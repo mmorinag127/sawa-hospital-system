@@ -1,5 +1,8 @@
 import pathlib
 import sys
+from copy import deepcopy
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -316,7 +319,8 @@ def test_extract_sheet_rows_from_payload_prefers_structured_tables_over_table_ra
     ]
 
 
-def test_extract_sheet_rows_from_payload_merges_roi_overlay_rows():
+def test_extract_sheet_rows_from_payload_does_not_replace_raw_blanks_with_unowned_roi_values():
+    from copy import deepcopy
     payload = {
         "roi_overlay_policy": "merge",
         "pages": [
@@ -340,12 +344,14 @@ def test_extract_sheet_rows_from_payload_merges_roi_overlay_rows():
         ],
     }
 
+    original = deepcopy(payload)
     rows = order_service._extract_sheet_rows_from_payload(payload, _template())
 
     assert rows == [
-        ["2/15", "朝", "じゃが芋のコンソメ煮", "12", "", ""],
-        ["2/15", "昼", "キャベツサラダ", "", "2", "note"],
+        ["2/15", "朝", "じゃが芋のコンソメ煮", "", "", ""],
+        ["2/15", "昼", "キャベツサラダ", "", "", "note"],
     ]
+    assert payload == original
 
 
 def test_extract_sheet_rows_from_payload_keeps_structured_rows_primary_when_overlay_is_audit_only():
@@ -538,7 +544,8 @@ def test_rows_from_structured_payload_maps_mixed_regular_bag_and_forbidden_subhe
     ]
 
 
-def test_rows_from_structured_payload_prefers_observed_projection_when_explicit_columns_shift_menu_column():
+def test_rows_from_structured_payload_rejects_shifted_columns_instead_of_overriding_explicit_template():
+    from copy import deepcopy
     payload = {
         "pages": [
             {
@@ -560,12 +567,12 @@ def test_rows_from_structured_payload_prefers_observed_projection_when_explicit_
         ]
     }
 
-    rows = rows_from_structured_payload(payload, _template_drifted_floor_split())
-
-    assert rows is not None
-    assert rows[0][:5] == ["4/5 (日)", "ま", "豚肉の卵とじ", "0", "0"]
-    assert rows[1][:5] == ["", "", "いんげんのカニ和え", "0", "0"]
-    assert rows[2][:5] == ["", "口", "サワラの西京焼き 添)小松菜", "58", "2"]
+    template = _template_drifted_floor_split()
+    original_payload, original_template = deepcopy(payload), deepcopy(template)
+    with pytest.raises(order_service._CanonicalOcrProjectionError, match="sheet_canonical_mismatch"):
+        rows_from_structured_payload(payload, template)
+    assert payload == original_payload
+    assert template == original_template
 
 
 def test_rows_from_structured_payload_prefers_quantity_column_order_when_header_family_is_stale():
@@ -672,7 +679,7 @@ def test_rows_from_structured_payload_prefers_quantity_column_order_for_diabetes
     ]
 
 
-def test_rows_from_pipeline_payload_realigns_stale_floor_family_quantity_block_for_staff_facility():
+def test_rows_from_pipeline_payload_rejects_stale_floor_family_quantity_block_for_staff_facility():
     payload = {
         "table_raw": """
 |日付|区 分||献立|常食||軟菜||ミキサー||備考欄|
@@ -682,14 +689,14 @@ def test_rows_from_pipeline_payload_realigns_stale_floor_family_quantity_block_f
 """.strip()
     }
 
-    rows = _rows_from_pipeline_payload(payload, _template_staff_forbidden_sesame())
+    original = deepcopy(payload)
+    from src.services.fax_extractor import CanonicalOcrProjectionError
+    with pytest.raises(CanonicalOcrProjectionError, match="^sheet_quantity_column_unmapped$"):
+        _rows_from_pipeline_payload(payload, _template_staff_forbidden_sesame())
+    assert payload == original
 
-    assert rows == [
-        ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "", ""],
-    ]
 
-
-def test_rows_from_pipeline_payload_realigns_split_forbidden_headers_by_numeric_block_order():
+def test_rows_from_pipeline_payload_preserves_declared_columns_without_numeric_realignment():
     payload = {
         "table_raw": """
 |日付|区分|メニュー|常食|禁食|||変更1||備考欄|
@@ -699,11 +706,14 @@ def test_rows_from_pipeline_payload_realigns_split_forbidden_headers_by_numeric_
 """.strip()
     }
 
+    original = deepcopy(payload)
     rows = _rows_from_pipeline_payload(payload, _template_diabetes_forbidden_change())
 
     assert rows == [
-        ["2/15", "朝", "Menu A", "20", "4", "5", "6", "7", "", ""],
+        ["", "", "", "", "肉禁", "魚禁", "", "変更2", "", ""],
+        ["2/15", "朝", "Menu A", "", "20", "4", "5", "6", "7", ""],
     ]
+    assert payload == original
 
 
 def test_extract_payload_cell_issues_derives_yomitoku_multiline_and_merged_quantity_cells():

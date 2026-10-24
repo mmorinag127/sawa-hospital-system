@@ -41,7 +41,7 @@ def owned_registration(monkeypatch, tmp_path, isolated_formal_schema):
         order = register_authored_original(uploaded["id"], effective_date=day)
         if lines:
             assert order_service.update_lines(order["id"], lines) is True
-        return order_service.get_order_by_id(order["id"])
+        return order_service.get_order_by_id(order["id"], allow_unresolved_menu_amount=True)
 
     return register
 
@@ -54,7 +54,7 @@ def authored_layout_registration(owned_registration):
     source = Path(__file__).resolve().parents[2] / "src/data/facility_master.template.json"
     specimens = json.loads(source.read_text())["facilities"]
 
-    def register(**inputs):
+    def register(*, body_merge_policy=None, **inputs):
         matches = [item for item in specimens if item["facility_id"] == inputs["facility_id"]]
         assert len(matches) == 1, "explicit authored layout specimen required"
         facility = deepcopy(matches[0])
@@ -64,6 +64,8 @@ def authored_layout_registration(owned_registration):
             facility["fax_template"]["template_id"] = facility["fax_template_id"]
         # authored_sources creates this component's one-page PDF.
         facility["fax_template"]["page"] = 1
+        if body_merge_policy is not None:
+            facility["fax_template"]["body_merge_policy"] = deepcopy(body_merge_policy)
         for column in facility["fax_template"]["columns"]:
             column["name"] = canonical_field_name_from_template_column(column)
         return owned_registration(**inputs, facility_config=facility)

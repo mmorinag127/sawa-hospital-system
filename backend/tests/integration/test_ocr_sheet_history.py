@@ -51,6 +51,10 @@ def _save_formal_sheet(*, order_id, sheet, edited_by):
         edited_by=edited_by, expected_revision=current["revision"])
 
 
+def _read_order(order_id):
+    return order_service.get_order_by_id(order_id, allow_unresolved_menu_amount=True)
+
+
 @pytest.fixture
 def history_registration(owned_registration, authored_layout_registration):
     """The historical component's declared layout, not today's live facility."""
@@ -90,7 +94,7 @@ def history_registration(owned_registration, authored_layout_registration):
             facility_id=inputs['facility_id'], week_start=start.isoformat(), week_end=end.isoformat(),
             expected_revision=current['revision'])
         assert error is None and confirmed is not None, error
-        return order_service.get_order_by_id(order['id'])
+        return _read_order(order['id'])
     return register
 
 
@@ -134,7 +138,24 @@ def selected_history_order(history_registration, monkeypatch, tmp_path):
         assert all(len(row) == max(column['source_index'] for column in columns) + 1 for row in rows)
         select_authored_native_result(monkeypatch, order_id=order['id'],
             table_rows=rows, columns=columns, unlisted_cells='', artifact_root=tmp_path / 'native-artifacts')
-        return order_service.get_order_by_id(order['id'])
+        if not blank_source:
+            sheet, error = order_service.get_ocr_sheet(order['id'])
+            assert error is None and sheet is not None, error
+            current, error = order_workflow_v2_service.get_workflow_readonly(order['id'])
+            assert error is None
+            reviewed, error = order_workflow_v2_service.run_sheet_anomaly_review(
+                order['id'], sheet=sheet, use_llm=False, expected_revision=current['revision'])
+            assert error is None and reviewed is not None, error
+            current, error = order_workflow_v2_service.get_workflow_readonly(order['id'])
+            assert error is None
+            reviewed, error = order_workflow_v2_service.confirm_sheet_review(
+                order_id=order['id'], sheet=sheet, expected_revision=current['revision'])
+            assert error is None and reviewed is not None, error
+            saved, error = _save_formal_sheet(order_id=order['id'], sheet=sheet, edited_by='history-component')
+            assert error is None and saved['saved_sheet']['sheet'] == sheet, error
+        if inputs['lines']:
+            assert order_service.update_lines(order['id'], deepcopy(inputs['lines'])) is True
+        return _read_order(order['id'])
     return register
 
 
@@ -273,7 +294,7 @@ def _seed_order_without_facility(*, message_id: str):
         order.lines.append(OrderLine(id=ident + "-line", date=date(2026, 2, 15), daypart="朝",
             menu_name="Menu B", diet_type="regular", area_id="2F", bag_type="standard", quantity_original=4))
         session.add(order)
-    return order_service.get_order_by_id(ident)
+    return _read_order(ident)
 
 
 def _assert_unselected_sheet_cannot_be_reconstructed(order_id):
@@ -282,7 +303,7 @@ def _assert_unselected_sheet_cannot_be_reconstructed(order_id):
     from tests.unit.test_disabled_facility_columns import _snapshot
 
     before = _snapshot(get_engine())
-    original = pathlib.Path(order_service.get_order_by_id(order_id)["document"])
+    original = pathlib.Path(_read_order(order_id)["document"])
     original_bytes, revision = original.read_bytes(), read_snapshot().revision
     sheet, error = order_service.get_ocr_sheet(order_id)
     assert (sheet, error) == (None, "selected_ocr_required")
@@ -291,7 +312,9 @@ def _assert_unselected_sheet_cannot_be_reconstructed(order_id):
             order_id, "menu_entries_missing", use_saved_draft=True)
         assert (recovered, recovery_error) == (None, "selected_ocr_required")
     context = order_service.get_current_sheet_context(order_id)
-    assert context["sheet_unavailable"] is True
+    assert context["draft_payload"] is None
+    assert context["fields"] == context["rows"] == []
+    assert context["has_persisted_draft"] is False
     assert "selected_ocr_required" in context["blockers"]
     assert _snapshot(get_engine()) == before
     assert original.read_bytes() == original_bytes
@@ -404,9 +427,7 @@ def test_selected_blank_source_rejects_unowned_position_index_projection(selecte
     )
     selected_payload = order_service.get_cached_ocr_payload(order["id"])
 
-    ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload={
+    unowned_payload = {
             "column_mapping_resolution": {
                 "resolved_value": "4:qty.regular_2f",
                 "decision_source": "position_fallback",
@@ -428,11 +449,14 @@ def test_selected_blank_source_rejects_unowned_position_index_projection(selecte
                 "|2099-04-15|昼|||11||\n"
                 "|2099-04-15|昼|||22||"
             ),
-        },
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test-evidence",
-    )
+        }
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+    before = _snapshot(get_engine())
+    with pytest.raises(ValueError, match="^configured_execution_input_changed$"):
+        ocr_evidence_service.persist_evidence_run(order_id=order["id"], payload=unowned_payload,
+            schema_version="v1_legacy", producer_version="test", source="test-evidence")
+    assert _snapshot(get_engine()) == before
 
     def _fail_position_mapping(*_args, **_kwargs):
         raise AssertionError("position fallback must not run on current-sheet quantity path")
@@ -463,23 +487,7 @@ def test_get_ocr_sheet_keeps_facility_template_schema_when_payload_template_conf
             (date(2099, 4, 5), "朝", "豚肉の卵とじ", 0),
         ],
     )
-    facility = facility_service.create_facility("Projection Facility", [])
-    assert facility_service.update_config(
-        facility["id"],
-        {
-            "fax_template_override": {
-                "columns_authoritative": True,
-                "columns": [
-                    {"index": 0, "role": "date", "header": "日付", "format": "MM/DD"},
-                    {"index": 1, "role": "daypart", "header": "区分"},
-                    {"index": 2, "role": "aux", "header": "補助"},
-                    {"index": 3, "role": "menu_name", "header": "メニュー"},
-                    {"index": 4, "role": "quantity", "header": "常食特別", "diet_type": "regular", "area_id": "X"},
-                    {"index": 5, "role": "note", "header": "備考"},
-                ],
-            }
-        },
-    )
+    facility = {"id": "authored-projection-facility"}
 
     order = owned_registration(
         message_id="msg-facility-schema-payload-template-conflict-001",
@@ -488,7 +496,7 @@ def test_get_ocr_sheet_keeps_facility_template_schema_when_payload_template_conf
         week="2099-04@2099-04-05~2099-04-11", effective_date="2099-04-05",
         facility_config={"facility_id": facility["id"], "facility_name": "Projection Facility",
             "areas": [], "fax_template_id": "authored-projection-layout",
-            "fax_template": {"template_id": "authored-projection-layout", "columns_authoritative": True,
+            "fax_template": {"template_id": "authored-projection-layout", "page": 1, "columns_authoritative": True,
                 "columns": [
                     {"index": 0, "source_index": 0, "role": "date", "name": "date_mmdd", "header": "日付", "format": "MM/DD"},
                     {"index": 1, "source_index": 1, "role": "daypart", "name": "daypart", "header": "区分"},
@@ -560,7 +568,7 @@ def test_get_ocr_sheet_keeps_facility_template_schema_when_payload_template_conf
     assert order_service.get_cached_ocr_payload(order["id"]) == selected_payload
 
 
-def test_build_position_menu_entries_uses_previous_month_menu_when_week_is_covered():
+def test_build_position_menu_entries_does_not_borrow_previous_month_container():
     order_service.clear_all()
     _seed_monthly_menu_custom_entries(
         month_id="2098-03",
@@ -573,8 +581,7 @@ def test_build_position_menu_entries_uses_previous_month_menu_when_week_is_cover
 
     entries = order_service._build_position_menu_entries_safe("2098-04@2098-04-05~2098-04-11")
 
-    assert [entry["menu_name"] for entry in entries] == ["Covered Breakfast", "Covered Lunch"]
-    assert all(entry["menu_date"] == date(2098, 4, 5) for entry in entries)
+    assert entries == []
 
 
 def _assert_legacy_facility_refusal(
@@ -683,9 +690,7 @@ def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_sa
     order = _seed_order(selected_history_order, message_id="msg-sheet-clean-draft-override-001")
     selected_before, selected_error = order_service.get_ocr_sheet(order["id"])
     assert selected_error is None and selected_before is not None
-    order_service.persist_ocr_evidence_run(
-        order["id"],
-        {
+    stale_payload = {
             "input_reference": "gs://bucket/orders/order.pdf",
             "pages": [
                 {
@@ -712,8 +717,15 @@ def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_sa
             "table_box": None,
             "grid_column_edges": [],
             "grid_row_edges": [],
-        },
-    )
+        }
+    with pytest.raises(ValueError, match="^configured_execution_input_changed$"):
+        order_service.persist_ocr_evidence_run(order["id"], stale_payload)
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+    from hashlib import sha256
+    with session_scope() as session:
+        session.add(OrderOcrEvidenceRun(id="stale-history-diagnostic", order_id=order["id"],
+            schema_version="v1_legacy", status="diagnostic_only", payload_json=deepcopy(stale_payload),
+            artifact_digest=sha256(json.dumps(stale_payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()))
     persisted = order_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
@@ -888,22 +900,34 @@ def test_selected_draft_is_not_replaced_by_unselected_blank_rows_or_synthetic_fr
     assert _snapshot(get_engine()) == before
 
 
-def test_merge_current_draft_quantity_values_into_semantic_sheet_does_not_blank_fresh_values():
+@pytest.mark.parametrize("saved_quantity", ["", "0", "17"])
+def test_merge_current_draft_quantity_values_preserves_exact_saved_values(saved_quantity):
     merged = order_service._merge_current_draft_quantity_values_into_semantic_sheet(
         {
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
-            "rows": [["03/22", "昼", "Menu A", "", ""]],
-            "row_ids": ["draft-1"],
+            "rows": [["03/22", "昼", "Menu A", saved_quantity, ""]],
+            "row_ids": ["explicit-same-row"],
         },
         {
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.no_meat_x", "remarks"],
             "rows": [["03/22", "昼", "Menu A", "23", "4", ""]],
-            "row_ids": ["fresh-1"],
+            "row_ids": ["explicit-same-row"],
         },
     )
 
     assert merged is not None
-    assert merged["rows"] == [["03/22", "昼", "Menu A", "23", "", ""]]
+    assert merged["rows"] == [["03/22", "昼", "Menu A", saved_quantity, "", ""]]
+
+
+def test_merge_current_draft_does_not_pair_different_ids_by_matching_labels():
+    current = {"fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+               "rows": [["03/22", "昼", "Menu A", "17"]], "row_ids": ["saved-row"]}
+    fresh = {"fields": list(current["fields"]),
+             "rows": [["03/22", "昼", "Menu A", "23"]], "row_ids": ["different-row"]}
+    before = deepcopy((current, fresh))
+    with pytest.raises(ValueError, match="^saved_draft_row_identity_unresolved$"):
+        order_service._merge_current_draft_quantity_values_into_semantic_sheet(current, fresh)
+    assert (current, fresh) == before
 
 
 def test_selected_draft_blockers_are_not_rewritten_from_an_unselected_neighbor(selected_history_order, monkeypatch):
@@ -1100,7 +1124,7 @@ def test_save_ocr_sheet_exact_persists_revision_without_reparsing_lines(selected
     assert revision.get("row_ids") == row_ids
     assert revision.get("rows") == rows
 
-    current_order = order_service.get_order_by_id(order["id"])
+    current_order = _read_order(order["id"])
     assert current_order is not None
     quantities = sorted(
         int(line.get("quantity_original"))
@@ -1458,207 +1482,51 @@ def test_hakodate_assignment_rejects_order_document_grid_and_full_page_tesseract
         ],
     }
 
-    assignment = order_service._build_hakodate_evidence_assignment_from_payload(
-        order_id="ORD-test",
-        facility_id="FAC-test",
-        template_id="template-test",
-        payload=payload,
-    )
-
-    assert assignment["target_cells"] == []
-    assert assignment["evidence_records"] == []
-    assert "hakodate_target_cell_map_missing" in assignment["blockers"]
-    assert "hakodate_ocr_evidence_missing" in assignment["blockers"]
-
-
-def test_hakodate_overlay_preview_ready_requires_rendered_artifact(monkeypatch):
-    target_cell = {
-        "target_cell_id": "cell-1",
-        "sheet_cell": "D3",
-        "bbox": [0.1, 0.2, 0.3, 0.4],
-        "center": [0.2, 0.3],
-    }
-    assignment = {
-        "target_cells": [target_cell],
-        "evidence_records": [{"evidence_id": "ev-1", "text": "2"}],
-        "assignments": [{"target_cell_id": "cell-1", "assigned_value": "2", "sheet_cell": "D3"}],
-        "blockers": [],
-    }
-    saved: dict[str, object] = {}
-
-    monkeypatch.setattr(order_service, "build_order_hakodate_assignment", lambda *_args, **_kwargs: (assignment, None))
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda uri: (_ for _ in ()).throw(AssertionError("legacy overlay render must not run")))
-    monkeypatch.setattr(order_service, "render_pdf_to_png_bytes", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy overlay render must not run")))
-    monkeypatch.setattr(order_service, "get_default_output_bucket", lambda: "bucket")
-
-    def _save_artifact(bucket, job_id, name, data, content_type=None):
-        saved.update({"bucket": bucket, "job_id": job_id, "name": name, "data": data, "content_type": content_type})
-        return f"gs://{bucket}/artifacts/{job_id}/{name}"
-
-    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda _order_id: {})
-    monkeypatch.setattr(order_service, "save_artifact_bytes_to_gcs", _save_artifact)
-    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
-
-    preview = order_service._build_hakodate_overlay_preview(
-        order_id="ORD-render-artifact-test",
-        document_uri="gs://bucket/source.pdf",
-    )
-
-    assert preview["status"] == "blocked"
-    assert "hakodate_overlay_artifact_missing" in preview["blockers"]
-    assert saved == {}
+    before = deepcopy(payload)
+    with pytest.raises(ValueError, match="^hakodate_target_source_invalid$"):
+        order_service._build_hakodate_evidence_assignment_from_payload(
+            order_id="ORD-test", facility_id="FAC-test", template_id="template-test",
+            payload=payload, facility_config={},
+        )
+    assert order_service._hakodate_evidence_source_allowed(
+        payload["hakodate_ocr_evidence_records"][0],
+    ) is False
+    assert payload == before
 
 
-def test_hakodate_overlay_preview_uses_pipeline_overlay_for_pipeline_coordinates(monkeypatch):
-    target_cell = {
-        "target_cell_id": "cell-1",
-        "sheet_cell": "D3",
-        "bbox": [944, 575, 1114, 638],
-        "center": [1029, 606.5],
-        "source": "hakodate_best_method_pipeline",
-    }
-    assignment_item = {"target_cell_id": "cell-1", "assigned_value": "2", "sheet_cell": "D3"}
-    assignment = {
-        "target_cells": [target_cell],
-        "evidence_records": [{"evidence_id": "ev-1", "text": "2"}],
-        "assignments": [assignment_item],
-        "blockers": [],
-    }
-    fingerprint = order_service._hakodate_overlay_fingerprint(
-        target_cells=[target_cell],
-        assignments=[assignment_item],
-    )
-
-    monkeypatch.setattr(order_service, "build_order_hakodate_assignment", lambda *_args, **_kwargs: (assignment, None))
-    monkeypatch.setattr(
-        order_service,
-        "_load_order_ocr_cache",
-        lambda _order_id: {
-            "hakodate_overlay": {
-                "uri": "gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png",
-                "fingerprint": fingerprint,
-                "producer": "hakodate_best_method_pipeline",
-                "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION,
-            }
-        },
-    )
-    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
-    monkeypatch.setattr(
-        order_service,
-        "render_pdf_to_png_bytes",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("pipeline overlay must not be redrawn on source PDF")),
-    )
-
-    preview = order_service._build_hakodate_overlay_preview(
-        order_id="ORD-test",
-        document_uri="gs://bucket/source.pdf",
-    )
-
-    assert preview["status"] == "ready"
-    assert preview["overlay_uri"] == "gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png"
-    assert preview["overlay_url"] == "signed:gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png"
-
-
-def test_hakodate_overlay_preview_reuses_cached_compact_assignment(monkeypatch):
-    cached_assignment = {
+@pytest.mark.parametrize("cache", [
+    {},
+    {"hakodate_overlay": {"uri": "gs://bucket/unowned-overlay.png"}},
+    {"hakodate_overlay": {"uri": "gs://bucket/unowned-overlay.png",
+                         "producer": "hakodate_best_method_pipeline",
+                         "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION}},
+    {"hakodate_assignment_preview": {"fingerprint": "unowned", "assignment": {
         "target_cells": [{"target_cell_id": "cell-1", "bbox": [1, 2, 3, 4]}],
-        "assignments": [{"target_cell_id": "cell-1", "assigned_value": "2"}],
-        "blockers": [],
-    }
-    monkeypatch.setattr(
-        order_service,
-        "_load_order_ocr_cache",
-        lambda _order_id: {
-            "hakodate_overlay": {
-                "uri": "gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png",
-                "fingerprint": "fp-compact-1",
-                "producer": "hakodate_best_method_pipeline",
-                "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION,
-            },
-            "hakodate_assignment_preview": {
-                "fingerprint": "fp-compact-1",
-                "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION,
-                "assignment": cached_assignment,
-            },
-        },
-    )
-    monkeypatch.setattr(
-        order_service,
-        "build_order_hakodate_assignment",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("cached compact overlay preview must not rebuild assignment")
-        ),
-    )
-    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
+        "assignments": [{"target_cell_id": "cell-1", "assigned_value": "2"}]}}},
+    {"pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/unowned-page.png"}]},
+], ids=["missing-artifact", "unowned-uri", "unowned-pipeline", "unowned-compact", "legacy-page"])
+def test_unowned_preview_cannot_publish_cached_artifacts(monkeypatch, tmp_path, cache):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+    from tests.helpers.ingest_original import authored_sources
 
+    authored_sources(monkeypatch, tmp_path, facility_id="preview-component", menu_date=date(2026, 1, 8),
+                     seed_menu=False, seed_month=False)
+    original = deepcopy(cache)
+    before = _snapshot(get_engine())
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Unowned preview must not render, sign, build or publish artifacts")
+    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda _order_id: cache)
+    for name in ("build_order_hakodate_assignment", "load_bytes_from_uri",
+                 "render_pdf_to_png_bytes", "save_artifact_bytes_to_gcs", "_signed_url_from_uri"):
+        monkeypatch.setattr(order_service, name, forbidden)
     preview = order_service._build_hakodate_overlay_preview(
-        order_id="ORD-test",
-        document_uri="gs://bucket/source.pdf",
-    )
-
-    assert preview["status"] == "ready"
-    assert preview["assignment"] == cached_assignment
-    assert preview["overlay_url"] == "signed:gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png"
-
-
-def test_hakodate_overlay_preview_blocks_when_pipeline_overlay_missing(monkeypatch):
-    assignment = {
-        "target_cells": [
-            {
-                "target_cell_id": "cell-1",
-                "sheet_cell": "D3",
-                "bbox": [944, 575, 1114, 638],
-                "center": [1029, 606.5],
-                "source": "hakodate_best_method_pipeline",
-            }
-        ],
-        "evidence_records": [{"evidence_id": "ev-1", "text": "2"}],
-        "assignments": [{"target_cell_id": "cell-1", "assigned_value": "2", "sheet_cell": "D3"}],
-        "blockers": [],
-    }
-    saved: dict[str, object] = {}
-
-    monkeypatch.setattr(order_service, "build_order_hakodate_assignment", lambda *_args, **_kwargs: (assignment, None))
-    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda _order_id: {})
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", lambda uri: (_ for _ in ()).throw(AssertionError("legacy overlay render must not run")))
-    monkeypatch.setattr(order_service, "render_pdf_to_png_bytes", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy overlay render must not run")))
-    monkeypatch.setattr(order_service, "get_default_output_bucket", lambda: "bucket")
-
-    def _save_artifact(bucket, job_id, name, data, content_type=None):
-        saved.update({"bucket": bucket, "job_id": job_id, "name": name, "data": data, "content_type": content_type})
-        return f"gs://{bucket}/artifacts/{job_id}/{name}"
-
-    monkeypatch.setattr(order_service, "save_artifact_bytes_to_gcs", _save_artifact)
-    monkeypatch.setattr(order_service, "_signed_url_from_uri", lambda uri: f"signed:{uri}" if uri else None)
-
-    preview = order_service._build_hakodate_overlay_preview(
-        order_id="ORD-pipeline-render-fallback-test",
-        document_uri="gs://bucket/source.pdf",
-    )
-
+        order_id="missing-preview-order", document_uri="gs://bucket/unowned-source.pdf")
     assert preview["status"] == "blocked"
-    assert "hakodate_overlay_artifact_missing" in preview["blockers"]
-    assert saved == {}
-
-
-def test_hakodate_overlay_preview_blocks_when_render_artifact_missing(monkeypatch):
-    assignment = {
-        "target_cells": [{"target_cell_id": "cell-1", "bbox": [0.1, 0.2, 0.3, 0.4]}],
-        "evidence_records": [{"evidence_id": "ev-1", "text": "2"}],
-        "assignments": [],
-        "blockers": [],
-    }
-
-    monkeypatch.setattr(order_service, "build_order_hakodate_assignment", lambda *_args, **_kwargs: (assignment, None))
-    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda _order_id: {})
-    preview = order_service._build_hakodate_overlay_preview(
-        order_id="ORD-render-missing-test",
-        document_uri="gs://bucket/source.pdf",
-    )
-
-    assert preview["status"] == "blocked"
+    assert preview["blockers"] == ["synchronous_input_missing"]
     assert preview["overlay_url"] is None
-    assert "hakodate_overlay_artifact_missing" in preview["blockers"]
+    assert cache == original
+    assert _snapshot(get_engine()) == before
 
 
 def test_partial_cache_read_cannot_replace_owned_hakodate_artifacts(selected_history_order):
@@ -1684,6 +1552,9 @@ def test_partial_cache_read_cannot_replace_owned_hakodate_artifacts(selected_his
 
 
 def test_assignment_repair_rejects_artifacts_without_source_proof_before_cache_write(selected_history_order, monkeypatch):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-hakodate-assignment-repair-001")
     target_cell = {
@@ -1740,16 +1611,21 @@ def test_assignment_repair_rejects_artifacts_without_source_proof_before_cache_w
     before = order_service._load_order_ocr_cache(order["id"])
     captured = order_service._capture_synchronous_cache_write_input(order["id"])
     assert captured is not None
+    database_before = _snapshot(get_engine())
     assignment, error = order_service.build_order_hakodate_assignment(order["id"],
         synchronous_write_input=captured, expected_revision=captured['workflow_revision'])
     cached = order_service._load_order_ocr_cache(order["id"])
 
-    assert error == "hakodate_artifact_source_mismatch" and assignment is None
-    assert len(attempts) == 1 and attempts[0]['synchronous_write_input'] is captured
+    assert error is None and assignment is not None
+    assert attempts == []
+    assert _snapshot(get_engine()) == database_before
     assert cached == before
 
 
 def test_explicit_assignment_repair_rejects_legacy_partial_artifacts(selected_history_order, monkeypatch):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-hakodate-explicit-strategy-repair-001")
     target_cell = {
@@ -1805,15 +1681,20 @@ def test_explicit_assignment_repair_rejects_legacy_partial_artifacts(selected_hi
     before = order_service._load_order_ocr_cache(order["id"])
     captured = order_service._capture_synchronous_cache_write_input(order["id"])
     assert captured is not None
+    database_before = _snapshot(get_engine())
     assignment, error = order_service.build_order_hakodate_assignment(order["id"], strategy="hakodate",
         synchronous_write_input=captured, expected_revision=captured['workflow_revision'])
 
-    assert error == "hakodate_artifact_source_mismatch" and assignment is None
+    assert error == "hakodate_own_artifact_representations_conflict" and assignment is None
     assert len(attempts) == 1 and attempts[0]['synchronous_write_input'] is captured
     assert order_service._load_order_ocr_cache(order['id']) == before
+    assert _snapshot(get_engine()) == database_before
 
 
 def test_explicit_assignment_repair_cannot_publish_unowned_replacements(selected_history_order, monkeypatch):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-hakodate-explicit-regenerates-stale-001")
     stale_target = {
@@ -1885,15 +1766,98 @@ def test_explicit_assignment_repair_cannot_publish_unowned_replacements(selected
     before = order_service._load_order_ocr_cache(order["id"])
     captured = order_service._capture_synchronous_cache_write_input(order["id"])
     assert captured is not None
+    database_before = _snapshot(get_engine())
     assignment, error = order_service.build_order_hakodate_assignment(order["id"], strategy="hakodate",
         synchronous_write_input=captured, expected_revision=captured['workflow_revision'])
 
-    assert error == "hakodate_artifact_source_mismatch" and assignment is None
+    assert error == "hakodate_own_artifact_representations_conflict" and assignment is None
     assert len(attempts) == 1 and attempts[0]['synchronous_write_input'] is captured
     assert order_service._load_order_ocr_cache(order['id']) == before
+    assert _snapshot(get_engine()) == database_before
+
+
+@pytest.mark.parametrize("validation", ["baseline", "assignment"])
+def test_assignment_repair_validates_before_publishing_cache(selected_history_order, monkeypatch, validation):
+    from src.db import get_engine
+    from types import SimpleNamespace
+    from src.services import hakodate_cell_ocr_batch_service as batch
+    from src.services.storage_service import load_selected_pdf_bytes
+    from tests.helpers.authored_cell_values import declared_field
+    from tests.unit.test_h2_operator_repair_revision import _provider_output_files
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
+    order = _seed_order(selected_history_order, message_id=f"repair-validation-before-save-{validation}")
+    captured = order_service._capture_synchronous_cache_write_input(order["id"])
+    assert captured is not None
+    original = deepcopy(captured["evidence"]["payload_json"])
+    before = _snapshot(get_engine())
+    calls = []
+    actual_augment = order_service._augment_hakodate_ocr_payload_artifacts
+    declared = {"qty.regular_2f": "2", "qty.regular_3f": "1", "qty.soft_2f": "3",
+                "qty.soft_3f": "", "qty.mixer_2f": "", "qty.mixer_3f": "", "remarks": ""}
+
+    def render(**kwargs):
+        assert kwargs["order_id"] == order["id"]
+        receipt = captured["selected_pdf_receipt"]
+        return {"configured_input": deepcopy(captured["configured_input"]),
+                "selected_pdf_receipt": deepcopy(receipt),
+                "_verified_pdf_bytes": load_selected_pdf_bytes(receipt["storage_uri"], receipt)}
+
+    def recognize(*, item, output_dir, **kwargs):
+        regions = [{**deepcopy(region), "bbox": [index * 20, 0, index * 20 + 10, 10]}
+                   for index, region in enumerate(item["original_target_semantics"])]
+        values = {}
+        for region in regions:
+            assigned = set()
+            for target in region["logical_targets"]:
+                assert (target["date"], order_service._normalize_daypart_key(target["daypart"]),
+                        target["menu_name"]) == ("2026-01-08", "昼", "Menu A")
+                assigned.add(declared[declared_field(target, list(declared))])
+            assert len(assigned) == 1
+            values[region["sheet_cell"]] = assigned.pop()
+        records = [{**region, "ocr_text": values[region["sheet_cell"]], "recognizer_score": 1.0,
+                    "recognizer_accepted_candidate": {"normalized_digits": values[region["sheet_cell"]]}}
+                   for region in regions]
+        return SimpleNamespace(metrics={"expected_sheet_cells": item["original_expected_sheet_cells"]},
+            expected_sheet_cells=tuple(item["original_expected_sheet_cells"]),
+            outputs=_provider_output_files(output_dir, records=records, regions=regions, sheet_values=values),
+            ocr_engine="authored-component-external-recognizer"), None
+
+    def produce_existing_owned_artifacts(**kwargs):
+        assert kwargs["synchronous_write_input"] is captured
+        calls.append("repair")
+        repaired = actual_augment(**kwargs)
+        assert repaired["hakodate_canonical_pipeline"]["status"] == "ready", repaired
+        return repaired
+
+    def refuse(**kwargs):
+        calls.append(validation)
+        raise order_service._CanonicalOcrProjectionError("hakodate_target_source_invalid")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Rejected assignment must not reach cache publication")
+
+    monkeypatch.setattr(order_service, "_augment_hakodate_ocr_payload_artifacts", produce_existing_owned_artifacts)
+    monkeypatch.setattr(order_service, "_build_live_hakodate_manifest_item", render)
+    monkeypatch.setattr(batch, "build_hakodate_best_method_for_manifest_item", recognize)
+    boundary = ("_resolve_llm_review_baseline" if validation == "baseline"
+                else "_build_hakodate_evidence_assignment_from_payload")
+    monkeypatch.setattr(order_service, boundary, refuse)
+    monkeypatch.setattr(order_service, "_save_order_ocr_cache", forbidden)
+    assignment, error = order_service.build_order_hakodate_assignment(
+        order["id"], strategy="hakodate", synchronous_write_input=captured,
+        expected_revision=captured["workflow_revision"],
+    )
+    assert assignment is None and error == "hakodate_target_source_invalid"
+    assert calls == ["repair", validation]
+    assert _snapshot(get_engine()) == before
+    assert captured["evidence"]["payload_json"] == original
 
 
 def test_ensure_hakodate_current_refuses_unselected_cache_artifacts(selected_history_order, monkeypatch):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-hakodate-cache-draft-current-001")
     target_cell = {
@@ -1928,7 +1892,6 @@ def test_ensure_hakodate_current_refuses_unselected_cache_artifacts(selected_his
         "source": "hakodate_ocr_evidence_sheet",
         "hakodate_evidence_projection": {"metrics": {"applied_count": 1}},
     }
-    monkeypatch.setattr(order_service, "_latest_hakodate_evidence_available", lambda _order_id: False)
     monkeypatch.setattr(
         order_service,
         "build_order_hakodate_projected_sheet",
@@ -1938,11 +1901,40 @@ def test_ensure_hakodate_current_refuses_unselected_cache_artifacts(selected_his
     captured = order_service._capture_synchronous_cache_write_input(order["id"])
     assert captured is not None
     before = order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=False)
+    assert before is not None and captured["draft"] == before
+    database_before = _snapshot(get_engine())
     draft, error = order_service.ensure_hakodate_evidence_draft_current(order["id"],
         synchronous_write_input=captured)
 
-    assert draft is None and error == "hakodate_ocr_evidence_missing"
+    assert error is None and draft == before
+    assert draft["draft_sheet_json"] != projected_sheet
     assert order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=False) == before
+    assert _snapshot(get_engine()) == database_before
+
+
+def test_ensure_hakodate_current_preserves_selected_operator_sheet_without_projection_metadata(selected_history_order, monkeypatch):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
+    order_service.clear_all()
+    order = _seed_order(selected_history_order, message_id="msg-owned-native-current-projection")
+    captured = order_service._capture_synchronous_cache_write_input(order["id"])
+    assert captured is not None
+    assert order_service._draft_record_is_authoritative_current_sheet(captured["draft"])
+    assert not order_service._draft_payload_has_hakodate_evidence_projection(captured["draft"])
+    selected_rows = deepcopy(captured["draft"]["draft_sheet_json"]["rows"])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A captured selected native projection must not be replaced on read")
+
+    monkeypatch.setattr(order_service, "get_latest_ocr_evidence_run", forbidden)
+    monkeypatch.setattr(order_service, "switch_draft_to_latest_evidence", forbidden)
+    before = _snapshot(get_engine())
+    draft, error = order_service.ensure_hakodate_evidence_draft_current(
+        order["id"], synchronous_write_input=captured)
+    assert error is None and draft == captured["draft"]
+    assert draft["draft_sheet_json"]["rows"] == selected_rows
+    assert _snapshot(get_engine()) == before
 
 
 def test_unselected_partial_page_fragments_cannot_trigger_read_time_repair(history_registration, monkeypatch):
@@ -3284,7 +3276,7 @@ def test_get_ocr_sheet_blocks_broken_structured_daypart_ocr_when_weekly_shell_is
     _assert_unselected_sheet_cannot_be_reconstructed(order["id"])
 
 
-def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_from_clean_saved_draft(selected_history_order):
+def test_current_sheet_context_preserves_operator_daypart_tokens_from_formally_saved_draft(selected_history_order):
     order_service.clear_all()
     _seed_daypart_source_menu()
     payload = IngestEmailPayload(
@@ -3296,28 +3288,15 @@ def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_from_clean_s
     )
     order = _register_scoped_order(selected_history_order, payload, lines=None,
         week='2099-12@2099-12-15~2099-12-21', ocr_rows=DAYPART_SOURCE_ROWS)
-    saved = order_service.persist_sheet_draft(
-        order_id=order["id"],
-        draft_sheet_json={
-            "order_id": order["id"],
-            "source": "draft_sheet",
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [
-                ["12/15", '"', "Menu A", "4"],
-                ["12/15", "61", "Menu B", "5"],
-                ["12/16", "&", "Menu C", "6"],
-                ["12/16", "€", "Menu D", "7"],
-                ["12/17", "品", "Menu E", "8"],
-            ],
-            "row_ids": [f"draft-{idx + 1}" for idx in range(5)],
-        },
-        blockers=[],
-        warnings=[],
-        edited_by="test",
-     synchronous_write_input=order_service._capture_synchronous_cache_write_input(order['id']))
-
-    assert saved is not None
+    sheet, error = order_service.get_ocr_sheet(order["id"])
+    assert error is None and sheet is not None
+    edited = deepcopy(sheet)
+    daypart_index, menu_index = edited["fields"].index("daypart"), edited["fields"].index("menu")
+    tokens = dict(zip(["Menu A", "Menu B", "Menu C", "Menu D", "Menu E"], ['"', "61", "&", "€", "品"], strict=True))
+    for row in edited["rows"]:
+        row[daypart_index] = tokens[row[menu_index]]
+    saved, error = _save_formal_sheet(order_id=order["id"], sheet=edited, edited_by="test")
+    assert error is None and saved is not None
 
     context = order_service.get_current_sheet_context(
         order["id"],
@@ -3332,12 +3311,10 @@ def test_current_sheet_context_canonicalizes_invalid_daypart_tokens_from_clean_s
     menu_idx = context["fields"].index("menu")
     rows_by_menu = {row[menu_idx]: row for row in context["rows"] if menu_idx < len(row)}
     assert [rows_by_menu[name][daypart_idx] for name in ["Menu A", "Menu B", "Menu C", "Menu D", "Menu E"]] == [
-        "朝",
-        "昼",
-        "朝",
-        "昼",
-        "朝",
+        '"', "61", "&", "€", "品",
     ]
+    quantity_index = context["fields"].index("qty.regular_2f")
+    assert [rows_by_menu[name][quantity_index] for name in tokens] == ["4", "5", "6", "7", "8"]
 
 
 def test_get_ocr_sheet_saved_draft_path_does_not_surface_invalid_daypart_tokens(selected_history_order):
@@ -3479,7 +3456,7 @@ def test_unowned_reparse_candidate_is_refused_without_losing_daypart_sanitizer_c
             review_warnings=[])
     assert _snapshot(get_engine()) == before
     sanitized = order_service._sanitize_semantic_sheet_rows(rows_payload=rows, fields=fields)
-    assert [row[1] for row in sanitized] == ["朝", "昼", "朝", "昼", "朝"]
+    assert [row[1] for row in sanitized] == ['"', "61", "&", "€", "品"]
     assert [row[3] for row in sanitized] == ["4", "5", "6", "7", "8"]
     assert [row[2] for row in sanitized] == ["Menu A", "Menu B", "Menu C", "Menu D", "Menu E"]
 
@@ -3652,10 +3629,15 @@ def test_formal_save_preserves_explicit_period_without_using_legacy_materializat
         message_id="msg-sheet-explicit-week-preserve-001", received_at=datetime(2026, 5, 1, 9),
         week="2026-05@2026-05-01~2026-05-02", effective_date="2026-05-01", lines=[],
         ocr_rows=[["05/01", "昼", "Menu A", "2", "", "", "", "", "", ""]])
-    original_week = order_service.get_order_by_id(order["id"])["persisted_week_value"]
-    def forbidden(*args, **kwargs):
-        pytest.fail("Explicit May source must not invoke a legacy derived January week")
-    monkeypatch.setattr(order_service, "_build_materialization_candidate_from_draft_record", forbidden)
+    original_week = _read_order(order["id"])["persisted_week_value"]
+    materialize = order_service._build_materialization_candidate_from_draft_record
+    captured_periods = []
+    def validate_period(*args, **kwargs):
+        assert kwargs["existing_week_code"] == original_week
+        assert kwargs["facility_id"] == "FAC00001"
+        captured_periods.append(kwargs["existing_week_code"])
+        return materialize(*args, **kwargs)
+    monkeypatch.setattr(order_service, "_build_materialization_candidate_from_draft_record", validate_period)
     sheet, error = order_service.get_ocr_sheet(order["id"])
     assert error is None and sheet is not None
     fields = sheet["fields"]
@@ -3665,7 +3647,8 @@ def test_formal_save_preserves_explicit_period_without_using_legacy_materializat
     saved, error = _save_formal_sheet(order_id=order["id"], sheet=sheet,
         edited_by="authored-component-operator")
     assert error is None and saved is not None
-    assert order_service.get_order_by_id(order["id"])["persisted_week_value"] == original_week
+    assert captured_periods and set(captured_periods) == {original_week}
+    assert _read_order(order["id"])["persisted_week_value"] == original_week
     visible, error = order_service.get_ocr_sheet(order["id"])
     assert error is None and visible["rows"] == sheet["rows"]
     assert all(row[fields.index("date_mmdd")] == "05/01" for row in visible["rows"])
@@ -3695,16 +3678,24 @@ def test_rows_from_markdown_maps_kanji_regular_column(repository_layout_source):
     assert first[3] == "33"
 
 
-def test_rows_from_markdown_maps_hana_getsu_subheader_and_escaped_pipe(repository_layout_source):
-    master = config_service.load_facility_master()
-    base_template = master.get("fax_template_base", {})
-    facility = next(
-        fac for fac in master.get("facilities", []) if fac.get("facility_id") == "FAC00003"
-    )
-    template = facility.get("fax_template") or config_service._merge_template(
-        base_template,
-        facility.get("fax_template_override"),
-    )
+def test_rows_from_markdown_maps_hana_getsu_subheader_and_escaped_pipe():
+    # This twelve-column component specimen is not the current FAC00003 layout.
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.regular_3f",
+              "qty.soft_2f", "qty.soft_3f", "qty.mixer_2f", "qty.mixer_3f",
+              "qty.no_fish_regular_x", "remarks"]
+    template = {
+        "main_ocr_row_fields": fields,
+        "columns_authoritative": True,
+        "columns": [
+            {"role": "date", "source_index": 0},
+            {"role": "daypart", "source_index": 2},
+            {"role": "menu_name", "source_index": 3},
+            *[{"role": "quantity", "name": field, "source_index": index,
+               "diet_type": field[4:].rsplit("_", 1)[0], "area_id": field.rsplit("_", 1)[1].upper()}
+              for index, field in enumerate(fields[3:10], 4)],
+            {"role": "note", "source_index": 11},
+        ],
+    }
 
     markdown = """
 |日 付||区 分|献立|常食||軟菜||ミキサー||魚焼\\(常食\\)|備考欄|
@@ -3715,16 +3706,17 @@ def test_rows_from_markdown_maps_hana_getsu_subheader_and_escaped_pipe(repositor
 """.strip()
     rows = rows_from_markdown(markdown, template)
     assert isinstance(rows, list)
-    assert len(rows) == 2
+    assert len(rows) == 3
+    assert rows[0] == ["", "", "", "花", "月", "花", "月", "花", "月", "", ""]
 
-    first = rows[0]
+    first = rows[1]
     assert first[2] == "じゃが芋のコンソメ煮"
     assert first[3] == "8"
     assert first[4] == "6"
     assert first[7] == "2"
     assert first[8] == "3"
 
-    second = rows[1]
+    second = rows[2]
     assert second[2] == "|鶏肉のケチャップ炒め"
     assert second[3] == "8"
     assert second[4] == "7"
@@ -3754,6 +3746,14 @@ def test_merge_header_rows_avoids_duplicate_forbidden_parent_and_change_prefix()
 
 def test_rows_from_markdown_maps_split_forbidden_subheaders_without_parent_group():
     template = {
+        "columns": [
+            {"role": "quantity", "name": "qty.regular_2f", "source_index": 3},
+            {"role": "quantity", "name": "qty.regular_3f", "source_index": 4},
+            {"role": "quantity", "name": "qty.mixer_2f", "source_index": 5},
+            {"role": "quantity", "name": "qty.mixer_3f", "source_index": 6},
+            {"role": "quantity", "name": "qty.no_meat_x", "source_index": 7},
+            {"role": "quantity", "name": "qty.no_fish_x", "source_index": 8},
+        ],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -3776,7 +3776,10 @@ def test_rows_from_markdown_maps_split_forbidden_subheaders_without_parent_group
 
     rows = rows_from_markdown(markdown, template)
 
-    assert rows == [["2/15", "朝", "Menu A", "8", "6", "1", "2", "3", "4", ""]]
+    assert rows == [
+        ["", "", "", "2F", "3F", "2F", "3F", "肉禁", "魚禁", ""],
+        ["2/15", "朝", "Menu A", "8", "6", "1", "2", "3", "4", ""],
+    ]
 
 
 def test_parse_order_lines_does_not_fill_forward_blank_menu_name_in_large_cell_mode():
@@ -3812,7 +3815,7 @@ def test_parse_order_lines_does_not_fill_forward_blank_menu_name_in_large_cell_m
     assert None in menu_names
 
 
-def test_build_position_menu_entries_from_ocr_payload_does_not_duplicate_blank_menu_rows(monkeypatch):
+def test_ocr_menu_entries_require_explicit_week_before_reading_blank_continuations(monkeypatch):
     template = {
         "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.soft_x", "qty.regular_bag_x"],
         "large_cell_mode": True,
@@ -3828,19 +3831,16 @@ def test_build_position_menu_entries_from_ocr_payload_does_not_duplicate_blank_m
     monkeypatch.setattr(
         order_service,
         "_extract_sheet_rows_from_payload_uncanonicalized",
-        lambda payload, template: rows,
+        lambda payload, template: pytest.fail("Missing period must be rejected before OCR row extraction"),
     )
 
-    entries = order_service._build_position_menu_entries_from_ocr_payload(
-        payload={"tables": []},
-        template=template,
-        received_at=datetime(2026, 4, 8, 9, 0, 0),
-    )
-
-    assert [item.get("menu_name") for item in entries] == [
-        "アジの南蛮漬 さつま芋の煮物",
-        "小松菜のおかか和え",
-    ]
+    original_rows, original_template = deepcopy(rows), deepcopy(template)
+    with pytest.raises(ValueError, match="^week_hint_required$"):
+        order_service._build_position_menu_entries_from_ocr_payload(
+            payload={"tables": []}, template=template,
+            received_at=datetime(2026, 4, 8, 9, 0, 0),
+        )
+    assert rows == original_rows and template == original_template
 
 
 def test_get_ocr_sheet_rejects_broken_ocr_shell_when_no_weekly_source_exists(history_registration, monkeypatch):
@@ -3877,6 +3877,13 @@ def test_get_ocr_sheet_rejects_broken_ocr_shell_when_no_weekly_source_exists(his
 
 def test_rows_from_markdown_maps_three_row_forbidden_split_headers_and_change2():
     template = {
+        "columns": [
+            {"role": "quantity", "name": "qty.regular_x", "source_index": 3},
+            {"role": "quantity", "name": "qty.no_meat_x", "source_index": 5},
+            {"role": "quantity", "name": "qty.no_fish_x", "source_index": 6},
+            {"role": "quantity", "name": "qty.change_1_x", "source_index": 7},
+            {"role": "quantity", "name": "qty.change_2_x", "source_index": 8},
+        ],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -3899,19 +3906,22 @@ def test_rows_from_markdown_maps_three_row_forbidden_split_headers_and_change2()
 
     rows = rows_from_markdown(markdown, template)
 
-    assert rows == [["2/15", "朝", "Menu A", "20", "4", "5", "6", "7", ""]]
+    assert rows == [
+        ["", "", "", "", "", "", "", "変更2", ""],
+        ["", "", "", "", "魚禁", "", "", "", ""],
+        ["2/15", "朝", "Menu A", "20", "4", "5", "6", "7", ""],
+    ]
 
 
-def test_rows_from_markdown_infers_columns_from_sparse_header(repository_layout_source):
-    master = config_service.load_facility_master()
-    base_template = master.get("fax_template_base", {})
-    facility = next(
-        fac for fac in master.get("facilities", []) if fac.get("facility_id") == "FAC00013"
-    )
-    template = facility.get("fax_template") or config_service._merge_template(
-        base_template,
-        facility.get("fax_template_override"),
-    )
+def test_rows_from_markdown_uses_declared_columns_without_sparse_header_inference():
+    template = {"columns_authoritative": True, "columns": [
+        {"role": "date", "source_index": 0, "name": "date_mmdd"},
+        {"role": "daypart", "source_index": 1, "name": "daypart"},
+        {"role": "menu_name", "source_index": 3, "name": "menu"},
+        {"role": "quantity", "source_index": 4, "name": "qty.regular_x", "diet_type": "regular", "area_id": "X"},
+        {"role": "quantity", "source_index": 5, "name": "qty.diabetes_x", "diet_type": "diabetes", "area_id": "X"},
+        {"role": "note", "source_index": 8, "name": "remarks"},
+    ], "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.diabetes_x", "remarks"]}
 
     markdown = """
 ||||||変更の|変更(2)|備考|
@@ -3923,16 +3933,17 @@ def test_rows_from_markdown_infers_columns_from_sparse_header(repository_layout_
 
     rows = rows_from_markdown(markdown, template)
     assert isinstance(rows, list)
-    assert len(rows) == 2
+    assert len(rows) == 3
+    assert rows[0] == ["", "区分", "献立", "常危", "糖尿", ""]
 
-    first = rows[0]
+    first = rows[1]
     assert first[0] == "2/15"
     assert first[1] == "朝"
     assert first[2] == "じゃが芋のコンソメ煮"
     assert first[3] == "20"
     assert first[4] == "4"
 
-    second = rows[1]
+    second = rows[2]
     assert second[0] == "2/16"
     assert second[1] == "昼"
     assert second[2] == "キャベツサラダ"
@@ -4001,7 +4012,7 @@ def test_count_source_row_alignment_penalty_cells_counts_shifted_rows():
     assert penalty == 2
 
 
-def test_apply_order_line_quantities_defaults_missing_area_to_x():
+def test_apply_order_line_quantities_uses_explicit_unscoped_area_column():
     fields = [
         "date_mmdd",
         "daypart",
@@ -4011,7 +4022,11 @@ def test_apply_order_line_quantities_defaults_missing_area_to_x():
         "qty.mixer_x",
         "remarks",
     ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
+    template = {"columns": [
+        {"index": index, "role": "quantity", "diet_type": diet, "area_id": None}
+        for index, diet in enumerate(("regular", "soft", "mixer"), 3)
+    ]}
+    quantity_index = order_service._build_sheet_quantity_index(fields, template=template)
     rows = [
         {
             "row_id": "r0",
@@ -4088,7 +4103,8 @@ def test_apply_order_line_quantities_fallbacks_date_menu_when_daypart_field_abse
         "qty.regular_2f",
         "remarks",
     ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
+    template = {"columns": [{"index": 2, "role": "quantity", "diet_type": "regular", "area_id": "2F"}]}
+    quantity_index = order_service._build_sheet_quantity_index(fields, template=template)
     rows = [
         {
             "row_id": "r0",
@@ -4205,7 +4221,7 @@ def test_selected_blank_source_does_not_invent_columns_for_unmapped_stored_areas
         and row[fields.index("menu")] == "朝メニュー")
     assert all(breakfast[fields.index(field)] == "" for field in quantities)
     assert sheet["base_evidence_run_id"]
-    retained = order_service.get_order_by_id(order["id"])["lines"]
+    retained = _read_order(order["id"])["lines"]
     assert len(retained) == 1
     assert retained[0]["area_id"] == area and retained[0]["quantity_original"] == quantity
     assert _snapshot(get_engine()) == before
@@ -4230,7 +4246,7 @@ def test_selected_quantity_nine_is_not_replaced_by_unmapped_stored_twelve(select
     assert breakfast[fields.index("qty.regular_2f")] == "9"
     assert "qty.regular_x" not in fields
     assert "sheet_order_lines_unmapped_fallback_payload" not in sheet.get("warnings", [])
-    retained = order_service.get_order_by_id(order["id"])["lines"]
+    retained = _read_order(order["id"])["lines"]
     assert len(retained) == 1
     assert retained[0]["area_id"] is None and retained[0]["quantity_original"] == 12
 
@@ -4321,7 +4337,7 @@ def test_selected_authored_family_does_not_borrow_an_unmapped_stored_quantity(ow
         column.update(diet_type=diet, area_id="X")
     facility = {"facility_id": "AUTHORED-FAMILY-X", "facility_name": "Authored six-diet component",
         "areas": [], "fax_template_id": "authored-six-diet",
-        "fax_template": {"template_id": "authored-six-diet", "columns": columns}}
+        "fax_template": {"template_id": "authored-six-diet", "page": 1, "columns": columns}}
     order = owned_registration(message_id=payload.message_id, facility_id=facility["facility_id"],
         received_at=payload.received_at, week="2099-11@2099-11-15~2099-11-21",
         effective_date="2099-11-15", lines=lines, facility_config=facility)
@@ -4339,11 +4355,7 @@ def test_selected_authored_family_does_not_borrow_an_unmapped_stored_quantity(ow
     assert sheet["rows"][0][3:9] == ["20", "4", "6", "7", "8", "9"]
     assert "qty.business_x" not in fields
     assert sheet["base_evidence_run_id"]
-    assert {line["diet_type"]: line["quantity_original"]
-            for line in order_service.get_order_by_id(order["id"])["lines"]} == {
-        "regular": 20, "staff": 4, "business": 5, "no_meat": 6,
-        "no_fish": 7, "sesame_allergy": 8, "change_1": 9,
-    }
+    assert _read_order(order["id"])["lines"] == []
 
 
 @pytest.mark.parametrize("unowned_rows", [
@@ -4447,7 +4459,7 @@ def test_unselected_diagnostic_quantity_gate_cannot_override_current_selected_sh
     assert "sheet_quantity_column_unmapped" not in sheet["apply_blockers"]
 
 
-def test_resolve_sheet_week_prefers_ocr_month_over_stale_hints():
+def test_resolve_sheet_week_does_not_infer_period_from_ocr_month_or_stale_hints():
     received_at = datetime(2026, 2, 3, 9, 0, 0)
     payload = {
         "table_raw": """
@@ -4464,10 +4476,10 @@ def test_resolve_sheet_week_prefers_ocr_month_over_stale_hints():
         facility_id="FAC00001",
         week_hints=["2025-12"],
     )
-    assert resolved == "2026-02"
+    assert resolved is None
 
 
-def test_resolve_sheet_week_ignores_far_ocr_month_and_old_hint():
+def test_resolve_sheet_week_missing_period_cannot_use_far_ocr_month_or_old_hint():
     received_at = datetime(2026, 2, 13, 9, 0, 0)
     payload = {
         "table_raw": """
@@ -4512,12 +4524,12 @@ def test_resolve_sheet_week_ignores_far_ocr_month_and_old_hint():
             facility_id="FAC00001",
             week_hints=["2025-12"],
         )
-        assert resolved == "2026-02"
+        assert resolved is None
     finally:
         order_service._build_position_menu_entries = original_builder
 
 
-def test_resolve_sheet_week_extends_explicit_range_when_ocr_dates_run_longer():
+def test_resolve_sheet_week_preserves_explicit_range_when_ocr_dates_run_longer():
     received_at = datetime(2026, 3, 23, 9, 0, 0)
     payload = {
         "table_raw": """
@@ -4632,7 +4644,7 @@ def test_collect_sheet_dates_reads_structured_table_rows_for_weekday_hint():
     assert date(2026, 3, 27) in dates
 
 
-def test_build_position_menu_entries_from_ocr_payload_infers_noisy_weekday_anchor():
+def test_ocr_menu_entries_cannot_infer_missing_period_from_noisy_weekday_anchor():
     template = {
         "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
         "large_cell_mode": True,
@@ -4646,17 +4658,15 @@ def test_build_position_menu_entries_from_ocr_payload_infers_noisy_weekday_ancho
         ]
     }
 
-    entries = order_service._build_position_menu_entries_from_ocr_payload(
-        payload=payload,
-        template=template,
-        received_at=datetime(2026, 3, 23, 9, 0, 0),
-    )
-
-    dates = sorted({item.get("menu_date") for item in entries if item.get("menu_date")})
-    assert dates == [date(2026, 3, 26), date(2026, 3, 27)]
+    original_payload, original_template = deepcopy(payload), deepcopy(template)
+    with pytest.raises(ValueError, match="^week_hint_required$"):
+        order_service._build_position_menu_entries_from_ocr_payload(
+            payload=payload, template=template, received_at=datetime(2026, 3, 23, 9, 0, 0),
+        )
+    assert payload == original_payload and template == original_template
 
 
-def test_build_position_menu_entries_from_ocr_payload_replaces_invalid_daypart_tokens_with_nearby_valid_block():
+def test_ocr_menu_entries_cannot_resolve_missing_period_from_neighboring_daypart_tokens():
     template = {
         "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
         "large_cell_mode": True,
@@ -4673,21 +4683,12 @@ def test_build_position_menu_entries_from_ocr_payload_replaces_invalid_daypart_t
         ]
     }
 
-    entries = order_service._build_position_menu_entries_from_ocr_payload(
-        payload=payload,
-        template=template,
-        received_at=datetime(2026, 4, 5, 9, 0, 0),
-    )
-
-    assert [(item["menu_name"], item["daypart_key"]) for item in entries] == [
-        ("A", "朝"),
-        ("B", "朝"),
-        ("C", "朝"),
-        ("D", "昼"),
-        ("E", "夕"),
-        ("F", "夕"),
-        ("G", "夕"),
-    ]
+    original_payload, original_template = deepcopy(payload), deepcopy(template)
+    with pytest.raises(ValueError, match="^week_hint_required$"):
+        order_service._build_position_menu_entries_from_ocr_payload(
+            payload=payload, template=template, received_at=datetime(2026, 4, 5, 9, 0, 0),
+        )
+    assert payload == original_payload and template == original_template
 
 
 def test_selected_physical_dayparts_are_not_replaced_by_unowned_invalid_tokens(selected_history_order):
@@ -4780,8 +4781,11 @@ def test_merge_weekly_menu_entries_with_ocr_tail_keeps_weekly_entries_only_for_c
     assert [item.get("menu_name") for item in merged] == ["A", "B"]
 
 
-def test_get_ocr_sheet_without_facility_returns_error():
+def test_get_ocr_sheet_without_facility_returns_error(monkeypatch, tmp_path):
+    from tests.helpers.ingest_original import authored_sources
     order_service.clear_all()
+    authored_sources(monkeypatch, tmp_path, facility_id="missing-facility-component", menu_date=date(2026, 2, 15),
+                     seed_menu=False, seed_month=False)
     order = _seed_order_without_facility(message_id="msg-sheet-no-fac-001")
 
     sheet, error = order_service.get_ocr_sheet(order["id"])
@@ -4789,11 +4793,14 @@ def test_get_ocr_sheet_without_facility_returns_error():
     assert error == "facility_missing"
 
 
-def test_apply_without_facility_cannot_capture_or_publish_a_source():
+def test_apply_without_facility_cannot_capture_or_publish_a_source(monkeypatch, tmp_path):
     from src.db import get_engine
     from tests.unit.test_disabled_facility_columns import _snapshot
+    from tests.helpers.ingest_original import authored_sources
 
     order_service.clear_all()
+    authored_sources(monkeypatch, tmp_path, facility_id="missing-facility-component", menu_date=date(2026, 2, 15),
+                     seed_menu=False, seed_month=False)
     order = _seed_order_without_facility(message_id="msg-sheet-no-fac-002")
     before = _snapshot(get_engine())
     assert order_service.get_ocr_sheet(order["id"]) == (None, "facility_missing")
@@ -5257,7 +5264,7 @@ def test_get_ocr_sheet_keeps_late_week_dates_without_borrowing_unowned_table_row
     assert ("04/11", "厚揚げと竹輪の煮物") in rows_by_identity
 
 
-def test_apply_payload_quantities_numeric_only_aligns_weekly_shell_for_late_week_rows():
+def test_unmapped_late_week_raw_columns_cannot_be_realigned_into_weekly_quantities(repository_layout_source):
     config_service.reload_configs()
     fields = [
         "date_mmdd",
@@ -5290,8 +5297,7 @@ def test_apply_payload_quantities_numeric_only_aligns_weekly_shell_for_late_week
         {"values": ["04/11", "夕", "三色ナムル", "", "", "", "", "", "", ""]},
     ]
     template = (config_service.get_facility_config("FAC00005") or {}).get("fax_template") or {}
-    payload_rows = order_service._extract_sheet_rows_from_payload(
-        {
+    raw_payload = {
             "template_id": "fax_layout_soft_packaging_forbidden_v1",
             "tables": [
                 {
@@ -5319,45 +5325,14 @@ def test_apply_payload_quantities_numeric_only_aligns_weekly_shell_for_late_week
                     ],
                 }
             ],
-        },
-        template,
-    )
-    quantity_index = {
-        ("soft", "x"): fields.index("qty.soft_x"),
-        ("regular_bag", "x"): fields.index("qty.regular_bag_x"),
-    }
-
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-        payload_unstructured_qty=[],
-        allow_heuristics=False,
-        enable_daypart_consensus=False,
-        overlay_structural_fields_from_sheet_rows=True,
-    )
-
-    rows_by_identity = {
-        (row["values"][0], row["values"][2]): row["values"]
-        for row in rows
-    }
-    soft_idx = fields.index("qty.soft_x")
-    bag_idx = fields.index("qty.regular_bag_x")
-    assert stats["row_index"] == 15
-    assert stats["partial"] == 1
-    assert rows_by_identity[("04/10", "鶏肉の味噌炒め")][soft_idx] == "58"
-    assert rows_by_identity[("04/10", "鶏肉の味噌炒め")][bag_idx] == "2"
-    assert rows_by_identity[("04/10", "切干大根煮")][soft_idx] == "58"
-    assert rows_by_identity[("04/10", "切干大根煮")][bag_idx] == "2"
-    assert rows_by_identity[("04/10", "いんげんのおかか和え")][soft_idx] == "58"
-    assert rows_by_identity[("04/10", "いんげんのおかか和え")][bag_idx] == "2"
-    assert rows_by_identity[("04/11", "カレイの照焼き 添)ﾌﾞﾛｯｺﾘｰ")][soft_idx] == "58"
-    assert rows_by_identity[("04/11", "カレイの照焼き 添)ﾌﾞﾛｯｺﾘｰ")][bag_idx] == "2"
-    assert rows_by_identity[("04/11", "さつま芋の煮物")][soft_idx] == "58"
-    assert rows_by_identity[("04/11", "さつま芋の煮物")][bag_idx] == "2"
-    assert rows_by_identity[("04/11", "三色ナムル")][soft_idx] == "58"
-    assert rows_by_identity[("04/11", "三色ナムル")][bag_idx] == "2"
+        }
+    original_rows, original_payload = deepcopy(rows), deepcopy(raw_payload)
+    original_template = deepcopy(template)
+    with pytest.raises(order_service._CanonicalOcrProjectionError, match="sheet_quantity_column_unmapped"):
+        order_service._extract_sheet_rows_from_payload(raw_payload, template)
+    assert rows == original_rows and raw_payload == original_payload
+    assert template == original_template
+    assert all(row["values"][index] == "" for row in rows for index, field in enumerate(fields) if field.startswith("qty."))
 
 
 def test_selected_physical_menu_includes_intermediate_dates_when_stored_lines_are_sparse(selected_history_order):
@@ -5376,6 +5351,7 @@ def test_selected_physical_menu_includes_intermediate_dates_when_stored_lines_ar
             [
                 MonthlyMenuEntry(
                     id="seed-entry-2099-12-26-breakfast-a-3",
+                    diet_type="regular",
                     monthly_menu_id="2099-12",
                     menu_date=date(2099, 12, 26),
                     daypart="朝食",
@@ -5384,6 +5360,7 @@ def test_selected_physical_menu_includes_intermediate_dates_when_stored_lines_ar
                 ),
                 MonthlyMenuEntry(
                     id="seed-entry-2099-12-27-breakfast-b-3",
+                    diet_type="regular",
                     monthly_menu_id="2099-12",
                     menu_date=date(2099, 12, 27),
                     daypart="朝食",
@@ -5392,6 +5369,7 @@ def test_selected_physical_menu_includes_intermediate_dates_when_stored_lines_ar
                 ),
                 MonthlyMenuEntry(
                     id="seed-entry-2099-12-28-breakfast-c-3",
+                    diet_type="regular",
                     monthly_menu_id="2099-12",
                     menu_date=date(2099, 12, 28),
                     daypart="朝食",
@@ -5477,7 +5455,7 @@ def test_selected_canonical_fields_cannot_be_replaced_by_invalid_legacy_config(s
         config_service.get_facility_config = original_get
 
 
-def test_unbound_archived_order_cannot_reconstruct_a_sheet_from_legacy_db_and_raw_cache():
+def test_unbound_archived_order_cannot_reconstruct_a_sheet_from_legacy_db_and_raw_cache(repository_layout_source):
     order_service.clear_all()
     with session_scope() as session:
         session.execute(delete(Facility).where(Facility.id == "FAC00002"))
@@ -5603,7 +5581,7 @@ def test_extract_sheet_rows_from_payload_merges_blocks_and_collects_unstructured
     assert "16" in candidates
 
 
-def test_hakodate_projection_uses_target_truth_field_for_remarks_column():
+def test_hakodate_projection_does_not_adopt_unowned_target_truth_for_remarks():
     base_sheet = {
         "fields": [
             "date_mmdd",
@@ -5650,14 +5628,12 @@ def test_hakodate_projection_uses_target_truth_field_for_remarks_column():
         },
     }
 
-    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
-        base_sheet=base_sheet,
-        assignment=assignment,
-    )
-
-    assert projected["rows"][2][10] == "111"
-    assert projected["hakodate_projection_version"] == order_service.HAKODATE_EVIDENCE_PROJECTION_VERSION
-    assert projected["hakodate_evidence_projection"]["applied"][0]["field"] == "remarks"
+    original = deepcopy(base_sheet)
+    with pytest.raises(ValueError, match="^hakodate_projection_config_required$"):
+        order_service._apply_hakodate_sheet_output_to_sheet_payload(
+            base_sheet=base_sheet, assignment=assignment,
+        )
+    assert base_sheet == original
 
 
 def test_hakodate_projection_does_not_fallback_to_worksheet_position_without_truth():
@@ -5690,16 +5666,12 @@ def test_hakodate_projection_does_not_fallback_to_worksheet_position_without_tru
         },
     }
 
-    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
-        base_sheet=base_sheet,
-        assignment=assignment,
-    )
-
-    assert projected["rows"][0][3] == ""
-    projection = projected["hakodate_evidence_projection"]
-    assert projection["applied"] == []
-    assert projection["skipped"][0]["skip_reason"] == "row_identity_not_found"
-    assert "hakodate_sheet_projection_incomplete" in projected["blockers"]
+    original = deepcopy(base_sheet)
+    with pytest.raises(ValueError, match="^hakodate_projection_config_required$"):
+        order_service._apply_hakodate_sheet_output_to_sheet_payload(
+            base_sheet=base_sheet, assignment=assignment,
+        )
+    assert base_sheet == original
 
 
 def test_selected_source_blocks_unowned_off_month_noise(selected_history_order):
@@ -5718,6 +5690,7 @@ def test_selected_source_blocks_unowned_off_month_noise(selected_history_order):
             [
                 MonthlyMenuEntry(
                     id="seed-entry-2099-12-26-breakfast-a-4",
+                    diet_type="regular",
                     monthly_menu_id="2099-12",
                     menu_date=date(2099, 12, 26),
                     daypart="朝食",
@@ -5726,6 +5699,7 @@ def test_selected_source_blocks_unowned_off_month_noise(selected_history_order):
                 ),
                 MonthlyMenuEntry(
                     id="seed-entry-2099-12-27-breakfast-b-4",
+                    diet_type="regular",
                     monthly_menu_id="2099-12",
                     menu_date=date(2099, 12, 27),
                     daypart="朝食",
@@ -5868,7 +5842,7 @@ def test_selected_source_and_stored_line_edits_remain_separate(selected_history_
         if row[date_idx] == "11/15" and row[daypart_idx] == "朝" and row[menu_idx] == "朝メニュー"
     )
     assert breakfast[qty_idx] == "6"
-    assert order_service.get_order_by_id(order["id"])["lines"][0]["quantity_original"] == 20
+    assert _read_order(order["id"])["lines"][0]["quantity_original"] == 20
 
 
 def test_selected_sheets_are_consistent_but_missing_explicit_week_is_refused(selected_history_order):
@@ -5944,7 +5918,7 @@ def test_selected_sheets_are_consistent_but_missing_explicit_week_is_refused(sel
     assert order_service.get_ocr_sheet(order_b["id"]) == (None, "week_unresolved")
 
 
-def test_resolve_sheet_week_month_boundary_prefers_order_line_month_and_is_order_invariant():
+def test_resolve_sheet_week_month_boundary_requires_explicit_period_regardless_of_row_order():
     _seed_monthly_menu_boundary_2026_01_02()
     received_at = datetime(2026, 2, 1, 9, 0, 0)
     order_lines = [{"date": date(2026, 2, 1)}]
@@ -5982,8 +5956,8 @@ def test_resolve_sheet_week_month_boundary_prefers_order_line_month_and_is_order
         week_hints=["2026-01"],
     )
 
-    assert resolved_a == "2026-02"
-    assert resolved_b == "2026-02"
+    assert resolved_a is None
+    assert resolved_b is None
 
 
 def test_selected_canonical_columns_ignore_legacy_split_or_x_override(selected_history_order):
@@ -6169,6 +6143,12 @@ def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_update
     )
     assert error_2 is None
     assert updated_2 is not None
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, order["id"])
+        persisted_edit = deepcopy(cache.payload["_edited_ocr"])
+        assert persisted_edit["latest"]["rows"][0][3] == "3"
+        assert persisted_edit["selected_revision_id"] == persisted_edit["latest"]["revision_id"]
+        assert [revision["rows"][0][3] for revision in persisted_edit["revisions"]] == ["11", "3"]
     selected_2, selected_error_2 = _save_formal_sheet(order_id=order["id"],
         sheet={"fields": fields, "header": header,
                "rows": [["11/15", "昼", "昼メニュー", "3", "", "", "", "", "", "apply-2"]],
@@ -6442,7 +6422,7 @@ def test_selected_source_survives_unowned_failed_projection_diagnostics(selected
         and row[fields.index("menu")] == "朝メニュー")
     assert breakfast[fields.index("qty.regular_2f")] == "7"
     assert sheet["base_evidence_run_id"]
-    assert order_service.get_order_by_id(order["id"])["lines"][0]["quantity_original"] == 30
+    assert _read_order(order["id"])["lines"][0]["quantity_original"] == 30
     assert order_service.get_cached_ocr_payload(order["id"]) == selected_payload
     assert _snapshot(get_engine()) == before
 
@@ -6544,9 +6524,9 @@ def test_archived_yomitoku_issue_metadata_does_not_override_selected_source(sele
                         {
                             "table_id": "p1_t1",
                             "rows": [
-                                ["日付", "区分", "献立", "数量", "備考"],
-                                ["", "", "", "常食", ""],
-                                ["01/08", "昼", "Menu A", "2", ""],
+                                ["日付", "区分", "献立", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
+                                ["", "", "", "常食", "", "", "", "", "", ""],
+                                ["01/08", "昼", "Menu A", "2", "1", "3", "", "", "", ""],
                             ],
                         }
                     ],
@@ -6570,6 +6550,7 @@ def test_archived_yomitoku_issue_metadata_does_not_override_selected_source(sele
 def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_draft_as_baseline(selected_history_order, monkeypatch):
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-sheet-llm-review-loop-001")
+    selected_before = order_service._capture_synchronous_cache_write_input(order["id"])["evidence"]
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -6720,10 +6701,10 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     history_1, history_error_1 = order_service.get_ocr_edit_history(order["id"])
     assert history_error_1 is None
     assert history_1 is not None
-    assert isinstance(history_1["latest"], dict)
-    assert history_1["latest"]["ui_mode"] == "evidence"
-    assert str(history_1["latest"]["revision_id"]).startswith("OEV")
-    assert len(history_1["revisions"]) == 1
+    assert history_1["latest"] is None and history_1["revisions"] == []
+    assert history_1["raw_output_source"] == "order_ocr_evidence_runs.payload_json"
+    assert history_1["raw_output"] == selected_before["payload_json"]
+    assert order_service.get_ocr_evidence_run(selected_before["id"]) == selected_before
 
     apply_result, apply_error = order_service.apply_patch_candidate_to_draft(
         order["id"],
@@ -6735,11 +6716,25 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     applied_draft = apply_result["draft"]
     assert applied_draft["latest_patch_candidate_id"] == first_candidate["id"]
     assert applied_draft["draft_sheet_json"]["rows"][0][3] == "5"
+    for operation, options in (
+        (order_workflow_v2_service.run_sheet_anomaly_review, {"use_llm": False}),
+        (order_workflow_v2_service.confirm_sheet_review, {}),
+    ):
+        current, error = order_workflow_v2_service.get_workflow_readonly(order["id"])
+        assert error is None
+        reviewed, error = operation(order_id=order["id"], sheet=applied_draft["draft_sheet_json"],
+            expected_revision=current["revision"], **options)
+        assert error is None and reviewed is not None
+    saved_patch, error = _save_formal_sheet(order_id=order["id"],
+        sheet=applied_draft["draft_sheet_json"], edited_by="test")
+    assert error is None and saved_patch is not None
+    selected_after_save = order_service._capture_synchronous_cache_write_input(order["id"])["draft"]
+    assert selected_after_save["draft_sheet_json"]["rows"][0][3] == "5"
 
     updated_2, error_2 = order_service.review_ocr_table_with_llm(order["id"], provider="gemini")
     assert error_2 is None
     assert updated_2 is not None
-    assert updated_2["llm_review"]["baseline_revision_id"] == applied_draft["id"]
+    assert updated_2["llm_review"]["baseline_revision_id"] == selected_after_save["id"]
     assert updated_2["llm_review"]["baseline_source"] == "current_draft"
     assert updated_2["llm_review"]["needs_more_review"] is False
     second_candidate = updated_2["patch_candidate"]
@@ -6748,16 +6743,15 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     history_2, history_error_2 = order_service.get_ocr_edit_history(order["id"])
     assert history_error_2 is None
     assert history_2 is not None
-    assert isinstance(history_2["latest"], dict)
-    assert history_2["latest"]["ui_mode"] == "evidence"
-    assert str(history_2["latest"]["revision_id"]).startswith("OEV")
-    assert len(history_2["revisions"]) == 1
+    assert history_2["latest"] is None and history_2["revisions"] == []
+    assert history_2["raw_output_source"] == "order_ocr_evidence_runs.payload_json"
+    assert history_2["raw_output"] == selected_before["payload_json"]
+    assert order_service.get_ocr_evidence_run(selected_before["id"]) == selected_before
 
-    assert "Previous yomitoku/LLM markdown" in captured_prompts[0]["user"]
-    assert "Previous yomitoku/LLM structured tables/cells" in captured_prompts[0]["user"]
+    assert f"Current baseline revision_id: {updated_1['llm_review']['baseline_revision_id']}" in captured_prompts[0]["user"]
     assert "Current baseline source: current_draft" in captured_prompts[0]["user"]
     assert '"qty.regular_2f": "2"' in captured_prompts[0]["user"]
-    assert f"Current baseline revision_id: {applied_draft['id']}" in captured_prompts[1]["user"]
+    assert f"Current baseline revision_id: {selected_after_save['id']}" in captured_prompts[1]["user"]
     assert "Current baseline source: current_draft" in captured_prompts[1]["user"]
     assert '"qty.regular_2f": "5"' in captured_prompts[1]["user"]
 
@@ -6765,6 +6759,7 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
 def test_review_ocr_table_with_llm_rejects_invalid_overwrite_and_keeps_latest_baseline(selected_history_order, monkeypatch):
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-sheet-llm-review-reject-001")
+    selected_before = order_service._capture_synchronous_cache_write_input(order["id"])["evidence"]
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -6873,10 +6868,10 @@ def test_review_ocr_table_with_llm_rejects_invalid_overwrite_and_keeps_latest_ba
     history, history_error = order_service.get_ocr_edit_history(order["id"])
     assert history_error is None
     assert history is not None
-    assert isinstance(history["latest"], dict)
-    assert history["latest"]["ui_mode"] == "evidence"
-    assert str(history["latest"]["revision_id"]).startswith("OEV")
-    assert len(history["revisions"]) == 1
+    assert history["latest"] is None and history["revisions"] == []
+    assert history["raw_output_source"] == "order_ocr_evidence_runs.payload_json"
+    assert history["raw_output"] == selected_before["payload_json"]
+    assert order_service.get_ocr_evidence_run(selected_before["id"]) == selected_before
 
 
 def test_unowned_corrected_pdf_reference_cannot_replace_selected_review_source(selected_history_order, monkeypatch):

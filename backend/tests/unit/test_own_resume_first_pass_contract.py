@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
+from copy import deepcopy
 
 import pytest
 
@@ -8,7 +9,7 @@ from src.services import order_service
 
 @pytest.fixture
 def own_resume_session(monkeypatch):
-    job = SimpleNamespace(order_id="order", output_reference="own-output")
+    job = SimpleNamespace(order_id="order", output_reference="own-output", metrics={})
     session = SimpleNamespace(get=lambda model, key: job)
 
     @contextmanager
@@ -27,7 +28,7 @@ def own_resume_session(monkeypatch):
 
 
 @pytest.mark.parametrize("old_active_present", [False, True])
-def test_incompatible_own_schema_stops_without_active_substitution(monkeypatch, own_resume_session, old_active_present):
+def test_unreceipted_incompatible_schema_stops_without_active_substitution(monkeypatch, own_resume_session, old_active_present):
     # Active availability cannot change the explicit own-input decision.
     active_reads = []
     def active_read(*args, **kwargs):
@@ -40,20 +41,21 @@ def test_incompatible_own_schema_stops_without_active_substitution(monkeypatch, 
         output_reference="own-output",
     )
     assert result is None
-    assert error == "own_first_pass_schema_incompatible"
+    assert error == "own_first_pass_delivery_mismatch"
     assert active_reads == []
 
 
-def test_compatible_own_zero_values_are_retained(monkeypatch, own_resume_session):
+def test_zero_values_do_not_authorize_an_unreceipted_result(monkeypatch, own_resume_session):
     monkeypatch.setattr(order_service, "_payload_first_pass_schema_matches_template", lambda payload, template: True)
     monkeypatch.setattr(order_service, "_annotate_payload_with_template_field_schema", lambda payload, template: payload)
     payload = {"tables": [{"rows": [[0, "0"]]}]}
+    before = deepcopy(payload)
     result, error = order_service._resolve_own_resume_first_pass(
         "order", "actual-job", payload, {}, output_reference="own-output",
     )
-    assert error is None
-    assert result == payload
-    assert result is not payload
+    assert error == "own_first_pass_delivery_mismatch"
+    assert result is None
+    assert payload == before
 
 
 def test_missing_own_result_does_not_read_active(own_resume_session):

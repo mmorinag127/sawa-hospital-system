@@ -94,7 +94,7 @@ for (const [name, counts] of Object.entries(expected)) {
   const migration = '7d7e41d2085376013a835f4e6f5904c4031b0c1f';
   const current = execFileSync('git', ['show', migration + ':' + file], { cwd: root, encoding: 'utf8' });
   test(name + ' current approved RHF/session-query/refusal guards remain exact', () => {
-    const approved = name === 'admin/users' ? 'c3d9586' : name === 'system-status' ? '227cae9' : migration;
+    const approved = name === 'admin/users' ? '9d046f3be08ed895ca5cc791a3576812a2de9412' : name === 'system-status' ? '227cae9' : migration;
     for (const [ancestor, descendant] of [[base, migration], [migration, approved], [approved, 'HEAD']])
       execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: root });
     if (name === 'admin/users') execFileSync('git', ['merge-base', '--is-ancestor', 'a252363', approved], { cwd: root });

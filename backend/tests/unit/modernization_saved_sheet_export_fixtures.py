@@ -178,10 +178,10 @@ class SavedSheetFixture:
     def authored(self):
         return self.master["facilities"][0]["versions"][0]["facility"]
 
-    def republish(self):
+    def republish(self, *, prepare_invoice=True):
         """Explicit fixture setup adoption, not a production guard override."""
         invoice = self.authored.get("invoice_template")
-        if invoice is not None and "template_uri" not in invoice:
+        if prepare_invoice and invoice is not None and "template_uri" not in invoice:
             from tests.helpers.authored_invoice import declare_invoice
             self.authored["invoice_template"] = declare_invoice(self.root, invoice)
         self.write_master()

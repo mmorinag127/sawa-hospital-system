@@ -454,7 +454,10 @@ def test_workflow_gates_both_deploy_surfaces_and_retains_bootstraps():
     migration_command = "uv run --project backend --extra dev --frozen python scripts/run_stg_schema_adoption.py"
     preflight_command = "uv run --project backend --extra dev --frozen python scripts/run_stg_runtime_schema_preflight.py"
     gate_commands = [step["run"] for step in gate["steps"] if "run" in step]
-    assert gate_commands == [migration_command, preflight_command]
+    assert len(gate_commands) == 3
+    assert gate_commands[1:] == [migration_command, preflight_command]
+    assert 'sudo apt-get install --only-upgrade -y ca-certificates' in gate_commands[0]
+    assert 'dpkg --compare-versions "$actual" ge "$minimum"' in gate_commands[0]
     for name in ("build-backend", "deploy-backend", "deploy-frontend"):
         assert "menu-master-migration" in jobs[name]["needs"]
         assert "continue-on-error" not in jobs[name]
@@ -463,12 +466,13 @@ def test_workflow_gates_both_deploy_surfaces_and_retains_bootstraps():
         assert "continue-on-error" not in jobs[name]
     assert not any(step.get("continue-on-error") for step in gate["steps"])
     commands = [step["run"] for step in jobs["automation-bootstrap"]["steps"] if "run" in step]
-    assert commands == ["bash scripts/bootstrap_automation_user.sh stg", "bash scripts/bootstrap_automation_user.sh stg school-lunch"]
+    assert commands == [gate_commands[0], "bash scripts/bootstrap_automation_user.sh stg",
+                        "bash scripts/bootstrap_automation_user.sh stg school-lunch"]
     source = next(step["run"] for step in jobs["source-gate"]["steps"] if step.get("name") == "Assert staging source")
     for assertion in ('test "${GITHUB_REF_NAME}" = "develop"', 'test -z "$(git status --porcelain)"',
                       'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/develop)"'):
         assert assertion in source
-    assert workflow["on"]["push"]["branches"] == ["develop"]
+    assert set(workflow["on"]) == {"workflow_dispatch"}
     bootstrap = (ROOT / "scripts/bootstrap_automation_user.sh").read_text()
     assert runner.PROXY_URL in bootstrap and runner.PROXY_SHA256 in bootstrap
 

@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from datetime import date
 from openpyxl import Workbook
 
 from src.services.hakodate_step_review_pipeline_service import (
@@ -18,6 +19,43 @@ from src.services.hakodate_step_review_pipeline_service import (
     dewarp_rectified_y_to_template_rows,
     snap_regions_x_to_local_fax_rulings,
 )
+
+
+@pytest.fixture
+def authored_geometry():
+    from src.services import master_order_form_template_service as master
+
+    books = []
+
+    def create(names, *, roles=("regular",), merged=False, day="2026-07-12"):
+        columns = [{"index": 0, "role": "date"}, {"index": 1, "role": "daypart"},
+                   {"index": 3, "role": "menu_name", "header": "献立"}]
+        fields = ["date_mmdd", "daypart", "menu"]
+        for index, role in enumerate(roles, 4):
+            if role == "note":
+                columns.append({"index": index, "role": "note", "header": "備考欄"})
+                fields.append("remarks")
+            else:
+                columns.append({"index": index, "role": "quantity", "diet_type": role,
+                                "area_id": "X", "header": role, "name": f"qty.{role}_x"})
+                fields.append(f"qty.{role}_x")
+        template = {"columns": columns}
+        if merged:
+            template["body_merge_policy"] = {"mode": "daypart", "columns": ["qty.regular_x"], "required": True}
+        config = {"facility_id": "authored-geometry", "facility_name": "Authored geometry", "fax_template": template}
+        entries = [{"menu_date": date.fromisoformat(day), "daypart": "朝", "name": name,
+                    "slot_index": index, "diet_type": "regular"} for index, name in enumerate(names)]
+        workbook = master.build_facility_template_workbook(
+            facility_config=config, week_value=f"{day[:7]}@{day}~{day}", week_menu_entries=entries)
+        books.append(workbook)
+        worksheet = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
+        assert len(master.validated_body_row_plan(worksheet)) == len(names)
+        sheet = {"fields": fields, "rows": [[day, "朝", name, *([""] * len(roles))] for name in names]}
+        return worksheet, template, sheet
+
+    yield create
+    for workbook in books:
+        workbook.close()
 
 
 def test_physical_internal_horizontal_lines_detects_full_width_rule() -> None:
@@ -609,13 +647,9 @@ def test_snap_regions_clusters_duplicate_row_boundaries_before_curve_fit() -> No
     assert len(snapped) == len(regions)
 
 
-def test_step_review_body_rows_start_after_preserved_two_stage_header_boundary() -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet.cell(row=11, column=4, value="先頭メニュー")
-    worksheet.cell(row=66, column=4, value="56行目メニュー")
-    worksheet.cell(row=67, column=4, value="57行目メニュー")
-    worksheet.cell(row=68, column=4, value="")
+def test_step_review_body_rows_start_after_preserved_two_stage_header_boundary(authored_geometry) -> None:
+    names = ["先頭メニュー", *[f"{index}行目メニュー" for index in range(2, 58)]]
+    worksheet, _template, _sheet = authored_geometry(names)
 
     rows = _step_review_physical_row_map(worksheet, row_count=59)
 
@@ -664,8 +698,11 @@ def test_row_height_outlier_evidence_requires_manual_review() -> None:
 
 
 def test_step_review_header_merge_regions_use_grid_band_span() -> None:
+    from src.services.master_order_form_template_service import MASTER_SHEET_NAME
+
     workbook = Workbook()
     worksheet = workbook.active
+    worksheet.title = MASTER_SHEET_NAME
     worksheet.merge_cells("G7:H8")
     worksheet["G7"] = "禁食"
     worksheet.merge_cells("G9:G10")
@@ -697,8 +734,11 @@ def test_step_review_header_merge_regions_use_grid_band_span() -> None:
 
 
 def test_step_review_grid_keeps_template_merge_when_fax_has_internal_line() -> None:
+    from src.services.master_order_form_template_service import MASTER_SHEET_NAME
+
     workbook = Workbook()
     worksheet = workbook.active
+    worksheet.title = MASTER_SHEET_NAME
     worksheet.merge_cells("E11:E12")
     row_edges = [float(index * 10) for index in range(59)]
     column_edges = [float(index * 10) for index in range(6)]
@@ -721,13 +761,8 @@ def test_step_review_grid_keeps_template_merge_when_fax_has_internal_line() -> N
     assert evidence["merged_ranges"] == ["E11:E12"]
 
 
-def test_step_review_target_regions_keep_template_merge_center() -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet["D7"] = "献立"
-    worksheet["D11"] = "先頭メニュー"
-    worksheet["D12"] = "結合内メニュー"
-    worksheet.merge_cells("E11:E12")
+def test_step_review_target_regions_keep_template_merge_center(authored_geometry) -> None:
+    worksheet, fax_template, draft_sheet = authored_geometry(["先頭メニュー", "結合内メニュー"], merged=True)
     row_edges = [float(index * 10) for index in range(59)]
     column_edges = [float(index * 10) for index in range(6)]
     horizontal_mask = np.zeros((600, 80), dtype=np.uint8)
@@ -738,6 +773,7 @@ def test_step_review_target_regions_keep_template_merge_center() -> None:
         column_edges=column_edges,
         row_edges=row_edges,
         horizontal_line_mask=horizontal_mask,
+        fax_template=fax_template, draft_sheet=draft_sheet, menu_body_row_indexes=[0, 1],
     )
 
     by_id = {str(region["region_id"]): region for region in regions}
@@ -750,48 +786,18 @@ def test_step_review_target_regions_keep_template_merge_center() -> None:
     assert evidence["physical_split_excel_merge_ranges"] == []
 
 
-def test_step_review_target_regions_include_all_post_menu_columns() -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet["D7"] = "献立"
-    worksheet["E7"] = "常食"
-    worksheet["F7"] = "糖尿"
-    worksheet["G7"] = "備考欄"
-    worksheet["H7"] = "肉禁"
-    worksheet["I7"] = "魚禁"
-    worksheet["D11"] = "先頭メニュー"
+def test_step_review_target_regions_include_all_post_menu_columns(authored_geometry) -> None:
     row_edges = [float(index * 10) for index in range(59)]
     column_edges = [float(index * 10) for index in range(10)]
-    fax_template = {
-        "columns": [
-            {"index": 0, "role": "date", "field": "date_mmdd", "header": "日付"},
-            {"index": 1, "role": "daypart", "field": "daypart", "header": "区分"},
-            {"index": 3, "role": "menu_name", "field": "menu", "header": "献立"},
-            {
-                "index": 4,
-                "role": "quantity",
-                "name": "qty.regular_x",
-                "diet_type": "regular",
-                "area_id": "X",
-                "header": "常食",
-            },
-            {
-                "index": 5,
-                "role": "quantity",
-                "name": "qty.diabetes_x",
-                "diet_type": "diabetes",
-                "area_id": "X",
-                "header": "糖尿",
-            },
-            {"index": 6, "role": "note", "field": "remarks", "header": "備考欄"},
-        ],
-    }
 
+    worksheet, fax_template, draft_sheet = authored_geometry(
+        ["先頭メニュー"], roles=("regular", "diabetes", "note", "no_meat", "no_fish"))
     regions, evidence = _post_menu_target_regions(
         worksheet=worksheet,
         column_edges=column_edges,
         row_edges=row_edges,
         fax_template=fax_template,
+        draft_sheet=draft_sheet, menu_body_row_indexes=[0],
     )
 
     first_row_regions = [region for region in regions if int(region["worksheet_row"]) == 11]
@@ -806,17 +812,13 @@ def test_step_review_target_regions_include_all_post_menu_columns() -> None:
     assert evidence["template_column_restricted"] is False
     assert evidence["target_selection_mode"] == "all_physical_columns_right_of_menu"
     assert evidence["target_worksheet_cols"] == [5, 6, 7, 8, 9]
-    assert evidence["canonical_target_worksheet_cols"] == [5, 6, 7]
+    assert evidence["canonical_target_worksheet_cols"] == [5, 6, 7, 8, 9]
 
 
-def test_step_review_target_regions_include_57th_body_row() -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet["D7"] = "献立"
-    for row in range(11, 68):
-        worksheet.cell(row=row, column=4, value=f"メニュー{row}")
-    for col, header in zip(("E", "F", "G", "H", "I", "J", "K"), ("常食", "糖尿", "備考欄", "肉禁", "魚禁", "軟菜", "袋分け")):
-        worksheet[f"{col}7"] = header
+def test_step_review_target_regions_include_57th_body_row(authored_geometry) -> None:
+    worksheet, fax_template, draft_sheet = authored_geometry(
+        [f"メニュー{row}" for row in range(11, 68)],
+        roles=("regular", "diabetes", "note", "no_meat", "no_fish", "soft", "regular_bag"))
     row_edges = [float(index * 10) for index in range(60)]
     column_edges = [float(index * 10) for index in range(12)]
 
@@ -824,6 +826,7 @@ def test_step_review_target_regions_include_57th_body_row() -> None:
         worksheet=worksheet,
         column_edges=column_edges,
         row_edges=row_edges,
+        fax_template=fax_template, draft_sheet=draft_sheet, menu_body_row_indexes=list(range(57)),
     )
 
     target_cells = {str(region["sheet_cell"]) for region in regions}
@@ -831,29 +834,18 @@ def test_step_review_target_regions_include_57th_body_row() -> None:
     assert all(f"{col}67" in target_cells for col in ("E", "F", "G", "H", "I", "J", "K"))
 
 
-def test_step_review_target_regions_use_draft_sheet_row_count_when_available() -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet["D7"] = "献立"
-    for row in range(11, 68):
-        worksheet.cell(row=row, column=4, value=f"テンプレート行{row}")
-    for col, header in zip(("E", "F", "G", "H", "I", "J", "K"), ("常食", "糖尿", "備考欄", "肉禁", "魚禁", "軟菜", "袋分け")):
-        worksheet[f"{col}7"] = header
+def test_step_review_target_regions_use_draft_sheet_row_count_when_available(authored_geometry) -> None:
+    worksheet, fax_template, draft_sheet = authored_geometry(
+        [f"月次メニュー{index + 1}" for index in range(63)],
+        roles=("regular", "diabetes", "note", "no_meat", "no_fish", "soft", "regular_bag"))
     row_edges = [float(index * 10) for index in range(66)]
     column_edges = [float(index * 10) for index in range(12)]
-    draft_sheet = {
-        "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.regular_3f", "qty.soft_2f", "qty.soft_3f", "qty.mixer_2f", "qty.mixer_3f", "remarks"],
-        "rows": [
-            [f"07/{12 + (index // 9):02d}", "朝", f"月次メニュー{index + 1}", "", "", "", "", "", "", ""]
-            for index in range(63)
-        ],
-    }
-
     regions, evidence = _post_menu_target_regions(
         worksheet=worksheet,
         column_edges=column_edges,
         row_edges=row_edges,
         draft_sheet=draft_sheet,
+        fax_template=fax_template,
         menu_body_row_indexes=list(range(63)),
     )
 
@@ -865,14 +857,10 @@ def test_step_review_target_regions_use_draft_sheet_row_count_when_available() -
     assert {region["logical_targets"][0]["menu_name"] for region in last_row_regions} == {"月次メニュー63"}
 
 
-def test_step_review_target_regions_block_unresolved_draft_sheet_map() -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet["D7"] = "献立"
-    worksheet["E7"] = "常食"
-    worksheet["D11"] = "テンプレート行"
+def test_step_review_target_regions_block_unresolved_draft_sheet_map(authored_geometry) -> None:
+    worksheet, fax_template, _ = authored_geometry(["月次メニュー1"])
     row_edges = [float(index * 10) for index in range(12)]
-    column_edges = [float(index * 10) for index in range(8)]
+    column_edges = [float(index * 10) for index in range(6)]
     draft_sheet = {
         "fields": ["date_mmdd", "menu"],
         "rows": [["07/12", "月次メニュー1"]],
@@ -884,21 +872,18 @@ def test_step_review_target_regions_block_unresolved_draft_sheet_map() -> None:
             column_edges=column_edges,
             row_edges=row_edges,
             draft_sheet=draft_sheet,
+            fax_template=fax_template,
             menu_body_row_indexes=[0],
         )
 
 
 @pytest.mark.parametrize("merged", [False, True])
-def test_draft_menu_cells_use_physical_rows_after_leading_blanks(merged) -> None:
-    worksheet = Workbook().active
-    worksheet["D7"] = "献立"
-    worksheet["E7"] = "常食"
-    if merged:
-        worksheet.merge_cells("E11:E12")
-    sheet = {"fields": ["date_mmdd", "daypart", "menu"], "rows": [["10/01", "朝", "A"], ["10/01", "朝", "B"]]}
+def test_draft_menu_cells_use_physical_rows_after_leading_blanks(merged, authored_geometry) -> None:
+    worksheet, fax_template, sheet = authored_geometry(["A", "B"], merged=merged, day="2026-10-01")
     regions, _ = _post_menu_target_regions(
         worksheet=worksheet, column_edges=[float(i * 10) for i in range(6)],
         row_edges=[float(i * 10) for i in range(59)], draft_sheet=sheet,
+        fax_template=fax_template,
         menu_body_row_indexes=[32, 33],
     )
     assert regions[0]["sheet_cell"] == "E11"
@@ -909,41 +894,32 @@ def test_draft_menu_cells_use_physical_rows_after_leading_blanks(merged) -> None
 
 
 @pytest.mark.parametrize("indexes", [None, [], [0, 0], [1, 0], [-1, 0], [55, 56]])
-def test_missing_or_invalid_physical_menu_mapping_blocks(indexes) -> None:
-    worksheet = Workbook().active
-    worksheet["D7"] = "献立"
-    worksheet["E7"] = "常食"
-    sheet = {"fields": ["date_mmdd", "daypart", "menu"], "rows": [["10/01", "朝", "A"], ["10/01", "朝", "B"]]}
+def test_missing_or_invalid_physical_menu_mapping_blocks(indexes, authored_geometry) -> None:
+    worksheet, fax_template, sheet = authored_geometry(["A", "B"], day="2026-10-01")
     with pytest.raises(ValueError, match="fax_menu_row_mapping"):
         _post_menu_target_regions(
             worksheet=worksheet, column_edges=[float(i * 10) for i in range(6)],
             row_edges=[float(i * 10) for i in range(59)], draft_sheet=sheet,
+            fax_template=fax_template,
             menu_body_row_indexes=indexes,
         )
 
 
-def test_step_review_target_regions_skip_blank_menu_rows() -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet["D7"] = "献立"
-    worksheet["E7"] = "常食"
-    worksheet["D11"] = "先頭メニュー"
+def test_step_review_target_regions_reject_changed_blank_menu_row(authored_geometry) -> None:
+    from copy import deepcopy
+    from src.services.master_order_form_template_service import FacilityTemplateBuildError
+    worksheet, fax_template, draft_sheet = authored_geometry(["先頭メニュー", "中間メニュー", "次メニュー"])
+    original = deepcopy(draft_sheet)
     worksheet["D12"] = ""
-    worksheet["D13"] = "次メニュー"
     row_edges = [float(index * 10) for index in range(59)]
     column_edges = [float(index * 10) for index in range(6)]
 
-    regions, evidence = _post_menu_target_regions(
-        worksheet=worksheet,
-        column_edges=column_edges,
-        row_edges=row_edges,
-    )
-
-    worksheet_rows = {int(region["worksheet_row"]) for region in regions}
-    assert 11 in worksheet_rows
-    assert 12 not in worksheet_rows
-    assert 13 in worksheet_rows
-    assert evidence["blank_menu_row_count"] > 0
+    with pytest.raises(FacilityTemplateBuildError, match="^generated_body_row_identity_changed$"):
+        _post_menu_target_regions(
+            worksheet=worksheet, column_edges=column_edges, row_edges=row_edges,
+            fax_template=fax_template, draft_sheet=draft_sheet, menu_body_row_indexes=[0, 1, 2],
+        )
+    assert draft_sheet == original
 
 
 def test_detect_vertical_candidates_rejects_partial_height_correction_line() -> None:
@@ -959,17 +935,9 @@ def test_detect_vertical_candidates_rejects_partial_height_correction_line() -> 
     assert {40, 140, 240, 340}.issubset(set(rounded))
 
 
-def test_post_menu_boundary_preserving_xs_keeps_first_quantity_line() -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet["D7"] = "献立"
-    worksheet["E7"] = "常食"
-    worksheet["F7"] = "月"
-    worksheet["G7"] = "軟菜"
-    worksheet["H7"] = "月"
-    worksheet["I7"] = "ミキサー"
-    worksheet["J7"] = "月"
-    worksheet["K7"] = "備考"
+def test_post_menu_boundary_preserving_xs_keeps_first_quantity_line(authored_geometry) -> None:
+    worksheet, fax_template, _ = authored_geometry(["献立"],
+        roles=("regular", "diabetes", "soft", "mixer", "no_meat", "no_fish", "note"))
     matched_xs = [15.0, 102.0, 139.0, 212.0, 1071.0, 1251.0, 1435.0, 1617.0, 1800.0, 1982.0, 2167.0, 2347.0]
     fax_candidates = [15.0, 102.0, 139.0, 212.0, 887.0, 1071.0, 1087.0, 1105.0, 1251.0, 1435.0, 1617.0, 1800.0, 1982.0, 2167.0, 2347.0]
 
@@ -977,6 +945,7 @@ def test_post_menu_boundary_preserving_xs_keeps_first_quantity_line() -> None:
         worksheet=worksheet,
         matched_xs=matched_xs,
         fax_x_candidates=fax_candidates,
+        fax_template=fax_template,
     )
 
     assert evidence["used"] is True

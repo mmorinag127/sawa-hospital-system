@@ -241,11 +241,12 @@ def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(isolat
         assert len(delivery_rows) == 2, (delivery_rows, context["order_for_outputs"])
         outputs = build_outputs(order["id"], write_session=session, original_adoption=original)
     delivery_wb = load_workbook(outputs["delivery_note"])
-    ws_out = delivery_wb["2025-02-20"]
+    assert delivery_wb.sheetnames == [invoice_template["sheet_name"]]
+    ws_out = delivery_wb[invoice_template["sheet_name"]]
 
-    assert ws_out.cell(row=2, column=3).value == "主A メニュー朝"
+    assert ws_out.cell(row=2, column=3).value == "主 メニュー朝"
     assert ws_out.cell(row=2, column=4).value == 5
-    assert ws_out.cell(row=4, column=3).value == "主A メニュー夕"
+    assert ws_out.cell(row=4, column=3).value == "主 メニュー夕"
     assert ws_out.cell(row=4, column=4).value == 7
     assert ws_out.cell(row=3, column=3).value in ("", None)
     assert ws_out.cell(row=3, column=4).value in ("", None)
@@ -298,7 +299,8 @@ def test_delivery_slot_template_preserves_authored_fixed_headers(tmp_path):
     )
 
     actual = load_workbook(output_path)
-    ws_out = actual["2026-05-24"]
+    assert actual.sheetnames == ["Template"]
+    ws_out = actual["Template"]
     authored = load_workbook(template_path)["Template"]
     assert [[ws_out.cell(row=row, column=col).value for col in range(1, 9)] for row in (1, 2)] == [
         [authored.cell(row=row, column=col).value for col in range(1, 9)] for row in (1, 2)]

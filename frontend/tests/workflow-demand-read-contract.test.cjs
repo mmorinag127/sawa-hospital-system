@@ -147,6 +147,46 @@ test('progress single flight updates common status and retries completion refres
   } finally {await f.h.close();}
 });
 
+test('current progress revision refresh failure remains visible and retries',async()=>{
+  const f=await setup(true);
+  try {
+    f.t.on('get',`${BASE}/ocr-progress`,()=>({data:{order_id:'demand',workflow_revision:8,
+      state:'ocr_running',ocr_job:f.state.workflow.ocr_job,common_job_status:null}}));
+    f.t.on('get',READ,()=>{throw Error('revision refresh failed');});
+    await f.h.settle(()=>f.timers.get(1)());
+    assert.match(f.probe.current.error,/revision refresh failed/);
+    assert.equal(f.probe.current.workflow.revision,7);
+    f.state.workflow.revision=8;
+    f.t.on('get',READ,()=>({data:f.payload()}));
+    await f.h.settle(()=>f.timers.get(1)());
+    assert.equal(f.probe.current.workflow.revision,8);
+  } finally {await f.h.close();}
+});
+
+for (const boundary of ['refresh','revision','route']) test(`completion refresh late failure cannot replace ${boundary} successor feedback`,async()=>{
+  const f=await setup(true), pending=deferred();
+  try {
+    f.t.on('get',`${BASE}/ocr-progress`,()=>({data:{order_id:'demand',workflow_revision:7,
+      state:'ocr_completed',ocr_job:f.state.workflow.ocr_job,common_job_status:null}}));
+    f.t.on('get',READ,()=>pending.promise);
+    await f.h.settle(()=>f.timers.get(1)());
+    if(boundary==='revision') f.state.workflow.revision=8;
+    f.t.on('get',READ,()=>({data:f.payload()}));
+    if(boundary==='route') {
+      f.h.nav.router.asPath+='?successor=1';
+      await f.h.render();
+    } else {
+      await f.h.settle(()=>f.probe.current.refreshAll());
+    }
+    await f.h.settle(()=>f.probe.current.setError('successor-feedback'));
+    await f.h.settle(()=>pending.reject(Error('obsolete-completion-failure')));
+    assert.equal(f.probe.current.error,'successor-feedback');
+    assert.equal(f.probe.current.workflow.ocr_job.ocr_job_id,'job');
+    assert.equal(f.probe.current.workflow.revision,boundary==='revision'?8:7);
+    assert.equal(f.timers.has(1),true);
+  } finally {await f.h.close();}
+});
+
 for (const boundary of ['route','order','unmount']) test(`pending progress aborts at ${boundary} and cannot update its former owner`,async()=>{
   const f=await setup(true), pending=deferred();
   try {
@@ -214,7 +254,8 @@ test("workflow progress polling is owned, single-flight, and refreshes on comple
   assert.match(source, /workflow-v2\/ocr-progress/);
   assert.match(source, /let polling=false/);
   assert.match(source, /if \(!current\(\) \|\| polling\) return/);
-  assert.match(source, /await refreshAll\(readCurrent, native \? nativeOwner! : \{jobId,attemptId:attemptId as string\}\)/);
+  assert.match(source, /const pendingRefresh=refreshAll\(readCurrent, native \? nativeOwner! : \{jobId,attemptId:attemptId as string\}\)/);
+  assert.match(source, /return await pendingRefresh/);
   assert.match(source, /polling=false/);
 });
 

@@ -23,6 +23,7 @@ import {
 type WorkflowV2 = {
   order_id: string;
   common_job_status?: JobStatusRecord | null;
+  ocr_job_binding_error?: string | null;
   revision?: number | null;
   source?: string | null;
   state: string;
@@ -98,6 +99,7 @@ type OrderVersion = {
 
 type OrderDetail = {
   id?: string | null;
+  ocr_job_binding_error?: string | null;
   menu_amount_resolution?: {
     status: "resolved" | "unresolved";
     blocker?: string | null;
@@ -562,6 +564,7 @@ const workflowRevisionTokenFromRead = (workflow: WorkflowV2): WorkflowRevisionTo
 
 const formatApiError = (err: any, fallback: string) => {
   const reviewError = err?.response?.data?.detail;
+  if (reviewError === "ocr_result_saved_history_conflict") return describeWorkflowBlocker(reviewError);
   if (reviewError === "recognition_acceptance_saved_draft_conflict") return "別のOCR結果に紐づく保存済みシートがあります。編集内容を保持して採用を停止しました。使用するOCRと保存済みシートを確認してください。";
   if (reviewError === "recognition_acceptance_explicit_values_required") return "要確認の全セルについて、空欄または数値を明示指定してください。文字・記号のままでは採用できません。";
   if (err?.response?.status === 428) {
@@ -897,10 +900,21 @@ const describeWorkflowBlocker = (code: string) => {
   const labels: Record<string, string> = {
     menu_amount_unresolved: "月次メニューの一人量または単位を確認してください。確定するまで量計算と出力はできません。",
     selected_pdf_document_required: "注文に紐づくFAX PDFを確認してください。",
-    ocr_result_saved_history_conflict: "このOCR結果に紐づく保存済みシートの履歴があるため、削除できません。現在選択中のOCRと保存内容は保持しています。",
+    ocr_result_saved_history_conflict: "このOCR結果に紐づく保存済みシート・修正候補・出力の履歴があるため、削除できません。現在選択中のOCRと保存内容は保持しています。",
     selected_pdf_input_mismatch: "選択したFAX PDFが注文の参照元と一致していません。",
     selected_pdf_digest_required: "FAX PDFの照合情報が不足しているため、処理を停止しています。",
     selected_pdf_generation_required: "FAX PDFの保存版を特定できないため、処理を停止しています。",
+    ocr_job_not_recorded: "現在のOCR実行IDが記録されていません。",
+    ocr_recorded_job_missing: "記録されたOCRジョブが見つかりません。",
+    ocr_recorded_job_order_mismatch: "OCRジョブの注文IDが注文の記録と一致しません。",
+    ocr_recorded_job_attempt_mismatch: "OCRジョブの実行回が注文の記録と一致しません。",
+    ocr_recorded_job_input_missing: "OCR実行時の原本情報が不足しています。",
+    ocr_recorded_job_input_changed: "OCR実行時の入力情報が受付時の記録と一致しません。",
+    ocr_recorded_job_document_changed: "OCR実行後に注文のFAX文書が変わっています。",
+    ocr_recorded_job_pdf_mismatch: "OCRジョブのFAX文書・保存先・ハッシュが原本と一致しません。",
+    ocr_recorded_job_version_changed: "OCRジョブが参照するFAXの版が元の記録と一致しません。",
+    sheet_ocr_execution_missing: "保存済みシートの元OCR実行を特定できません。",
+    recognition_resume_source_required: "手動修正を再開する元の実行情報が不足しています。保存済みの入力内容は保持しています。",
     menu_entries_missing: "対象週の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
     monthly_menu_object_missing: "対象月の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
     monthly_menu_lookup_failed: "対象週の月次メニューを解決できません。メニュー登録を確認してください。",
@@ -1989,7 +2003,9 @@ export default function OrderWorkflowV2Page() {
       : workflow.common_job_status.attemptIdentity === (workflow.ocr_job.workflow_attempt_id ?? null))
     ? workflow.common_job_status : null;
   const quantityContentEditable = workflow?.ocr_job?.quantity_content_editable === true;
-  const ocrJobErrorMessage = quantityContentEditable ? "" : String(
+  const ocrBindingError = workflow && "ocr_job_binding_error" in workflow
+    ? workflow.ocr_job_binding_error : orderDetail?.ocr_job_binding_error;
+  const ocrJobErrorMessage = ocrBindingError ? describeWorkflowBlocker(ocrBindingError) : quantityContentEditable ? "" : String(
     workflow?.ocr_job?.error_user_message
       || workflow?.ocr_job?.error_detail
       || workflow?.ocr_job?.error_message
@@ -2635,14 +2651,26 @@ export default function OrderWorkflowV2Page() {
       polling=true;
       const readOwn=capturePageOwner();
       const readGeneration=refreshGenerationRef.current;
-      let progressAccepted=false;
+      const readRevision=workflowRevisionRef.current?.revision;
       const readCurrent=()=>current() && ownsPageInput(readOwn);
+      const refreshProgress = async () => {
+        const pendingRefresh=refreshAll(readCurrent, native ? nativeOwner! : {jobId,attemptId:attemptId as string});
+        const refreshGeneration=refreshGenerationRef.current;
+        try {
+          return await pendingRefresh;
+        } catch (err) {
+          if (readCurrent() && refreshGeneration===refreshGenerationRef.current
+              && workflowRevisionRef.current?.revision===readRevision) {
+            setError(formatApiError(err, "OCR完了結果の取得に失敗しました"));
+          }
+          return false;
+        }
+      };
       void apiClient.get<Pick<WorkflowV2, "order_id" | "state" | "ocr_job" | "common_job_status"> & {workflow_revision?: number}>(
         `/orders/${orderId}/workflow-v2/ocr-progress`,
         {signal: progressController.signal},
       ).then(async (response) => {
         if (!readCurrent() || readGeneration !== refreshGenerationRef.current) return;
-        progressAccepted=true;
         const progress = response.data;
         const actual = native ? nativeOcrOwner(progress.ocr_job, orderId) : null;
         const owned = progress.order_id === orderId
@@ -2655,7 +2683,7 @@ export default function OrderWorkflowV2Page() {
         }
         if (!owned) return;
         if (progress.workflow_revision !== workflowRevisionRef.current?.revision) {
-          await refreshAll(readCurrent, native ? nativeOwner! : {jobId,attemptId:attemptId as string});
+          await refreshProgress();
           return;
         }
         if (progress.state === "ocr_running") {
@@ -2667,14 +2695,28 @@ export default function OrderWorkflowV2Page() {
         }
         const completionKey = `${jobId}:${native ? nativeOwner?.executionId : attemptId}`;
         if (ocrCompletionRefreshRef.current === completionKey) return;
-        const accepted = await refreshAll(readCurrent, native ? nativeOwner! : {jobId,attemptId:attemptId as string});
+        const accepted = await refreshProgress();
         if (accepted === true && readCurrent()) {
           ocrCompletionRefreshRef.current = completionKey;
           active=false;
           window.clearInterval(timer);
         }
       }).catch((err) => {
-        if (readCurrent() && (progressAccepted || readGeneration === refreshGenerationRef.current)) setError(formatApiError(err, "OCR進捗の取得に失敗しました"));
+        if (!readCurrent() || readGeneration !== refreshGenerationRef.current) return;
+        if (workflowRevisionRef.current?.revision !== readRevision) return;
+        setError(formatApiError(err, "OCR進捗の取得に失敗しました"));
+        const detail = err?.response?.data?.detail;
+        if (typeof detail === "string" && (detail.startsWith("ocr_recorded_job_") || detail === "ocr_job_not_recorded")) {
+          active=false; window.clearInterval(timer);
+          setWorkflow(currentWorkflow => ownsPageInput(readOwn)
+            && readGeneration === refreshGenerationRef.current
+            && currentWorkflow?.order_id === orderId && currentWorkflow.revision === readRevision
+            && currentWorkflow.ocr_job?.ocr_job_id === jobId
+            && (native ? nativeOcrOwner(currentWorkflow.ocr_job, orderId)?.executionId === nativeOwner?.executionId
+              : currentWorkflow.ocr_job?.workflow_attempt_id === attemptId)
+            ? {...currentWorkflow, ocr_job: null, common_job_status: null, ocr_job_binding_error: detail}
+            : currentWorkflow);
+        }
       }).finally(() => {
         polling=false;
       });
@@ -3451,7 +3493,9 @@ export default function OrderWorkflowV2Page() {
         else {
           const rowReview = review as RowAxisReviewPayload;
           const boundaries = validSource ? rowReview.saved_override?.body_day_boundary_indexes ?? rowReview.body_day_boundary_indexes : null;
-          setRowDayBoundaries(Array.from({length: 8}, (_, index) => boundaries?.[index]?.toString() ?? ""));
+          setRowDayBoundaries(Array.isArray(rowReview.calendar_days) && rowReview.calendar_days.length > 0
+            ? Array.from({length: rowReview.calendar_days.length + 1}, (_, index) => boundaries?.[index]?.toString() ?? "")
+            : []);
           setRowAxisYs(points); setSelectedRowAxisIndex(null); setRowAxisAddMode(false);
         }
         if (!validSource) message("保存済み補正のPDF・入力の正本を確認できません。補正点は反映していません。");
@@ -3473,8 +3517,10 @@ export default function OrderWorkflowV2Page() {
     }
     const coordinateSpace=review?.coordinate_space;
     if (points.length<2 || !coordinateSpace?.width || !coordinateSpace.height) { message("交点または座標系が不足しています。"); return; }
-    if (axis === "row" && (rowDayBoundaries.length !== 8 || rowDayBoundaries.some(value => !/^\d+$/.test(value)))) {
-      message("7日分の日境界と最終境界を整数で指定してください。"); return;
+    if (axis === "row" && (!rowAxisReview?.calendar_days?.length
+        || rowDayBoundaries.length !== rowAxisReview.calendar_days.length + 1
+        || rowDayBoundaries.some(value => !/^\d+$/.test(value)))) {
+      message("対象期間の日境界と最終境界を整数で指定してください。"); return;
     }
     if (axis==="header") {
       const expectedCount=getHeaderAxisExpectedCount();
@@ -4335,6 +4381,11 @@ export default function OrderWorkflowV2Page() {
     runAction(
       "Step4 final confirm",
       async ({ adopt, assertCurrent }) => {
+        if (workflow?.state === "confirmed") {
+          assertCurrent();
+          await router.push("/orders");
+          return;
+        }
         if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker(menuAmountBlocker));
         await executeWorkflowMutation("finalConfirm", (config) => apiClient.post(`/orders/${orderId}/workflow-v2/confirm`, {
           confirmed_by: "operator",
@@ -4732,9 +4783,9 @@ export default function OrderWorkflowV2Page() {
 
       {message ? <div className="notice success">{message}</div> : null}
       {error ? <div className="notice error">{error}</div> : null}
-      {ocrJobErrorMessage && workflow?.ocr_job?.status === "failed" ? (
+      {ocrJobErrorMessage && (workflow?.ocr_job?.status === "failed" || ocrBindingError) ? (
         <div className={recognitionReviewPending ? "notice warning" : "notice error"}>
-          {recognitionReviewPending ? <><strong>読み取り結果の確認待ち</strong><details><summary>認識実行時のエラー詳細</summary>{ocrJobErrorMessage}</details></> : <><strong>OCR失敗:</strong> {ocrJobErrorMessage}</>}
+          {recognitionReviewPending ? <><strong>読み取り結果の確認待ち</strong><details><summary>認識実行時のエラー詳細</summary>{ocrJobErrorMessage}</details></> : <><strong>{ocrBindingError ? "OCR参照エラー:" : "OCR失敗:"}</strong> {ocrJobErrorMessage}</>}
           {ocrJobRecoveryAction === "review_or_edit_quad" ? (
             <span>
               {" "}Step1.5で推定4点を確認してください。
@@ -5572,10 +5623,10 @@ export default function OrderWorkflowV2Page() {
               </label>
             ))}
             <label>最終境界
-              <input type="number" min={0} step={1} value={rowDayBoundaries[7] ?? ""}
+              <input type="number" min={0} step={1} value={rowDayBoundaries.at(-1) ?? ""}
                 disabled={Boolean(busy)} onChange={event => {
                   beginWorkflowEditorEdit("row", true);
-                  setRowDayBoundaries(current => current.map((value, i) => i === 7 ? event.target.value : value));
+                  setRowDayBoundaries(current => current.map((value, i) => i === current.length - 1 ? event.target.value : value));
                 }} />
             </label>
           </div>
@@ -6353,8 +6404,8 @@ export default function OrderWorkflowV2Page() {
               <Button className="btn primary workflow-ordinary-control" type="button" onClick={runBagging} disabled={Boolean(busy || menuAmountUnresolved || !workflow?.saved_sheet_id)}>
                 出力確認を作成
               </Button>
-              <Button className="btn primary workflow-ordinary-control" type="button" onClick={finalConfirm} disabled={Boolean(busy || menuAmountUnresolved || !workflow?.output_bundle_id)}>
-                確定して一覧にもどる
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={finalConfirm} disabled={Boolean(busy || (workflow?.state !== "confirmed" && (menuAmountUnresolved || !workflow?.output_bundle_id)))}>
+                {workflow?.state === "confirmed" ? "一覧にもどる" : "確定して一覧にもどる"}
               </Button>
             </div>
           </header>

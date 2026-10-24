@@ -475,14 +475,12 @@ function DailyDeliveryNotesScreen() {
   const mounted = useRef(true), contextGeneration = useRef(0), editorGeneration = useRef(0);
   const operations = useRef<Record<string, number>>({});
   const rowEdits = useRef<Record<string, number>>({}), bulkEdits = useRef(0);
-  const mainPending = useRef(false);
   const writeFeedback = useRef(0);
   const pendingLoadOwner = useRef<(() => boolean) | null>(null), pendingEditorOwner = useRef<(() => boolean) | null>(null);
   const appliedConditions = useRef<DailyConditions>({ date, status });
   const session = browserSessionKey();
   const retire = () => {
     ++contextGeneration.current; ++loadGeneration.current; ++writeFeedback.current;
-    mainPending.current = false;
     pendingLoadOwner.current = null; pendingEditorOwner.current = null;
     setLoading(false); setAuditAiLoading(false); setOverrideEditorLoading(false);
     setOverrideEditorSavingKey(""); setOverrideEditorBulkSaving(false);
@@ -504,7 +502,7 @@ function DailyDeliveryNotesScreen() {
       && (!rowKey || draft === (rowEdits.current[rowKey] ?? 0)) && (!bulk || draft === bulkEdits.current);
   };
   const releaseRetiredPending = () => {
-    if (pendingLoadOwner.current && !pendingLoadOwner.current()) { pendingLoadOwner.current = null; mainPending.current = false; setLoading(false); }
+    if (pendingLoadOwner.current && !pendingLoadOwner.current()) { pendingLoadOwner.current = null; setLoading(false); }
     if (pendingEditorOwner.current && !pendingEditorOwner.current()) { pendingEditorOwner.current = null; setOverrideEditorLoading(false); }
   };
   const retireOutput = () => { operations.current.output = (operations.current.output ?? 0) + 1; setMessage(""); };
@@ -589,8 +587,10 @@ function DailyDeliveryNotesScreen() {
 
   const loadOrders = async (conditions: DailyConditions = { date, status }, parentOwner?: () => boolean) => {
     if (!conditions.date) return;
-    // An internal refresh cannot supersede an explicit display request.
-    if (parentOwner && (!parentOwner() || mainPending.current)) return;
+    // A mutation refresh may replace only the currently applied target.
+    if (parentOwner && (!parentOwner()
+      || JSON.stringify(appliedConditions.current) !== JSON.stringify(conditions)
+      || JSON.stringify(conditionForm.getValues()) !== JSON.stringify(conditions))) return;
     if (!parentOwner) retire();
     operations.current.audit = (operations.current.audit ?? 0) + 1;
     let auditOperation = operations.current.audit;
@@ -602,30 +602,28 @@ function DailyDeliveryNotesScreen() {
     const pageOwner = capture("load");
     const own = () => generation === loadGeneration.current && pageOwner() && (!parentOwner || parentOwner());
     pendingLoadOwner.current = own;
-    if (!parentOwner) mainPending.current = true;
     setLoading(true);
     try {
       const params: Record<string, string> = { date: conditions.date };
       if (conditions.status) params.status = conditions.status;
-      const responses = await Promise.all((["primary", "bags", "totals"] as const).map(async section => {
+      const requests = (["primary", "bags", "totals"] as const).map(async section => {
         try {
           const response = await apiClient.get("/orders/daily-output-context", { params: { ...params, section } });
           if (response.data?.date !== conditions.date || response.data?.status !== (conditions.status || null)
             || response.data?.facility !== null) throw new Error("集計の取得対象が一致しません。");
           return { section, response, error: null as any };
         } catch (error: any) { return { section, response: null, error }; }
-      }));
-      if (!own()) return;
-      const primary = responses.find(result => result.section === "primary")!;
-      if (primary.error || !sectionData<{ orders?: OrderSummary[] }>(primary.response?.data?.sections?.orders)) {
-        const error = primary.error ?? new Error(sectionErrorMessage(primary.response?.data?.sections?.orders, "注文一覧の取得に失敗しました。"));
-        const detail = error?.response?.data?.detail;
-        const text = detail ? `取得に失敗しました: ${detail}` : error instanceof Error ? error.message : "取得に失敗しました。";
-        if (ownsMessage()) setMessage(text);
-        setMealCountMessage(text);
-        throw error;
-      }
-      responses.forEach(({ section, response, error }) => {
+      });
+      const applyResponse = ({ section, response, error }: Awaited<(typeof requests)[number]>) => {
+        if (!own()) return;
+        if (section === "primary" && (error || !sectionData<{ orders?: OrderSummary[] }>(response?.data?.sections?.orders))) {
+          const failure = error ?? new Error(sectionErrorMessage(response?.data?.sections?.orders, "注文一覧の取得に失敗しました。"));
+          const detail = failure?.response?.data?.detail;
+          const text = detail ? `取得に失敗しました: ${detail}` : failure instanceof Error ? failure.message : "取得に失敗しました。";
+          if (ownsMessage()) setMessage(text);
+          setMealCountMessage(text);
+          throw failure;
+        }
         try {
           if (error) throw error;
           const contextRes = response!;
@@ -648,6 +646,12 @@ function DailyDeliveryNotesScreen() {
             setDate(conditions.date);
             setStatus(conditions.status);
             setOrders(items);
+            setDailyBagSummary({});
+            setDailyBagAudit({});
+            setTotalsRows([]);
+            setBagMessage("袋分け結果を取得中です...");
+            if (ownsAudit()) setAuditMessage("数量監査を取得中です...");
+            setTotalsMessage("総量を取得中です...");
             if (ownsMessage()) setMessage("");
             setMealCountMessage("");
             if (!items.length) {
@@ -730,7 +734,17 @@ function DailyDeliveryNotesScreen() {
             setTotalsMessage(error);
           }
         }
-      });
+      };
+      const primaryReady = requests[0].then(applyResponse);
+      const completed = await Promise.allSettled([
+        primaryReady,
+        ...requests.slice(1).map(async request => {
+          const result = await request;
+          await primaryReady;
+          applyResponse(result);
+        }),
+      ]);
+      if (completed[0].status === "rejected") throw completed[0].reason;
     } catch (err) {
       if (own()) {
         if (!parentOwner) conditionForm.setError("root", { message: err instanceof Error ? err.message : "集計の取得に失敗しました。" });
@@ -738,7 +752,6 @@ function DailyDeliveryNotesScreen() {
       }
     } finally {
       if (own()) {
-        mainPending.current = false;
         setLoading(false);
       }
     }

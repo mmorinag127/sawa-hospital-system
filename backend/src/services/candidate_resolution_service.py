@@ -734,6 +734,44 @@ def build_quantity_resolution(payload: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _current_sheet_template_resolution(order_id, context, read_session):
+    from contextlib import nullcontext
+    from src.db import session_scope
+    from src.services.workflow_attempt_guard_service import validate_current_sheet_input
+    from src.services.template_field_schema_service import QuantitySchemaError, quantity_field_identities_for_fields
+
+    with (nullcontext(read_session) if read_session is not None else session_scope()) as session:
+        validate_current_sheet_input(session, order_id, context)
+    captured = context.input_receipt["input"]
+    source_error = captured.get("sheet_source_unavailable")
+    template_id = None
+    if not source_error:
+        template = captured["configured_input"]["facility"]["fax_template"]
+        template_id = template.get("template_id")
+        fields = context.get("fields")
+        if not isinstance(template_id, str) or not template_id.strip():
+            source_error = "configured_template_id_required"
+        elif not isinstance(fields, list) or not fields:
+            source_error = "current_sheet_fields_required"
+        else:
+            try:
+                quantity_field_identities_for_fields(template, fields)
+            except QuantitySchemaError as exc:
+                source_error = str(exc)
+    if source_error:
+        return {
+            "decision_type": "template", "resolved_value": None, "resolved_label": None,
+            "confidence": "unknown", "blocked": True, "blocked_reasons": [source_error],
+            "requires_user_choice": False, "candidates": [],
+        }
+    return {
+        "decision_type": "template", "resolved_value": template_id,
+        "resolved_label": template_id, "confidence": "high", "blocked": False,
+        "blocked_reasons": [], "requires_user_choice": False, "candidates": [],
+        "decision_source": "configured_current_sheet",
+    }
+
+
 def resolve_order_candidates(
     *,
     order_id: str,
@@ -741,6 +779,8 @@ def resolve_order_candidates(
     week_code: str | None,
     received_at: datetime | None,
     evidence_payload: dict[str, Any] | None,
+    current_sheet_context: dict[str, Any] | None = None,
+    read_session: Any = None,
 ) -> dict[str, Any]:
     augmented_payload = evidence_payload
     facility = build_facility_resolution(current_facility=facility_code, payload=evidence_payload)
@@ -750,7 +790,11 @@ def resolve_order_candidates(
         payload=augmented_payload,
         facility_id=facility.get("resolved_value") or facility_code,
     )
-    template = build_template_resolution_snapshot(evidence_payload)
+    template = (
+        _current_sheet_template_resolution(order_id, current_sheet_context, read_session)
+        if current_sheet_context is not None
+        else build_template_resolution_snapshot(evidence_payload)
+    )
     column_mapping = build_column_mapping_resolution(augmented_payload)
     quantity = build_quantity_resolution(augmented_payload)
     resolutions = {

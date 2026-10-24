@@ -748,7 +748,7 @@ def get_evidence_run(evidence_run_id: str) -> dict[str, Any] | None:
         return _serialize_evidence_run(row, include_payload=True)
 
 
-def get_selected_evidence_run(order_id: str) -> dict[str, Any] | None:
+def get_selected_evidence_run(order_id: str, *, require_selectable: bool = True) -> dict[str, Any] | None:
     from src.models.order_workflow_state import OrderWorkflowState
 
     with session_scope() as session:
@@ -757,9 +757,14 @@ def get_selected_evidence_run(order_id: str) -> dict[str, Any] | None:
         if (
             row is None or row.order_id != order_id
             or row.template_version_id != workflow.template_version_id
-            or not evidence_run_is_selectable(row)
         ):
             return None
+        if not evidence_run_is_selectable(row):
+            if require_selectable:
+                return None
+            # Recovery diagnostics retain the selected identity, never its unusable payload.
+            return {"id": row.id, "order_id": row.order_id,
+                    "template_version_id": row.template_version_id, "selectable": False}
         return _serialize_evidence_run(row, include_payload=True)
 
 

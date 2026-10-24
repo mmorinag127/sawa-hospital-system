@@ -234,45 +234,49 @@ def test_effective_date_overlapping_active_template_versions_are_blocker(monkeyp
     assert source.read_bytes() == original
 
 
-def test_output_builder_blocks_template_version_date_mismatch() -> None:
+def test_output_builder_retains_accepted_dated_source_after_current_config_change(monkeypatch, tmp_path) -> None:
+    import json
+    from pathlib import Path
+    from src.db import get_engine
+    from tests.helpers.newnarrowbaggingfixture import selected_bagging_order, accepted_bagging_order
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
     facility_id = _id("FAC")
-    version_id = _id("FTV")
-    columns = facility_template_version_service.normalize_template_columns(_registered_config(facility_id)["fax_template"]["columns"])
-    with session_scope() as session:
-        session.add(Facility(id=facility_id, name="Output Effective Date Facility"))
-        session.add(
-            FacilityTemplateVersion(
-                id=version_id,
-                facility_id=facility_id,
-                version="1",
-                status="active",
-                template_id="template-output",
-                source="test",
-                config_json={"facility_name": "output-effective"},
-                columns_json=columns,
-                cells_json=[],
-                template_digest="digest-output",
-                validation_json={"errors": [], "warnings": []},
-                valid_from=date(2026, 7, 1),
-                valid_to=date(2026, 7, 10),
-                created_at=datetime.utcnow(),
-                activated_at=datetime.utcnow(),
-            )
-        )
-
-    order = {
-        "id": _id("ORD"),
-        "facility": facility_id,
-        "week_code": "2026-07@2026-07-12~2026-07-18",
-        "template_version_id": version_id,
-    }
-
-    try:
-        output_builder._resolve_facility_config_for_order(order)  # noqa: SLF001
-    except ValueError as exc:
-        assert str(exc) == "facility_template_version_date_mismatch"
-    else:
-        raise AssertionError("facility_template_version_date_mismatch was not raised")
+    lines = [{"line_id": "dated-output", "date": "2026-07-12", "daypart": "昼",
+              "menu_name": "output-effective", "diet_type": "regular", "area_id": "2F",
+              "bag_type": "standard", "quantity_original": 0}]
+    prepared = selected_bagging_order(monkeypatch, tmp_path, lines,
+        facility_id=facility_id, week_start="2026-07-12", week_end="2026-07-18",
+        prepare_only=True)
+    source = tmp_path / "authored-facilities.json"
+    master = json.loads(source.read_text())
+    version = master["facilities"][0]["versions"][0]
+    version.update(valid_from="2026-07-01", valid_to="2026-07-31")
+    source.write_text(json.dumps(master))
+    order = accepted_bagging_order(monkeypatch, tmp_path, lines,
+        facility_id=facility_id, week_start="2026-07-12", week_end="2026-07-18",
+        prepared_sources=True, prepared_original=prepared, prepared_menu_sources=True)
+    captured_order = order_service.get_order_for_output_read(order["id"])
+    accepted = output_builder._accepted_output_candidate(captured_order)
+    assert accepted["lines"][0]["quantity_original"] == 0
+    authored = accepted["configured_input"]["selected_authored_version"]
+    assert authored["valid_from"] == "2026-07-01"
+    assert authored["valid_to"] == "2026-07-31"
+    context_before = output_builder._prepare_output_context(order["id"], include_bags=False)
+    original = Path(prepared["path"]).read_bytes()
+    captured = deepcopy(accepted)
+    before = _snapshot(get_engine())
+    version["valid_to"] = "2026-07-10"
+    source.write_text(json.dumps(master))
+    narrowed_source = source.read_bytes()
+    assert output_builder._resolve_facility_config_for_order(captured_order) == captured["configured_input"]["facility"]
+    context_after = output_builder._prepare_output_context(order["id"], include_bags=False)
+    assert context_after == context_before
+    assert output_builder._accepted_output_candidate(captured_order) == captured
+    assert _snapshot(get_engine()) == before
+    assert accepted == captured
+    assert Path(prepared["path"]).read_bytes() == original
+    assert source.read_bytes() == narrowed_source
 
 
 def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
@@ -417,106 +421,39 @@ def test_backfill_does_not_stamp_ocr_job_by_name_without_explicit_order_lineage(
         assert session.get(OcrJob, job_id).template_version_id is None
 
 
-def test_current_state_cache_requires_matching_template_version(monkeypatch) -> None:
-    order_id = _id("ORD")
-    draft_id = _id("ODS")
-    facility_id = _id("FAC")
-    template_version_id = _id("FTV")
-    stale_template_version_id = _id("FTV")
-    with session_scope() as session:
-        session.add(Facility(id=facility_id, name="Cache Facility"))
-        session.add(
-            FacilityTemplateVersion(
-                id=template_version_id,
-                facility_id=facility_id,
-                version="1",
-                status="active",
-                template_id="fax_layout_regular_forbidden_v1",
-                source="test",
-                columns_json=[],
-                cells_json=[],
-                template_digest="digest-a",
-                validation_json={},
-                created_at=datetime.utcnow(),
-                activated_at=datetime.utcnow(),
-            )
-        )
-        session.add(
-            FacilityTemplateVersion(
-                id=stale_template_version_id,
-                facility_id=facility_id,
-                version="2",
-                status="archived",
-                template_id="fax_layout_regular_forbidden_v1",
-                source="test",
-                columns_json=[],
-                cells_json=[],
-                template_digest="digest-b",
-                validation_json={},
-                created_at=datetime.utcnow(),
-                activated_at=datetime.utcnow(),
-            )
-        )
-        session.add(
-            Order(
-                id=order_id,
-                facility_code=None,
-                week_code="2026-04@2026-04-26~2026-04-30",
-                status="要確認",
-                document_uri=f"file:///{order_id}.pdf",
-                message_id=f"msg-{order_id}",
-                template_version_id=template_version_id,
-                received_at=datetime.utcnow(),
-            )
-        )
-        session.add(
-            OrderSheetDraft(
-                id=draft_id,
-                order_id=order_id,
-                template_version_id=template_version_id,
-                draft_sheet_json={
-                    "fields": ["date_mmdd", "daypart", "menu", "qty.regular"],
-                    "header": ["日付", "区分", "献立", "常食"],
-                    "rows": [["04/26", "朝", "大豆のトマト煮", ""]],
-                    "source": "workflow_v2_selected_ocr_projection",
-                },
-                draft_state="saved",
-                blockers_json=[],
-                warnings_json=[],
-                created_at=datetime.utcnow(),
-                edited_at=datetime.utcnow(),
-                edited_by="operator",
-            )
-        )
+def test_current_state_cache_requires_matching_template_version(monkeypatch, tmp_path) -> None:
+    from src.db import get_engine
+    from tests.helpers.newnarrowbaggingfixture import selected_bagging_order
+    from tests.unit.test_disabled_facility_columns import _snapshot
+    from src.services import order_workflow_v2_service as workflow
 
-    assert (
-        order_service._persisted_current_state_is_reusable(
-            {
-                "draft_id": draft_id,
-                "template_version_id": stale_template_version_id,
-                "order_payload": {"lines_updated_at": None},
-                "fields": ["date_mmdd", "daypart", "menu", "qty.regular"],
-                "header": ["日付", "区分", "献立", "常食"],
-                "base_evidence_run_id": None,
-            },
-            order_id=order_id,
-            refresh_draft_from_semantic=False,
-        )
-        is False
-    )
-
-    monkeypatch.setattr(
-        order_service,
-        "_resolve_current_sheet_context_week_id",
-        lambda **_kwargs: "2026-04@2026-04-26~2026-04-30",
-    )
-    monkeypatch.setattr(order_service, "_build_monthly_menu_diagnostics", lambda **_kwargs: {})
-    context = order_service._build_current_sheet_context_uncached(
-        order_id,
-        refresh_draft_from_semantic=False,
-        upgrade_generic_from_sheet=True,
-    )
-    assert context["template_version_id"] == template_version_id
+    order, sheet = selected_bagging_order(monkeypatch, tmp_path, [{
+        "line_id": "blank-quantity", "date": "2026-04-26", "daypart": "朝",
+        "menu_name": "大豆のトマト煮", "diet_type": "regular", "area_id": "2F",
+        "bag_type": "standard", "quantity_original": None,
+    }], facility_id=_id("FAC"))
+    current, error = workflow.get_workflow(order["id"])
+    assert error is None
+    saved, error = workflow.save_sheet(order_id=order["id"], sheet=sheet,
+        expected_revision=current["revision"])
+    assert error is None
+    stored, error = workflow.get_saved_sheet(order["id"])
+    assert error is None
+    context = order_service.get_current_sheet_context(order["id"])
+    assert context is not None
+    stale = deepcopy(context)
+    stale["template_version_id"] = "foreign-cache-template"
+    before = _snapshot(get_engine())
+    assert order_service._persisted_current_state_is_reusable(
+        stale, order_id=order["id"], refresh_draft_from_semantic=False) is False
+    rebuilt = order_service._build_current_sheet_context_uncached(
+        order["id"], refresh_draft_from_semantic=False, upgrade_generic_from_sheet=True)
+    assert rebuilt["template_version_id"] == stored["template_version_id"]
+    assert rebuilt["draft_id"] == stored["saved_sheet_id"]
+    again, error = workflow.get_saved_sheet(order["id"])
+    assert error is None
+    assert again["sheet"] == stored["sheet"] == sheet
+    assert _snapshot(get_engine()) == before
 
 
 def test_resolved_config_digest_change_replaces_active_template_version(monkeypatch) -> None:

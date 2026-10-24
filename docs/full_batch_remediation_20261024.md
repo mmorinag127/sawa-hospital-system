@@ -1,5 +1,235 @@
 # Fixed-source full batch remediation
 
+## Host Batch At b8efa378
+
+Related verification at9e5afff7:287 backend cases passed in265.71seconds,
+1794 frontend contracts passed,lint/types/inspection and24 receipt cases passed.
+Browser:107 passed,4 failed in3.8minutes. Evidence:
+`/private/tmp/sawa-related-batch-9e5afff78247-20261025/results.json`.
+This targeted run is not a full successful signed receipt.
+
+The remaining browser history failures were reproduced with four diagnostic
+cases only. Instrumentation in a disposable `/private/tmp` source copy showed
+Next's callback running before the custom window listener for the same event.
+The first decision scheduled owned restoration; the duplicate decision saw
+restoring=true and the original destination, then wrongly invalidated ownership.
+The shared boundary now consumes the same dispatch decision once regardless of
+listener order. The decision expires after the event task; unknown entries and
+unmatched restoration still refuse. Both listener orders and repeated cancellation
+retain source-input and exact history assertions. Diagnostic console statements
+are not part of the release source. Output-review fixtures now author the actual
+current bundle lineage instead of returning an invalid empty history response.
+These subsequent repairs are not yet verified.
+
+Evidence: `/private/tmp/sawa-host-batch-b8efa3788bd2-20261024/results.json`.
+Docker remained stopped. The source was fixed in the clean r3 verification tree.
+Backend:9991 passed,17 failed,184 skipped in4296.79seconds. Frontend config:
+1792 passed,2 failed in172.69seconds. Browser:86 passed,25 failed in9.6minutes.
+Types,lint,inspection-read and the remaining host contracts passed except the
+receipt shell test's three missing-host-tool cases. These are not a deployment
+receipt or live verification. Container-dependent checks remain unexecuted.
+
+Follow-up repairs are batched before related serial verification:
+
+- Publication race injection targets the committed projection boundary, not an
+  obsolete compat-only canonical revision increment.
+- History fixtures construct independent authored OrderLines after formal save,
+  which correctly invalidates the derived lines. Original quantities stay exact.
+- Successful row-repair fixtures explicitly use Sunday-Saturday. Monday-Sunday
+  remains a rejected cross-FAX negative case.
+- Configuration fixtures distinguish omitted comparison settings from an empty
+  list. Explicit None removes the field; default component settings remain empty.
+- Browser workflow fixtures return the actual selected workflow on direct GET,
+  include explicit resolved menu amounts and field-bound overlay cells, and
+  navigate to Step1 before operating its controls. Hidden MUI sizing textareas
+  are not editing controls.
+- Current approved source comparisons move to b8efa378 while preserving the
+  historical migration, ancestry and ownership checks.
+
+The full backend run consumed about72minutes and must not be repeated after
+each fixture edit. Collect the failures, finish all known repairs, and run their
+related modules and adjacent cases serially before deciding the final source's
+remaining validation requirements. Never treat old-SHA evidence as a new-SHA
+successful signed receipt.
+
+## Diagnostic At b30bb8ad And Remaining Repairs
+
+Related backend:172 passed,3 failed,10013 deselected in326.94seconds.
+Changed frontend contracts:34 passed. Browser:52 passed,32 failed,1 interrupted,
+53 did not run in10minutes. The dedicated Playwright PID2815 was interrupted
+after its isolated source cwd was verified. The tracked source remained clean.
+Evidence: `/private/tmp/sawa-followup-b30bb8ad-20261024/diagnostic-result.json`.
+These results do not verify the subsequent uncommitted repairs or live stg.
+
+Known production repairs are batched before further verification:
+
+- Legacy projection metadata updates must not increment canonical workflow CAS
+  revision. Update only metadata under the existing order/revision fence and
+  synchronize the loaded ORM row; reject a lost fence instead of overwriting it.
+- Daily primary orders must become visible without waiting for independent bag
+  and totals requests. Secondary results require primary success and the same
+  request owner. Same-target mutation refresh may supersede a pending aggregate;
+  changed form, applied target, session or operation owner may not.
+- The app authentication gate used the entire URL as a render prerequisite.
+  Query changes therefore unmounted editors before re-verification, losing drafts
+  and history guards. Verify at pathname boundaries, preserving same-page query
+  state, while retaining logout and API authentication failure handling.
+- Monthly entry sorting accepts the stored short dayparts 朝/昼/夕, but its
+  editor Select did not. Add only the selected stored short value to the editor
+  options, retaining its raw value rather than rewriting stored business data.
+  A pending authentication failure also retains the latest same-page destination.
+
+Fixture repairs are not product failures by themselves: canonical facility
+list mocks omit source/revision; logout mocks omit the actual POST; several
+monthly controls are MUI Selects but tests query native options; cut-unit master
+fixtures omit required bag settings. Preserve these validations rather than
+loosening production code to accept incomplete test responses. The bulk override
+check selects an actual facility before inspecting its updated row. The saved
+import response declares its source_month_id instead of bypassing that guard.
+New real-React regression cases retain a dirty editor across query/history changes
+and require authentication again at a different pathname, for both bearer and
+server-session modes. These additions have not yet been executed.
+
+The legacy order_confirm browser suite targets a redirected retired screen.
+Its40 scenarios require mapping to current workflow-v2 controls and API contracts,
+including unique archive, candidate, overlay, period, save and confirm behavior.
+Do not skip the file or re-enable the retired screen to obtain a green run.
+The user subsequently confirmed: use the full seven-day FAX and take only the
+target-month order rows. The automatic matcher, physical row indexes and manual
+row recovery now share full_week_fax_period. Manual recovery exposes seven FAX
+days, with no invented target-menu count on days outside the selected period.
+The original target row plan is not expanded. Tests cover September27-October3
+FAX versus October1-3 target rows and the neighboring October partial interval.
+The user also confirmed that OCR with saved history must refuse deletion.
+The deletion guard now applies to selected and unselected OCR alike, before
+creating workflow state. Whole-database invariance is checked for refusal;
+deleting an unused history-free OCR must retain another OCR's saved sheet.
+These subsequent implementation and test changes have not been executed yet.
+
+## Diagnostic At 2773a58d
+
+Related backend:168 passed,7 failed,10013 deselected in337.67seconds, clean source.
+Frontend lint, types, inspection-read and production dependency audit passed.
+Frontend config:1787 passed,2 failed in173.58seconds (old period wording and an
+old direct-await source assertion). The real local browser runner passed16,
+failed12, interrupted1 and did not run109. It was interrupted after the shared
+daily-output fixture identity omission was established, rather than repeating
+known invalid responses. Only the dedicated Playwright PID835 was signalled,
+after lsof verified its cwd under this run's isolated source copy. No user
+browser/process was stopped. These browser results are partial, not live proof.
+Evidence: `/private/tmp/sawa-followup-2773a58d-20261024/diagnostic-result.json`.
+
+The next fixture batch preserves current business code:
+
+- Daily-output mocks echo the explicit request date/status and null facility.
+- Menu-master viewport checks first bring the table into view; minimal PUT
+  assertions also check the persisted unchanged units/temperature.
+- Patch proposals are formally reviewed/saved before the next review uses them
+  as the canonical baseline; an unselected candidate is not a selected save.
+- Diagnostic draft checks permit only the real legacy projection refresh time,
+  bound between creation and completion; all other database fields stay exact.
+- Assignment publication-order probes use real augmentation with only the
+  external render/recognizer leaves doubled, not copied old source receipts.
+- Explicit fixture integer cells remain integers; missing deepcopy is imported.
+
+No new production change, Actions run, integration or deployment is included in
+this fixture batch. Partial-month/FAX source semantics remain unresolved.
+
+## Follow-up Diagnostic At f4e01502
+
+The clean owned verification worktree was fast-forwarded to f4e01502 and its
+locked frontend dependencies were installed explicitly with npm ci (297 packages).
+One serial related backend diagnostic selected 114 existing/new test functions,
+including their parameter neighbors: 142 passed,32 failed,10013 deselected in
+303.88seconds. Source and tracked tree remained unchanged. Evidence:
+`/private/tmp/sawa-followup-f4e01502-20261024/diagnostic-result.json` and backend.xml.
+This is not a full test receipt, integration or deployment result.
+
+Two additional shared production causes were identified and repaired locally:
+
+- A formally saved operator sheet without OCR projection metadata could enter
+  re-projection. Keep an authoritative current draft only when its nonempty base
+  evidence and template IDs match the captured selected source; do not reuse a
+  different-source native projection merely because it has projection metadata.
+- Pending handoff binding adds the delivery owner at flush, replacing the stored
+  receipt. Return a copy of that flushed receipt rather than the pre-binding
+  local dictionary, preserving the exact recovery fence and all ownership checks.
+
+Remaining diagnostic fixes are being batched before another verification:
+explicit local artifact storage in April fixtures, source-bound physical row
+ordering from declared slots, raw SQL evidence retention checks independent of
+dynamic availability serialization, missing fixture imports/schema fields and
+current manual-save/history contracts. Display expectations are derived from
+existing physical-slot rules (副菜1 for aggregation, 副① for delivery, 朝/夕の主),
+not copied wholesale from generated output; numeric checks remain unchanged.
+Old forbidden-diet confirmation expectations conflict with the June exclusion
+policy. That policy is unchanged. Native cases retain original excluded cells
+and prove non-materialization; vocabulary/quantity components remain separate
+from successful operator-flow proof. Initial blank sheets are saved as drafts,
+not prematurely confirmed or filled with substitute quantities.
+
+All subsequent changes remain unverified. The partial-month/full-FAX source
+semantics question remains unresolved and was not silently decided.
+
+## Follow-up At 57e9dffe
+
+The clean fixed-source run completed all30 local commands at
+`57e9dffe35c96b23f91039ae2769d0c3a9d4b40d`, with23 zero exits and7 nonzero.
+Evidence: `/private/tmp/sawa-hospital-full-57e9dffe35c9-20261024-3/failed-run.json`.
+Backend:9837 passed,131 failed,22 setup errors,184 skipped in3852.72seconds.
+Its153 failure/error sections are indexed beside the original log.
+The five frontend commands lacked the clean worktree's ignored node_modules;
+the browser flow did not run and is not a functional failure or success proof.
+The C1 guard group had202 passes and one obsolete push-trigger expectation:
+the approved workflow is manual-only. Actual Linux agent tests and owned
+container cleanup succeeded. These are local results, not deploy evidence.
+
+Follow-up implementation is in progress, without a new test run:
+
+- Queue capture now copies the document ID from the actual selected PDF receipt,
+  rejecting differing explicit/metadata IDs. Pending handoff no longer relies on
+  a caller redundantly supplying that same identity. Guards remain strict.
+- Selected evidence with unavailable artifacts retains identity-only recovery
+  metadata. Its unusable payload is never returned or selected by this change.
+- The original target plan includes post-menu auxiliary cells, but its evidence
+  validator rejected their authored role. Only explicit aux.col_N roles are now
+  accepted; raw text is preserved, not summed, reanchored or used as a quantity.
+- Authored fixture sources explicitly declare their label-comparison policy.
+  Terminal-history setup records diagnostics during owned completion instead of
+  modifying already-completed jobs outside their delivery owner.
+- Receipt transition assertions cover both the actual pipeline delivery receipt
+  and its output reference atomically, retaining whole-database comparisons.
+- Assignment merge diagnostics count body cells only, not header merges.
+- A blocked-source placeholder without a persisted draft ID no longer hides the
+  selected evidence identity and presents it again as a new candidate.
+- Raw monthly category 副菜 is preserved independently of output slot labels.
+- The isolated worker's two OCR integration fixture files were reviewed and
+  copied into the parent. Corrected-PDF tests use real registered source bytes,
+  derived hashes and parent receipts; missing receipts/artifacts never fall back.
+  Diagnostic draft persistence proves exactly one added row, unchanged current
+  selection, raw operator cells, PDF and canonical facility revision.
+- Assignment public-command boundaries now return the existing typed refusal
+  for inconsistent repaired representations and invalid assignment sources,
+  instead of leaking a validation exception. Cache publication is deferred until
+  baseline and final assignment validation have both succeeded. Two failure-
+  injection cases require no publication and whole-database/source immutability;
+  these new cases are not yet run.
+- The local batch now refuses missing frontend dependencies before starting
+  backend tests. Dependency installation remains explicit; no Actions or network
+  installation is introduced by the runner. New refusal coverage is unrun.
+- The daily-category fixture now declares a real scoped side-dish recipe while
+  retaining the different master category and all quantity assertions.
+
+Unresolved source semantics: partial-month order periods versus full seven-day
+FAX periods must not be silently conflated. The former Sunday expansion and
+the explicit-period boundary currently disagree. No narrowing was implemented.
+Totals-only forbidden-diet fixtures also conflict with the explicit exclusion
+introduced in 5a89ce6e; the production exclusion has not been removed to pass
+those tests. Frontend dependencies must be prepared before the next clean batch.
+
+All follow-up changes remain unverified and unintegrated. The current parent
+AGENTS.md modification is unrelated and remains unstaged.
+
 Fixed requirements: complete known implementation repairs first, then update
 fixtures together, then run serial local verification on one fixed source.
 Preserve raw OCR/operator edits, canonical input/geometry/receipt validation,
@@ -117,3 +347,269 @@ validated immutable source receipt.
 Do not treat old tests as the cause without reading each failure. Genuine source
 defects are reported to the parent. Do not replace unknown expected values,
 remove assertions, skip cases or reintroduce fallback to make this batch green.
+
+## Integrated-source batch and recorded execution reads
+
+The first integrated-source batch is running from clean develop
+7dd6677ce19597146e76855cf53bcadbc1c00532 in the independent verifier worktree.
+Its evidence directory is
+/private/tmp/sawa-hospital-full-7dd6677ce195-20261024.
+The general backend partition collected10075 cases. Failures have been observed;
+this source is not verified and has not been deployed by this batch.
+The verifier source remains unchanged while production repairs are made in the
+separate assistant-business-workflows-20261023 worktree.
+
+Source inspection found fabricated OCR-{order_id} reads and latest-job selection
+in list/detail/summary, pipeline status, sheet/pages and current history status.
+The shared binding reader now resolves only workflow_v2.ocr_job_id, checking
+order/attempt, captured current document, the original upload/document/hash,
+explicit selected version and the independent workflow delivery input.
+Missing or inconsistent bindings produce explicit diagnostics without selecting
+another job or changing persisted data. List reads stay bulk rather than adding
+per-order job/source queries. Audit history retains its legacy search targets and
+also includes actual job IDs belonging to the order.
+Saved-sheet origin is a separate identity: it comes from its base evidence's
+recorded execution, not from a newer candidate job.
+These repairs remain unverified until all known implementation work is complete.
+
+Required batch regressions for this failure class:
+- UUID job remains current with newer unrelated/stale jobs present, across list,
+  detail, summary, pages, workflow and current history status.
+- Missing job, foreign order, old attempt, changed current document and malformed
+  receipt identities are refused without a latest/name/cache substitution.
+- Explicit historical-version selection works when its original document,
+  upload digest and version identity agree.
+- Changing captured current_document_id to match a newer document cannot bypass
+  the independent delivery's original processing input comparison.
+- Receipt document/version/digest alterations are refused; operator quantities,
+  saved sheets, audit rows and original evidence remain unchanged.
+- Progress reads use the same binding. Permanent binding errors stop only their
+  owned poller; late errors cannot clear another document/job/attempt/revision.
+  The existing workflow banner distinguishes binding failures from execution
+  failures and shows the concrete cause. A fresh explicit null clears an older
+  detail error without changing operator input.
+
+## Completed failed baseline and additional root causes
+
+The clean integrated 7dd6677ce195 source completed all 30 local commands:
+25 commands succeeded and 5 failed. Backend: 475 failed, 9408 passed,
+184 skipped, 8 errors in 3370.56 seconds. Browser: 136 failed, 2 passed;
+133 failures reported a redirect loop. These are not a successful receipt.
+Evidence: /private/tmp/sawa-hospital-full-7dd6677ce195-20261024/failed-run.json.
+
+- Daily delivery requires template_uri in the accepted source resolver but
+  rejects it in the workbook embedding path. The requirement appeared in
+  05fde4ce (2026-10-21), while the rejection dates to 24c392aa (2026-05-16).
+  This is a real integration inconsistency, not merely an obsolete assertion.
+  Repair must preserve the authored template package rather than remove its URI.
+- Contact OCR did not emit raw_text. The producer now supplies its own rendered
+  word text alongside ocr_text; no test-input raw value is injected.
+- The local image proof reused source/tmp/image-ci. Its local executor now maps
+  that exact output root to its newly allocated evidence directory, preserving
+  old proofs and keeping deploy inputs/source identity unchanged.
+- Progress error side effects now reject an obsolete request revision before
+  changing the banner or stopping the current poller.
+- The PostgreSQL C1 guard batch had 200 passes and 3 failures: two fail the
+  run-scoped ledger-name check; one expects the old workflow commands without
+  the CA update. PostgreSQL corruption has not been established by these failures.
+
+These new repairs are uncommitted and unverified. The remaining failure-index
+records were read against their tracebacks; fixture updates are not yet complete.
+The repeated-apply synchronous-input conflict still requires diagnosis from its
+exact guard rejection and must not be classified as an obsolete expectation.
+
+## Current implementation and fixture batch
+
+- Daily delivery now retains each authored workbook package and packages complete
+  facility workbooks in a ZIP. Original support worksheets, drawings and print
+  definitions are retained; multiple delivery dates clone worksheet package parts.
+  Package-retention regression cases have been added but not executed.
+  Review found that table-bearing worksheet clones would share table identities;
+  these now fail explicitly before publishing instead of producing a corrupt ZIP.
+  Single-date tables remain supported. General multi-date Excel-table cloning is
+  not implemented and is not claimed as complete.
+- New recognition bases no longer seed quantities from stored OrderLines. The
+  authored weekly physical structure is copied without borrowing saved values.
+  Operator-saved sheets are not rewritten by this change.
+- Current candidate template resolution consumes the validated current-sheet
+  configured-input receipt instead of an unrelated legacy candidate template.
+- Formal user/audit timestamps retain the nullable shape of migration0035;
+  no live schema or production records were changed.
+- The isolated fixture writer has frozen four unit-test files. Parent reviewed
+  and copied their changes into the repair worktree through apply_patch. No tests
+  executed, no stage/commit/push. The first producer's no-recapture assertions
+  were restored around the actual producer, not around fixture preparation.
+- Parent fixture updates retain raw artifact hashes, real authentication grants,
+  terminal-owner protections, read-only snapshots and explicit source geometry.
+  Test-only stale-diagnostic injection deliberately uses out-of-band SQL while
+  keeping native terminal receipt and execution ownership fields unchanged.
+
+No new local test, type check, build, Actions run or deployment has been executed
+against this repair batch. The earlier failed clean-source run remains preserved.
+
+Additional review/fixture work in progress:
+- Actual admin-user save errors are now displayed by EditForm once rather than
+  both EditForm and the page; query invalidation and authority refresh remain.
+- Copied-sheet formulas and local defined names share token-based self-sheet
+  reference translation. String literals and foreign sheet references are not
+  text-replaced. Formula and package regression cases remain unexecuted.
+- Manifest template consumption now checks the captured facility ID against the
+  requested facility before consuming its authored template.
+- HistoryCase now uses an independent UUID by default, avoiding collisions with
+  deliberately unowned OCR-order/message-ID diagnostic rows.
+- Unowned diagnostic corruption is installed only by an explicit test SQL helper
+  that refuses recorded current jobs and any execution/terminal owner metadata.
+  Authorized terminal update guards remain unchanged.
+- Six ingest lifecycle cases now resolve their original job through the actual
+  generation's IngestDelivery receipt, with independent successor assertions.
+- The operator receipt-wire test now uses the real native failed-job review,
+  full-manual save and newly claimed workflow resume scenario. Receipt-less
+  hand-built overrides are negative cases, not successful resumes.
+- The legacy local child runner now removes inherited pytest/impact selectors
+  and forces full selection while leaving the invoking environment and TLS trust
+  settings unchanged. A fresh-image-evidence/full-child-scope test was added.
+
+Known remaining fixture groups include the original-target geometry specimens,
+captured evidence/projection components, and the worker's pending first-pass
+boundary cases. The repeated-apply conflict remains unresolved. No clean-source
+success, develop integration or stg verification is claimed for this batch.
+
+Further source/fixture reconciliation (not executed):
+- Current Hakodate reconciliation dispatches to captured native recovery before
+  the retired structured first-pass branch. The old success fixture must not
+  drive a relaxation of owned H2 artifact validation. The isolated writer has
+  supplied a native recovery replacement; parent review is still in progress.
+- Removed latest-evidence helper expectations now reject uncaptured reads. A
+  positive selected native projection reuse case checks exact rows and database
+  immutability, without borrowing unselected latest/cache artifacts.
+- Shared-row merge specimens now preserve explicit saved blanks, zero and 17.
+  Matching display labels with different row IDs remain a rejected join.
+- Evidence persistence specimens now exercise separately owned native 3/3/9
+  runs, preserve each prior payload, and reject ownership-free source labels.
+  An actual native artifact packet supplies the positive classification case.
+- A suspected missing template-version argument in repeated save was disproved:
+  the local persistence wrapper already passes the captured evidence version.
+  The attempted extra argument was immediately removed. The repeated-apply
+  cause remains unconfirmed; no fix or successful verification is claimed.
+
+- Subsequent read-only review found a concrete repeated-save failure mechanism:
+  `_append_edited_ocr_revision` shallow-copied the ORM JSON payload and mutated
+  its shared `_edited_ocr` dictionary. This can hide the JSON change from ORM
+  dirty checking while advancing the timestamp, so the subsequent refreshed CAS
+  reads an older body. The write now deep-copies the payload before mutation.
+  The existing 11 -> manual lines20 -> edit3 regression additionally inspects
+  the persisted cache in a separate session. Runtime confirmation is pending.
+- The history fixture now explicitly saves its declared operator lines after
+  native evidence selection, which intentionally invalidates old derived rows.
+  Recognition evidence and the independently declared operator values are not
+  substituted for one another.
+- Daily reference specimens explicitly declare facility-aggregate columns for
+  inputs without an area. The complete delivery/label bundle check reads the
+  two separate workbooks from the ZIP and retains label quantity assertions.
+- Monthly-menu component inputs explicitly declare regular diet identity so
+  the test does not depend on guessing a blank identity from another row.
+- Bagging source identity used the aggregation normalizer that collapses
+  daycare/staff into regular. The retained weekly-weight database contains all
+  three distinct declared rows at the same physical slot; the source-row
+  duplicate gate and item ranking therefore rejected legitimate input.
+  Monthly item/entry identity now uses the existing identity-preserving delivery
+  diet normalizer. Aggregation normalization itself remains unchanged. Added
+  regular/daycare/staff/diabetes component cases verify distinct source choice,
+  distinct authored amounts, explicit source-diet retention and unchanged
+  aggregation aliases. Full bagging/weekly output verification is pending.
+- The projection writer's final single-file delta is now copied into the parent.
+  Canonical record and augmentation positives use actual registration, queued
+  execution, capture and producer code; doubles remain at external rendering
+  and recognizer leaves. Explicit logical targets replace inferred shared-row
+  copies. Raw full-width/nonnumeric/blank values stay editable and unchanged.
+- Parent `git diff --check` passed after integration. All writers are frozen for
+  staged review. This is not a test, build, commit or deployment success. The
+  next full local batch must use a new clean named verification worktree and
+  fresh evidence directories, preserving the earlier failed 7dd source/run.
+
+## Fixed-source 9d batch and aggregate repairs
+
+Source `9d046f3be08ed895ca5cc791a3576812a2de9412` was checked in the
+clean `hospital-batch-verification-20261024` worktree. Evidence is retained at
+`/private/tmp/sawa-hospital-full-9d046f3be08e-20261024-2`.
+All 30 commands finished: 26 returned zero and four did not. Backend collected
+10,116 cases: 9,578 passed, 310 failed, 184 skipped and 44 setup errors, in
+3,491.03 seconds. The browser command was deliberately interrupted after
+repeated obsolete-selector failures: nine passed, 54 failed, one interrupted
+and 74 not run. It is not a full browser success. Config had three failures;
+the C1 guard command had one obsolete bootstrap-list assertion. Actual Linux
+agent checks passed 433 cases; four image proofs and TLS checks passed. These
+results do not establish success for the new dirty repair source.
+
+The following aggregate changes have not been rerun or deployed:
+- Preserve explicit monthly source category (including main-A variants) before
+  meal-slot category resolution, rather than collapsing it to an aggregate.
+- Return the flushed terminal receipt including its real delivery owner.
+- Read workflow candidate identity from a matching successful terminal receipt,
+  not mutable stale diagnostic pointers. Missing/foreign/failed receipts are
+  negative cases; selected values and source records remain unchanged.
+- Distinguish an unavailable selected artifact from an output never produced.
+- Allow workflow diagnostic reads to expose unresolved menu amounts without
+  bypassing quantity calculation or output gates.
+- Derive row-review calendar and boundary count from the explicitly selected
+  period, not a guessed Sunday-to-Saturday range, through producer, validator
+  and UI. Include cross-month and partial-period specimens.
+- Remove the reparse scope heuristic that reselected dates using OCR clusters
+  or old lines. The explicit facility/period and canonical physical menu rows
+  alone determine the scope; missing period/facility/menu is refused.
+- Retain a current refresh's own error across its generation increment while
+  fencing off errors from superseded routes, revisions and refreshes.
+- Bound the sticky date column in the monthly menu table so it does not cover
+  actionable menu cells. Pointer interception is fixed in layout, not bypassed
+  with forced test clicks.
+- Context reconfirmation deleted all OCR evidence while patch/history foreign
+  keys still referenced it. It now invalidates current selection and derived
+  materialized rows without deleting evidence, saved drafts, patch candidates,
+  confirmed snapshots or output-history artifacts. Regression assertions retain
+  every historical row and forbid automatically borrowing an old saved sheet.
+- Update recorded-job mocks, actual ownership fixtures, row calendar inputs,
+  full-source controls and current browser entry labels as one batch. Static
+  header fixtures explicitly identify a static master; generated body fixtures
+  use the real workbook builder rather than manufacturing a schema flag.
+
+The legacy real-PDF geometry cases included facility-14 files assigned to other
+facilities. Their unowned structure path recaptured current JSON and generated a
+workbook without the selected period; that fallback now explicitly refuses a
+missing captured structure. The five old cases are negative contracts that do
+not open those PDFs or invoke recognition, not replacement live-flow proof.
+The manifest's explicitly supplied structure workbook path is retained, as are
+current owned native artifact and numeric-FAX regressions. These changes have
+not been executed. Remaining fixture and implementation groups are still being
+repaired. No new full verification, commit, integration,
+Actions run, billing change or stg deployment is claimed for these edits.
+
+### Auxiliary total transcription follow-up (not yet verified)
+
+The shared display path erased conflicting totals, reanchored values across
+rows, guessed dates by sequence, and derived missing totals from quantities.
+Both display callers now use the existing canonical row identity mapping without
+the raw-table reoverlay or preemptive blanking. Conflict diagnostics no longer
+erase or redistribute cells. The dictionary caller copies nested values before
+writing, so refusal cannot mutate the caller's source. The unused 450-line
+sequence/derived-total helper chain was removed rather than left callable.
+
+The new auxiliary-cell regression covers both callers, unbound raw dates and
+missing dayparts, zero/blank/dash/symbol/full-width values, conflicting totals,
+and identity rejection with input preservation. Existing sequence datasets now
+check preservation rather than inferred totals. No execution success is claimed;
+the known remaining implementation and fixture groups must be finished before
+the serial aggregate verification starts.
+
+An awaiting pipeline resend also stored its new delivery receipt before changing
+the job's old output reference. The ingest flush fence correctly rejected that
+mixed pair. The common receipt writer now updates both in the same transaction,
+without changing original input, ownership, PDF/configured-input checks or
+generation checks. The existing real-ingest resend regression additionally checks
+the persisted handoff pair and rejection of the superseded output.
+
+The blank-rerun regression now checks the actual recognition boundary with an
+explicit operator quantity two in OrderLines. It requires the new evidence to
+remain blank and the old selected evidence, saved draft and every line column to
+remain unchanged. Queue/history fixtures use real queue/claim/completion instead
+of invented current-job pointers; native recovery uses an explicit isolated
+artifact directory. These additions are also unexecuted.

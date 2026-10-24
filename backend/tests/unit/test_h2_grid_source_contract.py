@@ -46,7 +46,8 @@ def definitions(path, names, bindings):
     namespace = {"__name__": "h2_source_case", "dataclass": dataclass, "BytesIO": BytesIO,
                  "Path": Path, "Any": Any, "Iterable": Iterable, "Optional": Optional,
                  "Tuple": Tuple, "np": np, "Image": Image, "tempfile": tempfile,
-                 "figure_markup": _figure_markup, "datasets": datasets, **URI_BINDINGS, **bindings}
+                 "figure_markup": _figure_markup, "datasets": datasets,
+                 "_dataset_settings": datasets, **URI_BINDINGS, **bindings}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
     return namespace
 
@@ -352,7 +353,7 @@ def test_actual_full_handler_html_page_loop_metadata_tables_and_normal_return():
              "_upload_bytes", "_upload_text", "_upload_figure_artifact", "_publish_page_figures", "_validate_figure_pages",
              "_write_output_partial", "_extract_metadata", "_upload_corrected_pdf_artifact", "_count_non_empty_roi_cells",
              "_extract_markdown_images", "_replace_markdown_images", "_image_reference_spans",
-             "_recognition_input_receipt", "_producer_dataset", "_complete_terminal", "_persist_terminal_intent", "_update_owned_terminal_job",
+             "_recognition_input_receipt", "_producer_dataset", "_producer_option", "_complete_terminal", "_persist_terminal_intent", "_update_owned_terminal_job",
              "_replay_terminal", "_duplicate_outcome", "_terminal_ack"]
     namespace, stores, source, protocol = owned_pipeline(names=names, claim=False, bindings={
         "storage": SimpleNamespace(Blob=Any), "firestore": SimpleNamespace(SERVER_TIMESTAMP="timestamp"),

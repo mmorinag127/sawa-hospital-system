@@ -149,13 +149,15 @@ def test_history_uses_only_sql_revisions_and_preserves_diagnostics(read_history,
         assert body["raw_output_source"] == ("order_ocr_cache._edited_ocr.raw_output" if has_cache else
                                               "order_ocr_evidence_runs.payload_json" if has_evidence else None)
         if scenario == "failed":
-            attempt = body["latest_reparse_attempt"]
-            assert {key: attempt[key] for key in ("job_id", "status", "error_message", "request_mode",
-                    "requested_provider", "provider", "processing_stage", "result_state")} == {
-                "job_id": "failed-job", "status": "failed", "error_message": "main_ocr_failed:gemini",
-                "request_mode": "llm_reparse", "requested_provider": "gemini", "provider": "gemini",
-                "processing_stage": "inference", "result_state": "hard_failed"}
-            assert body["reparse_state"]["status"] == "hard_failed"
+            assert body["latest_reparse_attempt"] is None
+            assert body["reparse_state"] is None
+            with session_scope() as session:
+                job = session.get(OcrJob, "failed-job")
+                assert job.status == "failed" and job.error_message == "main_ocr_failed:gemini"
+                assert job.metrics == {
+                    "request_mode": "llm_reparse", "requested_provider": "gemini", "provider": "gemini",
+                    "processing_stage": "inference", "result_state": "hard_failed",
+                }
     else:
         revisions = [item for item in body["items"] if item["action"] in {"ocr_sheet_save", "ocr_candidate_review"}]
         assert [item["id"] for item in revisions] == (["sql-revision-8"] if has_sql else [])

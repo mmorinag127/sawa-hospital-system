@@ -49,8 +49,8 @@ def strict_sqlite():
 
 
 class CanonicalHistoryCase(HistoryCase):
-    def prepare_provider(self, *, cell_values="2"):
-        self.queue()
+    def prepare_provider(self, *, cell_values="2", job_id=None):
+        self.queue(job_id=job_id)
         with session_scope() as session:
             receipt, start = workflow._axis_source_receipt(
                 session, session.get(Order, self.id), session.get(OrderWorkflowState, self.id))
@@ -175,33 +175,17 @@ def row_case(isolated_formal_schema, tmp_path, monkeypatch):
 
 
 def row_image_provider(monkeypatch):
-    seen = []
-    def image(order_id, *, source_receipt, start_input):
-        orders._validate_geometry_source(source_receipt, source_receipt["selected_pdf_receipt"],
-            start_input["configured_input"], source_receipt["order_input_identity"])
-        saved = ((start_input["workflow"]["secondary_actions_json"] or {}).get("workflow_v2") or {}).get("row_axis_override")
-        consumed = orders._normalize_operator_row_axis_override(saved,
-            selected_pdf_receipt=source_receipt["selected_pdf_receipt"],
-            configured_input=start_input["configured_input"], order_input_identity=source_receipt["order_input_identity"])
-        seen.append(consumed)
-        plan = [{"date": r["menu_date"]} for r in start_input["physical_menu_entries"]]
-        return {"status": "ready", "saved_override": consumed,
-            "calendar_days": row_recovery.calendar_contract(plan),
-            "header_band_count": len(master.TEMPLATE_HEADER_EDGE_ROWS),
-            "coordinate_space": {"mode": "template_canvas", "width": 100, "height": 100}}
-    monkeypatch.setattr(orders, "build_hakodate_row_axis_review", image)
-    return seen
+    from tests.helpers.authored_row_axis import install_image_provider
+    return install_image_provider(monkeypatch)
 
 
 def save_valid_row(order_id, revision, receipt, review):
-    count = review["header_band_count"] + 8
-    ys = [float(i * 10) for i in range(count - 1)] + [100.0]
-    result, error = workflow.save_row_axis_review_decision(order_id, corrected_ys=ys,
-        coordinate_space=review["coordinate_space"], body_day_boundary_indexes=list(range(8)),
-        day_labels=[day["date"] for day in review["calendar_days"]],
+    from tests.helpers.authored_row_axis import operator_input
+    declared = operator_input(review)
+    result, error = workflow.save_row_axis_review_decision(order_id, **declared,
         source_receipt=receipt, expected_revision=revision)
     assert error is None
-    return ys, result
+    return declared["corrected_ys"], result
 
 
 def test_row_save_consumes_original_source(row_case, monkeypatch):
@@ -260,7 +244,12 @@ def test_partial_period_same_plan_all_consumers(isolated_formal_schema, monkeypa
         # Use the real alignment/manual calendar validator. Observed synthetic
         # coordinates are explicit inputs, not a manufactured used=True result.
         days = row_recovery.calendar_contract([
-            {"date": row["menu_date"]} for row in start["physical_menu_entries"]])
+            {"date": row["menu_date"]} for row in start["physical_menu_entries"]],
+            week_value=start["order"]["week_code"])
+        assert [day["date"] for day in days] == [
+            "2026-09-27", "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-03"]
+        assert [day["expected_band_count"] for day in days] == [None, None, None, None, 1, 1, 1]
+        assert [row["menu_date"] for row in start["physical_menu_entries"]] == ["2026-10-01", "2026-10-02", "2026-10-03"]
         space = {"mode": "template_canvas", "width": image.shape[1], "height": image.shape[0]}
         _, ys, _, _ = batch._align_axes()
         for module in (batch, collector):

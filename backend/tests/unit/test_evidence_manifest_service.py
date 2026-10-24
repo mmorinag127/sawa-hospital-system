@@ -74,7 +74,7 @@ def test_template_resolution_does_not_block_only_on_classifier_mismatch_within_r
     assert resolution["blocked_reasons"] == []
 
 
-def test_payload_has_quantity_column_semantics_when_template_registry_can_supply_column_edges():
+def test_payload_cannot_borrow_quantity_column_edges_from_legacy_template_registry():
     payload = {
         "template_id": "fax_layout_regular_soft_mixer_forbidden_v1",
         "pages": [
@@ -102,7 +102,11 @@ def test_payload_has_quantity_column_semantics_when_template_registry_can_supply
         "grid_row_edges": [],
     }
 
-    assert ocr_evidence_service.payload_has_quantity_column_semantics(payload) is True
+    from copy import deepcopy
+
+    before = deepcopy(payload)
+    assert ocr_evidence_service.payload_has_quantity_column_semantics(payload) is False
+    assert payload == before
 
 
 def test_payload_high_risk_numeric_issues_drive_numeric_trust_low() -> None:
@@ -135,16 +139,14 @@ def test_payload_high_risk_numeric_issues_drive_numeric_trust_low() -> None:
         "grid_row_edges": [],
     }
 
-    evidence = ocr_evidence_service.persist_evidence_run(
-        order_id="ORD-test-numeric-trust",
-        payload=payload,
-        source="test",
-    )
+    from copy import deepcopy
 
-    assert evidence is not None
-    assert ocr_evidence_service.payload_has_quantity_column_semantics(evidence["payload_json"]) is True
-    assert ocr_evidence_service.payload_has_high_risk_numeric_issues(evidence["payload_json"]) is True
-    assert evidence["capabilities_json"]["numeric_trust_low"] is True
+    before = deepcopy(payload)
+    projected = evidence_manifest_service.ensure_evidence_manifest(payload)
+    assert ocr_evidence_service.payload_has_quantity_column_semantics(projected) is False
+    assert ocr_evidence_service.payload_has_high_risk_numeric_issues(projected) is True
+    assert ocr_evidence_service._build_capabilities(projected)["numeric_trust_low"] is True
+    assert payload == before
 
 
 def test_legacy_payload_without_evidence_context_does_not_trigger_blocker():

@@ -16,16 +16,21 @@ for (const latestResolved of [false, true]) {
       const path = new URL(route.request().url()).pathname;
       if (route.request().method() !== "GET") posts.push(path);
       let json: object = {};
-      if (path.endsWith(`/orders/${orderId}/workflow-v2`)) {
-        json = { order_id: orderId, state: "output_review", headline: "Owned recovery loaded", blockers: [],
-          saved_sheet_id: "owned-draft", output_bundle_id: "owned-bundle", menu_amount_resolution: resolution(latestResolved) };
+      if (path.endsWith(`/orders/${orderId}/workflow-v2/inspection`)) {
+        json = {
+          workflow: { order_id: orderId, revision: 7, source: "workflow_v2",
+            state: "output_review", headline: "Owned recovery loaded", blockers: [],
+            saved_sheet_id: "owned-draft", output_bundle_id: "owned-bundle", menu_amount_resolution: resolution(latestResolved) },
+          ocr_candidates: { order_id: orderId, results: [], workflow_state: "output_review", blockers: [],
+            selected_ocr_result_id: null, candidate_template_version_id: null, hidden_template_mismatch_result_count: 0 },
+        };
       } else if (path.endsWith(`/orders/${orderId}`)) {
         json = { id: orderId, versions: [], menu_amount_resolution: resolution(!latestResolved),
           lines: [{ menu_name: "Old Dish", quantity_original: 11, quantity_corrected: 13 }] };
       } else if (path.endsWith("/ocr-results")) {
         json = { results: [] };
       } else if (path.endsWith("/facilities")) {
-        json = { facilities: [] };
+        json = { source: "canonical_json", revision: "amount-facilities-1", facilities: [] };
       }
       await route.fulfill({ status: 200, json });
     });

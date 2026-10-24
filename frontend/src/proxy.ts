@@ -26,16 +26,6 @@ export function proxy(request: NextRequest) {
   } catch {
     return NextResponse.json({ error: "portal_session_request_rejected" }, { status: 403 });
   }
-  if (pathname === "/hospital") {
-    const url = request.nextUrl.clone();
-    url.pathname = "/hospital-dashboard";
-    return NextResponse.rewrite(url, { request: { headers } });
-  }
-  if (pathname.startsWith("/hospital/")) {
-    const url = request.nextUrl.clone();
-    url.pathname = pathname.slice("/hospital".length) || "/";
-    return NextResponse.rewrite(url, { request: { headers } });
-  }
   const hospitalRoots = new Set([
     "orders", "weekly-orders", "pdf-upload", "daily-delivery-notes", "totals",
     "facilities", "facility-master", "facility-orders", "menus", "base-menus",

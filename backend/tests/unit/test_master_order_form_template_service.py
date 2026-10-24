@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from datetime import date
 
 from openpyxl import load_workbook
 from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor
@@ -155,7 +156,7 @@ def test_build_facility_template_from_master_supports_all_master_facilities(tmp_
         facility_id = facility.get("facility_id")
         if not facility_id:
             continue
-        resolved = config_service._build_facility_config(facility_id=facility_id, facility=facility)  # noqa: SLF001
+        resolved = config_service.get_facility_config(facility_id)
         output = service.build_facility_template_xlsx(
             facility_config=resolved,
             output_path=tmp_path / f"{facility_id}_facility_template.xlsx",
@@ -197,9 +198,10 @@ def test_build_facility_template_from_master_uses_explicit_header_groups_only(tm
 
 
 def test_build_facility_template_from_master_applies_configured_two_level_headers(tmp_path: Path, repository_layout_source) -> None:
-    master = config_service.load_facility_master()
-    facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00003")
-    resolved = config_service._build_facility_config(facility_id="FAC00003", facility=facility)  # noqa: SLF001
+    resolved = config_service.get_facility_config("FAC00003")
+    quantity_headers = [column["header"] for column in resolved["fax_template"]["columns"]
+                        if column["role"] == "quantity"]
+    assert len(quantity_headers) >= 12
 
     output = service.build_facility_template_xlsx(
         facility_config=resolved,
@@ -218,18 +220,18 @@ def test_build_facility_template_from_master_applies_configured_two_level_header
     assert "M8:N8" in merged_ranges
     assert "O8:P8" in merged_ranges
     assert worksheet["E7"].value == "常食"
-    assert worksheet["E9"].value == "花"
-    assert worksheet["F9"].value == "月"
+    assert worksheet["E9"].value == quantity_headers[0]
+    assert worksheet["F9"].value == quantity_headers[1]
     assert worksheet["G7"].value == "軟菜"
-    assert worksheet["G9"].value == "花"
-    assert worksheet["H9"].value == "月"
+    assert worksheet["G9"].value == quantity_headers[2]
+    assert worksheet["H9"].value == quantity_headers[3]
     assert worksheet["I7"].value == "ミキサー"
-    assert worksheet["I9"].value == "花"
-    assert worksheet["J9"].value == "月"
+    assert worksheet["I9"].value == quantity_headers[4]
+    assert worksheet["J9"].value == quantity_headers[5]
     assert worksheet["K7"].value == "禁食、魚"
     assert worksheet["K8"].value == "常食"
-    assert worksheet["K9"].value == "花"
-    assert worksheet["L9"].value == "月"
+    assert worksheet["K9"].value == quantity_headers[6]
+    assert worksheet["L9"].value == quantity_headers[7]
     assert worksheet["M8"].value == "軟菜"
     assert worksheet["O8"].value == "ミキサー"
     assert _generated_render_width(worksheet, workbook["generated_template_schema"]["B8"].value) == service.SOURCE_GENERATED_PIXEL_WIDTH
@@ -384,14 +386,19 @@ def test_build_facility_template_from_master_keeps_week_menu_overflow_as_review_
 
 
 def test_build_facility_template_from_master_applies_configured_body_merges(tmp_path: Path, repository_layout_source) -> None:
-    master = config_service.load_facility_master()
-    facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00007")
-    resolved = config_service._build_facility_config(facility_id="FAC00007", facility=facility)  # noqa: SLF001
+    resolved = config_service.get_facility_config("FAC00007")
 
     output = service.build_facility_template_xlsx(
         facility_config=resolved,
         output_path=tmp_path / "FAC00007_facility_template.xlsx",
         week_value="2026-04@2026-04-26~2026-04-30",
+        week_menu_entries=[
+            {"menu_date": date(2026, 4, day), "daypart": meal, "slot_index": slot,
+             "name": f"Authored {day}-{meal}-{slot}", "diet_type": "regular"}
+            for day in range(26, 31)
+            for meal, count in (("朝", 2), ("昼", 3), ("夕", 3))
+            for slot in range(count)
+        ],
     )
 
     workbook = load_workbook(output)
@@ -414,9 +421,7 @@ def test_build_facility_template_from_master_applies_configured_body_merges(tmp_
 
 
 def test_build_facility_template_from_master_applies_body_merges_without_week_value(tmp_path: Path, repository_layout_source) -> None:
-    master = config_service.load_facility_master()
-    facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00016")
-    resolved = config_service._build_facility_config(facility_id="FAC00016", facility=facility)  # noqa: SLF001
+    resolved = config_service.get_facility_config("FAC00016")
 
     output = service.build_facility_template_xlsx(
         facility_config=resolved,

@@ -26,9 +26,9 @@ from src.services.ocr_job_service import (
     describe_job_state as describe_ocr_job_state,
     get_job_request_mode,
     get_job as get_ocr_job,
-    get_latest_order_job,
+    get_recorded_order_job_bindings,
+    recorded_order_job_fields,
     is_order_reparse_job as is_order_reparse_ocr_job,
-    get_jobs as get_ocr_jobs,
     get_job_stale_at as get_ocr_job_stale_at,
     get_stale_minutes as get_ocr_job_stale_minutes,
     is_job_stale as is_ocr_job_stale,
@@ -286,6 +286,9 @@ def _attach_order_review_summary(
     workflow = order.get("workflow_state") if isinstance(order.get("workflow_state"), dict) else None
     if lightweight:
         job_state = describe_ocr_job_state(ocr_job if isinstance(ocr_job, dict) else None)
+        binding_error = order.get("ocr_job_binding_error")
+        if binding_error:
+            job_state = {**job_state, "status": "blocked", "blockers": [binding_error]}
         apply_gate = (workflow or {}).get("apply_gate") if isinstance(workflow, dict) else None
         apply_gate = apply_gate if isinstance(apply_gate, dict) else {}
         order.update(
@@ -312,7 +315,7 @@ def _attach_order_review_summary(
                     else None
                 ),
                 "ocr_reparse_last_error_code": (
-                    str(ocr_job.get("error_message") or "").strip() or None if isinstance(ocr_job, dict) else None
+                    str(ocr_job.get("error_message") or "").strip() or None if isinstance(ocr_job, dict) else binding_error
                 ),
                 "ocr_can_apply_draft": False,
                 "ocr_apply_blockers": list(apply_gate.get("apply_blockers") or []),
@@ -701,8 +704,15 @@ def list_orders(
     include_runtime_flag = (include_ocr is not None) if include_runtime is None else include_runtime
     if not include_runtime_flag:
         return _order_list_response(page, response_view)
+    bindings = get_recorded_order_job_bindings([order["id"] for order in orders])
+    jobs = {}
+    for order in orders:
+        binding = bindings.get(order["id"])
+        if binding is not None:
+            order.update(recorded_order_job_fields(binding))
+            if binding["job"] is not None:
+                jobs[binding["job_id"]] = binding["job"]
     if response_view == "ocr_monitor" and include_ocr is not False:
-        jobs = get_ocr_jobs([order["ocr_job_id"] for order in orders if order.get("ocr_job_id")])
         for order in orders:
             job = jobs.get(order.get("ocr_job_id"))
             _apply_job_status_to_order(order, job)
@@ -713,14 +723,13 @@ def list_orders(
     cache_map = order_service._load_order_ocr_cache_map(order_ids) if (not lightweight_mode or include_candidate_summary) else {}
     workflow_map = workflow_state_service.list_workflow_states(order_ids)
     if lightweight_mode:
-        reparse_jobs = get_ocr_jobs([f"OCR-{order_id}" for order_id in order_ids])
         for order in orders:
             order_id = str(order.get("id") or "").strip()
             cached_payload = cache_map.get(order_id)
             workflow = workflow_map.get(order_id)
             if isinstance(workflow, dict):
                 order["workflow_state"] = workflow
-            review_job = reparse_jobs.get(f"OCR-{order_id}")
+            review_job = jobs.get(order.get("ocr_job_id"))
             if review_job:
                 _apply_job_status_to_order(order, review_job)
             elif cached_payload:
@@ -737,8 +746,6 @@ def list_orders(
                     cached_payload=cached_payload,
                 )
     else:
-        job_ids = [order.get("ocr_job_id") for order in orders if order.get("ocr_job_id")]
-        jobs = get_ocr_jobs(job_ids)
         for order in orders:
             job_id = order.get("ocr_job_id")
             job = jobs.get(job_id) if job_id else None
@@ -749,25 +756,9 @@ def list_orders(
                 cached_payload=cache_map.get(str(order.get("id") or "")),
             )
             job = _apply_stale_ocr_status(order, job)
-    reparse_jobs = {} if lightweight_mode else get_ocr_jobs(
-        list(
-            {
-                token
-                for order in orders
-                for token in (
-                    str(order.get("ocr_job_id") or "").strip(),
-                    f"OCR-{str(order.get('id') or '').strip()}",
-                )
-                if token
-            }
-        )
-    )
     for order in orders:
         order_id = str(order.get("id") or "").strip()
-        review_job = (
-            reparse_jobs.get(f"OCR-{order_id}")
-            or reparse_jobs.get(str(order.get("ocr_job_id") or "").strip())
-        )
+        review_job = jobs.get(order.get("ocr_job_id"))
         if review_job:
             review_job = _mark_stale_order_reparse_job(order, review_job)
         if not lightweight_mode:
@@ -1080,10 +1071,9 @@ def get_order(order_id: str):
     order = order_service.get_order_by_id(order_id, allow_unresolved_menu_amount=True)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
-    job_id = order.get("ocr_job_id")
-    job = get_latest_order_job(order_id)
-    if not job and job_id:
-        job = get_ocr_job(job_id)
+    binding = get_recorded_order_job_bindings([order_id]).get(order_id) or {}
+    order.update(recorded_order_job_fields(binding))
+    job = binding.get("job")
     if job:
         # GET /orders/{id} is a read projection. Finished OCR jobs are
         # reconciled by workers or explicit commands, not by page reads.
@@ -1093,12 +1083,6 @@ def get_order(order_id: str):
     # Keep it read-only/fast; explicit workflow endpoints and mutating actions
     # are responsible for refreshing persisted workflow/current-sheet state.
     _attach_order_workflow_context(order, refresh=False)
-    if job:
-        refreshed_job = get_ocr_job(str(job.get("id") or "")) or job
-        if refreshed_job is not job:
-            job = refreshed_job
-        _apply_job_status_to_order(order, job)
-        job = _apply_stale_ocr_status(order, job)
     _attach_order_review_summary(order, ocr_job=job, lightweight=True)
     return order
 

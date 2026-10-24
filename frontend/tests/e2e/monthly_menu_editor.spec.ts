@@ -127,7 +127,13 @@ test("monthly menu page renders entries as a sheet-style grid", async ({ page })
   await expect(sheet.getByRole("button", { name: "豆腐の煮物" })).toBeVisible();
   await sheet.getByRole("button", { name: "ホイコーロー" }).click();
   await expect(page.getByTestId("selected-entry-name")).toHaveText("ホイコーロー");
-  await expect(page.getByLabel("単位").first().locator("option")).toHaveText(["未選択", "グラム(g)", "切れ", "個"]);
+  await expect(page.getByRole("combobox", { name: "朝昼夕", exact: true }).first()).toHaveText("昼");
+  await page.getByRole("combobox", { name: "朝昼夕", exact: true }).first().click();
+  await expect(page.getByRole("listbox").getByRole("option", { name: "昼", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Escape");
+  await page.getByRole("combobox", { name: "単位", exact: true }).first().click();
+  await expect(page.getByRole("listbox").getByRole("option")).toHaveText(["未選択", "グラム(g)", "切れ", "個"]);
+  await page.keyboard.press("Escape");
   await sheet.getByRole("button", { name: "豆腐の煮物" }).click();
   await expect(page.getByTestId("selected-entry-name")).toHaveText("豆腐の煮物");
   await expect(page.getByTestId("selected-entry-category")).toHaveText("副菜");
@@ -229,14 +235,16 @@ test("monthly menu detail selects same-name item by daypart and uses daypart dro
   await sheet.getByRole("button", { name: "ジャーマンポテト" }).nth(0).click();
   await expect(page.getByTestId("selected-entry-name")).toHaveText("ジャーマンポテト");
   await expect(page.getByLabel("1人前の量").first()).toHaveValue("70");
-  await expect(page.getByLabel("朝昼夕").first()).toHaveValue("朝食");
-  await expect(page.getByLabel("朝昼夕").first().locator("option")).toHaveText(["未選択", "朝食", "昼食", "夕食"]);
+  await expect(page.getByRole("combobox", { name: "朝昼夕", exact: true }).first()).toHaveText("朝食");
+  await page.getByRole("combobox", { name: "朝昼夕", exact: true }).first().click();
+  await expect(page.getByRole("listbox").getByRole("option")).toHaveText(["未選択", "朝食", "昼食", "夕食"]);
+  await page.keyboard.press("Escape");
 
   await sheet.getByRole("button", { name: "ジャーマンポテト" }).nth(1).click();
 
   await expect(page.getByTestId("selected-entry-category")).toHaveText("副菜");
   await expect(page.getByLabel("1人前の量").first()).toHaveValue("40");
-  await expect(page.getByLabel("朝昼夕").first()).toHaveValue("昼食");
+  await expect(page.getByRole("combobox", { name: "朝昼夕", exact: true }).first()).toHaveText("昼食");
 });
 
 test("monthly menu editor sends the selected item's EditForm values as the item payload", async ({ page }) => {
@@ -619,7 +627,7 @@ test("monthly menu saved upload requires explicit master review and apply", asyn
       } else {
         expect(route.request().headers()["if-match"]).toBe("import-receipt-own-2");
         await route.fulfill({ status: 200, json: { item_count: 2, replaced: false, receipt: { ...savedReceipt, state: "applied" },
-          snapshot: { menu: { id: "2026-03" },
+          snapshot: { source_month_id: "2026-03", menu: { id: "2026-03" },
             items: savedReceipt.review.items.map((item: any, index: number) => ({ ...item,
               ...savedReceipt.review.plans[item.name].seed_fields, id: `applied-item-${index}`, month_id: "2026-03",
               menu_master_id: savedReceipt.review.plans[item.name].action === "existing"

@@ -231,6 +231,7 @@ def test_real_native_subset_get_save_resume_preserves_good_records(diagnostic, m
             if cell in values:
                 assert new["operator_value"] == values[cell] and new["recognition_source"] == "operator"
                 assert "original_recognizer_output" not in new
+                assert "recognizer_raw_text" not in new
             else:
                 assert new == old
         old_records = original_payload["hakodate_ocr_evidence_records"]
@@ -244,7 +245,7 @@ def test_real_native_subset_get_save_resume_preserves_good_records(diagnostic, m
                 comparable["raw_payload_ref"] = old["raw_payload_ref"]
                 comparable["engine_metadata"]["source_receipt"] = old["engine_metadata"]["source_receipt"]
                 assert comparable == old
-        assert [row["recognizer_raw_text"] for row in rows[:4]] == ["1", "26", "0", ""]
+        assert [row["recognizer_raw_text"] for row in f["raw"][:4]] == ["1", "26", "0", ""]
         assert payload["hakodate_recognition_review"] == {"cells": [], "count": 0}
         completed, error = order_service._persist_ocr_rerun_completion(f["order_id"], next_f["job_id"], payload,
             producer_version="hakodate_best_method_pipeline")

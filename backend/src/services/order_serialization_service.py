@@ -12,6 +12,7 @@ from src.models.order import Order, OrderLine
 from src.models.order_version import OrderVersion
 from src.services import menu_service, sheet_week_service
 from src.services.workflow_attempt_guard_service import selected_version_snapshot
+from src.services.ocr_job_service import get_recorded_order_job_bindings, recorded_order_job_fields
 
 
 def _collect_menu_items_for_week(
@@ -92,6 +93,11 @@ def _list_order_versions_for_serialization(order: Order) -> list[dict[str, Any]]
         return _list_order_versions(session, order.id)
     with session_scope() as scoped_session:
         return _list_order_versions(scoped_session, order.id)
+
+
+def _recorded_job_fields(order: Order) -> dict[str, Any]:
+    bindings = get_recorded_order_job_bindings([order.id], read_session=object_session(order))
+    return recorded_order_job_fields(bindings.get(order.id))
 
 
 def _line_menu_identity(line):
@@ -322,7 +328,7 @@ def serialize_order(order: Order, *, allow_unresolved_menu_amount: bool = False)
 
     return {
         "id": order.id,
-        "ocr_job_id": f"OCR-{order.id}",
+        **_recorded_job_fields(order),
         "facility": order.facility_code,
         "template_version_id": order.template_version_id,
         "week": week_month_id,
@@ -354,7 +360,7 @@ def serialize_order_summary(order: Order) -> dict[str, Any]:
     versions = _list_order_versions_for_serialization(order)
     return {
         "id": order.id,
-        "ocr_job_id": f"OCR-{order.id}",
+        **_recorded_job_fields(order),
         "facility": order.facility_code,
         "template_version_id": order.template_version_id,
         "week": week_month_id,

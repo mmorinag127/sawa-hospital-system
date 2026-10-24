@@ -1,6 +1,9 @@
 import pathlib
 import sys
 from datetime import date
+from copy import deepcopy
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -30,6 +33,7 @@ def test_build_delivery_rows_adds_menu_rows_without_copying_ocr_quantities():
         {"zero_as_empty": True},
         {},
         {
+            "entry_defaults": {},
             "entries": [
                 {
                     "date": date(2026, 2, 15),
@@ -47,7 +51,7 @@ def test_build_delivery_rows_adds_menu_rows_without_copying_ocr_quantities():
 
     assert len(rows) == 1
     assert rows[0]["menu_display"] == "Menu A"
-    assert "qty_regular_total" not in rows[0]
+    assert rows[0]["qty_regular_total"] is None
 
 
 def test_build_delivery_rows_uses_only_materialized_saved_sheet_rows():
@@ -82,6 +86,7 @@ def test_build_delivery_rows_uses_only_materialized_saved_sheet_rows():
         {"zero_as_empty": True},
         {},
         {
+            "entry_defaults": {},
             "entries": [
                 {
                     "date": date(2026, 2, 15),
@@ -99,55 +104,19 @@ def test_build_delivery_rows_uses_only_materialized_saved_sheet_rows():
 
     assert len(rows) == 1
     assert rows[0]["qty_regular_total"] == 12.0
-    assert rows[0]["menu_display"] == "主菜 Menu A"
+    assert rows[0]["menu_display"] == "主 Menu A"
 
 
-def test_menu_entry_override_does_not_replace_existing_daypart_or_category():
-    rows = output_builder._apply_menu_entry_overrides(
-        [
-            {
-                "date": date(2026, 5, 24),
-                "daypart": "夕",
-                "menu_category": "主菜",
-                "menu_name": "Menu A",
-                "quantity_original": 1,
-            }
-        ],
-        [
-            {
-                "menu_date": "2026-05-24",
-                "daypart": "昼",
-                "category": "副菜",
-                "name": "Menu A",
-            }
-        ],
-    )
-
-    assert rows[0]["daypart"] == "夕"
-    assert rows[0]["menu_category"] == "主菜"
-
-
-def test_menu_entry_override_fills_missing_daypart_and_category():
-    rows = output_builder._apply_menu_entry_overrides(
-        [
-            {
-                "date": date(2026, 5, 24),
-                "menu_name": "Menu A",
-                "quantity_original": 1,
-            }
-        ],
-        [
-            {
-                "menu_date": "2026-05-24",
-                "daypart": "昼",
-                "category": "副菜",
-                "name": "Menu A",
-            }
-        ],
-    )
-
-    assert rows[0]["daypart"] == "昼"
-    assert rows[0]["menu_category"] == "副菜"
+@pytest.mark.parametrize("existing_context", [False, True])
+def test_menu_entry_without_physical_slot_cannot_supply_or_replace_context(existing_context):
+    lines = [{"date": date(2026, 5, 24), "menu_name": "Menu A", "quantity_original": 1}]
+    if existing_context:
+        lines[0].update(daypart="夕", menu_category="主菜")
+    entries = [{"menu_date": "2026-05-24", "daypart": "昼", "category": "副菜", "name": "Menu A"}]
+    before = deepcopy((lines, entries))
+    with pytest.raises(ValueError, match="^delivery_monthly_slot_required$"):
+        output_builder._apply_menu_entry_overrides(lines, entries)
+    assert (lines, entries) == before
 
 
 def test_build_pipeline_match_text_includes_structured_rows_for_facility_match(repository_layout_source):

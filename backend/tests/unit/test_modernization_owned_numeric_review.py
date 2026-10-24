@@ -50,7 +50,9 @@ def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_
         assert by_cell[target["sheet_cell"]]["raw_text"] == expected
         assert by_cell[target["sheet_cell"]]["normalized_value"] == expected
     artifacts.validate_payload(payload)
-    assert len(payload["hakodate_canonical_pipeline"]["artifact_packet"]["outputs"]) == 8
+    assert set(payload["hakodate_canonical_pipeline"]["artifact_packet"]["outputs"]) == (
+        set(artifacts.REQUIRED_OUTPUTS) | {"preprocess_observation"}
+    )
     f.select()
     original_json = f.master_json.read_bytes()
     before_output_read = database_snapshot()
@@ -105,7 +107,7 @@ def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_
     for candidate in deferred:
         assert candidate["sheet_cell"] in note_cells
         assert candidate["field"] == "remarks" and candidate["value"] == ""
-        assert candidate["assignment_confidence"] == by_cell[candidate["sheet_cell"]]["confidence"]
+        assert candidate["assignment_confidence"] == round(by_cell[candidate["sheet_cell"]]["confidence"], 4)
         assert candidate["classification"] != "accepted"
         assert sheet["rows"][candidate["row_index"]][sheet["fields"].index("remarks")] == ""
     applied = sheet["hakodate_evidence_projection"]["applied"]
@@ -117,7 +119,7 @@ def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_
     assert low_confidence, "actual low confidence must remain visible without blocking the sheet"
     for candidate in quantity_applied:
         assert candidate["value"] == authored[candidate["row_index"]]
-        assert candidate["assignment_cell"]["assignment_confidence"] == by_cell[candidate["sheet_cell"]]["confidence"]
+        assert candidate["assignment_cell"]["assignment_confidence"] == round(by_cell[candidate["sheet_cell"]]["confidence"], 4)
         assert sheet["rows"][candidate["row_index"]][quantity] == candidate["value"]
     assert len(sheet["ocr_numeric_cell_items"]) == 56
 

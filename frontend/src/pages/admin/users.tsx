@@ -191,7 +191,6 @@ function UsersContent({ session }: { session: string }) {
       return saved;
     } catch (error) {
       if (own()) {
-        setNotice({ kind: "error", text: errorMessage(error, "ユーザーを保存できませんでした") });
         void client.invalidateQueries({ queryKey });
       }
       throw error;

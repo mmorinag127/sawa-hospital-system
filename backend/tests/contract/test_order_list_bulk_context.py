@@ -1,29 +1,9 @@
-import ast
 from collections import Counter
 from copy import deepcopy
-from pathlib import Path
-import subprocess
 
 import pytest
 
 from src.api import orders as api
-
-
-BASE = '737e40f'
-
-
-def baseline_functions():
-    root = Path(__file__).resolve().parents[3]
-    source = subprocess.check_output(
-        ['git', 'show', f'{BASE}:backend/src/api/orders.py'], cwd=root, text=True,
-    )
-    names = {'list_orders', '_apply_cached_status_override', '_attach_order_workflow_context'}
-    nodes = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name in names]
-    for node in nodes:
-        node.decorator_list = []
-    namespace = dict(vars(api))
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), BASE, 'exec'), namespace)
-    return namespace
 
 
 @pytest.mark.parametrize('count', [0, 1, 50])
@@ -54,19 +34,26 @@ def test_same_page_without_per_order_context_reads(monkeypatch, count, lightweig
     monkeypatch.setattr(api.order_service, 'get_cached_ocr_payload', one_cache)
     monkeypatch.setattr(api.order_service, 'get_order_workflow_state', one_workflow)
     monkeypatch.setattr(api.workflow_state_service, 'list_workflow_states', bulk_workflow)
-    monkeypatch.setattr(api, 'get_ocr_jobs', lambda ids: {
-        key: {'id': key, 'status': 'running', 'metrics': {}} for key in ids})
+    def bulk_jobs(ids):
+        reads['jobs_bulk'] += 1
+        return {row['id']: {'job_id': row['ocr_job_id'], 'error': None,
+                'job': {'id': row['ocr_job_id'], 'status': 'running', 'metrics': {}}}
+                for row in rows if row['id'] in ids}
+    monkeypatch.setattr(api, 'get_recorded_order_job_bindings', bulk_jobs)
     monkeypatch.setattr(api, '_attach_order_review_summary', lambda order, **kw: order.update(review='unchanged'))
-    old = baseline_functions()
     kwargs = {'include_ocr': not lightweight, 'include_candidate_summary': True, 'limit': 50}
-    expected = old['list_orders'](**kwargs)
-    before = dict(reads)
-    reads.clear()
-    assert api.list_orders(**kwargs) == expected
+    actual = api.list_orders(**kwargs)
+    assert actual['has_more'] is True and actual['next_cursor'] == {'id': 'cursor'}
+    assert len(actual['orders']) == count
+    for original, projected in zip(rows, actual['orders'], strict=True):
+        assert {key: projected[key] for key in original} == original
+        assert projected['ocr_status'] == 'running'
+        assert projected['ocr_job_binding_error'] is None
+        if not lightweight:
+            assert projected['review'] == 'unchanged'
+    assert all('ocr_status' not in row for row in rows)
     assert reads['cache_single'] == reads['workflow_single'] == 0
-    assert reads['cache_bulk'] == reads['workflow_bulk'] == 1
-    if not lightweight:
-        assert before.get('cache_single', 0) == before.get('workflow_single', 0) == count
+    assert reads['cache_bulk'] == reads['workflow_bulk'] == reads['jobs_bulk'] == 1
 
 
 def test_workflow_read_failure_is_not_an_empty_success(monkeypatch):

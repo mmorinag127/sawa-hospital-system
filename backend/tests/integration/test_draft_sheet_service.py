@@ -302,10 +302,10 @@ def _fac00004_owned_source(history_case, *, rows, menu_entries, lines,
 
 def _legacy_aux_target_refused(case, value):
     from src.services.hakodate_ocr_evidence_service import authored_cell_role
-    target = {"role": "aux", "field": "aux.col_4", "semantic_field": "aux.col_4",
+    target = {"role": "aux", "field": "legacy.sum", "semantic_field": "legacy.sum",
               "worksheet_col": 5, "field_label": "合計", "ocr_text": value}
     with case.readonly():
-        with pytest.raises(ValueError, match="^hakodate_target_role_unresolved$"):
+        with pytest.raises(ValueError, match="^hakodate_target_role_conflict$"):
             authored_cell_role(target)
     assert target["ocr_text"] == value
 
@@ -850,6 +850,7 @@ def test_owned_rerun_keeps_saved_quantities_and_requires_explicit_candidate_adop
 
 def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
     from src.models.order_workflow_state import OrderWorkflowState
+    from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
     from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal
 
     receipt = rerun["terminal_receipt"]
@@ -858,6 +859,7 @@ def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
         "workflow_attempt_id": case.queued["ocr_job"]["workflow_attempt_id"],
         "workflow_revision": case.queued["workflow"]["revision"],
         "evidence_run_id": rerun["id"], "status": "failed", "error": error,
+        "workflow_delivery_owner": {key: case.claim[key] for key in ("delivery_id", "generation", "claim_token")},
     }
     assert rerun["status"] == "diagnostic_only"
     assert rerun["order_id"] == case.id
@@ -874,12 +876,16 @@ def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
     assert job["status"] == "failed"
     assert job["error_message"] == error
     assert job["metrics"]["adopted"] is False
-    assert {key: job["metrics"]["rerun_terminal_receipt"][key] for key in receipt} == receipt
+    assert job["metrics"]["rerun_terminal_receipt"] == receipt
     after = _snapshot(case.engine)
     for table in ("order_sheet_drafts", "order_ocr_cache", "order_ocr_revisions",
                   "order_current_states", "order_confirmed_snapshots", "order_lines"):
         assert after[table] == before[table], table
     with session_scope() as session:
+        delivery = session.get(WorkflowOcrDelivery, case.claim["delivery_id"])
+        assert delivery.order_id == case.id and delivery.job_id == case.job
+        assert delivery.delivery_generation == case.claim["generation"]
+        assert delivery.claim_token == case.claim["claim_token"]
         state = session.get(OrderWorkflowState, case.id)
         assert state.evidence_run_id is None and state.draft_id is None
         assert state.confirmed_snapshot_id is None
@@ -981,7 +987,7 @@ def test_unowned_rerun_cannot_publish_partial_pipeline_output(authored_sheet_cas
         assert retained.base_evidence_run_id == case.evidence
 
 
-def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch, authored_sheet_case) -> None:
+def test_rerun_ocr_evidence_only_completes_actual_generated_job_identity(monkeypatch, authored_sheet_case) -> None:
     case = authored_sheet_case(quantity=3, produce=False)
     prepare_rerun(case, cell_values="9")
     order = {"id": case.id}
@@ -991,8 +997,9 @@ def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch, autho
 
     assert error is None
     assert isinstance(rerun, dict)
-    job = order_service.get_ocr_job(f"OCR-{order['id']}")
+    job = order_service.get_ocr_job(case.job)
     assert isinstance(job, dict)
+    assert job["id"] == case.job
     assert job["status"] == "done"
     metrics = job.get("metrics") or {}
     assert metrics.get("result_state") == "evidence_ready"
@@ -1001,9 +1008,9 @@ def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch, autho
     assert latest_evidence["producer_version"] == "hakodate_best_method_pipeline"
 
 
-def test_rerun_ocr_evidence_only_async_trigger_marks_job_awaiting_output(monkeypatch, authored_sheet_case) -> None:
+def test_rerun_ocr_evidence_only_completes_actual_explicit_job_identity(monkeypatch, authored_sheet_case) -> None:
     case = authored_sheet_case(quantity=3, produce=False)
-    prepare_rerun(case, cell_values="9")
+    case.prepare_provider(cell_values="9", job_id="explicit-owned-native-job")
     order = {"id": case.id}
 
     with case.execution():
@@ -1011,8 +1018,9 @@ def test_rerun_ocr_evidence_only_async_trigger_marks_job_awaiting_output(monkeyp
 
     assert error is None
     assert isinstance(rerun, dict)
-    job = order_service.get_ocr_job(f"OCR-{order['id']}")
+    job = order_service.get_ocr_job(case.job)
     assert isinstance(job, dict)
+    assert job["id"] == case.job == "explicit-owned-native-job"
     assert job["status"] == "done"
     metrics = job.get("metrics") or {}
     assert metrics.get("result_state") == "evidence_ready"

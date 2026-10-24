@@ -176,6 +176,8 @@ def test_real_geometry_producer_changes_for_actual_geometry_source_not_workflow_
 
 @pytest.mark.parametrize("axis", ["header", "row"])
 def test_real_axis_receipt_get_put_get_and_normalizer(geometry_roundtrip, monkeypatch, axis):
+    from tests.helpers.authored_row_axis import review_geometry, operator_input
+
     state, order, pdf, configured, _, _ = geometry_roundtrip
     normalizer = getattr(order_service, f"_normalize_operator_{axis}_axis_override")
     key = "corrected_xs" if axis == "header" else "corrected_ys"
@@ -186,7 +188,8 @@ def test_real_axis_receipt_get_put_get_and_normalizer(geometry_roundtrip, monkey
         stored = workflow._workflow_meta(state).get(f"{axis}_axis_override")
         saved = normalizer(stored, selected_pdf_receipt=pdf, configured_input=configured,
                            order_input_identity=source_receipt["order_input_identity"]) if stored is not None else None
-        return {"order_id": order_id, "status": "ok", "saved_override": saved}
+        return {"order_id": order_id, "status": "ok", "saved_override": saved,
+                **(review_geometry(source_receipt, start_input) if axis == "row" else {})}
 
     # Only heavy axis render/manifest adapter is doubled; GET/PUT receipt producers remain real.
     monkeypatch.setattr(order_service, f"build_hakodate_{axis}_axis_review", render_adapter)
@@ -195,22 +198,25 @@ def test_real_axis_receipt_get_put_get_and_normalizer(geometry_roundtrip, monkey
     before, error = read(order.id, document_id=pdf["document_id"])
     assert error is None
     receipt = deepcopy(before["source_receipt"])
-    saved, error = save(order.id, **{key: [0, 5, 10]}, coordinate_space={"mode": "template_canvas", "width": 10, "height": 10},
-                        source_receipt=receipt, expected_revision=receipt["workflow_revision"])
+    values = operator_input(before) if axis == "row" else {
+        key: [0, 5, 10], "coordinate_space": {"mode": "template_canvas", "width": 10, "height": 10},
+    }
+    saved, error = save(order.id, **values, source_receipt=receipt,
+                        expected_revision=receipt["workflow_revision"])
     assert error is None
     assert saved["order_id"] == order.id
     assert saved["revision"] > receipt["workflow_revision"]
     ocr_override = normalizer(workflow._workflow_meta(state)[f"{axis}_axis_override"],
                               selected_pdf_receipt=pdf, configured_input=configured,
                               order_input_identity=receipt["order_input_identity"])
-    assert ocr_override[key] == [0, 5, 10]
+    assert ocr_override[key] == values[key]
     assert ocr_override["source_receipt"] == receipt
     after, error = read(order.id, document_id=pdf["document_id"])
     assert error is None
     assert after["source_receipt"]["input_digest"] != receipt["input_digest"]
     assert after["source_receipt"]["geometry_source_digest"] == receipt["geometry_source_digest"]
     assert after["saved_override"]["source_receipt"] == receipt
-    assert after["saved_override"][key] == [0, 5, 10]
+    assert after["saved_override"][key] == values[key]
     assert state.revision == saved["revision"]
 
 

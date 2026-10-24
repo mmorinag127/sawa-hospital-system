@@ -2,12 +2,14 @@
 
 import ast
 import inspect
+from copy import deepcopy
 from datetime import date, datetime
 
 import pytest
 
 from src.services.fax_parser import parse_order_lines
 from src.services.ingest_policy import parse_date_string
+from tests.helpers.authored_sheet_case import authored_sheet_case  # noqa: F401
 
 
 WEEK = "2026-02@2026-02-15~2026-02-21"
@@ -177,13 +179,20 @@ def test_sheet_and_reparse_position_entries_reject_month_only_even_without_rows(
             lines=[], rows=[], parsed_output={}, received_at=LATE_RECEIPT, template=_source_template())
 
 
-def test_reparse_position_entries_reject_outside_date_before_menu_resolution():
+def test_reparse_position_entries_use_explicit_physical_menu_not_an_unowned_outside_date(authored_sheet_case):
     from src.services import order_service
 
-    with pytest.raises(ValueError, match="ingest_date_outside_selected_period"):
-        order_service._build_reparse_position_menu_entries(week_id=WEEK, lines=[], rows=[],
-            parsed_output={"table_rows": [["2027/02/20", "昼", "Menu A", "2"]]},
+    case = authored_sheet_case(quantity=2, menu_date=date(2026, 2, 20), period=WEEK,
+                               include_remarks=False)
+    payload = {"table_rows": [["2027/02/20", "昼", "Menu A", "2"]]}
+    original = deepcopy(payload)
+    with case.readonly():
+        entries = order_service._build_reparse_position_menu_entries(week_id=WEEK,
+            facility_id=case.facility, lines=[], rows=[], parsed_output=payload,
             received_at=LATE_RECEIPT, template=_source_template())
+    assert [(entry["menu_date"], entry["daypart_key"], entry["menu_name"]) for entry in entries] == [
+        (date(2026, 2, 20), "朝", "Menu A")]
+    assert payload == original
 
 
 def test_order_sheet_and_reparse_callers_explicitly_thread_period():
@@ -199,6 +208,14 @@ def test_order_sheet_and_reparse_callers_explicitly_thread_period():
         "_build_position_menu_entries_from_structured_tables"}
     for function in functions:
         tree = ast.parse(inspect.getsource(function))
+        if function is order_service._build_reparse_position_menu_entries:
+            calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == "_build_position_menu_entries_safe"]
+            assert len(calls) == 1
+            assert [arg.id for arg in calls[0].args if isinstance(arg, ast.Name)] == ["week_id", "facility_id"]
+            assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                       and node.func.id == "require_explicit_ingest_week" for node in ast.walk(tree))
+            continue
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name) and node.func.id in targets]
         assert calls, function.__name__

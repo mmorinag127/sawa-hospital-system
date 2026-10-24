@@ -81,7 +81,7 @@ def stored_records(isolated_formal_schema, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("case,status,detail", [
     ("current", 400, ERROR),
-    ("stale", 400, ERROR),
+    ("stale", 409, {"error": "workflow_revision_conflict"}),
     ("missing-revision", 428, {"error": "workflow_revision_required"}),
     ("missing-order", 404, "order_not_found"),
     ("unauthenticated", 401, "Unauthorized"),
@@ -116,7 +116,12 @@ def test_disabled_columns_http_preserves_all_stored_state(stored_records, monkey
         else:
             actor.verifier.assert_not_called()
         assert response.status_code == status
-        assert response.json() == {"detail": detail}
+        if case == "stale":
+            current, error = order_workflow_v2_service.get_workflow_readonly(order_id)
+            assert error is None
+            assert response.json() == {"detail": {**detail, "workflow": current}}
+        else:
+            assert response.json() == {"detail": detail}
         if case in {"missing-revision", "unauthenticated"}:
             save.assert_not_called()
         else:

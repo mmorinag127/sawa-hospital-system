@@ -11,7 +11,7 @@ class User(Base):
     role = Column(String, nullable=False)
     account = Column(String, nullable=False)
     status = Column(String, default="active", nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
 
 
 class AuditLog(Base):
@@ -24,7 +24,7 @@ class AuditLog(Base):
     fac = Column(String, nullable=True)
     wek = Column(String, nullable=True)
     metadata_json = Column("metadata", JSON, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
 
 
 class Notification(Base):

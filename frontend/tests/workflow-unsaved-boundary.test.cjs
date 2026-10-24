@@ -235,6 +235,35 @@ test('existing NavigationBoundary back/forward cancel restores exact owned histo
   } finally { await f.h.close(); }
 });
 
+for (const order of ['next-first', 'capture-first']) test(`owned pop cancellation is consumed once with ${order} listeners`, async () => {
+  const f = await setup();
+  try {
+    await pendingCell(f);
+    const count = confirmation(f, false), before = snapshot(f);
+    const history = window.history, initial = clone(history.state);
+    history.pushState({ __N: true, as: ROOT + '?view=3' }, '', ROOT + '?view=3');
+    const current = clone(history.state), goes = [], go = history.go;
+    const replace = Object.getPrototypeOf(history).replaceState;
+    history.go = delta => goes.push(delta);
+    const dispatch = (state, url) => f.h.settle(() => {
+      replace.call(history, state, '', url);
+      const event = new window.PopStateEvent('popstate', { state: history.state });
+      if (order === 'next-first') assert.equal(f.pop(event.state), false);
+      window.dispatchEvent(event);
+      if (order === 'capture-first') assert.equal(f.pop(event.state), false);
+    });
+    try {
+      for (let index = 0; index < 2; index++) {
+        await dispatch({ ...initial, as: '/orders' }, ROOT);
+        assert.equal(count(), index + 1);
+        assert.deepEqual(goes, Array(index + 1).fill(1));
+        await dispatch(current, ROOT + '?view=3');
+        assert.deepEqual(snapshot(f), before);
+      }
+    } finally { history.go = go; }
+  } finally { await f.h.close(); }
+});
+
 test('normal own save clears live guard only after successful revision adoption and preserves explicit zero', async () => {
   const f = await setup();
   try {

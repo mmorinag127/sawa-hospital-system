@@ -1283,6 +1283,17 @@ def validated_body_row_plan(ws: Worksheet, *, allow_static: bool = False) -> lis
     return plan
 
 
+def validated_body_week_value(ws: Worksheet) -> str:
+    validated_body_row_plan(ws)
+    schema = dict((row[0], row[1]) for row in ws.parent["generated_template_schema"].iter_rows(values_only=True)
+                  if len(row) >= 2 and isinstance(row[0], str))
+    value = schema["week_value"]
+    _, start, end = sheet_week_service.parse_sheet_week_value(value)
+    if start is None or end is None:
+        raise FacilityTemplateBuildError("generated_body_week_invalid")
+    return value
+
+
 def validated_body_end_row(ws: Worksheet, *, allow_static: bool = False) -> int:
     plan = validated_body_row_plan(ws, allow_static=allow_static)
     return plan[-1]["worksheet_row"] if plan is not None else BODY_END_ROW

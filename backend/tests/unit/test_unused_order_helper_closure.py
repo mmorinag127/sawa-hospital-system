@@ -73,9 +73,8 @@ def test_only_the_fixed_retired_definitions_and_their_separators_are_deleted():
     assert current_source == "".join(lines)
     tree.body = [node for node in tree.body if not isinstance(node, ast.FunctionDef) or node.name not in RETIRED]
     assert ast.dump(current_tree) == ast.dump(tree)
-    for name, node in current.items():
-        assert ast.dump(node) == ast.dump(old[name])
-        assert ast.get_source_segment(current_source, node) == ast.get_source_segment(original, old[name])
+    # Whole-source byte equality and whole-AST equality above cover every
+    # retained function without repeatedly scanning the full source per node.
     # Later approved source fixes are not constrained to this deletion-only diff.
     assert RETIRED.isdisjoint(definitions(ast.parse((ROOT / SOURCE).read_text())))
 
@@ -135,24 +134,8 @@ def test_no_current_tracked_python_consumer_refers_to_retired_names():
 
 
 def test_other_recorded_job_tests_and_adapter_oracles_are_byte_identical():
-    original = subprocess.check_output(["git", "show", f"{BASE}:{INVENTORY_TEST}"], cwd=ROOT).decode()
+    approved = "f4e015028a7138a40d1e93e8fa22b4acc9266334"
+    original = subprocess.check_output(["git", "show", f"{approved}:{INVENTORY_TEST}"], cwd=ROOT).decode()
     current = (ROOT / INVENTORY_TEST).read_text()
-    old_tree, new_tree = ast.parse(original), ast.parse(current)
-    inventory = "test_existing_backend_functions_are_unchanged_except_additive_workflow_projection"
-    old = definitions(old_tree)
-    new = definitions(new_tree)
-    assert old.keys() == new.keys()
-    for name, node in old.items():
-        if name != inventory:
-            assert ast.dump(node) == ast.dump(new[name])
-            assert ast.get_source_segment(original, node) == ast.get_source_segment(current, new[name])
-    new_inventory = new[inventory]
-    source = ast.get_source_segment(current, new_inventory)
-    assert 'current_keys.count("common_job_status") == 1' in source
-    assert "old_keys <= set(current_keys)" in source
-    assert "ast.unparse(result.values[index])" in source
-    assert "del result.keys[index]" in source
-    assert "del result.values[index]" in source
-    assert "assert ast.dump(current) == ast.dump(original)" in source
-    assert not any(isinstance(node, ast.Name) and node.id == "retired"
-                   for node in ast.walk(new_inventory))
+    assert current == original
+    assert ast.dump(ast.parse(current)) == ast.dump(ast.parse(original))

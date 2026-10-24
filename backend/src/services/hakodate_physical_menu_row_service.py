@@ -7,17 +7,23 @@ from typing import Any
 from src.services import sheet_week_service
 
 
+def full_week_fax_period(target_start: date, target_end: date) -> tuple[date, date]:
+    """The FAX covers Sunday-Saturday; the order may cover only its target month."""
+    _, first, last = sheet_week_service.parse_sheet_week_value(
+        sheet_week_service.build_calendar_week_value(target_start),
+    )
+    if first is None or last is None or target_end < target_start or target_end > last:
+        raise ValueError("fax_calendar_week_unresolved")
+    return first, last
+
+
 def resolve_partial_calendar_day_boundaries(
     physical_plan: list[dict[str, Any]], printed_boundaries: list[int],
     observed_boundaries: list[int], observed_count: int,
 ) -> list[int]:
     """Resolve seven physical days while constraining only the authored target days."""
     dates = [date.fromisoformat(row["date"]) for row in physical_plan]
-    _, first, last = sheet_week_service.parse_sheet_week_value(
-        sheet_week_service.build_calendar_week_value(dates[0]),
-    )
-    if first is None or last is None or dates[-1] > last:
-        raise ValueError("fax_calendar_week_unresolved")
+    first, _ = full_week_fax_period(dates[0], dates[-1])
     counts = Counter(dates)
     target_dates = [dates[0] + timedelta(days=i) for i in range((dates[-1] - dates[0]).days + 1)]
     if list(counts) != target_dates:
@@ -79,11 +85,7 @@ def resolve_fax_menu_row_indexes(sheet: dict[str, Any], row_match: dict[str, Any
     expected_dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     if list(dict.fromkeys(dates)) != expected_dates:
         raise ValueError("physical_menu_days_disagree_with_order_period")
-    _, calendar_start, calendar_end = sheet_week_service.parse_sheet_week_value(
-        sheet_week_service.build_calendar_week_value(start)
-    )
-    if calendar_start is None or calendar_end is None or end > calendar_end:
-        raise ValueError("fax_calendar_week_unresolved")
+    calendar_start, calendar_end = full_week_fax_period(start, end)
     structural = row_match.get("structural_match")
     if not isinstance(structural, dict):
         raise ValueError("fax_day_boundaries_disagree_with_monthly_menu")

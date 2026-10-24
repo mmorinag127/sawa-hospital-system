@@ -7,7 +7,10 @@ const contextKeys = {
 } as const;
 
 async function fulfillDailyContext(route: Route, response: { status: number; json: any }) {
-  const section = new URL(route.request().url()).searchParams.get("section");
+  const url = new URL(route.request().url());
+  const section = url.searchParams.get("section");
+  const date = url.searchParams.get("date");
+  expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   expect(section).toMatch(/^(primary|bags|totals)$/);
   const keys = contextKeys[section as keyof typeof contextKeys];
   const sections = response.json.sections ?? {
@@ -17,7 +20,8 @@ async function fulfillDailyContext(route: Route, response: { status: number; jso
   };
   await route.fulfill({
     status: response.status,
-    json: { sections: Object.fromEntries(keys.map((key) => [key, sections[key]])) },
+    json: { date, status: url.searchParams.get("status"), facility: null,
+      sections: Object.fromEntries(keys.map((key) => [key, sections[key]])) },
   });
 }
 
@@ -36,7 +40,7 @@ for (const bagOutcome of ["success", "failure"] as const) {
       if (url.pathname.endsWith("/auth/me")) {
         await route.fulfill({ status: 200, json: { role: "admin" } });
       } else if (url.pathname.endsWith("/facilities")) {
-        await route.fulfill({ status: 200, json: { facilities: [{ id: "FAC-001", name: "施設A" }] } });
+        await route.fulfill({ status: 200, json: { source: "canonical_json", revision: "daily-facilities-1", facilities: [{ id: "FAC-001", name: "施設A" }] } });
       } else if (url.pathname.endsWith("/orders/daily-output-context")) {
         const section = url.searchParams.get("section")!;
         requests.push(section);
@@ -63,15 +67,16 @@ for (const bagOutcome of ["success", "failure"] as const) {
     });
     try {
       await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
-      await page.getByRole("button", { name: "取得", exact: true }).click();
+      await page.getByLabel("日付", { exact: true }).fill("2026-03-24");
+      await page.getByRole("button", { name: "表示・集計", exact: true }).click();
       await expect(page.getByText("12食", { exact: true })).toBeVisible();
       await expect(page.locator('a[href="/orders/ORD-PARTIAL-001"]')).toBeVisible();
-      await expect(page.getByRole("button", { name: "取得中...", exact: true })).toBeDisabled();
-      await expect(page.getByLabel("日付", { exact: true })).toBeDisabled();
-      await expect(page.getByLabel("ステータス", { exact: true })).toBeDisabled();
+      await expect(page.getByRole("button", { name: "集計中...", exact: true })).toBeDisabled();
+      await expect(page.getByLabel("日付", { exact: true })).toBeEnabled();
+      await expect(page.getByLabel("ステータス", { exact: true })).toBeEnabled();
       expect(requests.slice().sort()).toEqual(["bags", "primary", "totals"]);
       releaseBags();
-      await expect(page.getByRole("button", { name: "取得", exact: true })).toBeEnabled();
+      await expect(page.getByRole("button", { name: "表示・集計", exact: true })).toBeEnabled();
       await expect(page.getByLabel("日付", { exact: true })).toBeEnabled();
       await expect(page.getByLabel("ステータス", { exact: true })).toBeEnabled();
       await expect(page.getByText("12食", { exact: true })).toBeVisible();
@@ -106,7 +111,7 @@ test("daily delivery notes shows meal counts by daypart and warns about unconfir
     if (path.endsWith("/facilities")) {
       await route.fulfill({
         status: 200,
-        json: { facilities: [{ id: "FAC-001", name: "施設A" }, { id: "FAC-002", name: "施設B" }] },
+        json: { source: "canonical_json", revision: "daily-facilities-1", facilities: [{ id: "FAC-001", name: "施設A" }, { id: "FAC-002", name: "施設B" }] },
       });
       return;
     }
@@ -148,7 +153,8 @@ test("daily delivery notes shows meal counts by daypart and warns about unconfir
   });
 
   await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
-  await page.getByRole("button", { name: "取得" }).click();
+  await page.getByLabel("日付", { exact: true }).fill("2026-09-01");
+  await page.getByRole("button", { name: "表示・集計", exact: true }).click();
 
   const summary = page.getByRole("heading", { name: "当日食数集計" }).locator("..").locator("..");
   await expect(summary.getByRole("heading", { name: "朝食" })).toBeVisible();
@@ -184,6 +190,7 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
       await route.fulfill({
         status: 200,
         json: {
+          source: "canonical_json", revision: "daily-facilities-1",
           facilities: [{ id: "FAC-001", name: "施設A" }],
         },
       });
@@ -292,9 +299,10 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
   });
 
   await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
+  await page.getByLabel("日付", { exact: true }).fill("2026-03-24");
 
   await expect(page.getByRole("heading", { name: "日別出力" })).toBeVisible();
-  await page.getByRole("button", { name: "取得" }).click();
+  await page.getByRole("button", { name: "表示・集計", exact: true }).click();
 
   const bagTable = page.locator(".menu-bag-table").first();
   await expect(page.getByRole("heading", { name: "当日袋分け一覧" })).toBeVisible();
@@ -346,6 +354,7 @@ for (const mutation of ["save", "remove"] as const) {
       await route.fulfill({
         status: 200,
         json: {
+          source: "canonical_json", revision: "daily-facilities-1",
           facilities: [{ id: "FAC-001", name: "施設A" }],
         },
       });
@@ -581,11 +590,13 @@ for (const mutation of ["save", "remove"] as const) {
 
   try {
     await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
-    await page.getByRole("button", { name: "取得", exact: true }).click();
+    await page.getByLabel("日付", { exact: true }).fill("2026-03-24");
+    await page.getByRole("button", { name: "表示・集計", exact: true }).click();
     await page.getByRole("button", { name: "施設別単位設定" }).click();
     await page.getByLabel("施設を選ぶ").selectOption("FAC-001");
+    await page.getByLabel("区分を選ぶ").selectOption("regular");
     const facilityEditor = page.locator(".override-editor-shell .override-editor-card").nth(1);
-    await expect(page.getByRole("button", { name: "取得中...", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "集計中...", exact: true })).toBeDisabled();
     if (mutation === "save") {
       await facilityEditor.locator("input[type='number']").fill("2");
       await facilityEditor.locator("select").last().selectOption("切");
@@ -600,10 +611,10 @@ for (const mutation of ["save", "remove"] as const) {
       response.url().includes("daily-output-context") && response.status() === 500);
     releaseOldTotals();
     await oldResponse;
-    await expect(page.getByRole("button", { name: "取得中...", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "集計中...", exact: true })).toBeDisabled();
     await expect(page.getByText("取得に失敗しました: stale totals failure", { exact: true })).toHaveCount(0);
     releaseNewTotals();
-    await expect(page.getByRole("button", { name: "取得", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "表示・集計", exact: true })).toBeEnabled();
     await expect(page.locator(".menu-bag-table").getByRole("cell", { name: basis, exact: true })).toBeVisible();
     await expect(page.getByText(mutation === "save" ? "施設別単位設定を保存しました。" : "施設別単位設定を解除しました。")).toBeVisible();
     expect(requestCounts).toEqual({ primary: 2, bags: 2, totals: 2 });
@@ -637,7 +648,7 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
     if (path.endsWith("/facilities") && method === "GET") {
       await route.fulfill({
         status: 200,
-        json: { facilities: [{ id: "FAC-001", name: "施設A" }, { id: "FAC-002", name: "施設B" }] },
+        json: { source: "canonical_json", revision: "daily-facilities-1", facilities: [{ id: "FAC-001", name: "施設A" }, { id: "FAC-002", name: "施設B" }] },
       });
       return;
     }
@@ -765,7 +776,8 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
   });
 
   await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
-  await page.getByRole("button", { name: "取得" }).click();
+  await page.getByLabel("日付", { exact: true }).fill("2026-03-24");
+  await page.getByRole("button", { name: "表示・集計", exact: true }).click();
   await page.getByRole("button", { name: "施設別単位設定" }).click();
   const bulkEditor = page.locator(".override-bulk-card");
   await bulkEditor.locator("input[type='number']").fill("3");
@@ -774,6 +786,8 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
   await page.getByRole("button", { name: "全施設に保存" }).click();
 
   await expect(page.getByText("全施設の単位設定を保存しました。")).toBeVisible();
+  await page.getByRole("dialog").getByLabel("施設を選ぶ").selectOption("FAC-001");
+  await page.getByRole("dialog").getByLabel("区分を選ぶ").selectOption("regular");
   await expect(page.getByRole("dialog").getByText("3個/人")).toBeVisible();
 });
 
@@ -796,7 +810,7 @@ test("daily delivery notes shows blocker text when bag data truly does not exist
     }
 
     if (path.endsWith("/facilities") && method === "GET") {
-      await route.fulfill({ status: 200, json: { facilities: [{ id: "FAC-001", name: "施設A" }] } });
+      await route.fulfill({ status: 200, json: { source: "canonical_json", revision: "daily-facilities-1", facilities: [{ id: "FAC-001", name: "施設A" }] } });
       return;
     }
 
@@ -824,7 +838,8 @@ test("daily delivery notes shows blocker text when bag data truly does not exist
   });
 
   await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
-  await page.getByRole("button", { name: "取得" }).click();
+  await page.getByLabel("日付", { exact: true }).fill("2026-03-24");
+  await page.getByRole("button", { name: "表示・集計", exact: true }).click();
 
   await expect(page.getByRole("heading", { name: "当日袋分け一覧" })).toBeVisible();
   await expect(page.getByText("袋分け結果がまだ生成されていません。")).toBeVisible();
@@ -850,7 +865,7 @@ test("daily delivery notes bundle download survives responses longer than the ol
     }
 
     if (path.endsWith("/facilities") && method === "GET") {
-      await route.fulfill({ status: 200, json: { facilities: [] } });
+      await route.fulfill({ status: 200, json: { source: "canonical_json", revision: "daily-facilities-1", facilities: [] } });
       return;
     }
 
@@ -870,12 +885,14 @@ test("daily delivery notes bundle download survives responses longer than the ol
     }
 
     if (path.endsWith("/outputs/daily-bundle") && method === "GET") {
+      expect(url.searchParams.get("bundle_type")).toBe("labels");
+      expect(url.searchParams.get("date")).toBe("2026-03-24");
       await new Promise((resolve) => setTimeout(resolve, 31000));
       await route.fulfill({
         status: 200,
         headers: {
           "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          "content-disposition": "attachment; filename=\"daily_outputs_2026-03-24_delivery.xlsx\"",
+          "content-disposition": "attachment; filename=\"daily_outputs_2026-03-24_labels.xlsx\"",
           "x-daily-bundle-success-orders": "1",
           "x-daily-bundle-empty-orders": "0",
           "x-daily-bundle-error-orders": "0",
@@ -889,8 +906,9 @@ test("daily delivery notes bundle download survives responses longer than the ol
   });
 
   await page.goto(`${baseUrl}/hospital/daily-delivery-notes`);
-  await page.getByRole("button", { name: "取得" }).click();
-  await page.getByRole("button", { name: "当日納品書Excel" }).click();
+  await page.getByLabel("日付", { exact: true }).fill("2026-03-24");
+  await page.getByRole("button", { name: "表示・集計", exact: true }).click();
+  await page.getByRole("button", { name: "当日ラベルExcel", exact: true }).click();
 
-  await expect(page.getByText("当日納品書Excelをダウンロードしました。成功 1件 / 失敗 0件")).toBeVisible({ timeout: 40000 });
+  await expect(page.getByText("当日ラベルExcelをダウンロードしました。成功 1件 / 失敗 0件")).toBeVisible({ timeout: 40000 });
 });

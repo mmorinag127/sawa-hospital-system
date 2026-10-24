@@ -29,6 +29,8 @@ from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_sheet_patch_candidate import OrderSheetPatchCandidate
+from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import workflow_ocr_delivery_service
 from src.services.ocr_history_read import read_history, read_history_detail, read_history_summary
@@ -517,7 +519,7 @@ def _normalize_context_suggestion(suggestion: dict[str, Any] | None) -> dict[str
             if str(item).strip()
         ][:20],
         "confidence": _normalize_id(suggestion.get("confidence")) or ("medium" if facility_id or week_code else None),
-        "created_at": _normalize_id(suggestion.get("created_at")) or _now().isoformat(),
+        "created_at": _normalize_id(suggestion.get("created_at")) or None,
     }
     if not normalized["facility_id"] and not normalized["week_code"] and not normalized["facility_candidates"]:
         return None
@@ -1082,6 +1084,7 @@ def _serialize_workflow(
         "output_bundle_id": meta.get("output_bundle_id"),
         "pre_save_checks": _workflow_pre_save_checks(meta),
         "ocr_job": _serialize_ocr_job(ocr_job, session=session),
+        "ocr_job_binding_error": None,
         "common_job_status": _recorded_workflow_job_status(row, meta, ocr_job),
         "blockers": list(row.blockers_json or []),
         "warnings": list(row.warnings_json or []),
@@ -1422,7 +1425,14 @@ def _serialize_workflow_checked(
         meta=meta,
         session=session,
     )
+    job_binding = ocr_job_service.get_recorded_order_job_bindings(
+        [order.id], read_session=session,
+    ).get(order.id) or {}
+    ocr_job = session.get(OcrJob, job_binding["job_id"]) if job_binding.get("job") is not None else None
     serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta, session=session)
+    if job_binding.get("error"):
+        serialized["ocr_job_binding_error"] = job_binding["error"]
+        serialized["common_job_status"] = None
     canonical_state = _canonical_workflow_v2_state(workflow, meta)
     lineage_error = _workflow_lineage_error(session, order=order, workflow=workflow, meta_override=meta, _analysis=_analysis)
     if lineage_error:
@@ -1618,6 +1628,7 @@ def _serialize_uninitialized_workflow(order: Order) -> dict[str, Any]:
         "bagging_result_id": None,
         "output_bundle_id": None,
         "ocr_job": None,
+        "ocr_job_binding_error": None,
         "blockers": ["workflow_not_initialized"],
         "warnings": [],
         "updated_at": None,
@@ -1769,9 +1780,12 @@ def get_ocr_progress(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
                 "state": "not_initialized",
                 "ocr_job": None,
             }, None
-        meta = _workflow_meta(workflow)
-        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
-        job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        binding = ocr_job_service.get_recorded_order_job_bindings(
+            [order.id], read_session=session,
+        ).get(order.id) or {}
+        if binding.get("error"):
+            return None, binding["error"]
+        job = session.get(OcrJob, binding["job_id"]) if binding.get("job") is not None else None
         serialized = _serialize_workflow(workflow, ocr_job=job, session=session)
         if job is not None and serialized["common_job_status"] is None:
             return None, "ocr_job_ownership_mismatch"
@@ -2530,7 +2544,7 @@ def confirm_context(
 
         row = existing_workflow or _get_or_create_workflow(session, order.id)
         if existing_workflow is not None and _workflow_has_downstream_lineage(existing_workflow):
-            _delete_all_ocr_and_downstream_after_template_change(session, order.id)
+            _invalidate_ocr_selection_after_template_change(session, order.id)
         revision_error = _apply_context_selection(session, order, row, template_version,
             normalized_facility_id, normalized_week_start, normalized_week_end)
         if revision_error:
@@ -2652,6 +2666,12 @@ def mark_ocr_run_queued(
                 reservation_metrics["selected_pdf_receipt"] = capture_selected_pdf_receipt(session, order, selected_input, input_reference)
             except ValueError as exc:
                 return finalize_queue_blocker(str(exc))
+            captured_document_id = reservation_metrics["selected_pdf_receipt"]["document_id"]
+            if any(value is not None and value != captured_document_id for value in (
+                reservation_metrics.get("selected_document_id"), delivery_selected_document_id,
+            )):
+                return finalize_queue_blocker("selected_document_input_changed")
+            reservation_metrics["selected_document_id"] = captured_document_id
             reservation_metrics["job_id"] = normalized_job_id
             if request_mode not in {"ocr_reparse", "llm_reparse", "ocr_rerun"}:
                 raise ValueError("workflow_ocr_delivery_request_mode_unknown")
@@ -3161,20 +3181,9 @@ def _delete_downstream_after_ocr_change(session: Any, order_id: str, *, preserve
         session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
 
-def _delete_all_ocr_and_downstream_after_template_change(session: Any, order_id: str) -> int:
-    workflow = session.get(OrderWorkflowState, order_id)
-    if workflow is not None:
-        workflow.evidence_run_id = None
-        workflow.draft_id = None
-        workflow.confirmed_snapshot_id = None
-    _delete_downstream_after_ocr_change(session, order_id)
-    session.flush()
-    deleted = (
-        session.query(OrderOcrEvidenceRun)
-        .filter(OrderOcrEvidenceRun.order_id == order_id)
-        .delete(synchronize_session=False)
-    )
-    return int(deleted or 0)
+def _invalidate_ocr_selection_after_template_change(session: Any, order_id: str) -> None:
+    _delete_materialized_downstream_rows_for_order(session, order_id)
+    _clear_downstream_references_before_delete(session, order_id, clear_evidence=True)
 
 
 @workflow_command
@@ -3273,8 +3282,8 @@ def select_ocr_result(
             required_template_version_id=workflow_template_version_id,
         )
         if template_error:
-            revision_error = _finalize_workflow_blocker(session, workflow, template_error)
-            return _serialize_workflow(workflow), revision_error or template_error
+            # Refusing a candidate must not invalidate the current selection.
+            return _serialize_workflow(workflow), template_error
         from src.services.recognition_acceptance_service import KEY
         if KEY in (ocr_result.artifact_manifest_json or {}):
             if (meta.get("latest_ocr_result_id") != ocr_result.id
@@ -3372,12 +3381,18 @@ def delete_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         ocr_result = session.get(OrderOcrEvidenceRun, normalized_ocr_result_id)
         if ocr_result is None or ocr_result.order_id != order.id:
             return None, "ocr_result_not_found"
-        workflow = _get_or_create_workflow(session, order.id)
-        if workflow.evidence_run_id != normalized_ocr_result_id and session.query(OrderSheetDraft.id).filter(
-            OrderSheetDraft.order_id == order.id,
-            OrderSheetDraft.base_evidence_run_id == normalized_ocr_result_id,
-        ).first() is not None:
+        has_history = session.query(or_(*(
+            session.query(model.id).filter(source == normalized_ocr_result_id).exists()
+            for model, source in (
+                (OrderSheetDraft, OrderSheetDraft.base_evidence_run_id),
+                (OrderSheetPatchCandidate, OrderSheetPatchCandidate.base_evidence_run_id),
+                (OrderBaggingResult, OrderBaggingResult.source_ocr_result_id),
+                (OrderOutputBundle, OrderOutputBundle.source_ocr_result_id),
+            )
+        ))).scalar()
+        if has_history:
             return None, "ocr_result_saved_history_conflict"
+        workflow = _get_or_create_workflow(session, order.id)
         if workflow.evidence_run_id == normalized_ocr_result_id:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None

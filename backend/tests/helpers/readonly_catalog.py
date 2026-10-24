@@ -14,4 +14,7 @@ def readonly_catalog_statements(engine):
             functions = ("table_info", "table_xinfo", "foreign_key_list", "index_list") if kind == "table" else (
                 "index_info", "index_xinfo")
             allowed.update(f"PRAGMA main.{function}({quoted})" for function in functions)
+            if kind == "table":
+                # SQLAlchemy probes temp when a main table has no foreign keys.
+                allowed.add(f"PRAGMA temp.foreign_key_list({quoted})")
     return allowed

@@ -182,9 +182,18 @@ def test_refresh_publication_refuses_real_input_change(publication_case, monkeyp
 
     if boundary == "after_workflow_commit":
         original = order_service.get_current_sheet_context
+        project = workflow_state_service._build_locked_workflow_state_projection
+        projected = []
+
+        def record_projection(*args, **kwargs):
+            result = project(*args, **kwargs)
+            projected.append(True)
+            return result
+
+        monkeypatch.setattr(workflow_state_service, "_build_locked_workflow_state_projection", record_projection)
 
         def race(*args, **kwargs):
-            if case.revision() > original_revision and not calls:
+            if projected and not calls:
                 change_lines_timestamp()
             return original(*args, **kwargs)
 
@@ -200,7 +209,7 @@ def test_refresh_publication_refuses_real_input_change(publication_case, monkeyp
     with pytest.raises(guard.CurrentSheetInputChanged, match="^current_sheet_input_changed$"):
         workflow_state_service.refresh_workflow_state(case.id)
     assert len(calls) == 1
-    assert calls[0] > original_revision
+    assert calls[0] == original_revision
     assert order_current_state_service.get_current_state(case.id) == physical_before
     with case.readonly():
         assert order_current_state_service.get_current_state_payload(case.id) is None

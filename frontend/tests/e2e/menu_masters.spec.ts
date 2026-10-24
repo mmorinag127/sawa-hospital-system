@@ -18,6 +18,7 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     items: [record("MNU001", "白身魚のフライ"), record("MNU002", "日本語の白飯")],
     requests: [] as { method: string; path: string; query: string; body: any; bearer: string }[],
     unexpected: [] as string[], errors: [] as string[], console: [] as string[], blocked: [] as string[],
+    cancelledSessionReads: [] as string[],
     putStatus: 200, getStatus: 200, listStatus: 200, postStatus: 200,
     putGate: undefined as ReturnType<typeof gate> | undefined,
     postGate: undefined as ReturnType<typeof gate> | undefined,
@@ -26,6 +27,20 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
   page.on("pageerror", e => state.errors.push(e.message));
   page.on("console", m => { if (["error", "warning"].includes(m.type())) state.console.push(m.text()); });
   await page.addInitScript(() => {
+    (window as any).menuPopEvents = 0;
+    (window as any).menuPopTrace = [];
+    const go = history.go.bind(history);
+    history.go = function (delta) {
+      (window as any).menuPopTrace.push({ type: "go", delta, state: history.state, url: location.href });
+      return go(delta);
+    };
+    window.addEventListener("popstate", event => {
+      const captured = { type: "pop", state: event.state, history: history.state, url: location.href };
+      queueMicrotask(() => {
+        (window as any).menuPopEvents++;
+        (window as any).menuPopTrace.push({ ...captured, after: history.state, afterURL: location.href });
+      });
+    }, true);
     const replace = history.replaceState;
     (window as any).removeOwnedMenuPosition = () => {
       const { sawa_navigation, ...unchangedNextState } = history.state;
@@ -52,7 +67,12 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
   page.on("request", request => { if (new URL(request.url()).origin === origin) pending.add(request); });
   page.on("requestfinished", request => { if (pending.delete(request)) finished++; });
   page.on("requestfailed", request => {
-    if (pending.delete(request)) failures.push(`${request.url()}: ${request.failure()?.errorText}`);
+    if (!pending.delete(request)) return;
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && request.failure()?.errorText === "net::ERR_ABORTED"
+      && ["/api/staging-datasets", "/api/portal/auth/me"].includes(path)) {
+      state.cancelledSessionReads.push(path);
+    } else failures.push(`${request.url()}: ${request.failure()?.errorText}`);
   });
   await page.route("**/*", async route => {
     const req = route.request(), url = new URL(req.url());
@@ -62,10 +82,22 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     const body = req.postData() ? req.postDataJSON() : null, bearer = req.headers().authorization || "";
     state.requests.push({ method, path, query: url.search, body, bearer });
     const respond = (status: number, json: any) => route.fulfill({ status, json });
+    if (path === "/portal/auth/start") {
+      expect(method).toBe("GET");
+      expect(url.searchParams.get("next")).toMatch(/^\//);
+      expect(bearer).toBe("");
+      return respond(503, { detail: "Synthetic Google configuration unavailable" });
+    }
     if (path === "/auth/config") return respond(200, { google_client_id: "" });
+    if (path === "/portal/auth/logout") {
+      expect(method).toBe("POST");
+      expect(body).toBeNull();
+      return respond(200, { logged_out: true });
+    }
     if (!/^Bearer menu-test-[AB]$/.test(bearer)) return respond(401, { detail: "Synthetic Bearer required" });
     if (path === "/auth/me") return respond(200, { role: "admin", auth_disabled: false });
     if (path === "/portal/auth/me") return respond(200, { role: "admin", systems: ["hospital"], auth_disabled: false });
+    if (path === "/staging-datasets" && method === "GET") return respond(200, { enabled: false });
     if (path === "/menu-rules") return respond(200, { items: [] });
     if (path === "/menu-masters" && method === "GET") {
       if (state.listStatus !== 200) return respond(state.listStatus, { detail: "synthetic list failure" });
@@ -98,6 +130,7 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     await page.waitForLoadState("networkidle");
     expect([...pending].map(request => request.url())).toEqual([]);
     expect(failures).toEqual([]);
+    if (state.cancelledSessionReads.length) expect(new URL(page.url()).pathname).toMatch(/^\/(login|about)$/);
     return finished;
   } });
 }
@@ -107,7 +140,10 @@ async function finish(page: Page, info: TestInfo, state: Awaited<ReturnType<type
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
   expect(state.console.filter(s => /hydration|did not match|Minified React error|Failed prop type|out of range/i.test(s))).toEqual([]);
-  expect(state.requests.filter(r => r.path !== "/auth/config").every(r => /^Bearer menu-test-[AB]$/.test(r.bearer))).toBe(true);
+  const sessionEndpoints = new Set(["/auth/config", "/portal/auth/start", "/portal/auth/me", "/portal/auth/logout", "/staging-datasets"]);
+  expect(state.requests.filter(r => !sessionEndpoints.has(r.path)).every(r => /^Bearer menu-test-[AB]$/.test(r.bearer))).toBe(true);
+  expect(state.requests.filter(r => sessionEndpoints.has(r.path)).every(r => r.bearer === "" || /^Bearer menu-test-[AB]$/.test(r.bearer))).toBe(true);
+  expect(state.requests.filter(r => r.path === "/staging-datasets").every(r => r.method === "GET")).toBe(true);
 }
 async function open(page: Page, path = "/hospital/menu-masters") {
   const response = await page.goto(path);
@@ -133,6 +169,21 @@ async function search(page: Page, value: string) {
 }
 async function position(page: Page) { return page.evaluate(() => ({ url: location.href, position: history.state.sawa_navigation, nextStatePresent: !!history.state.__N })); }
 async function historyGo(page: Page, delta: number) { await page.evaluate(n => history.go(n), delta); }
+async function cancelOwnedHistory(page: Page, delta: number) {
+  const before = await page.evaluate(() => (window as any).menuPopEvents);
+  const dialog = page.waitForEvent("dialog");
+  await historyGo(page, delta);
+  await (await dialog).dismiss();
+  await expect.poll(() => page.evaluate(() => (window as any).menuPopEvents)).toBe(before + 2);
+}
+
+test.afterEach(async ({ page }, info) => {
+  if (info.status === info.expectedStatus || page.isClosed()) return;
+  await info.attach("menu-navigation-event-trace", {
+    body: JSON.stringify(await page.evaluate(() => (window as any).menuPopTrace || [])),
+    contentType: "application/json",
+  });
+});
 
 for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
   test(`both entry, nine-field POST/PUT and fresh document saved values: ${path}`, async ({ page }, info) => {
@@ -159,7 +210,7 @@ for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
     await edit.getByRole("spinbutton", { name: "袋上限数量", exact: true }).fill("");
     await option(page, edit, "温冷", "温");
     await field(edit, "食事帯").fill("夕"); await field(edit, "分類").fill("魚"); await field(edit, "付属品").fill("ソース");
-    const update = { name: "白身魚の保存値", unit_type: "count", bag_max_unit: "cut", qty_per_serving: 2, bag_max_qty: null, temp_type: "hot", daypart: "夕", category: "魚", condiments: ["ソース"], revision: 1 };
+    const update = { name: "白身魚の保存値", unit_type: "count", bag_max_unit: "cut", qty_per_serving: 2, bag_max_qty: null, daypart: "夕", category: "魚", condiments: ["ソース"], revision: 1 };
     await save(edit); await saved(edit); expect(s.requests.find(r => r.method === "PUT")?.body).toEqual(update);
     const before = await page.evaluate(() => performance.timeOrigin);
     expect((await page.reload())?.status()).toBe(200);
@@ -175,7 +226,7 @@ for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
     await expect(field(editForm(page), "食事帯")).toHaveValue("夕");
     await expect(field(editForm(page), "分類")).toHaveValue("魚");
     await expect(field(editForm(page), "付属品")).toHaveValue("ソース");
-    expect(s.items[0]).toMatchObject({ ...update, revision: 2 });
+    expect(s.items[0]).toMatchObject({ ...update, temp_type: "hot", revision: 2 });
     const savedRow = page.getByRole("row").filter({ has: page.getByRole("cell", { name: update.name, exact: true }) });
     await expect(savedRow.getByRole("cell")).toHaveText([update.name, "個", "2", "—", "切れ", "温", "夕", "魚", "ソース", "編集"]);
     const createdRow = page.getByRole("row").filter({ has: page.getByRole("cell", { name: payload.name, exact: true }) });
@@ -199,6 +250,7 @@ for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
       expect(firstLabel!.y).toBeGreaterThan(heading!.y + heading!.height);
       if (width === 360) {
         const region = page.getByRole("region", { name: "メニューマスター一覧" });
+        await region.scrollIntoViewIfNeeded();
         const tableWidth = await page.getByRole("table", { name: "メニューマスター一覧" }).boundingBox();
         expect(tableWidth!.width).toBeGreaterThan((await region.boundingBox())!.width);
         await region.evaluate(el => { el.scrollLeft = el.scrollWidth; });
@@ -313,7 +365,8 @@ test("pending shared Select cannot change the submitted values", async ({ page }
   } finally { s.putGate.release(); }
   await saved(editForm(page));
   for (const name of ["単位", "袋単位", "温冷"]) await expect(editForm(page).getByRole("combobox", { name, exact: true })).toBeEnabled();
-  expect(s.requests.find(r => r.method === "PUT")?.body).toMatchObject({ unit_type: "cut", bag_max_unit: "count", temp_type: "hot" });
+  expect(s.requests.find(r => r.method === "PUT")?.body).toEqual({ category: "保存中の選択値", revision: 1 });
+  expect(s.items[0]).toMatchObject({ unit_type: "cut", bag_max_unit: "count", temp_type: "hot", category: "保存中の選択値" });
   await finish(page, info, s);
 });
 
@@ -422,7 +475,7 @@ test("unknown dirty history stops without guessed delta and recovers after becom
   const owned = await position(page);
   expect(owned.position).toEqual({ token: recovered.position.token, index: 2 });
   await info.attach("recovered-owned-history", { body: JSON.stringify({ recovered, neighbor, owned }), contentType: "application/json" });
-  const cancel = page.waitForEvent("dialog"); await historyGo(page, -1); await (await cancel).dismiss();
+  await cancelOwnedHistory(page, -1);
   await expect.poll(async () => (await position(page)).position).toEqual(owned.position);
   await expect(page).toHaveURL(owned.url); await expect(field(editForm(page), "分類")).toHaveValue("新しい所有履歴で保護");
   const allow = page.waitForEvent("dialog"); await historyGo(page, -1); await (await allow).accept();
@@ -491,7 +544,7 @@ test("dirty link and history cancellation restores URL/render/history, then acce
   page.once("dialog", d => d.dismiss()); await page.getByRole("link", { name: "メニュールール", exact: true }).click();
   await expect(page).toHaveURL(current.url); await expect(field(editForm(page), "分類")).toHaveValue("取消保護");
   for (let n = 0; n < 2; n++) {
-    const dialog = page.waitForEvent("dialog"); await historyGo(page, -1); await (await dialog).dismiss();
+    await cancelOwnedHistory(page, -1);
     await expect.poll(async () => (await position(page)).position).toEqual(current.position);
     await expect(page).toHaveURL(current.url); await expect(field(editForm(page), "分類")).toHaveValue("取消保護");
   }
@@ -500,7 +553,7 @@ test("dirty link and history cancellation restores URL/render/history, then acce
   await historyGo(page, 1); await expect(page.getByRole("heading", { name: "メニューマスター", exact: true })).toBeVisible();
   await expect(editForm(page)).toHaveCount(0); await select(page); await expect(field(editForm(page), "分類")).toHaveValue("主菜");
   await field(editForm(page), "分類").fill("複数entry取消"); await search(page, "白身魚"); const query = await position(page);
-  const multi = page.waitForEvent("dialog"); await historyGo(page, -2); await (await multi).dismiss();
+  await cancelOwnedHistory(page, -2);
   await expect.poll(async () => (await position(page)).position).toEqual(query.position); await expect(page).toHaveURL(query.url);
   await expect(field(editForm(page), "分類")).toHaveValue("複数entry取消"); await finish(page, info, s);
 });

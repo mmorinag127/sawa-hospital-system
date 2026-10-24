@@ -74,6 +74,7 @@ def test_review_returns_image_on_day_validation_failure(repair_order, monkeypatc
     monkeypatch.setattr(assignment, "_worksheet_for_manifest_structure_template", lambda **kw: object())
     monkeypatch.setattr(batch, "_fax_template_for_manifest_item", lambda *a: {})
     monkeypatch.setattr(master, "validated_body_row_plan", lambda ws: [{"date": "2026-10-07"}])
+    monkeypatch.setattr(master, "validated_body_week_value", lambda ws: captured["order"]["week_code"])
     monkeypatch.setattr(batch, "_align_axes", lambda **kw: ([0, 100], [0, 50, 100],
         {"row_intersection_y_match": {"corrected_ys": [0, 50, 100]}}, Image.new("RGB", (100, 600))))
     monkeypatch.setattr(batch, "_draw_row_intersections_overlay", lambda **kw: kw["image"])

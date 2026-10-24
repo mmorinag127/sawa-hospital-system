@@ -4,6 +4,7 @@ from datetime import date, timedelta
 import math
 
 from src.services import sheet_week_service
+from src.services.hakodate_physical_menu_row_service import full_week_fax_period
 
 
 def failure_details(message):
@@ -61,23 +62,25 @@ def coordinates(value, *, canvas_height=None):
     return list(ys)
 
 
-def calendar_contract(physical_plan):
+def calendar_contract(physical_plan, *, week_value):
     dates = [date.fromisoformat(row["date"]) for row in physical_plan]
     if not dates or dates != sorted(dates):
         raise ValueError("fax_canonical_day_identity_ambiguous")
-    _, start, end = sheet_week_service.parse_sheet_week_value(sheet_week_service.build_calendar_week_value(dates[0]))
-    if start is None or end is None or dates[-1] > end:
+    _, start, end = sheet_week_service.parse_sheet_week_value(week_value)
+    if start is None or end is None or dates[0] < start or dates[-1] > end:
         raise ValueError("fax_calendar_week_unresolved")
     counts = Counter(dates)
-    return [{"date": (start + timedelta(days=i)).isoformat(),
-             "expected_band_count": counts.get(start + timedelta(days=i))} for i in range(7)]
+    fax_start, fax_end = full_week_fax_period(start, end)
+    return [{"date": (fax_start + timedelta(days=i)).isoformat(),
+             "expected_band_count": counts.get(fax_start + timedelta(days=i))}
+            for i in range((fax_end - fax_start).days + 1)]
 
 
-def manual_match(value, *, physical_plan, header_bands, canvas_height, canvas_width):
+def manual_match(value, *, physical_plan, week_value, header_bands, canvas_height, canvas_width):
     ys = coordinates(value, canvas_height=canvas_height)
     if value["coordinate_space"]["width"] != canvas_width:
         raise ValueError("row_axis_canvas_changed")
-    days = calendar_contract(physical_plan)
+    days = calendar_contract(physical_plan, week_value=week_value)
     body_count = len(ys) - header_bands - 1
     boundaries = validate_days(value, days=days, body_count=body_count)
     return ys, {"used": True, "method": "operator_row_axis_override",
@@ -92,7 +95,7 @@ def validate_days(value, *, days, body_count):
     if value.get("day_labels") != [day["date"] for day in days]:
         raise ValueError("row_axis_calendar_days_required")
     boundaries = value.get("body_day_boundary_indexes")
-    if (not isinstance(boundaries, list) or len(boundaries) != 8
+    if (not isinstance(boundaries, list) or len(boundaries) != len(days) + 1
             or any(type(b) is not int for b in boundaries) or boundaries[0] != 0
             or boundaries[-1] != body_count
             or any(b <= a for a, b in zip(boundaries, boundaries[1:]))):

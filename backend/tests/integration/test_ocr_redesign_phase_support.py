@@ -6,12 +6,15 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from src.db import session_scope
 from tests.helpers.newnarrowbaggingfixture import selected_bagging_order
 from tests.helpers.owned_order import authored_layout_registration, owned_registration  # noqa: F401
 from tests.integration.test_ocr_sheet_history import history_registration  # noqa: F401
 from tests.helpers.owned_output import owned_outputs  # noqa: F401
 from tests.helpers.authored_sheet_case import authored_sheet_case  # noqa: F401
 from tests.contract.test_orders_ocr_sheet_history_api import history_case  # noqa: F401
+from tests.helpers.job_diagnostics_corruption import inject_stale_job_diagnostics
+from tests.helpers.authored_parser_templates import authored_aux_component_template as _authored_aux_component_template
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -33,7 +36,7 @@ def selected_projection_case(history_registration, authored_layout_registration,
     created = []
 
     def create(*, layout, facility_id, period, rows, unlisted_cells, recognizer_score=1.0,
-               stored_lines=None):
+               stored_lines=None, body_merge_policy=None):
         assert not created, "one explicit projection source per case"
         assert layout in {"authored-split", "repository-specimen"}
         assert layout != "authored-split" or facility_id == "FAC00001"
@@ -57,9 +60,13 @@ def selected_projection_case(history_registration, authored_layout_registration,
                     monthly_menu_id=month, menu_date=day, daypart=row["daypart"],
                     name=row["menu"], diet_type="regular", slot_index=slot))
         register = history_registration if layout == "authored-split" else authored_layout_registration
+        registration_options = {}
+        if body_merge_policy is not None:
+            assert layout == "repository-specimen"
+            registration_options["body_merge_policy"] = body_merge_policy
         order = register(message_id="projection-" + uuid4().hex, facility_id=facility_id,
             received_at=datetime.combine(start, datetime.min.time()).replace(hour=9),
-            week=period, effective_date=start.isoformat(), lines=stored_lines or [])
+            week=period, effective_date=start.isoformat(), lines=stored_lines or [], **registration_options)
         if layout == "repository-specimen":
             current, error = workflow.get_workflow_readonly(order["id"])
             assert error is None
@@ -153,6 +160,8 @@ def _structured_cells(rows: list[list[str]]) -> list[dict[str, object]]:
                 }
             )
     return cells
+
+
 
 
 def _fac00004_aux_rows() -> list[list[str]]:
@@ -425,7 +434,7 @@ def test_get_ocr_output_and_sheet_prefer_active_evidence_over_stale_cache(author
         assert payload_error is None and isinstance(payload, dict)
         assert payload["hakodate_canonical_pipeline"] == selected["payload_json"]["hakodate_canonical_pipeline"]
         assert payload["hakodate_ocr_evidence_records"] == selected["payload_json"]["hakodate_ocr_evidence_records"]
-        assert any(record["text"] == "9" for record in payload["hakodate_ocr_evidence_records"])
+        assert any(record["raw_text"] == "9" for record in payload["hakodate_ocr_evidence_records"])
         assert sheet_error is None and isinstance(sheet, dict)
         assert sheet["rows"][0][:4] == ["03/21", "朝", "Menu A", "9"]
         with session_scope() as session:
@@ -434,26 +443,29 @@ def test_get_ocr_output_and_sheet_prefer_active_evidence_over_stale_cache(author
 
 def test_get_ocr_output_prefers_active_evidence_over_stale_job_output(authored_sheet_case):
     from copy import deepcopy
-    from src.db import session_scope
-    from src.models.ocr_job import OcrJob
     from src.services.ocr_job_service import get_job
 
     case = authored_sheet_case(quantity=2, cell_values="9", include_remarks=False,
         menu_date=date(2026, 3, 21), period="2026-03@2026-03-21~2026-03-28")
     selected = order_service.get_ocr_evidence_run(case.evidence)
+    terminal = deepcopy(get_job(case.job)["metrics"]["rerun_terminal_receipt"])
+    from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
     with session_scope() as session:
-        job = session.get(OcrJob, case.job)
-        terminal = deepcopy(job.metrics["rerun_terminal_receipt"])
-        # Stale diagnostic output URI, never a replacement producer/terminal result.
-        job.output_reference = "gs://bucket/stale-output.json"
-        assert job.metrics["rerun_terminal_receipt"] == terminal
+        owner = terminal["workflow_delivery_owner"]
+        delivery = session.get(WorkflowOcrDelivery, owner["delivery_id"])
+        assert delivery is not None
+        assert delivery.order_id == case.id and delivery.job_id == case.job
+        assert owner == {"delivery_id": delivery.id, "generation": delivery.delivery_generation,
+                         "claim_token": delivery.claim_token}
+    inject_stale_job_diagnostics(case, output_reference="gs://bucket/stale-output.json")
+    assert get_job(case.job)["metrics"]["rerun_terminal_receipt"] == terminal
     before = get_job(case.job)
     with case.readonly():
         payload, error = order_service.get_ocr_output(case.id, persist_cache=False)
         assert error is None and isinstance(payload, dict)
         assert payload["hakodate_canonical_pipeline"] == selected["payload_json"]["hakodate_canonical_pipeline"]
         assert payload["hakodate_ocr_evidence_records"] == selected["payload_json"]["hakodate_ocr_evidence_records"]
-        assert any(record["text"] == "9" for record in payload["hakodate_ocr_evidence_records"])
+        assert any(record["raw_text"] == "9" for record in payload["hakodate_ocr_evidence_records"])
         assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == [["03/21", "朝", "Menu A", "9"]]
         assert get_job(case.job) == before
 
@@ -547,6 +559,7 @@ def test_owned_aux_quantities_are_not_shifted_or_recomputed_from_stale_position_
 
 def test_missing_owned_artifact_cannot_be_recovered_from_stale_aux_mapping_without_tables(history_case):
     from src.services import canonical_ocr_artifact_service
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
     case, source = _fac4_original_quantities(history_case)
     stale = {
             "status": "done",
@@ -579,6 +592,8 @@ def test_missing_owned_artifact_cannot_be_recovered_from_stale_aux_mapping_witho
     overlay = pathlib.Path(original["hakodate_overlay"]["uri"].removeprefix("file://"))
     assert overlay.is_file()
     assert overlay.is_relative_to(case.root)
+    with session_scope() as session:
+        stored_payload = deepcopy(session.get(OrderOcrEvidenceRun, case.evidence).payload_json)
     overlay.unlink()
     with case.readonly():
         with pytest.raises(ValueError, match="^canonical_artifact_bytes_unavailable$"):
@@ -587,8 +602,10 @@ def test_missing_owned_artifact_cannot_be_recovered_from_stale_aux_mapping_witho
         assert payload is None
         assert error == "ocr_evidence_recovery_required"
         stored = order_service.get_ocr_evidence_run(case.evidence)
-        assert stored["payload_json"] == original
+        assert stored["selectable"] is False
         assert stored["artifact_digest"] == selected["artifact_digest"]
+        with session_scope() as session:
+            assert session.get(OrderOcrEvidenceRun, case.evidence).payload_json == stored_payload
 
 
 def _assert_selected_native_page(case):
@@ -633,17 +650,13 @@ def test_get_ocr_pages_prefers_active_evidence_over_stale_cache(authored_sheet_c
 
 def test_get_ocr_pages_prefers_active_evidence_over_stale_job_output(authored_sheet_case):
     from copy import deepcopy
-    from src.db import session_scope
-    from src.models.ocr_job import OcrJob
     from src.services.ocr_job_service import get_job
 
     case = authored_sheet_case(quantity=2, cell_values="2", include_remarks=False,
         menu_date=date(2026, 3, 21), period="2026-03@2026-03-21~2026-03-28")
-    with session_scope() as session:
-        job = session.get(OcrJob, case.job)
-        terminal = deepcopy(job.metrics["rerun_terminal_receipt"])
-        job.output_reference = "gs://bucket/stale-output.json"
-        assert job.metrics["rerun_terminal_receipt"] == terminal
+    terminal = deepcopy(get_job(case.job)["metrics"]["rerun_terminal_receipt"])
+    inject_stale_job_diagnostics(case, output_reference="gs://bucket/stale-output.json")
+    assert get_job(case.job)["metrics"]["rerun_terminal_receipt"] == terminal
     before = get_job(case.job)
     _assert_selected_native_page(case)
     with case.readonly():
@@ -692,12 +705,14 @@ def test_get_ocr_sheet_prefers_saved_revision_over_confirmed_lines_by_default(au
         assert isinstance(sheet, dict)
         assert sheet["rows"] == [["03/21", "朝", "Menu A", "9", "draft"]]
         assert sheet["rows"][0][3] == "9"
-        assert sheet["source"].startswith("draft_sheet")
+        assert sheet["source"] == saved_sheet["source"]
+        context = order_service.get_current_sheet_context(case.id)
+        assert context is not None and context["draft_id"] == saved["id"]
+        assert context["draft_record"]["draft_sheet_json"] == saved_sheet
         assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == [["03/21", "朝", "Menu A", "2", ""]]
         with session_scope() as session:
             lines = session.query(OrderLine).filter_by(order_id=case.id).all()
-            assert len(lines) == 1
-            assert lines[0].quantity_original == 2
+            assert lines == []
             assert session.get(OrderOcrCache, case.id).payload == stale
 
 
@@ -737,7 +752,7 @@ def test_build_recoverable_ocr_sheet_payload_never_uses_confirmed_lines_fallback
         assert sheet["rows"] == [["03/21", "朝", "Menu A", "4"]]
         with session_scope() as session:
             lines = session.query(OrderLine).filter_by(order_id=case.id).all()
-            assert len(lines) == 1 and lines[0].quantity_original == 2
+            assert lines == []
             assert session.get(OrderOcrCache, case.id).payload == stale
 
 
@@ -787,7 +802,7 @@ def test_owned_six_columns_do_not_execute_legacy_position_fallback(selected_proj
         rows=[{"date":"2026-03-21","daypart":"朝","menu":"Menu A","cells":{"qty.regular_2f":"9","qty.regular_3f":"8","qty.soft_2f":"7","qty.soft_3f":"6","qty.mixer_2f":"5","qty.mixer_3f":"4"}}])
     def forbidden(*args, **kwargs):
         pytest.fail("Current selected quantities must not use legacy position fallback")
-    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", forbidden)
+    monkeypatch.setattr(order_service, "_apply_menu_position_mapping", forbidden)
     rows = [["日付", "区分", "メニュー", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"], ["03/21", "朝", "Menu A", "9", "8", "7", "6", "5", "4", ""]]
     _assert_unowned_projection_is_not_adopted(case, {"tables": [{"page_index": 1, "table_id": "page1_table1", "rows": rows, "row_count": len(rows), "col_count": len(rows[0]), "cells": _structured_cells(rows)}]})
 
@@ -871,7 +886,8 @@ def test_augment_payload_with_candidate_resolution_skips_choice_required_column_
     assert augmented.get("column_mapping_candidates") in (None, [])
 
 
-def test_sheet_payload_mapping_block_reason_allows_resolved_multi_table_position_fallback():
+def test_sheet_payload_mapping_block_reason_rejects_payload_declared_position_fallback():
+    from copy import deepcopy
     template = {
         "row_fields": [
             "date_mmdd",
@@ -923,6 +939,7 @@ def test_sheet_payload_mapping_block_reason_allows_resolved_multi_table_position
         },
     }
 
+    original_payload, original_template = deepcopy(payload), deepcopy(template)
     reason = order_service._sheet_payload_mapping_block_reason(
         source="weekly_menu",
         ocr_payload=payload,
@@ -931,7 +948,9 @@ def test_sheet_payload_mapping_block_reason_allows_resolved_multi_table_position
         template_blockers=[],
     )
 
-    assert reason is None
+    assert reason == "unresolved_template"
+    assert payload == original_payload
+    assert template == original_template
 
 
 def test_owned_multi_row_current_sheet_retains_selected_quantities(selected_projection_case):
@@ -988,12 +1007,26 @@ def test_owned_regular_quantities_are_not_reassigned_by_noisy_unowned_headers(se
 
 
 def test_owned_regular_blanks_and_forty_four_keep_physical_menu_positions(selected_projection_case):
+    # Separate physical cells are explicitly authored for independent blank/44 values.
     case = selected_projection_case(layout="repository-specimen", facility_id="FAC00007",
+        body_merge_policy={"mode": "none"},
         period="2026-03@2026-03-22~2026-03-28",
         rows=[{"date":"2026-03-22","daypart":"朝","menu":"Menu A","cells":{"qty.regular_x":""}},{"date":"2026-03-22","daypart":"朝","menu":"Menu B","cells":{"qty.regular_x":""}},{"date":"2026-03-22","daypart":"朝","menu":"Menu C","cells":{"qty.regular_x":"44"}},{"date":"2026-03-22","daypart":"朝","menu":"Menu D","cells":{"qty.regular_x":""}},{"date":"2026-03-22","daypart":"朝","menu":"Menu E","cells":{"qty.regular_x":""}},{"date":"2026-03-22","daypart":"朝","menu":"Menu F","cells":{"qty.regular_x":"44"}}], unlisted_cells="")
     _assert_unowned_projection_is_not_adopted(case, {
         "tables": [{"page_index": 1, "table_id": "unowned-noisy-table",
                     "rows": [["4 日","区 分","","献立","茶食","","禁食"],["3/22","明","WO","Menu A",""],["","","(2)","Menu B",""],["","&","¥¥","Menu C","44"],["","","金属","Menu D",""],["","","福","Menu E",""],["","$","¥","Menu F","44"]]}]})
+
+
+def test_merged_authored_cell_cannot_hold_both_blank_and_forty_four(selected_projection_case):
+    with pytest.raises(AssertionError, match="a merged authored region must have one explicit value"):
+        selected_projection_case(
+            layout="repository-specimen", facility_id="FAC00007",
+            period="2026-03@2026-03-22~2026-03-28", unlisted_cells="",
+            rows=[
+                {"date": "2026-03-22", "daypart": "朝", "menu": "Menu A", "cells": {"qty.regular_x": ""}},
+                {"date": "2026-03-22", "daypart": "朝", "menu": "Menu B", "cells": {"qty.regular_x": "44"}},
+            ],
+        )
 
 
 def test_owned_soft_and_bag_quantities_do_not_depend_on_partial_legacy_mapping(selected_projection_case):
@@ -1024,7 +1057,7 @@ def test_owned_canonical_columns_do_not_invent_aux_totals_from_unowned_headers(s
         ["", "昼", "副", "Menu B", "9", "8", "", "1"]]}]})
 
 
-def test_extract_sheet_rows_from_payload_preserves_authoritative_aux_columns_for_noisy_fac00004_table(repository_layout_source):
+def test_extract_sheet_rows_from_payload_rejects_position_fallback_for_noisy_fac00004_table(repository_layout_source):
     template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
     rows = _fac00004_aux_rows()
     payload = {
@@ -1057,16 +1090,15 @@ def test_extract_sheet_rows_from_payload_preserves_authoritative_aux_columns_for
         },
     }
 
-    extracted = order_service._extract_sheet_rows_from_payload(payload, template)
+    original = deepcopy(payload)
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError,
+                       match="^sheet_quantity_column_unmapped$"):
+        order_service._extract_sheet_rows_from_payload(payload, template)
+    assert payload == original
 
-    assert extracted[:2] == [
-        ["4/26 (日)", "朝", "主", "鶏じゃが", "70", "66", "", "", "", "", "", "", ""],
-        ["", "夕", "主", "麻婆豆腐", "67", "58", "", "", "", "", "6", "", ""],
-    ]
 
-
-def test_extract_sheet_rows_from_resolved_mapping_overlays_explicit_aux_columns_when_mapping_meta_omits_them(monkeypatch, repository_layout_source):
-    template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
+def test_extract_sheet_rows_from_resolved_mapping_overlays_explicit_aux_columns_when_mapping_meta_omits_them(monkeypatch):
+    template = _authored_aux_component_template()
     rows = _fac00004_aux_rows()
     payload = {
         "table_raw": "|日付|区分|副区分|献立|合計|#☆|通所|職員|平森|肉蒸|魚禁|揚げ物|備考|\n|---|---|---|---|---|---|---|---|---|---|---|---|---|",
@@ -1092,7 +1124,7 @@ def test_extract_sheet_rows_from_resolved_mapping_overlays_explicit_aux_columns_
             "blocked": False,
             "blocked_reasons": [],
             "requires_user_choice": False,
-            "decision_source": "position_fallback",
+            "decision_source": "resolved_column_mapping",
             "partial_quantity_mapping": False,
             "confidence": 0.99,
         },
@@ -1140,10 +1172,11 @@ def test_extract_sheet_rows_from_resolved_mapping_overlays_explicit_aux_columns_
     assert extracted[1][:7] == ["", "夕", "主", "麻婆豆腐", "59", "58", ""]
 
 
-def test_overlay_structured_block_total_cells_projects_live_like_sequences_by_canonical_date_order(repository_layout_source):
-    template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
+def test_helper_diagnostics_do_not_fill_blank_totals_from_live_like_sequences():
+    template = _authored_aux_component_template()
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)
+    header[4] = "合計"
     rows = [
         ["04/26", "朝", "", "大豆のトマト煮", "", "70", "", "", "", "", "", "", ""],
         ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "", "67", "", "", "", "", "", "", ""],
@@ -1176,36 +1209,21 @@ def test_overlay_structured_block_total_cells_projects_live_like_sequences_by_ca
         ],
     }
 
-    projected, stats = order_service._overlay_structured_block_total_cells_onto_sheet_row_lists(
+    original_rows, original_payload = deepcopy(rows), deepcopy(payload)
+    projected, stats = order_service._canonicalize_block_helper_display_rows(
         rows=rows,
         fields=fields,
         header=header,
-        raw_payload=payload,
-        template=template,
     )
 
-    assert projected[0][4] == "70"
-    assert projected[1][4] == "70"
-    assert projected[2][4] == "67"
-    assert projected[3][4] == "67"
-    assert projected[4][4] == "70"
-
-    assert projected[5][4] == "105"
-    assert projected[6][4] == "72"
-    assert projected[10][4] == "70"
-    assert projected[11][4] == "105"
-    assert projected[12][4] == "72"
-    assert projected[13][4] == "70"
-    assert projected[14][4] == "102"
-    assert projected[15][4] == "66"
-    assert int(stats.get("structured_block_total_assignment_count") or 0) == 14
-    assert int(stats.get("derived_block_total_assignment_count") or 0) == 2
-    assignments = stats.get("structured_block_total_assignments") or []
-    assert any(item.get("raw_date") == "04/20" and item.get("canonical_date") == "04/29" for item in assignments)
+    assert projected == original_rows
+    assert rows == original_rows and payload == original_payload
+    assert all(row[4] == "" for row in projected)
+    assert stats["helper_reanchor_count"] == 0
 
 
-def test_extract_sheet_rows_from_resolved_column_mapping_uses_template_columns_for_aux_markdown_tables(repository_layout_source):
-    template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
+def test_extract_sheet_rows_from_resolved_column_mapping_uses_template_columns_for_aux_markdown_tables():
+    template = _authored_aux_component_template(hiramori=True)
     payload = {
         "table_raw": "\n".join(
             [
@@ -1230,8 +1248,18 @@ def test_extract_sheet_rows_from_resolved_column_mapping_uses_template_columns_f
     assert extracted[1][:7] == ["04/26", "朝", "副①", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "67", "3"]
 
 
-def test_project_payload_quantities_onto_weekly_menu_shell_maps_exact_date_group_with_menu_anchor(repository_layout_source):
-    template = (config_service.get_facility_config("FAC00001") or {}).get("fax_template") or {}
+def _authored_single_floor_template():
+    return {"columns": [
+        {"index": 0, "source_index": 0, "name": "date_mmdd", "role": "date"},
+        {"index": 1, "source_index": 1, "name": "daypart", "role": "daypart"},
+        {"index": 2, "source_index": 2, "name": "menu", "role": "menu_name"},
+        {"index": 3, "source_index": 3, "name": "qty.regular_2f", "role": "quantity",
+         "diet_type": "regular", "area_id": "2F"},
+    ]}
+
+
+def test_project_payload_quantities_onto_weekly_menu_shell_maps_explicit_identities():
+    template = _authored_single_floor_template()
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
 
     def _shell_row(*, row_id: str, menu_date: date, mmdd: str, daypart: str, menu_name: str) -> dict[str, object]:
@@ -1261,11 +1289,11 @@ def test_project_payload_quantities_onto_weekly_menu_shell_maps_exact_date_group
         _shell_row(row_id="r5", menu_date=date(2026, 4, 29), mmdd="04/29", daypart="昼", menu_name="Menu E"),
     ]
     payload_rows = [
-        _payload_row(date_text="04/29", daypart="朝", menu_name="", regular="70"),
-        _payload_row(date_text="", daypart="朝", menu_name="Menu B", regular="70"),
-        _payload_row(date_text="", daypart="昼", menu_name="Menu C", regular="58"),
-        _payload_row(date_text="", daypart="昼", menu_name="Menu D", regular="59"),
-        _payload_row(date_text="", daypart="昼", menu_name="Menu E", regular="60"),
+        _payload_row(date_text="04/29", daypart="朝", menu_name="Menu A", regular="70"),
+        _payload_row(date_text="04/29", daypart="朝", menu_name="Menu B", regular="70"),
+        _payload_row(date_text="04/29", daypart="昼", menu_name="Menu C", regular="58"),
+        _payload_row(date_text="04/29", daypart="昼", menu_name="Menu D", regular="59"),
+        _payload_row(date_text="04/29", daypart="昼", menu_name="Menu E", regular="60"),
     ]
 
     projected, stats = order_service._project_payload_quantities_onto_weekly_menu_shell(
@@ -1278,14 +1306,14 @@ def test_project_payload_quantities_onto_weekly_menu_shell_maps_exact_date_group
     qty_idx = field_index["qty.regular_2f"]
     assert [row["values"][qty_idx] for row in projected] == ["70", "70", "58", "59", "60"]
     assert stats["mapped_date_group_count"] == 1
-    assert stats["exact_row_count"] == 4
-    assert stats["ordered_row_count"] == 1
+    assert stats["exact_row_count"] == 5
+    assert stats["ordered_row_count"] == 0
     assert stats["unresolved_date_group_count"] == 0
     assert stats["overflow_row_count"] == 0
 
 
-def test_project_payload_quantities_onto_weekly_menu_shell_leaves_unresolved_date_group_blank(repository_layout_source):
-    template = (config_service.get_facility_config("FAC00001") or {}).get("fax_template") or {}
+def test_project_payload_quantities_onto_weekly_menu_shell_rejects_unresolved_date_group_without_mutation():
+    template = _authored_single_floor_template()
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
 
     def _shell_row(*, row_id: str, menu_date: date, mmdd: str, daypart: str, menu_name: str) -> dict[str, object]:
@@ -1316,22 +1344,15 @@ def test_project_payload_quantities_onto_weekly_menu_shell_leaves_unresolved_dat
         _payload_row(date_text="", daypart="朝", menu_name="Unknown B", regular="92"),
     ]
 
-    projected, stats = order_service._project_payload_quantities_onto_weekly_menu_shell(
-        rows=rows,
-        fields=fields,
-        payload_rows=payload_rows,
-        template=template,
-    )
-
-    qty_idx = field_index["qty.regular_2f"]
-    assert [row["values"][qty_idx] for row in projected] == ["", ""]
-    assert stats["mapped_date_group_count"] == 0
-    assert stats["unresolved_date_group_count"] == 1
-    assert int(stats.get("overflow_row_count") or 0) == 0
-    assert stats["unresolved_payload_dates"] == ["04/20"]
+    original_rows, original_payload = deepcopy(rows), deepcopy(payload_rows)
+    with pytest.raises(order_service._CanonicalOcrProjectionError, match="sheet_canonical_mismatch"):
+        order_service._project_payload_quantities_onto_weekly_menu_shell(
+            rows=rows, fields=fields, payload_rows=payload_rows, template=template,
+        )
+    assert rows == original_rows and payload_rows == original_payload
 
 
-def test_extract_first_pass_rows_from_payload_builds_fragmented_quantity_rows_from_header_columns(repository_layout_source):
+def test_extract_first_pass_rows_from_payload_rejects_fragmented_position_fallback(repository_layout_source):
     template = (config_service.get_facility_config("FAC00005") or {}).get("fax_template") or {}
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
     payload = {
@@ -1371,22 +1392,14 @@ def test_extract_first_pass_rows_from_payload_builds_fragmented_quantity_rows_fr
         ],
     }
 
-    rows = order_service._extract_first_pass_rows_from_payload(payload, template)
-
-    menu_idx = field_index["menu"]
-    bag_idx = field_index["qty.regular_bag_x"]
-    meat_idx = field_index["qty.no_meat_x"]
-    assert rows[0][field_index["date_mmdd"]] == "04/26"
-    assert rows[0][menu_idx] == "胡瓜のフレンチサラダ"
-    assert rows[0][bag_idx] == "0"
-    assert rows[1][menu_idx] == ""
-    assert rows[1][bag_idx] == "58"
-    assert rows[1][meat_idx] == "2"
-    assert rows[2][menu_idx] == "里芋の味噌かけ"
-    assert rows[3][menu_idx] == ""
+    original = deepcopy(payload)
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError,
+                       match="^sheet_quantity_column_unmapped$"):
+        order_service._extract_first_pass_rows_from_payload(payload, template)
+    assert payload == original
 
 
-def test_extract_first_pass_rows_from_payload_prefers_structured_identity_over_fragmented_rows(repository_layout_source):
+def test_extract_first_pass_rows_from_payload_does_not_promote_fragmented_position_identity(repository_layout_source):
     template = (config_service.get_facility_config("FAC00005") or {}).get("fax_template") or {}
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
     payload = {
@@ -1418,17 +1431,11 @@ def test_extract_first_pass_rows_from_payload_prefers_structured_identity_over_f
         ],
     }
 
-    rows = order_service._extract_first_pass_rows_from_payload(payload, template)
-
-    assert rows[0][field_index["date_mmdd"]] == "03/22"
-    assert rows[0][field_index["daypart"]] == "朝"
-    assert rows[0][field_index["menu"]] == "Menu A"
-    assert rows[0][field_index["qty.soft_x"]] == "57"
-    assert rows[0][field_index["qty.regular_bag_x"]] == "2"
-    assert rows[1][field_index["daypart"]] == "昼"
-    assert rows[1][field_index["menu"]] == "Menu B"
-    assert rows[1][field_index["qty.soft_x"]] == "58"
-    assert rows[1][field_index["qty.regular_bag_x"]] == "4"
+    original = deepcopy(payload)
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError,
+                       match="^sheet_quantity_column_unmapped$"):
+        order_service._extract_first_pass_rows_from_payload(payload, template)
+    assert payload == original
 
 
 def test_extract_sheet_rows_from_payload_does_not_use_position_fallback_pseudo_menu_tokens(repository_layout_source):
@@ -1457,18 +1464,17 @@ def test_extract_sheet_rows_from_payload_does_not_use_position_fallback_pseudo_m
         ],
     }
 
-    rows = order_service._extract_sheet_rows_from_payload(payload, template)
+    original = deepcopy(payload)
+    with pytest.raises(fax_extractor.CanonicalOcrProjectionError,
+                       match="^sheet_quantity_column_unmapped$"):
+        order_service._extract_sheet_rows_from_payload(payload, template)
+    assert payload == original
+    # Neither pseudo-menu tokens nor adjacent numeric cells acquire authority.
+    assert payload["tables"][0]["rows"][4][2:6] == ["41 4", "鯖の塩焼き", "58", "2"]
+    assert payload["tables"][0]["rows"][5][2:6] == ["MD", "", "89", "2"]
 
-    menu_idx = field_index["menu"]
-    bag_idx = field_index["qty.regular_bag_x"]
-    assert rows[0][menu_idx] == "鯖の塩焼き"
-    assert rows[0][bag_idx] == "58"
-    assert rows[1][menu_idx] == ""
-    assert rows[1][bag_idx] == "89"
-    assert all(row[menu_idx] not in {"41 4", "MD"} for row in rows)
 
-
-def test_project_payload_quantities_onto_weekly_menu_shell_fills_global_anchor_gaps_without_daypart_tokens(repository_layout_source):
+def test_project_payload_quantities_onto_weekly_menu_shell_rejects_global_anchor_guessing(repository_layout_source):
     template = (config_service.get_facility_config("FAC00005") or {}).get("fax_template") or {}
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
 
@@ -1511,20 +1517,12 @@ def test_project_payload_quantities_onto_weekly_menu_shell_fills_global_anchor_g
         _payload_row(date_text="", menu_name="キャベツと竹輪の酢の物", bag="0", meat="0"),
     ]
 
-    projected, stats = order_service._project_payload_quantities_onto_weekly_menu_shell(
-        rows=rows,
-        fields=fields,
-        payload_rows=payload_rows,
-        template=template,
-    )
-
-    bag_idx = field_index["qty.regular_bag_x"]
-    meat_idx = field_index["qty.no_meat_x"]
-    assert [row["values"][bag_idx] for row in projected] == ["58", "0", "58", "58", "", "0", "0", "0"]
-    assert [row["values"][meat_idx] for row in projected] == ["2", "0", "2", "2", "", "0", "0", "0"]
-    assert stats["exact_row_count"] == 5
-    assert stats["ordered_row_count"] == 2
-    assert stats["overflow_row_count"] == 0
+    original_rows, original_payload = deepcopy(rows), deepcopy(payload_rows)
+    with pytest.raises(order_service._CanonicalOcrProjectionError, match="sheet_canonical_mismatch"):
+        order_service._project_payload_quantities_onto_weekly_menu_shell(
+            rows=rows, fields=fields, payload_rows=payload_rows, template=template,
+        )
+    assert rows == original_rows and payload_rows == original_payload
 
 
 def test_project_payload_quantities_onto_weekly_menu_shell_blocks_blank_rows_without_any_exact_anchor(repository_layout_source):
@@ -1548,18 +1546,12 @@ def test_project_payload_quantities_onto_weekly_menu_shell_blocks_blank_rows_wit
         ["", "", "", "", "59", "3", "", "", "", ""],
     ]
 
-    projected, stats = order_service._project_payload_quantities_onto_weekly_menu_shell(
-        rows=rows,
-        fields=fields,
-        payload_rows=payload_rows,
-        template=template,
-    )
-
-    bag_idx = field_index["qty.regular_bag_x"]
-    assert [row["values"][bag_idx] for row in projected] == ["", ""]
-    assert stats["mapped_date_group_count"] == 0
-    assert stats["unresolved_date_group_count"] == 1
-    assert stats["unresolved_payload_dates"] == ["04/26"]
+    original_rows, original_payload = deepcopy(rows), deepcopy(payload_rows)
+    with pytest.raises(order_service._CanonicalOcrProjectionError, match="sheet_canonical_mismatch"):
+        order_service._project_payload_quantities_onto_weekly_menu_shell(
+            rows=rows, fields=fields, payload_rows=payload_rows, template=template,
+        )
+    assert rows == original_rows and payload_rows == original_payload
 
 
 def test_normalize_menu_text_collapses_halfwidth_katakana_and_spacing():
@@ -1568,10 +1560,11 @@ def test_normalize_menu_text_collapses_halfwidth_katakana_and_spacing():
     )
 
 
-def test_overlay_structured_block_total_cells_skips_extra_values_beyond_canonical_block_count(repository_layout_source):
-    template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
+def test_helper_diagnostics_do_not_adopt_extra_unmapped_totals():
+    template = _authored_aux_component_template()
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)
+    header[4] = "合計"
     rows = [
         ["04/26", "朝", "", "Menu A", "", "", "", "", "", "", "", "", ""],
         ["04/26", "昼", "", "Menu B", "", "", "", "", "", "", "", "", ""],
@@ -1598,24 +1591,23 @@ def test_overlay_structured_block_total_cells_skips_extra_values_beyond_canonica
         ]
     }
 
-    projected, stats = order_service._overlay_structured_block_total_cells_onto_sheet_row_lists(
+    original_rows, original_payload = deepcopy(rows), deepcopy(payload)
+    projected, stats = order_service._canonicalize_block_helper_display_rows(
         rows=rows,
         fields=fields,
         header=header,
-        raw_payload=payload,
-        template=template,
     )
 
-    assert [row[4] for row in projected] == ["70", "80", "90"]
-    skipped = stats.get("structured_block_total_skipped") or []
-    assert skipped
-    assert skipped[0]["values"] == ["70", "80", "90", "100"]
+    assert projected == original_rows
+    assert rows == original_rows and payload == original_payload
+    assert stats["helper_reanchor_count"] == 0
 
 
-def test_overlay_structured_block_total_cells_derives_missing_totals_when_structured_segments_absent(repository_layout_source):
-    template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
+def test_helper_diagnostics_preserve_blank_totals_instead_of_deriving_them():
+    template = _authored_aux_component_template()
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)
+    header[4] = "合計"
     rows = [
         ["04/26", "夕", "", "豚肉のピリ辛炒め", "", "67", "", "5", "", "", "", "", ""],
         ["", "", "", "春雨サラダ", "", "67", "", "5", "", "", "", "", ""],
@@ -1625,40 +1617,38 @@ def test_overlay_structured_block_total_cells_derives_missing_totals_when_struct
         ["", "", "", "ほうれん草のお浸し", "", "67", "", "5", "", "", "", "", ""],
     ]
 
-    projected, stats = order_service._overlay_structured_block_total_cells_onto_sheet_row_lists(
+    original_rows = deepcopy(rows)
+    projected, stats = order_service._canonicalize_block_helper_display_rows(
         rows=rows,
         fields=fields,
         header=header,
-        raw_payload={"tables": []},
-        template=template,
     )
 
-    assert [projected[idx][4] for idx in range(3)] == ["72", "72", "72"]
-    assert [projected[idx][4] for idx in range(3, 6)] == ["72", "72", "72"]
-    assert int(stats.get("structured_block_total_assignment_count") or 0) == 0
-    assert int(stats.get("derived_block_total_assignment_count") or 0) == 6
+    assert projected == original_rows and rows == original_rows
+    assert all(row[4] == "" for row in projected)
+    assert stats["helper_reanchor_count"] == 0
 
 
-def test_overlay_structured_block_total_cells_keeps_blank_when_no_explicit_or_derivable_total_exists(repository_layout_source):
-    template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
+def test_helper_diagnostics_keep_blank_without_explicit_total():
+    template = _authored_aux_component_template()
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)
+    header[4] = "合計"
     rows = [
         ["04/26", "夕", "", "豚肉のピリ辛炒め", "", "", "", "", "", "", "", "", ""],
         ["", "", "", "春雨サラダ", "", "", "", "", "", "", "", "", ""],
     ]
 
-    projected, stats = order_service._overlay_structured_block_total_cells_onto_sheet_row_lists(
+    original_rows = deepcopy(rows)
+    projected, stats = order_service._canonicalize_block_helper_display_rows(
         rows=rows,
         fields=fields,
         header=header,
-        raw_payload={"tables": []},
-        template=template,
     )
 
     assert [row[4] for row in projected] == ["", ""]
-    assert int(stats.get("structured_block_total_assignment_count") or 0) == 0
-    assert int(stats.get("derived_block_total_assignment_count") or 0) == 0
+    assert projected == original_rows and rows == original_rows
+    assert stats["helper_reanchor_count"] == 0
 
 
 def test_owned_menu_identity_keeps_breakfast_blanks_and_lunch_quantities(selected_projection_case):
@@ -1673,6 +1663,12 @@ def test_owned_menu_identity_keeps_breakfast_blanks_and_lunch_quantities(selecte
 
 
 def test_unselected_diagnostic_draft_does_not_override_owned_cells_or_add_stale_warnings(selected_projection_case):
+    from sqlalchemy import MetaData, Table, select
+    from src.db import get_engine, session_scope
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.services.canonical_facility_store import read_snapshot
+    from src.services import workflow_state_service
+    from tests.unit.test_disabled_facility_columns import _snapshot
     case = selected_projection_case(layout="repository-specimen", facility_id="FAC00002",
         period="2026-03@2026-03-22~2026-03-28", unlisted_cells="", rows=[
             {"date": "2026-03-22", "daypart": "朝", "menu": "Menu A", "cells": {"qty.regular_x": "23"}},
@@ -1682,22 +1678,84 @@ def test_unselected_diagnostic_draft_does_not_override_owned_cells_or_add_stale_
     diagnostic["rows"][0][diagnostic["fields"].index("qty.regular_x")] = "999"
     stale = ["template_unresolved", "sheet_quantity_column_unmapped",
              "ocr_evidence_recovery_required", "sheet_ocr_review_required"]
+    workflow_state_service.refresh_workflow_state(case.id, refresh_draft_from_semantic=False)
     captured = order_service._capture_synchronous_cache_write_input(case.id)
     assert captured is not None and captured["evidence_run_id"] == case.evidence["id"]
+    before = _snapshot(get_engine())
+    latest_before = order_service.get_latest_sheet_draft(case.id)
+    original_diagnostic = deepcopy(diagnostic)
+    original_capture = deepcopy(captured)
+    original_pdf = case.pdf.read_bytes()
+    source_revision = read_snapshot().revision
+    with session_scope() as session:
+        selected_draft_id = session.get(OrderWorkflowState, case.id).draft_id
+    started = datetime.utcnow()
     saved = order_service.persist_sheet_draft(order_id=case.id,
         draft_sheet_json=diagnostic, draft_state="draft_ready",
         blockers=["template_unresolved"], warnings=stale,
         synchronous_write_input=captured)
     assert saved is not None
+    assert saved["order_id"] == case.id
+    assert saved["base_evidence_run_id"] == captured["evidence_run_id"] == case.evidence["id"]
+    assert saved["template_version_id"] == case.evidence["template_version_id"]
+    assert "template_resolution" not in case.evidence["payload_json"]
+    assert saved["base_template_resolution_id"] is None
+    assert saved["base_menu_snapshot_id"] is None
+    assert saved["draft_sheet_json"] == original_diagnostic
+    assert saved["draft_sheet_json"]["rows"][0][diagnostic["fields"].index("qty.regular_x")] == "999"
+    assert saved["draft_state"] == "draft_ready"
+    assert saved["blockers_json"] == ["template_unresolved"]
+    assert saved["warnings_json"] == stale
+    assert saved["latest_patch_candidate_id"] is None
+    assert saved["edited_by"] is None
+    created = datetime.fromisoformat(saved["created_at"])
+    assert started <= created <= datetime.utcnow()
+    assert saved["edited_at"] == saved["created_at"]
+    with session_scope() as session:
+        assert session.get(OrderWorkflowState, case.id).draft_id == selected_draft_id
     sheet, error = order_service.get_ocr_sheet(case.id)
     assert error is None and sheet is not None
     assert sheet["rows"] == case.sheet["rows"]
+    quantity_index = sheet["fields"].index("qty.regular_x")
+    assert [row[quantity_index] for row in sheet["rows"]] == ["23", "27"]
     assert sheet["base_evidence_run_id"] == case.evidence["id"]
     assert sheet.get("warnings") == case.sheet.get("warnings")
     assert sheet.get("apply_blockers") == case.sheet.get("apply_blockers")
     assert sheet.get("can_apply") == case.sheet.get("can_apply")
-    latest = order_service.get_latest_sheet_draft(case.id)
-    assert latest["draft_sheet_json"]["rows"] == diagnostic["rows"]
+    assert order_service.get_latest_sheet_draft(case.id) == latest_before
+    assert diagnostic == original_diagnostic
+    assert captured == original_capture
+    assert case.pdf.read_bytes() == original_pdf
+    assert read_snapshot().revision == source_revision
+    engine = get_engine()
+    table = Table("order_sheet_drafts", MetaData(), autoload_with=engine)
+    with engine.connect() as connection:
+        actual = connection.execute(select(table).where(table.c.id == saved["id"])).one()
+    assert dict(actual._mapping) == {
+        "id": saved["id"], "order_id": case.id,
+        "template_version_id": case.evidence["template_version_id"],
+        "base_evidence_run_id": case.evidence["id"],
+        "base_template_resolution_id": None,
+        "base_menu_snapshot_id": None, "draft_sheet_json": original_diagnostic,
+        "draft_state": "draft_ready", "blockers_json": ["template_unresolved"],
+        "warnings_json": stale, "latest_patch_candidate_id": None, "edited_by": None,
+        "edited_at": created, "created_at": created,
+    }
+    expected = deepcopy(before)
+    assert tuple(actual) not in expected["order_sheet_drafts"]
+    expected["order_sheet_drafts"] = sorted(
+        [*expected["order_sheet_drafts"], tuple(actual)], key=repr,
+    )
+    workflow_table = Table("order_workflow_states", MetaData(), autoload_with=engine)
+    with engine.connect() as connection:
+        refreshed = connection.execute(select(workflow_table).where(workflow_table.c.order_id == case.id)).one()
+    secondary_index = list(workflow_table.c.keys()).index("secondary_actions_json")
+    timestamp = refreshed[secondary_index]["legacy_workflow_state"]["last_transition_at"]
+    assert created <= datetime.fromisoformat(timestamp) <= datetime.utcnow()
+    for previous in expected["order_workflow_states"]:
+        if previous[list(workflow_table.c.keys()).index("order_id")] == case.id:
+            previous[secondary_index]["legacy_workflow_state"]["last_transition_at"] = timestamp
+    assert _snapshot(engine) == expected
 
 
 def test_foreign_facility_candidates_cannot_rebind_owned_six_column_source(selected_projection_case):
@@ -1744,12 +1802,12 @@ def test_owned_regular_and_diabetes_cells_ignore_ambiguous_header_names(selected
     _assert_unowned_projection_is_not_adopted(case, {"table_rows": [["日付", "区分", "メニュー", "数量A", "数量B"], ["03/21", "朝", "Menu A", "9", "4"]], "template_resolution": {"resolved_template_id": "", "candidate_template_ids": ["fax_layout_regular_diabetes_v1", "fax_layout_regular_forbidden_v1"], "confidence": 0.41}})
 
 
-def test_fac00013_uses_forbidden_template_as_single_canonical_config(repository_layout_source):
+def test_fac00013_uses_current_json_template_as_single_canonical_config(repository_layout_source):
     facility_config = config_service.get_facility_config("FAC00013")
 
     assert isinstance(facility_config, dict)
-    assert facility_config["fax_template_id"] == "fax_layout_regular_forbidden_v1"
-    assert facility_config["fax_template_ids"] == ["fax_layout_regular_forbidden_v1"]
+    assert facility_config["fax_template_id"] == "いこいの森"
+    assert facility_config["fax_template_ids"] == ["いこいの森"]
 
 
 def test_get_ocr_sheet_projects_fac00006_repeated_regular_round_columns_from_source_indexes(history_case):
@@ -1912,11 +1970,69 @@ def test_owned_blank_recognition_does_not_borrow_stored_order_quantity(selected_
                        "qty.soft_2f": "", "qty.soft_3f": "",
                        "qty.mixer_2f": "", "qty.mixer_3f": ""}}])
     stored = order_service.get_order_by_id(case.id)["lines"]
-    assert len(stored) == 1 and stored[0]["quantity_original"] == 2
+    assert stored == []
+    quantity_indexes = [index for index, field in enumerate(case.sheet["fields"]) if field.startswith("qty.")]
+    assert quantity_indexes
+    assert all(row[index] == "" for row in case.sheet["rows"] for index in quantity_indexes)
     _assert_unowned_projection_is_not_adopted(case, {
         "tables": [{"rows": [["日付", "区分", "メニュー", "備考欄"],
                             ["03/21", "朝", "Menu A", ""]]}]})
     assert order_service.get_order_by_id(case.id)["lines"] == stored
+
+
+def test_actual_blank_rerun_cannot_borrow_existing_two_or_replace_saved_two(authored_sheet_case):
+    from src.db import session_scope
+    from src.models.order import OrderLine
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.models.order_workflow_state import OrderWorkflowState
+
+    case = authored_sheet_case(quantity=2, include_remarks=False, cell_values="2")
+    case.save(case.selected_sheet)
+    assert order_service.update_lines(case.id, [{
+        "line_id": "operator-two", "date": "2026-03-22", "daypart": "朝",
+        "menu_name": "Menu A", "diet_type": "regular", "area_id": "2F",
+        "bag_type": "standard", "quantity_original": 2, "quantity_corrected": 2,
+        "change_note": "explicit operator value",
+    }]) is True
+
+    def line_snapshot():
+        with session_scope() as session:
+            return [{column.key: deepcopy(getattr(line, column.key)) for column in OrderLine.__table__.columns}
+                    for line in session.query(OrderLine).filter_by(order_id=case.id).all()]
+
+    original_lines = line_snapshot()
+    assert len(original_lines) == 1
+    assert original_lines[0]["quantity_original"] == original_lines[0]["quantity_corrected"] == 2
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, case.id)
+        draft_id, selected_id = state.draft_id, state.evidence_run_id
+        original_draft = deepcopy(session.get(OrderSheetDraft, draft_id).draft_sheet_json)
+        original_evidence = deepcopy(session.get(OrderOcrEvidenceRun, selected_id).payload_json)
+    observed = []
+
+    def recognize_blank(region):
+        assert region["role"] == "quantity"
+        assert line_snapshot() == original_lines
+        observed.append(region["sheet_cell"])
+        return ""
+
+    case.prepare_provider(cell_values=recognize_blank)
+    with case.execution():
+        evidence, error = order_service.rerun_ocr_evidence_only(
+            case.id, job_id=case.job, project_sheet=False, refresh_workflow=False)
+    assert error is None and evidence is not None, error
+    assert len(observed) == 1
+    assert evidence["id"] != selected_id
+    with session_scope() as session:
+        new_payload = session.get(OrderOcrEvidenceRun, evidence["id"]).payload_json
+        records = new_payload["hakodate_ocr_evidence_records"]
+        assert len(records) == 1 and records[0]["raw_text"] == ""
+        state = session.get(OrderWorkflowState, case.id)
+        assert state.evidence_run_id == selected_id and state.draft_id == draft_id
+        assert session.get(OrderSheetDraft, draft_id).draft_sheet_json == original_draft
+        assert session.get(OrderOcrEvidenceRun, selected_id).payload_json == original_evidence
+    assert line_snapshot() == original_lines
 
 
 def test_build_confirm_materialization_candidate_prefers_latest_draft_rows(owned_outputs):
@@ -1998,7 +2114,7 @@ def test_confirmed_snapshot_includes_materialization_candidate_from_latest_draft
     assert output_ctx["order_lines"][0]["quantity_original"] == 9
 
 
-def test_owned_bagging_rejects_unparseable_saved_row_without_changing_existing_two(authored_sheet_case):
+def test_owned_bagging_rejects_unparseable_identity_without_restoring_invalidated_lines(authored_sheet_case):
     from src.db import session_scope
     from src.models.order import Order, OrderLine
     from src.services import order_workflow_v2_service as workflow
@@ -2017,7 +2133,7 @@ def test_owned_bagging_rejects_unparseable_saved_row_without_changing_existing_t
     with unchanged_after_refusal(case, revision):
         result, error = workflow.run_bagging(case.id, expected_revision=revision)
         assert result is None
-        assert error == "draft_lines_empty"
+        assert error == "sheet_identity_review_required"
     with case.readonly():
         current = order_service.get_current_sheet_context(case.id)
         assert current["rows"] == [["", "", "", "", "broken"]]
@@ -2025,7 +2141,7 @@ def test_owned_bagging_rejects_unparseable_saved_row_without_changing_existing_t
         with session_scope() as session:
             assert session.get(Order, case.id).status == "要確認"
             lines = session.query(OrderLine).filter_by(order_id=case.id).all()
-            assert len(lines) == 1 and lines[0].quantity_original == 2
+            assert lines == []
 
 
 def test_owned_bagging_and_confirm_require_formally_saved_source(authored_sheet_case):
@@ -2106,8 +2222,10 @@ def test_confirm_materialization_uses_sheet_fields_for_fac00004_multi_quantity_r
     assert {(line.get("diet_type"), line.get("quantity_original")) for line in hits} == {
         ("regular", 65),
         ("daycare", 45),
-        ("no_meat", 2),
     }
+    sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    assert sheet_error is None
+    assert sheet["rows"][0][sheet["fields"].index("qty.no_meat_x")] == "2"
 
 
 def test_confirm_materialization_uses_sheet_fields_for_fac00014_multi_quantity_rows(owned_outputs, monkeypatch, tmp_path):
@@ -2165,9 +2283,11 @@ def test_confirm_materialization_uses_sheet_fields_for_fac00014_multi_quantity_r
     assert {(line.get("diet_type"), line.get("quantity_original")) for line in hits} == {
         ("regular", 102),
         ("staff", 2),
-        ("no_meat", 2),
-        ("no_fish", 1),
     }
+    sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    assert sheet_error is None
+    assert [sheet["rows"][0][sheet["fields"].index(field)]
+            for field in ("qty.no_meat_x", "qty.no_fish_x")] == ["2", "1"]
 
 
 def test_owned_staff_and_forbidden_columns_ignore_missing_legacy_template_hint(selected_projection_case):

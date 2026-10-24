@@ -22,7 +22,9 @@ def test_monitor_keeps_visible_fields_pagination_without_unused_review(monkeypat
     monkeypatch.setattr(api.order_service, 'list_orders_page', lambda **kw: deepcopy(original))
     monkeypatch.setattr(api.order_service, '_load_order_ocr_cache_map', lambda ids: {})
     monkeypatch.setattr(api.workflow_state_service, 'list_workflow_states', lambda ids: {})
-    monkeypatch.setattr(api, 'get_ocr_jobs', lambda ids: {x: {'status': 'done'} for x in ids})
+    monkeypatch.setattr(api, 'get_recorded_order_job_bindings', lambda ids: {
+        row['id']: {'job_id': row['ocr_job_id'], 'job': {'id': row['ocr_job_id'], 'status': 'done'}, 'error': None}
+        for row in original['orders'] if row['id'] in ids})
     def status(order, job):
         calls.append(('status', order['id']))
         order['ocr_status'] = order['status']
@@ -81,7 +83,9 @@ def test_monitor_current_job_values_match_full_list(monkeypatch, state):
     jobs = {'J1': {'id': 'J1', 'status': state, 'error_message': 'job error',
                    'metrics': {'error': 'metrics error'}, 'updated_at': datetime.utcnow() - timedelta(days=1)}}
     monkeypatch.setattr(api.order_service, 'list_orders_page', lambda **kw: deepcopy(page))
-    monkeypatch.setattr(api, 'get_ocr_jobs', lambda ids: {key: deepcopy(jobs[key]) for key in ids if key in jobs})
+    monkeypatch.setattr(api, 'get_recorded_order_job_bindings', lambda ids: {
+        row['id']: {'job_id': row.get('ocr_job_id'), 'job': deepcopy(jobs.get(row.get('ocr_job_id'))), 'error': None}
+        for row in page['orders'] if row['id'] in ids})
     monkeypatch.setattr(api.order_service, '_load_order_ocr_cache_map', lambda ids: {})
     monkeypatch.setattr(api.workflow_state_service, 'list_workflow_states', lambda ids: {})
     monkeypatch.setattr(api, '_attach_order_review_summary', lambda *a, **kw: None)
@@ -104,14 +108,15 @@ def test_monitor_source_failure_stops_and_full_review_still_validates(monkeypatc
         'orders': [{'id': 'O1', 'ocr_job_id': 'J1'}], 'has_more': False, 'next_cursor': None})
     monkeypatch.setattr(api.order_service, '_load_order_ocr_cache_map', lambda ids: {})
     monkeypatch.setattr(api.workflow_state_service, 'list_workflow_states', lambda ids: {})
-    monkeypatch.setattr(api, 'get_ocr_jobs', lambda ids: {'J1': {'status': 'done'}})
+    monkeypatch.setattr(api, 'get_recorded_order_job_bindings', lambda ids: {
+        'O1': {'job_id': 'J1', 'job': {'id': 'J1', 'status': 'done'}, 'error': None}})
     def failed(*a, **kw):
         raise RuntimeError('source unavailable')
     monkeypatch.setattr(api, '_attach_order_review_summary', failed)
     client = TestClient(app, raise_server_exceptions=False)
     assert client.get('/orders?include_ocr=true').status_code == 500
     assert client.get('/orders?include_ocr=true&response_view=ocr_monitor').status_code == 200
-    monkeypatch.setattr(api, 'get_ocr_jobs', failed)
+    monkeypatch.setattr(api, 'get_recorded_order_job_bindings', failed)
     assert client.get('/orders?include_ocr=true&response_view=ocr_monitor').status_code == 500
     monkeypatch.setattr(api.order_service, 'list_orders_page', failed)
     assert client.get('/orders?include_ocr=false&response_view=ocr_monitor').status_code == 500

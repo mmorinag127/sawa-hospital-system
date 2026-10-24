@@ -161,14 +161,16 @@ def test_invalid_accepted_invoice_stops_child_without_fabricating_template(owned
     fixture = owned_bagging
     if invoice_fault == "empty-columns":
         fixture.authored["invoice_template"] = {"columns": []}
-        fixture.republish()
-        with fixture.session_scope() as session:
-            orders._record_current_order_version(
-                session, session.get(Order, fixture.order_id), session.get(OrderDocument, "UNIT-DOC"),
-            )
+    else:
+        fixture.authored.pop("invoice_template", None)
+    fixture.republish(prepare_invoice=False)
+    with fixture.session_scope() as session:
+        orders._record_current_order_version(
+            session, session.get(Order, fixture.order_id), session.get(OrderDocument, "UNIT-DOC"),
+        )
     candidate = confirm(fixture)
     if invoice_fault == "missing":
-        assert "invoice_template" not in candidate["configured_input"]["facility"]
+        assert candidate["configured_input"]["facility"].get("invoice_template") is None
     else:
         assert candidate["configured_input"]["facility"]["invoice_template"] == {"columns": []}
     day = date.fromisoformat(str(candidate["lines"][0]["date"])[:10])

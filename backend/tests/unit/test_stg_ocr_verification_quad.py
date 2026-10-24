@@ -157,11 +157,19 @@ def test_actual_serializer_contracts(monkeypatch):
     state = upload_serializer(row_for(upload_ast, 'row', current_order_id='ord', current_document_id='doc', content_sha256=value['sha256']))
     version_serializer, version_ast = source_function('order_serialization_service', '_serialize_order_version', {'selected_version_snapshot': lambda row: {}})
     version = version_serializer(row_for(version_ast, 'version', document_id='doc', is_current=True))
+    job_fields, _ = source_function('ocr_job_service', 'recorded_order_job_fields', {})
+    recorded_fields, _ = source_function('order_serialization_service', '_recorded_job_fields', {
+        'object_session': lambda row: None,
+        'get_recorded_order_job_bindings': lambda ids, **kwargs: {},
+        'recorded_order_job_fields': job_fields,
+    })
     serializer, order_ast = source_function('order_serialization_service', 'serialize_order', {
         'sheet_week_service': sheet_week_service, '_build_menu_amount_meta': lambda row: {},
         '_list_order_versions_for_serialization': lambda row: [version],
+        '_recorded_job_fields': recorded_fields,
     })
     order = serializer(row_for(order_ast, 'order', id='ord', current_document_id='doc', facility_code=value['facility_id'], week_code=value['week_id']))
+    assert order['ocr_job_id'] is None and order['ocr_job_binding_error'] is None
     assert verification.verify_owner(value, state, order) == 'doc'
 
     serializer, job_ast = source_function('order_workflow_v2_service', '_serialize_ocr_job', {

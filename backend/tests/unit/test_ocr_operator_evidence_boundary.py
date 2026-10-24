@@ -72,7 +72,7 @@ def test_job_checkpoint_rejects_missing_owner_before_storage(monkeypatch):
 
 
 @pytest.mark.parametrize("async_job", [False, True])
-def test_order_service_resumes_operator_checkpoint_without_preprocessing(owned_boundary, monkeypatch, async_job):
+def test_unowned_operator_override_cannot_resume_checkpoint(owned_boundary, monkeypatch, async_job):
     import numpy as np
     from src.services import hakodate_ocr_checkpoint_service as checkpoints
     from src.services import ocr_recognition_recovery_service as recovery
@@ -106,15 +106,13 @@ def test_order_service_resumes_operator_checkpoint_without_preprocessing(owned_b
         monkeypatch.setattr(order_service, "processing_start_pdf_receipt", lambda: start["selected_pdf_receipt"])
         original_draft = order_service._hakodate_best_method_draft_sheet(order_id, synchronous_write_input=start)
         monkeypatch.setattr(order_service, "_hakodate_best_method_draft_sheet", lambda *args, **kwargs: deepcopy(original_draft))
-    result = order_service._hakodate_canonical_payload_from_manifest_item(
-        order_id=order_id, facility_id=captured["order"]["facility_code"], item={},
-        synchronous_write_input=None if async_job else start,
-    )
-    records = result["hakodate_ocr_evidence_records"]
-    assert len(records) == len(values)
-    assert all(record["raw_text"] == "12" and record["engine"] == "operator" for record in records)
-    assert all(record["engine_metadata"]["edited_by"] == "test-operator" for record in records)
-    assert result["hakodate_preprocessing"]["quality_gate"]["ok"]
+    before = deepcopy(start)
+    with pytest.raises(ValueError, match="^recognition_resume_source_required$"):
+        order_service._hakodate_canonical_payload_from_manifest_item(
+            order_id=order_id, facility_id=captured["order"]["facility_code"], item={},
+            synchronous_write_input=None if async_job else start,
+        )
+    assert start == before
 
 
 @pytest.mark.parametrize("stale", [False, True])

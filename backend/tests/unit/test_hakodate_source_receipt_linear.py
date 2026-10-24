@@ -10,6 +10,7 @@ from src.services import order_service
 from src.services import hakodate_source_receipt as receipts
 from test_modernization_repair_validation_boundary import owned_boundary
 from test_h2_operator_repair_revision import repair_order
+from test_native_recognition_recovery import native_review, native_sql, store  # noqa: F401
 
 
 def cell_receipts(payload):
@@ -124,8 +125,8 @@ def test_real_metadata_linear_wire_size(record_property):
 
 
 @pytest.mark.parametrize('operator', [False, True])
-def test_actual_producer_emits_only_references(owned_boundary, repair_order, monkeypatch, operator):
-    from test_ocr_operator_evidence_boundary import test_order_service_resumes_operator_checkpoint_without_preprocessing
+def test_actual_producer_emits_only_references(request, monkeypatch, operator):
+    from test_native_recognition_recovery import test_native_terminal_review_get_save_and_checkpoint_resume
     from test_h2_operator_repair_revision import test_actual_canonical_producer_json_writer_and_selected_read
     producer = order_service._hakodate_canonical_payload_from_manifest_item
     observed = []
@@ -139,7 +140,7 @@ def test_actual_producer_emits_only_references(owned_boundary, repair_order, mon
         return result
     monkeypatch.setattr(order_service, '_hakodate_canonical_payload_from_manifest_item', check)
     if operator:
-        test_order_service_resumes_operator_checkpoint_without_preprocessing(owned_boundary, monkeypatch, False)
+        test_native_terminal_review_get_save_and_checkpoint_resume(request.getfixturevalue('native_review'), monkeypatch)
     else:
-        test_actual_canonical_producer_json_writer_and_selected_read(repair_order, monkeypatch, None)
+        test_actual_canonical_producer_json_writer_and_selected_read(request.getfixturevalue('repair_order'), monkeypatch, None)
     assert len(observed) == 1

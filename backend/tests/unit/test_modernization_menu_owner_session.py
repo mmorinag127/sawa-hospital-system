@@ -348,20 +348,34 @@ def test_active_ingest_and_quad_axis_callers_explicitly_forward_session():
 
 
 @pytest.mark.parametrize("command", ["quad", "header", "row"])
-def test_actual_quad_and_axis_save_commands_use_one_owned_transaction(geometry_bagging, command):
+def test_actual_quad_and_axis_save_commands_use_one_writer_after_readonly_cas(geometry_bagging, command, monkeypatch):
+    from tests.helpers.authored_row_axis import install_image_provider, operator_input
+
     f = geometry_bagging
     original = f.saved()
     with f.session_scope() as session:
         receipt, _captured = workflow._axis_source_receipt(
             session, session.get(Order, f.order_id), session.get(OrderWorkflowState, f.order_id))
+    row_values = None
+    if command == "row":
+        install_image_provider(monkeypatch)
+        review, error = workflow.get_row_axis_review(f.order_id)
+        assert error is None
+        receipt = review["source_receipt"]
+        row_values = operator_input(review)
     checkouts = []
     lifecycle = []
+    transactions = []
 
     def checkout(*_args):
         checkouts.append(True)
 
     def begin(_connection):
         lifecycle.append("begin")
+        transactions.append([])
+
+    def sql(_connection, _cursor, statement, _parameters, _context, _many):
+        transactions[-1].append(statement.lstrip().split(None, 1)[0].upper())
 
     def commit(_connection):
         lifecycle.append("commit")
@@ -370,7 +384,7 @@ def test_actual_quad_and_axis_save_commands_use_one_owned_transaction(geometry_b
         lifecycle.append("rollback")
 
     listeners = [("checkout", checkout), ("begin", begin),
-                 ("commit", commit), ("rollback", rollback)]
+                 ("commit", commit), ("rollback", rollback), ("before_cursor_execute", sql)]
     for name, callback in listeners:
         event.listen(f.engine, name, callback)
     try:
@@ -387,13 +401,19 @@ def test_actual_quad_and_axis_save_commands_use_one_owned_transaction(geometry_b
                 source_receipt=receipt, expected_revision=receipt["workflow_revision"])
         else:
             result, error = workflow.save_row_axis_review_decision(
-                f.order_id, corrected_ys=[0, 50, 100],
-                coordinate_space={"mode": "template_canvas", "width": 100, "height": 100},
+                f.order_id, **row_values,
                 source_receipt=receipt, expected_revision=receipt["workflow_revision"])
         assert error is None, error
         assert result["revision"] == receipt["workflow_revision"] + 1
-        assert len(checkouts) == 1
-        assert lifecycle == ["begin", "commit"]
+        expected_transactions = 4 if command == "row" else 2
+        assert len(checkouts) == expected_transactions
+        assert lifecycle == ["begin", "commit"] * expected_transactions
+        writers = [index for index, statements in enumerate(transactions)
+                   if set(statements) & {"INSERT", "UPDATE", "DELETE", "REPLACE"}]
+        assert len(writers) == 1 and writers[0] > 0, transactions
+        assert all(statements and set(statements) <= {"BEGIN", "SELECT", "PRAGMA"}
+                   for index, statements in enumerate(transactions) if index != writers[0]), transactions
+        assert set(transactions[writers[0]]) <= {"SELECT", "PRAGMA", "INSERT", "UPDATE"}, transactions
     finally:
         for name, callback in reversed(listeners):
             event.remove(f.engine, name, callback)

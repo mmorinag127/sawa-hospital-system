@@ -83,19 +83,25 @@ def test_multiple_template_ids_require_matching_authored_selection(monkeypatch):
 def test_embedded_manifest_template_cannot_replace_authored_template(monkeypatch):
     from src.services.hakodate_cell_ocr_batch_service import _fax_template_for_manifest_item
 
-    template = {"columns": [{"index": 0, "source_index": 0, "role": "quantity", "diet_type": "normal"}]}
-    monkeypatch.setattr(config_service, "load_facility_master", lambda: {
-        "facilities": [{"facility_id": "facility", "fax_template": template}],
-    })
-    assert _fax_template_for_manifest_item({"fax_template": {"columns": []}}, "facility") == template
-    monkeypatch.setattr(config_service, "load_facility_master", lambda: {
-        "facilities": [{"facility_id": "facility"}],
-    })
-    with pytest.raises(ValueError, match="authored_fax_template_missing"):
+    template = {"page": 1, "columns": [{"index": 0, "source_index": 0, "role": "quantity", "diet_type": "normal"}]}
+    captured = {"facility": {"facility_id": "facility", "fax_template": template}, "policy": {}}
+    monkeypatch.setattr(config_service, "load_facility_master",
+                        lambda: pytest.fail("recognition recaptured a different master"))
+    item = {"configured_input": captured, "fax_template": {"columns": []}}
+    original = deepcopy(item)
+    assert _fax_template_for_manifest_item(item, "facility") == template
+    assert item == original
+    with pytest.raises(ValueError, match="^hakodate_captured_facility_mismatch$"):
+        _fax_template_for_manifest_item(item, "another-facility")
+    assert item == original
+    with pytest.raises(ValueError, match="^hakodate_captured_config_required$"):
         _fax_template_for_manifest_item({"fax_template": template}, "facility")
+    with pytest.raises(ValueError, match="authored_fax_template_missing"):
+        _fax_template_for_manifest_item({"configured_input": {"facility": {"facility_id": "facility"}, "policy": {}},
+                                         "fax_template": template}, "facility")
 
 
-def test_pipeline_missing_template_stops_before_any_pipeline_side_effect(monkeypatch):
+def test_missing_pdf_receipt_and_authored_template_stop_before_pipeline_side_effects(monkeypatch):
     from src.services import ocr_pipeline_service
 
     monkeypatch.setattr(config_service, "load_facility_master", lambda: {
@@ -105,6 +111,8 @@ def test_pipeline_missing_template_stops_before_any_pipeline_side_effect(monkeyp
         raise AssertionError("pipeline must not start without authored template")
     monkeypatch.setattr(ocr_pipeline_service, "_get_pipeline_semaphore", forbidden_pipeline_start)
     with pytest.raises(ValueError, match="authored_fax_template_missing"):
+        config_service.capture_authored_processing_config("facility")
+    with pytest.raises(ValueError, match="^selected_pdf_execution_changed$"):
         ocr_pipeline_service.run_ocr_pipeline(pdf_bytes=b"", job_id="actual", facility_id="facility")
 
 
@@ -117,15 +125,18 @@ def test_db_version_columns_do_not_replace_authored_template(monkeypatch):
         "facilities": [{"facility_id": "facility", "fax_template": template}],
     })
     monkeypatch.setattr(facility_template_version_service, "serialize_template_version", lambda version: {"id": version.id})
-    result = facility_template_version_service._resolved_config_from_parts(
-        facility_id="facility", facility_name=None,
-        config=config_service.get_facility_config("facility"), template_id=None,
-        columns=[{"index": 9, "role": "quantity", "source_index": 9}],
-        version=SimpleNamespace(id="version", config_json={"fax_template": {"columns": []}}),
-    )
-    assert result["fax_template"] == template
-    assert result["facility_template_version_id"] == "version"
-    assert "facility_template_version_id" not in result["fax_template"]
+    from src.services.canonical_facility_store import CanonicalStoreError
+
+    config = config_service.get_facility_config("facility")
+    original = deepcopy(config)
+    with pytest.raises(CanonicalStoreError, match="legacy_db_config_resolution_disabled"):
+        facility_template_version_service._resolved_config_from_parts(
+            facility_id="facility", facility_name=None, config=config, template_id=None,
+            columns=[{"index": 9, "role": "quantity", "source_index": 9}],
+            version=SimpleNamespace(id="version", config_json={"fax_template": {"columns": []}}),
+        )
+    assert config == original
+    assert config["fax_template"] == template
 
 
 def test_version_resolution_uses_same_captured_raw_snapshot(monkeypatch):
@@ -143,13 +154,16 @@ def test_version_resolution_uses_same_captured_raw_snapshot(monkeypatch):
         raise AssertionError("canonical snapshot reread")
     monkeypatch.setattr(config_service, "load_facility_master", reread)
     monkeypatch.setattr(facility_template_version_service, "serialize_template_version", lambda version: {"id": version.id})
-    result = facility_template_version_service._resolved_config_from_parts(
-        facility_id="facility", facility_name="DB name", config=captured,
-        template_id="selected", columns=[], version=SimpleNamespace(id="version"),
-    )
-    assert result["fax_template"] == captured["fax_template"]
-    assert result["unknown"] == captured["unknown"]
-    assert "facility_name" not in result
+    from src.services.canonical_facility_store import CanonicalStoreError
+
+    original = deepcopy(captured)
+    with pytest.raises(CanonicalStoreError, match="legacy_db_config_resolution_disabled"):
+        facility_template_version_service._resolved_config_from_parts(
+            facility_id="facility", facility_name="DB name", config=captured,
+            template_id="selected", columns=[], version=SimpleNamespace(id="version"),
+        )
+    assert captured == original
+    assert "facility_name" not in captured
 
 
 @pytest.mark.parametrize("getter", [

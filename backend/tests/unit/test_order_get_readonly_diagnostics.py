@@ -1,13 +1,11 @@
-from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
-from sqlalchemy.orm import Session
 
 from src.api import orders
 from src.services import order_workflow_v2_service as workflow_service
+from tests.helpers.authored_sheet_case import authored_sheet_case  # noqa: F401
 
 
 @pytest.fixture
@@ -25,8 +23,8 @@ def readonly_jobs(monkeypatch):
     monkeypatch.setattr(orders.order_workflow_v2_service, "mark_ocr_run_completed", forbidden)
     monkeypatch.setattr(orders, "_is_job_stale", lambda job: True)
     monkeypatch.setattr(orders, "_get_ocr_stale_minutes", lambda: 30)
-    monkeypatch.setattr(orders, "get_ocr_jobs", lambda ids: {job["id"]: job})
-    monkeypatch.setattr(orders, "get_latest_order_job", lambda order_id: job)
+    monkeypatch.setattr(orders, "get_recorded_order_job_bindings", lambda ids: {
+        order_id: {"job_id": job["id"], "job": job, "error": None} for order_id in ids})
     monkeypatch.setattr(orders, "get_ocr_job", lambda job_id: job)
     return job
 
@@ -112,33 +110,35 @@ def test_stale_reparse_with_cached_evidence_keeps_job_tokens_cache_and_quantity(
     workflow_service.list_ocr_results, workflow_service.build_sheet_from_selected_ocr,
     lambda order_id: workflow_service.get_sheet_auto_edit_job(order_id=order_id),
 ])
-def test_workflow_gets_use_no_conditional_write_lock(monkeypatch, getter):
-    session = Session()
-    @contextmanager
-    def readonly_session():
-        with session:
-            yield session
+def test_workflow_gets_use_no_conditional_write_lock(monkeypatch, getter, authored_sheet_case):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+    case = authored_sheet_case(quantity=0)
+    sheet = deepcopy(case.selected_sheet)
+    sheet["rows"][0][sheet["fields"].index("qty.regular_2f")] = "5"
+    case.save(sheet)
+    before = _snapshot(get_engine())
     def forbidden(*args, **kwargs):
         raise AssertionError("GET entered mutation workflow lock")
-    monkeypatch.setattr(workflow_service, "session_scope", readonly_session)
-    monkeypatch.setattr(workflow_service, "_get_order_or_error", lambda *args: (SimpleNamespace(id="order"), None))
     monkeypatch.setattr(workflow_service, "_get_workflow", forbidden)
-    def readonly_lookup(actual_session, order_id):
-        assert actual_session is session
-        assert order_id == "order"
-        raise LookupError("readonly_lookup_reached")
-    monkeypatch.setattr(workflow_service, "_get_workflow_readonly", readonly_lookup)
-    # Entry boundary proof; does not substitute for full ORM projection coverage.
-    with pytest.raises(LookupError, match="readonly_lookup_reached"):
-        getter("order")
+    with case.readonly():
+        getter(case.id)
+    assert _snapshot(get_engine()) == before
+    current, error = workflow_service.get_saved_sheet(case.id)
+    assert error is None
+    assert current["sheet"]["rows"] == sheet["rows"]
 
 
-def test_real_saved_sheet_get_emits_no_dml_or_bootstrap(isolated_formal_schema):
+def test_real_saved_sheet_get_emits_no_dml_or_bootstrap(isolated_formal_schema, monkeypatch, tmp_path):
+    from datetime import date
+    from tests.helpers.ingest_original import authored_sources
     from sqlalchemy import event
     from src.db import session_scope
     from src.models.order import Order, OrderLine
     from src.models.order_workflow_state import OrderWorkflowState
 
+    authored_sources(monkeypatch, tmp_path, facility_id="readonly-component",
+                     menu_date=date(2026, 10, 7), seed_menu=False)
     order_id = "readonly-order"
     with session_scope() as session:
         session.add(Order(id=order_id, document_uri="explicit-source", message_id="explicit-message"))

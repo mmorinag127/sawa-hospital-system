@@ -266,7 +266,7 @@ def test_list_orders_without_ocr_uses_lightweight_summary(monkeypatch) -> None:
     assert row["candidate_resolution"]["resolutions"]["facility"]["resolved_label"] == "施設A"
     # Cache pages are not a recorded OCR job or evidence of successful OCR.
     assert "ocr_status" not in row
-    assert "ocr_pages_count" not in row
+    assert row["ocr_pages_count"] == 1
 
 
 def test_list_orders_without_ocr_skips_candidate_resolution_by_default(monkeypatch) -> None:

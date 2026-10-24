@@ -24,6 +24,7 @@ test("orders list highlights facility-unregistered and week-unresolved orders in
       await route.fulfill({
         status: 200,
         json: {
+          source: "canonical_json", revision: "orders-facilities-1",
           facilities: [{ id: "FAC-001", name: "施設A" }],
         },
       });
@@ -144,6 +145,7 @@ test("orders list renders order cards for a resolved week and keeps submitted/mi
       await route.fulfill({
         status: 200,
         json: {
+          source: "canonical_json", revision: "orders-facilities-1",
           facilities: [
             { id: "FAC-001", name: "施設A" },
             { id: "FAC-002", name: "施設B" },
@@ -216,7 +218,7 @@ test("orders list renders order cards for a resolved week and keeps submitted/mi
   await expect(resolvedGroup.getByRole("heading", { name: "03/22 - 03/28" })).toBeVisible();
   await resolvedGroup.getByRole("button", { name: "開く" }).click();
   await expect(page.getByText("施設A (FAC-001)")).toBeVisible();
-  await expect(page.getByText("推定: 施設B (FAC-002)")).toBeVisible();
+  await expect(page.getByText("未確定候補: 施設B (FAC-002)")).toBeVisible();
   await expect(page.getByText(confirmedOrderId)).toBeVisible();
   await expect(page.getByText(inferredOrderId)).toBeVisible();
 });
@@ -244,6 +246,7 @@ test("orders list can collapse and reopen a week group", async ({ page }) => {
       await route.fulfill({
         status: 200,
         json: {
+          source: "canonical_json", revision: "orders-facilities-1",
           facilities: [{ id: "FAC-001", name: "施設A" }],
         },
       });
@@ -320,6 +323,7 @@ test("orders list merges relocation facility pairs into one display slot", async
       await route.fulfill({
         status: 200,
         json: {
+          source: "canonical_json", revision: "orders-facilities-1",
           facilities: [
             { id: "FAC00011", name: "ケアハウス四万十" },
             { id: "FAC00013", name: "いこいの森" },
@@ -419,6 +423,7 @@ test("orders list can archive a completed week and restore it from archived view
       await route.fulfill({
         status: 200,
         json: {
+          source: "canonical_json", revision: "orders-facilities-1",
           facilities: [{ id: "FAC-001", name: "施設A" }],
         },
       });
@@ -531,6 +536,7 @@ test("orders list can bulk archive visible week groups regardless of order statu
       await route.fulfill({
         status: 200,
         json: {
+          source: "canonical_json", revision: "orders-facilities-1",
           facilities: [
             { id: "FAC-001", name: "施設A" },
             { id: "FAC-002", name: "施設B" },

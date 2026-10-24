@@ -71,3 +71,13 @@ test("shift routes are disabled when no shift target is configured", async () =>
 
   assert.deepEqual(shiftRoutes, []);
 });
+
+test("hospital aliases resolve internally before page routing without a second proxy rewrite", async () => {
+  const rewrites = await loadRewrites({});
+  assert.deepEqual(rewrites.beforeFiles.filter(route => route.source.startsWith("/hospital")), [
+    { source: "/hospital", destination: "/hospital-dashboard" },
+    { source: "/hospital/:path*", destination: "/:path*" },
+  ]);
+  const proxy = require("node:fs").readFileSync(require.resolve("../../src/proxy.ts"), "utf8");
+  assert.ok(!proxy.includes("NextResponse.rewrite"));
+});

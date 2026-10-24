@@ -17,19 +17,27 @@ def test_reparse_week_missing_stops_without_active_or_cache(monkeypatch):
 def test_explicit_start_week_wins_without_altering_zero():
     lines = [{"date": date(2026, 9, 7), "quantity_original": 0, "quantity_corrected": None}]
     week = order_service._resolve_reparse_own_week(
-        captured_week="2026-10", received_at=datetime(2026, 10, 7),
+        captured_week="2026-10@2026-10-04~2026-10-10", received_at=datetime(2026, 10, 7),
         lines=lines, own_payload=None,
     )
-    assert week == "2026-10"
+    assert week == "2026-10@2026-10-04~2026-10-10"
     assert lines[0]["quantity_original"] == 0
     assert lines[0]["quantity_corrected"] is None
 
 
-def test_own_recognized_dates_resolve_without_received_month_default():
+def test_recognized_dates_cannot_replace_missing_explicit_period():
     assert order_service._resolve_reparse_own_week(
         captured_week=None, received_at=datetime(2026, 10, 7),
         lines=[{"date": date(2026, 9, 7), "quantity_original": 0}], own_payload=None,
-    ) == "2026-09"
+    ) is None
+
+
+def test_captured_month_alone_cannot_replace_explicit_period():
+    assert order_service._resolve_reparse_own_week(
+        captured_week="2026-10", received_at=datetime(2026, 10, 7),
+        lines=[{"date": date(2026, 10, 7), "quantity_original": 0}],
+        own_payload={"date_strings": ["10/07"]},
+    ) is None
 
 
 def test_llm_baseline_receives_only_captured_draft_and_own_payload(monkeypatch):

@@ -10,6 +10,8 @@ from sqlalchemy import select
 from src.db import session_scope
 from tests.helpers.ingest_original import configure_delivery, authored_sources, authored_pipeline_provider, register_authored_payload
 from src.models.ingest_job import IngestJob
+from src.models.ingest_delivery import IngestDelivery
+from src.models.ingest_delivery_successor import IngestDeliverySuccessor
 from src.models.ocr_job import OcrJob
 from src.models.uploaded_pdf import UploadedPdf
 from src.services import ingest_job_service as ingest
@@ -110,9 +112,50 @@ def owned_uploaded_original(store, payload, monkeypatch, *, pending=False, faile
     return receipt
 
 
+def original_ocr_row(session, receipt):
+    recorded = session.execute(select(IngestDelivery).where(
+        IngestDelivery.job_id == receipt["id"],
+        IngestDelivery.business_generation == receipt["generation"],
+    )).scalar_one()
+    assert recorded.input_digest == receipt["input_digest"]
+    terminal = recorded.terminal_receipt
+    handoff = recorded.handoff_receipt
+    selected = terminal if terminal is not None else handoff
+    assert isinstance(selected, dict), "original delivery has no recorded OCR receipt"
+    row = session.get(OcrJob, selected["job_id"])
+    assert row is not None
+    lease = row.metrics["ingest_lease"]
+    assert lease["id"] == receipt["id"]
+    assert lease["generation"] == receipt["generation"]
+    assert lease["input_digest"] == receipt["input_digest"]
+    assert guard.snapshots_equal(lease, recorded.owner_lease)
+    assert guard.snapshots_equal(selected["capture"], row.metrics["nonworkflow_execution"])
+    for saved in (terminal, handoff):
+        if saved is not None:
+            assert saved["job_id"] == row.id
+    successor = session.execute(select(IngestDeliverySuccessor).where(
+        IngestDeliverySuccessor.parent_delivery_id == recorded.id,
+    )).scalar_one_or_none()
+    if successor is not None:
+        assert isinstance(terminal, dict), "successor requires its recorded predecessor terminal"
+        assert successor.predecessor_job_id == row.id
+        assert successor.job_id != row.id
+        child = session.get(OcrJob, successor.job_id)
+        assert child is not None
+        assert child.order_id == row.order_id
+        boundary = child.metrics["nonworkflow_execution"]
+        assert boundary["job_id"] == child.id
+        assert boundary["ingest_successor_id"] == successor.id
+        assert child.metrics["ingest_successor_id"] == successor.id
+        assert guard.snapshots_equal(boundary["ingest_lease"], recorded.owner_lease)
+        assert guard.snapshots_equal(successor.owner_lease, recorded.owner_lease)
+        assert guard.snapshots_equal(successor.original["predecessor_receipt"], terminal["receipt"])
+    return row
+
+
 def original_ocr(store, receipt):
     with store() as session:
-        row = session.query(OcrJob).filter(OcrJob.metrics["ingest_lease"]["id"].as_string() == receipt["id"]).one()
+        row = original_ocr_row(session, receipt)
         return row.id, deepcopy(row.metrics)
 
 
@@ -141,9 +184,7 @@ def test_old_attempt_cannot_finish_fail_or_capture_new_attempt(store, payload, r
     first = owned_uploaded_original(store, payload, monkeypatch, pending=True, uploaded=False)
     result = process_original(first)
     with store() as session:
-        actual = session.query(OcrJob).filter(
-            OcrJob.metrics["ingest_lease"]["id"].as_string() == first["id"]
-        ).one()
+        actual = original_ocr_row(session, first)
         diagnostic = (actual.status, actual.error_message, actual.metrics)
     assert result["result"] == "durable_handoff", repr(diagnostic)
     job_id, before = original_ocr(store, first)
@@ -178,7 +219,7 @@ def test_old_attempt_cannot_finish_fail_or_capture_new_attempt(store, payload, r
     assert advances
     assert ingest.get_ingest_job_snapshot(first["id"])["generation"] == selected_generation
     current_job_id, prepared = original_ocr(store, current)
-    assert current_job_id == job_id
+    assert current_job_id != job_id
     new = prepared["ingest_lease"]
     assert new["claim_id"] != old["claim_id"]
     assert new["attempts"] == old["attempts"] + 1
@@ -188,7 +229,8 @@ def test_old_attempt_cannot_finish_fail_or_capture_new_attempt(store, payload, r
     with ingest.ingest_execution_context(old), pytest.raises(ValueError, match="ingest_attempt_changed"):
         guard.capture_nonworkflow_execution(job_id, order_id="not-read", input_reference=payload["pdf_uri"])
     with store() as session:
-        assert session.get(OcrJob, job_id).metrics == prepared
+        assert session.get(OcrJob, current_job_id).metrics == prepared
+        assert session.get(OcrJob, job_id).metrics == before
         assert session.get(IngestJob, first["id"]).claim_id == new["claim_id"]
     assert ingest.get_ingest_job_snapshot(first["id"])["status"] == "done"
     assert prepared["first_pass_terminal_receipt"]["execution_id"] == prepared["nonworkflow_execution"]["execution_id"]
@@ -545,12 +587,14 @@ def test_new_ocr_execution_is_not_adopted_as_old_terminal_result(store, payload,
     authored_pipeline_provider(monkeypatch, table_rows=[["10/07", "昼", "Menu A", "2"]])
     assert process_original(current)["result"] == "business_done"
     current_id, metrics = original_ocr(store, current)
-    assert current_id == job_id
+    assert current_id != job_id
     assert metrics["nonworkflow_execution"]["execution_id"] != original["execution_id"]
     before = ingest.get_ingest_job_snapshot(receipt["id"])
     assert ingest.settle_ingest_ocr_terminal(original) is None
     assert ingest.get_ingest_job_snapshot(receipt["id"]) == before
     assert original_ocr(store, current)[1] == metrics
+    with store() as session:
+        assert session.get(OcrJob, job_id).metrics == old_metrics
 
 
 def test_business_terminal_does_not_consume_ocr_recovery_slots(store, payload, monkeypatch):
@@ -567,12 +611,14 @@ def test_worker_old_capture_failure_does_not_fail_new_prepared_ocr(store, payloa
     uploads.requeue_uploaded_pdf("own-upload")
     current = ingest.get_ingest_job_snapshot(receipt["id"])
     assert process_original(current)["result"] == "durable_handoff"
-    _, prepared_new = original_ocr(store, current)
+    current_job_id, prepared_new = original_ocr(store, current)
+    assert current_job_id != job_id
     assert not ingest.fail_ingest_ocr_capture(old_metrics["ingest_lease"], job_id, ValueError("old capture failed"))
     with store() as session:
-        job = session.get(OcrJob, job_id)
+        job = session.get(OcrJob, current_job_id)
         assert job.status == "awaiting_output"
         assert job.metrics == prepared_new
+        assert session.get(OcrJob, job_id).metrics == old_metrics
     assert ingest.get_ingest_job_snapshot(receipt["id"])["status"] == "processing"
 
 

@@ -5,7 +5,7 @@ from datetime import date
 from src.services import output_builder
 from src.services import menu_service, order_service, order_workflow_v2_service as workflow
 from src.services.sheet_week_service import parse_sheet_week_value
-from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order
+from tests.helpers.newnarrowbaggingfixture import accepted_bagging_order, selected_bagging_order
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def owned_outputs(monkeypatch, tmp_path, isolated_formal_schema):
         def create_order_from_ingest(self, payload, *, lines, recipe=None,
                                      declared_quantity_pairs=None, accessory_masters=None, physical_slot=None,
                                      physical_category=None, prepared_menu_sources=False,
-                                     daily_label_comparable_diet_types=None):
+                                     daily_label_comparable_diet_types=(), confirm=True):
             assert lines, "explicit authored lines/identity required"
             assert isinstance(payload.facility_hint, str) and payload.facility_hint.strip(), "explicit authored facility required"
             name, day, daypart = (lines[0][key] for key in ("menu_name", "date", "daypart"))
@@ -71,7 +71,7 @@ def owned_outputs(monkeypatch, tmp_path, isolated_formal_schema):
                     assert slots is not None, "explicit authored physical slot required; never borrow another scope"
             assert recipe["qty_per_serving"] is not None and recipe["unit_type"]
             assert slots is not None and type(slots[name]) is int and slots[name] >= 0
-            registered = accepted_bagging_order(monkeypatch, tmp_path, lines,
+            options = dict(
                 facility_id=payload.facility_hint, message_id=payload.message_id,
                 menu_qty_per_serving=recipe["qty_per_serving"],
                 menu_unit_type=recipe["unit_type"], menu_category=recipe["category"],
@@ -81,15 +81,20 @@ def owned_outputs(monkeypatch, tmp_path, isolated_formal_schema):
                 daily_label_comparable_diet_types=daily_label_comparable_diet_types,
                 physical_slot_indexes=slots, week_start=start.isoformat(), week_end=end.isoformat(),
                 accessory_masters=accessory_masters,
-                declared_quantity_pairs=declared_quantity_pairs, confirm=True)
+                declared_quantity_pairs=declared_quantity_pairs)
+            if confirm:
+                registered = accepted_bagging_order(monkeypatch, tmp_path, lines, **options, confirm=True)
+            else:
+                registered, sheet = selected_bagging_order(monkeypatch, tmp_path, lines, **options)
+                self.save_ocr_sheet_exact(registered["id"], **sheet)
             self.created.append(registered["id"])
-            return order_service.get_order_by_id(registered["id"])
+            return order_service.get_order_by_id(registered["id"], allow_unresolved_menu_amount=not confirm)
 
         def assert_confirmed(self, order_id):
             assert order_service.get_order_by_id(order_id)["status"] == "確定"
 
         def save_ocr_sheet_exact(self, order_id, *, fields, rows, row_ids=None, **kwargs):
-            order = order_service.get_order_by_id(order_id)
+            order = order_service.get_order_by_id(order_id, allow_unresolved_menu_amount=True)
             sheet = {**kwargs, "fields": fields, "rows": rows,
                      "week_id": kwargs.get("week_id", order["week_value"])}
             if row_ids is not None:

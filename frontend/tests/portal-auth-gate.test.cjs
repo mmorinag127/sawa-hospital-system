@@ -70,3 +70,68 @@ test("login distinguishes config loading from server failure without obsolete cl
   assert.match(container.textContent, /ログイン設定の取得に失敗/);
   assert.doesNotMatch(container.textContent, /NEXT_PUBLIC_GOOGLE_CLIENT_ID|Google Client ID/);
 }));
+
+for (const credential of ["bearer", "server-session"]) test(`query navigation retains editor; another route verifies authentication: ${credential}`, async () => dom(async (root, container) => {
+  const router = { isReady: true, pathname: "/menu-masters", asPath: "/menu-masters" };
+  const pending = [];
+  let mounts = 0, unmounts = 0;
+  const Shell = ({ children }) => children;
+  const App = load("_app.tsx", {
+    "next/router": { useRouter: () => router },
+    "../services/apiClient": {
+      getStoredAuthHeader: () => credential === "bearer" ? "Bearer test" : "",
+      establishServerSession: () => new Promise(resolve => pending.push(resolve)),
+    },
+    "../components/PageTemplate": { default: Shell }, "../components/UnifiedShell": { default: Shell },
+    "../components/NavigationBoundary": { NavigationBoundary: Shell },
+    "../services/browserSession": { watchBrowserLogout: () => () => {} },
+    "../services/loginDestination": { loginUrlFor: () => "/login" },
+  });
+  function Editor() {
+    const [draft, setDraft] = React.useState("");
+    React.useEffect(() => { mounts++; return () => { unmounts++; }; }, []);
+    return React.createElement("button", { onClick: () => setDraft("unsaved") }, draft || "edit");
+  }
+  const render = () => act(async () => root.render(React.createElement(App, { Component: Editor, pageProps: {} })));
+  await render();
+  if (credential === "server-session") await act(async () => pending.shift()({}));
+  await act(async () => container.querySelector("button").click());
+  for (const query of ["?q=fish", "?q=fish&page=1", "?q=fish", ""]) {
+    router.asPath = `/menu-masters${query}`;
+    await render();
+    assert.equal(container.querySelector("button").textContent, "unsaved");
+    assert.equal(mounts, 1); assert.equal(unmounts, 0); assert.equal(pending.length, 0);
+  }
+  router.pathname = "/menu-rules"; router.asPath = "/menu-rules";
+  await render();
+  assert.equal(unmounts, 1);
+  if (credential === "server-session") {
+    assert.match(container.textContent, /ログインを確認/); assert.equal(mounts, 1);
+    assert.equal(pending.length, 1);
+    await act(async () => pending.shift()({}));
+  }
+  assert.equal(mounts, 2); assert.equal(container.querySelector("button").textContent, "edit");
+}));
+
+test("pending authentication failure redirects to the latest same-page query", async () => dom(async (root) => {
+  const router = { isReady: true, pathname: "/menu-masters", asPath: "/menu-masters?q=old" };
+  let reject;
+  const pending = new Promise((_, fail) => { reject = fail; });
+  const Shell = ({ children }) => children;
+  const location = { href: "" };
+  const App = load("_app.tsx", {
+    "next/router": { useRouter: () => router },
+    "../services/apiClient": { getStoredAuthHeader: () => "", establishServerSession: () => pending },
+    "../components/PageTemplate": { default: Shell }, "../components/UnifiedShell": { default: Shell },
+    "../components/NavigationBoundary": { NavigationBoundary: Shell },
+    "../services/browserSession": { watchBrowserLogout: () => () => {} },
+    "../services/loginDestination": { loginUrlFor: next => `/login?next=${encodeURIComponent(next)}` },
+  }, { window: { sessionStorage: window.sessionStorage, location } });
+  const render = () => act(async () => root.render(React.createElement(App, { Component: () => null, pageProps: {} })));
+  await render();
+  router.asPath = "/menu-masters?q=current&page=2";
+  await render();
+  await act(async () => reject({ status: 401 }));
+  assert.equal(window.sessionStorage.getItem("auth_next"), router.asPath);
+  assert.equal(new URL(location.href, "https://portal.example.invalid").searchParams.get("next"), router.asPath);
+}));

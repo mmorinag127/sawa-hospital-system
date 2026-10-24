@@ -117,13 +117,20 @@ def _diagnostic_source(session, order, job, evidence_id, *, checkpoint, item, lo
     return records, proof
 
 
+def require_resume_source_receipt(override):
+    if (not isinstance(override, dict) or not isinstance(override.get("source_receipt"), dict)
+            or not isinstance(override.get("checkpoint"), dict)):
+        raise ValueError("recognition_resume_source_required")
+    return override["source_receipt"]
+
+
 def resume_diagnostic_source(override, *, item, captured):
     """Revalidate the explicitly captured original result, never the newest result."""
     from src.services import ingest_delivery_service as delivery
     from sqlalchemy import select
     from src.models.ingest_delivery import IngestDelivery
 
-    receipt = override["source_receipt"]
+    receipt = require_resume_source_receipt(override)
     with workflow.session_scope() as session:
         order = session.get(workflow.Order, item["order_id"])
         job = session.get(workflow.OcrJob, receipt.get("recognition_job_id"))
@@ -159,7 +166,7 @@ def resume_diagnostic_source(override, *, item, captured):
 
 
 def validate_manual_resume(override, *, item):
-    receipt = override["source_receipt"]
+    receipt = require_resume_source_receipt(override)
     with workflow.session_scope() as session:
         order = session.get(workflow.Order, item["order_id"])
         job = session.get(workflow.OcrJob, receipt.get("recognition_job_id"))

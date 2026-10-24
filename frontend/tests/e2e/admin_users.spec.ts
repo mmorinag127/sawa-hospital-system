@@ -61,7 +61,7 @@ test("admin sees the shared template and an explicit successful save result", as
   await page.getByLabel("メールアドレス").fill("operator@example.com");
   await page.getByRole("button", { name: "保存", exact: true }).click();
 
-  await expect(page.getByRole("status")).toHaveText("operator@example.com を保存しました。");
+  await expect(page.getByRole("status").filter({ hasText: "operator@example.com を保存しました。" })).toHaveText("operator@example.com を保存しました。");
   await expect(page.getByText("operator@example.com", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "保存中…" })).toHaveCount(0);
 });
@@ -96,6 +96,7 @@ test("admin sees an explicit save error and can retry without losing the form", 
   await expect(
     page.getByText("ユーザーを保存できませんでした: Account already exists", { exact: true }),
   ).toBeVisible();
+  await expect(page.getByText("ユーザーを保存できませんでした: Account already exists", { exact: true })).toHaveCount(1);
   await expect(page.getByLabel("メールアドレス")).toHaveValue("duplicate@example.com");
   await expect(page.getByRole("button", { name: "保存", exact: true })).toBeEnabled();
 });

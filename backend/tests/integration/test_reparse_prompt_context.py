@@ -10,7 +10,14 @@ from src.services import order_service  # noqa: E402
 def test_build_llm_assist_prompt_includes_structured_tables_and_issue_context():
     prompt = order_service._build_llm_assist_prompt(
         provider="openai",
-        template={},
+        template={"columns_authoritative": True,
+            "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+            "columns": [
+                {"index": 0, "source_index": 0, "role": "date"},
+                {"index": 1, "source_index": 1, "role": "daypart"},
+                {"index": 2, "source_index": 2, "role": "menu_name"},
+                {"index": 3, "source_index": 3, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+            ]},
         llm_assist=True,
         pipeline_output={
             "table_raw": "|日付|区分|献立|常食|\n|-|-|-|-|\n|2/15|朝|Menu A|12|",

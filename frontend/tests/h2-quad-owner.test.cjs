@@ -477,3 +477,27 @@ test('actual polling missing job stops without guessing, and current transient r
   const h=pollingHarness();h.context.apiClient.get=async()=>{throw Error('transient own read');};const cleanup=h.start();h.timer.tick();await settle();assert.match(h.state.error,/transient own read/);
   h.context.apiClient.get=async url=>h.response(url);h.timer.tick();await settle();assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.status,'queued');cleanup();
 });
+
+for(const changed of ['generation','revision'])test(`actual polling binding rejection after newer ${changed} cannot clear current job or stop its timer`,async()=>{
+  const h=pollingHarness(),pending=deferred();h.state.workflow=h.context.workflow;
+  h.context.apiClient.get=()=>pending.promise;
+  const cleanup=h.start();h.timer.tick();
+  if(changed==='generation')h.context.refreshGenerationRef.current++;
+  else h.context.workflowRevisionRef.current.revision=9;
+  h.state.error='new-current-error';
+  pending.reject({response:{data:{detail:'ocr_recorded_job_input_changed'}}});
+  await settle();
+  assert.equal(h.state.error,'new-current-error');
+  assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');
+  assert.equal(h.timer.cleared,0);cleanup();
+});
+
+test('actual polling current binding rejection clears only the rejected current execution',async()=>{
+  const h=pollingHarness();h.state.workflow=h.context.workflow;
+  h.context.apiClient.get=async()=>{throw {response:{data:{detail:'ocr_recorded_job_input_changed'}}};};
+  const cleanup=h.start();h.timer.tick();await settle();
+  assert.equal(h.state.workflow.ocr_job,null);
+  assert.equal(h.state.workflow.common_job_status,null);
+  assert.equal(h.state.workflow.ocr_job_binding_error,'ocr_recorded_job_input_changed');
+  assert.equal(h.timer.cleared,1);cleanup();
+});

@@ -33,6 +33,16 @@ def configure_delivery(monkeypatch):
             monkeypatch.setenv(dispatch.PREFIX + role + key, value)
 
 
+def configure_workflow_delivery(monkeypatch):
+    for key, value in {
+        "PROJECT_ID": "fixture-project", "LOCATION": "fixture-location",
+        "QUEUE": "fixture-queue", "TARGET_URL": "https://fixture.invalid",
+        "SERVICE_ACCOUNT_EMAIL": "fixture@fixture.iam.gserviceaccount.com",
+        "AUDIENCE": "fixture-audience", "DISPATCH_DEADLINE_SECONDS": "300",
+    }.items():
+        monkeypatch.setenv("HOSPITAL_WORKFLOW_OCR_DELIVERY_" + key, value)
+
+
 def _authored_selection(uploaded, effective_date):
     from src.services.canonical_facility_store import read_snapshot
     from src.services.ingest_facility_selection_service import capture_selection
@@ -86,6 +96,7 @@ def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="
 
     facility = {
         "facility_id": facility_id, "facility_name": "Authored component facility",
+        "daily_label_comparable_diet_types": [],
         "areas": [{"area_id": "2F", "name": "Synthetic component second floor"}], "fax_template_id": "authored-component",
         "fax_template": {"template_id": "authored-component", "page": 1, "columns": [
             {"index": 0, "source_index": 0, "role": "date", "name": "date_mmdd"},
