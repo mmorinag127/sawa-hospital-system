@@ -33,7 +33,7 @@ from src.workers.ingest_mail_adapter import IngestEmailPayload
 
 
 FIELDS = ["date_mmdd", "daypart", "menu", "qty.regular_x"]
-WEEK = "2026-10@2026-10-05~2026-10-11"
+WEEK = "2026-10@2026-10-04~2026-10-10"
 
 
 @pytest.fixture

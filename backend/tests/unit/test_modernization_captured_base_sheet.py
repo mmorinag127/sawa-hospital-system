@@ -101,7 +101,7 @@ def test_captured_inputs_survive_live_order_and_root_change(repair_order, isolat
         assert actual == expected
         assert captured == original
         assert actual["facility_id"] == "fixture"
-        assert actual["week_id"] == "2026-10@2026-10-05~2026-10-11"
+        assert actual["week_id"] == "2026-10@2026-10-04~2026-10-10"
     finally:
         path.write_bytes(original_bytes)
 

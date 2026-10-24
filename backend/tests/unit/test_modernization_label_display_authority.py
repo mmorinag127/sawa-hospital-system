@@ -151,24 +151,11 @@ def test_validator_distinguishes_missing_and_empty_including_authored_versions()
 
 
 def test_real_sql_receipt_reads_frozen_setting_not_current_json(monkeypatch, tmp_path, isolated_formal_schema):
-    real_author = helper.authored_sources
-
-    def explicit_source(*args, **kwargs):
-        result = real_author(*args, **kwargs)
-        path = tmp_path / "authored-facilities.json"
-        master = json.loads(path.read_text())
-        facility = master["facilities"][0]
-        facility["daily_label_comparable_diet_types"] = ["staff"]
-        facility["versions"][0]["facility"]["daily_label_comparable_diet_types"] = ["staff"]
-        path.write_text(json.dumps(master))
-        return result
-
-    monkeypatch.setattr(helper, "authored_sources", explicit_source)
     order = helper.accepted_bagging_order(monkeypatch, tmp_path, [{
         "line_id": "synthetic-display-line", "date": "2026-10-04", "daypart": "朝",
         "menu_name": "Synthetic display menu", "diet_type": "regular", "area_id": "2F",
         "bag_type": "standard", "quantity_original": 2,
-    }])
+    }], daily_label_comparable_diet_types=["staff"])
     path = tmp_path / "authored-facilities.json"
     current = json.loads(path.read_text())
     current["facilities"][0]["daily_label_comparable_diet_types"] = []
