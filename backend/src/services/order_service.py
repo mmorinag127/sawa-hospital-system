@@ -9940,6 +9940,7 @@ def _hakodate_canonical_payload_from_manifest_item(
             elif ((mode == recovery.FULL_MANUAL and source_receipt.get("recognition_mode") == mode)
                   or (mode is None and "recognition_mode" not in source_receipt)):
                 # Stored pre-mode overrides have the original complete-manual contract.
+                recovery.validate_manual_resume(recognition_override, item=runtime_item)
                 required_cells = runtime_item["original_expected_sheet_cells"]
             else:
                 raise ValueError("recognition_recovery_mode_changed")
