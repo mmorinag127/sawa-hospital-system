@@ -217,8 +217,14 @@ class Managed:
 
     async def stop(self, run_id, *, expected_generation=None):
         from .sandbox import settle_process_task
+        if self.store.get(run_id)["status"] in ("stopped", "rolled_back"):
+            return
+        fenced = self.store.fence(run_id, expected_generation=expected_generation)
+        if fenced is None:
+            return
         caller = asyncio.current_task()
-        _, cancelled = await settle_process_task(asyncio.create_task(self._stop(run_id, caller, expected_generation)))
+        _, cancelled = await settle_process_task(asyncio.create_task(self._stop(
+            run_id, caller, expected_generation, fenced=fenced)))
         if cancelled is not None:
             raise cancelled
 
@@ -235,13 +241,16 @@ class Managed:
             self.store.event(run_id, 'notice', {'message': '業務APIの停止が未確定です。保存済み内容と予算予約を保持して再確認します。'})
             return False
 
-    async def _stop(self, run_id, caller=None, expected_generation=None):
+    async def _stop(self, run_id, caller=None, expected_generation=None, *, fenced=None):
         if self.store.get(run_id)["status"] in ("stopped", "rolled_back"):
             return
-        fenced = self.store.fence(run_id, expected_generation=expected_generation)
+        if fenced is None:
+            fenced = self.store.fence(run_id, expected_generation=expected_generation)
         if fenced is None:
             return
         previous, generation = fenced
+        if self.store.get(run_id)["generation"] != generation:
+            return
         restored = previous["status"] == "rollback_stop_pending"
         pending_status = "rollback_stop_pending" if restored else "stop_pending"
         run = previous.copy()
@@ -249,10 +258,14 @@ class Managed:
         if starting and not starting.done() and starting not in (asyncio.current_task(), caller):
             starting.cancel()
             await asyncio.gather(starting, return_exceptions=True)
+        if self.store.get(run_id)["generation"] != generation:
+            return
         task = self.tasks.get(run_id)
         if task and not task.done() and task not in (asyncio.current_task(), caller):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        if self.store.get(run_id)["generation"] != generation:
+            return
         native_stopped = await self.stop_native(run_id, pending_status, generation)
         if not run["session_id"] and previous["status"] in ("dispatching", "reconciliation_required", "stop_pending", "rollback_stop_pending"):
             try:
@@ -272,7 +285,8 @@ class Managed:
                 self.store.usage(run_id, session.usage.model_dump(mode='json'), terminal=native_stopped, terminal_generation=generation)
             except Exception:
                 self.store.update(run_id, expected_stop_generation=generation, status=pending_status)
-                self.store.event(run_id, "notice", {"message": "業務書込みは停止しました。Claude側の停止・料金確認は未完了で、予算予約を保持しています。"})
+                local_status = "業務書込みは停止しました。" if native_stopped else "業務APIの停止は未確認です。"
+                self.store.event(run_id, "notice", {"message": local_status + "Claude側の停止・料金確認は未完了で、予算予約を保持しています。"})
                 return
         else:
             # No remote call was made only when local preparation failed before dispatch.

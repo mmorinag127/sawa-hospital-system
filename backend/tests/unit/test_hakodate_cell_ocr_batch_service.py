@@ -150,6 +150,7 @@ def test_sheet_assignments_expand_merged_region_to_logical_targets() -> None:
             "bbox": [10.0, 20.0, 30.0, 50.0],
             "ocr_cell_crop_bbox_px": [11, 22, 29, 48],
             "ocr_text": "5",
+            "raw_text": "5",
             "ocr_normalized": "5",
             "merged_cell": {"range": "E11:E12"},
             "logical_targets": [
@@ -260,6 +261,7 @@ def test_validate_cell_ocr_mapping_proves_region_to_sheet_value_propagation() ->
             "bbox": [0, 0, 80, 60],
             "ocr_contact_slot": [0, 0, 80, 60],
             "ocr_text": "12",
+            "raw_text": "12",
             "ocr_normalized": "12",
             "ocr_word_count": 1,
             "ocr_words": [{"text": "12", "x": 40, "y": 30}],
@@ -297,6 +299,7 @@ def test_validate_cell_ocr_mapping_rejects_stale_parsed_text() -> None:
             "bbox": [0, 0, 80, 60],
             "ocr_contact_slot": [0, 0, 80, 60],
             "ocr_text": "99",
+            "raw_text": "99",
             "ocr_normalized": "99",
             "ocr_word_count": 1,
             "ocr_words": [{"text": "12", "x": 40, "y": 30}],

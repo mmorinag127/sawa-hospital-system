@@ -45,7 +45,7 @@ class LocalPdfStorage:
         self.root_dir = Path(root_dir).expanduser()
 
     def save_pdf(self, *, job_id: str, filename: str, pdf_bytes: bytes) -> str:
-        target = datasets.local_directory(self.root_dir) / f"{job_id}-{_sanitize_filename(filename)}"
+        target = datasets.local_directory(self.root_dir, feature="school-lunch") / f"{job_id}-{_sanitize_filename(filename)}"
         with target.open("xb") as output:
             output.write(pdf_bytes)
         return target.resolve().as_uri()
@@ -84,7 +84,7 @@ class GcsPdfStorage:
 
     def save_pdf(self, *, job_id: str, filename: str, pdf_bytes: bytes) -> str:
         object_name = self._object_name(job_id=job_id, filename=filename)
-        bucket_name, object_name = datasets.write_object(self.bucket_name, object_name)
+        bucket_name, object_name = datasets.write_object(self.bucket_name, object_name, feature="school-lunch")
         bucket = self._storage_client().bucket(bucket_name)
         blob = bucket.blob(object_name)
         try:
@@ -128,7 +128,7 @@ def get_write_storage():
 
 
 def load_pdf(reference: str) -> bytes:
-    if datasets.current_dataset() != "test":
+    if datasets.current_dataset(feature="school-lunch") != "test":
         uri, generation, digest = datasets.read_object(reference, feature="school-lunch")
         parsed = urlparse(uri)
         if parsed.scheme != "gs":
@@ -162,7 +162,7 @@ def load_job_source(job):
 def storage_identity(reference):
     identity = parse_stored_reference(reference)
     if identity["mode"] == "local":
-        if datasets.current_dataset() != "test":
+        if datasets.current_dataset(feature="school-lunch") != "test":
             entry = datasets.component("school-lunch")["objects"].get(reference)
             proof = entry.get("source_identity") if isinstance(entry, dict) else None
             required = {"mode", "device", "inode", "size", "mtime_ns"}

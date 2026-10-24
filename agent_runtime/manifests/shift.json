@@ -1,10 +1,10 @@
 {
-  "source_revision": "d516f8e9756d1436ea870d264c964b2de9b0efbe",
-  "working_diff_sha256": "19972cbd84b2378092985038d4ccdd3cb63c33cbc6e80162bc8be4fcb4c29cd3",
+  "source_revision": "01a3869c748f1023847328b1b5f053a2311478c9",
+  "working_diff_sha256": "692bb7bb9ec425f3c58c2532053c555083d7f039a5d92dcc786ef7ab3dfb6a55",
   "files": {
     "backend/.dockerignore": "eac1f6c03c0f0a4720853b53e1ab37c7b633c31820aa05cbda28a0f5304c964d",
-    "backend/Dockerfile": "066eec7fb9400d908edcabec7a415c4a65e4057f88d277369c60ab51ff4db239",
-    "backend/Dockerfile.solve-worker": "8d3096c0afb8a884dd608a29659890e24f487fa3ddac8cfc341c3af897a55d92",
+    "backend/Dockerfile": "69d50eac6a694f76a1313ce99ff7aa089329c631e6fbd3f216a7fdc0f85c150a",
+    "backend/Dockerfile.solve-worker": "b95e5f6badfd0292a916edb331e4804f8780051ee3795cd25c2ee0a42840413e",
     "backend/alembic.ini": "27512fceb7639f07bf5392f016f62e838684ed9e1012b25e3e9008135255c9fb",
     "backend/migrations/env.py": "4e31627f44e67e4850f43b629699e1fd33f288d538b8d2f6f39f9bf22cc86c7e",
     "backend/migrations/script.py.mako": "79c2370604c824dd035b74de289314e5d8d7ae2e8120f94b9286341a835fff44",
@@ -19,7 +19,7 @@
     "backend/migrations/versions/e6a4c8b9d210_add_rule_profiles.py": "e87fec94532af06dc194a82f115dd8570d00b2658cead61ae72e7f3d79b3c7d3",
     "backend/migrations/versions/f2c1a9e7b4d6_add_skill_revisions.py": "3dba69c3bf090f8b2d49f4400e6f041a6be1026f2521cba7d7bfa2dd08f2fa44",
     "backend/migrations/versions/f7c31a9e204b_add_dated_assignments_and_status_reasons.py": "8d28f167ca77c450525c13c6e97f3aed4e79c962cb1d1dd042ee1db4da27ae76",
-    "backend/requirements.txt": "b03dc700c48c392fb8d3bdeb16bd9ef17f9b004a90f9f6e3680e13712d49f3ba",
+    "backend/requirements.txt": "ca39d8ca8082ce1c27ed3b5d7e49dd992d31cb1d5ea7add5233fc7b459c86c4f",
     "backend/shift_scheduler_backend/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "backend/shift_scheduler_backend/agent_trial_transport.py": "403e0598cbe14995e16dd6dc681747fa2b39869c201612859dc663a06a206dce",
     "backend/shift_scheduler_backend/assignment_validation.py": "456d0f791f1b9649323099f0a47d4a2596b1a3642d9bb071d3394b7d28b35c78",
@@ -30,7 +30,7 @@
     "backend/shift_scheduler_backend/editor_revision_service.py": "e31a4d94c489a539d9454cc7206610a1406f450fc4698503b37cb0e77d8c55cc",
     "backend/shift_scheduler_backend/holiday_calendar.py": "fb4ad13d07c481ee281cbb15b4f2604b8a5cfe0a62b1a7c6a23f12a0143ffbe3",
     "backend/shift_scheduler_backend/jobs.py": "b34352bd7d2a987d4b7c2094db17660e2a7ff3ef240f01dc03e61912ccbef06d",
-    "backend/shift_scheduler_backend/main.py": "bac89e97ebbe5c291d6a5325b45da2ce593a2daa8658e69455496474fd63b85e",
+    "backend/shift_scheduler_backend/main.py": "d5f91ea7c8941bd75aa2183ac92da34381002adfbcd83178169ea3a091aee6d6",
     "backend/shift_scheduler_backend/models.py": "36092db725fd94f7b7f96ffa2344c472326eceffe7f7095b736378de4c63be96",
     "backend/shift_scheduler_backend/operational_constraints.py": "52f5c083dab49cc355ef8f9bca7cb877429a1748b6d425d7c84dedfac00cadc4",
     "backend/shift_scheduler_backend/pdf_parity.py": "2f1d77a11c78009ca21f1400374f828066e2f290c9db30224e0853f865af7e2d",
@@ -58,10 +58,12 @@
     "backend/shift_scheduler_backend/solve_worker_app.py": "9902d8cc6ddd0bfa16d4c8fa7b0f4377e5867efa516f2ec80684e19c0dc86100",
     "backend/shift_scheduler_backend/solver.py": "20a4bb231bb5fa778cc97d1a067dd27a21e3eb54785696d6dfe970fb6aaf7369",
     "backend/shift_scheduler_backend/staff_api_schemas.py": "5e0576d19f6c066da59ea1849d895b1edfed045856c38bf18acd967f265a7061",
-    "backend/shift_scheduler_backend/staging_data.py": "3903f91b9bde7de7bf5e275da6c55bb415a0f3e81efbcd8d6019604234d8466f",
+    "backend/shift_scheduler_backend/staging_copy_migration.py": "bb2e9c3f49ea95c5ee6a200915f252407b3f5ebd164f84e20d5c3375f3c97bef",
+    "backend/shift_scheduler_backend/staging_copy_schema.py": "19dd886d86ae197f4582a9f8ce06a9e574d3faf61c166ea565664068901e953a",
+    "backend/shift_scheduler_backend/staging_data.py": "715deda27897c6ff010f1d46fe258390837f0488ebcbcffd1af0ce2d01869384",
     "backend/shift_scheduler_backend/storage.py": "5f4081d4366c18409a325e497aeda9eec5ac0ef425dfc470e98fc6972a2b5011",
     "backend/shift_scheduler_backend/validation_snapshot.py": "fb6105b9ea6b8b9e89bfa84410128820470991319f12a37ba4a36034be304781",
-    "pyproject.toml": "44af6155d7fefe5aa603a44c894bbdfce1adef71e3b873e6336099ffc6d44835"
+    "pyproject.toml": "40dc3dc42c07e40f6cfdb78e3574ac0d60d1fcd98b9df9d0156c4fbc54afcb36"
   },
   "security_patches": [
     {
@@ -75,8 +77,8 @@
       ]
     }
   ],
-  "upstream_base_revision": "d4d9a6b94d9859d39d16695ad38371833a7034c9",
-  "upstream_delta_sha256": "923b5edbb81d8054a29e1557c15eea900d54e54bb37abd54741f7d6c81bd38da",
+  "upstream_base_revision": "08715559c10ca67157dd957f5f74f931a9316f3b",
+  "upstream_delta_sha256": "3fd836a2cdcf18290c6178579d3bc721f52136923d62b633fcbe62241b553e53",
   "retained_extensions": [
     {
       "path": "backend/shift_scheduler_backend/agent_trial_transport.py",
@@ -85,8 +87,8 @@
     },
     {
       "path": "backend/shift_scheduler_backend/main.py",
-      "upstream_sha256": "8e2aae90e9a8a61cca8658e6ced837203377e037ce062fc0b389c9b4a4ed35f3",
-      "bundled_sha256": "bac89e97ebbe5c291d6a5325b45da2ce593a2daa8658e69455496474fd63b85e"
+      "upstream_sha256": "066b49bbde905bd359d578ec5eac31fde53d1d41da77d92b8def6c25e297fffd",
+      "bundled_sha256": "d5f91ea7c8941bd75aa2183ac92da34381002adfbcd83178169ea3a091aee6d6"
     },
     {
       "path": "backend/shift_scheduler_backend/planning_api.py",

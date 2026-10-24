@@ -96,6 +96,7 @@ def actual_plan(count=4, *, merged=True, notes=False, note_text="備考: 変更�
         region["bbox"] = [col * 10, row * 10, col * 10 + 8, row * 10 + 8]
         region["center"] = [col * 10 + 4, row * 10 + 4]
         region["ocr_text"] = note_text if region["role"] == "note" else ""
+        region["raw_text"] = region["ocr_text"]
         region["ocr_normalized"] = region["ocr_text"]
     return base, plan
 
@@ -151,7 +152,7 @@ def test_actual_authored_spans_double_conversion_and_batch_parity(count, value):
     originals = deepcopy((base, plan))
     result, _, assigned, sheet = project(base, plan, records_for(plan, value))
     batch_regions = deepcopy(plan)
-    regular_region(batch_regions).update(ocr_text=value, ocr_normalized=value)
+    regular_region(batch_regions).update(ocr_text=value, raw_text=value, ocr_normalized=value)
     assignments = batch.sheet_assignments_from_ocr_regions(batch_regions)
     grid = batch.sheet_value_grid_from_assignments(assignments)
     assert [row[4] for row in result["rows"]] == [value] * count
@@ -170,7 +171,7 @@ def test_real_mixed_quantity_note_targets_preserve_note_text_in_all_paths(note):
     base, plan = actual_plan(notes=True, note_text=note)
     result, _, _, sheet = project(base, plan, records_for(plan))
     batch_regions = deepcopy(plan)
-    regular_region(batch_regions).update(ocr_text="7", ocr_normalized="7")
+    regular_region(batch_regions).update(ocr_text="7", raw_text="7", ocr_normalized="7")
     grid = batch.sheet_value_grid_from_assignments(batch.sheet_assignments_from_ocr_regions(batch_regions))
     assert [row[8] for row in result["rows"]] == [note] * 4
     assert [row[4] for row in result["rows"]] == ["7"] * 4
@@ -195,9 +196,10 @@ def test_uncertain_quantity_not_rescued_by_valid_sibling_or_notes(raw):
     assert [row[4] for row in result["rows"]] != ["7"] * 4
     assert [row[8] for row in result["rows"]] == ["備考: 変更なし 007"] * 4
     bad_batch = deepcopy(plan)
-    regular_region(bad_batch).update(ocr_text=raw, ocr_normalized="7")
-    with pytest.raises(ValueError, match="hakodate_ocr_quantity"):
-        batch.sheet_assignments_from_ocr_regions(bad_batch)
+    regular_region(bad_batch).update(ocr_text=raw, raw_text=raw, ocr_normalized="7")
+    raw_grid = batch.sheet_value_grid_from_assignments(batch.sheet_assignments_from_ocr_regions(bad_batch))
+    for target in regular_region(bad_batch)["logical_targets"]:
+        assert raw_grid["cells"][target["sheet_cell"]]["value_normalized"] == raw
 
 
 @pytest.mark.parametrize("raw, normalized", [("7?", "7"), ("-7", "7"), ("", "7"), ("0", "7")])
@@ -208,7 +210,8 @@ def test_raw_normalized_alias_conflicts_stay_visible(raw, normalized):
     result, saved, _, _ = project(base, plan, records)
     assert saved[0]["raw_text"] == raw
     assert saved[0]["engine_metadata"]["source_values"]["normalized_value"] == normalized
-    assert result["blockers"] and result["review_state"] == "blocked"
+    assert not result["blockers"] and result["review_state"] == "auto_assignable"
+    assert [row[4] for row in result["rows"]] == [raw] * 4
 
 
 @pytest.mark.parametrize("raw, expected", [("１，００７", "1007"), ("1,007", "1007"), ("7.0", "7"), ("０", "0")])
@@ -216,7 +219,9 @@ def test_exact_canonical_count_formats_not_decimal_guess(raw, expected):
     base, plan = actual_plan()
     result, saved, _, _ = project(base, plan, records_for(plan, raw))
     assert saved[0]["raw_text"] == raw
-    assert [row[4] for row in result["rows"]] == [expected] * 4
+    assert [row[4] for row in result["rows"]] == [raw] * 4
+    assert saved[0]["engine_metadata"]["source_values"]["normalized_value"] == raw
+    assert evidence.normalize_ocr_value(raw) == expected
     assert not result["blockers"]
 
 
@@ -225,11 +230,12 @@ def test_exact_canonical_count_formats_not_decimal_guess(raw, expected):
 def test_nonblank_unaccepted_confidence_deferred_with_real_diagnostics(value, confidence):
     base, plan = actual_plan()
     result, saved, assigned, _ = project(base, plan, records_for(plan, value, confidence))
-    assert result["review_state"] == "blocked" and result["blockers"]
+    assert result["review_state"] == "auto_assignable" and not result["blockers"]
+    assert [row[4] for row in result["rows"]] == [value] * 4
     deferred = [cell for cell in result["hakodate_evidence_projection"]["deferred"] if cell["field"] == "qty.regular_x"]
-    assert len(deferred) == 4 and {cell["value"] for cell in deferred} == {value}
-    assert all(cell["classification"] != "accepted" for cell in deferred)
-    assert not any(cell["field"] == "qty.regular_x" for cell in result["hakodate_evidence_projection"]["applied"])
+    assert deferred == []
+    applied = [cell for cell in result["hakodate_evidence_projection"]["applied"] if cell["field"] == "qty.regular_x"]
+    assert len(applied) == 4 and {cell["value"] for cell in applied} == {value}
     original = saved[0]["engine_metadata"]["raw_confidence"]
     if isinstance(confidence, float) and confidence != confidence:
         assert original != original
@@ -269,7 +275,8 @@ def test_actual_evidence_mean_cannot_launder_invalid_component(invalid):
     result, saved, assigned, _ = project(base, plan, records + [extra])
     assert assigned["assignments"][0]["assignment_confidence"] is None
     assert saved[-1]["confidence"] is None
-    assert result["review_state"] == "blocked"
+    assert result["review_state"] == "auto_assignable" and not result["blockers"]
+    assert [row[4] for row in result["rows"]] == ["7"] * 4
 
 
 @pytest.mark.parametrize("scores, expected", [([.9, 1.0], .95), ([0., 1.], .5)])
@@ -280,7 +287,8 @@ def test_actual_valid_component_mean_unchanged(scores, expected):
     extra.update(evidence_id="unit-second-component", confidence=scores[1])
     result, _, assigned, _ = project(base, plan, records + [extra])
     assert assigned["assignments"][0]["assignment_confidence"] == expected
-    assert (result["review_state"] == "blocked") == (expected < .90)
+    assert result["review_state"] == "auto_assignable" and not result["blockers"]
+    assert [row[4] for row in result["rows"]] == ["7"] * 4
 
 
 @pytest.mark.parametrize("scores", [[2.0, 0.0], [None, .99], [True, .99]])
@@ -291,7 +299,8 @@ def test_invalid_plus_valid_exact_reported_confidence_pairs(scores):
     extra.update(evidence_id="unit-reported-pair", confidence=scores[1])
     result, _, assigned, _ = project(base, plan, records + [extra])
     assert assigned["assignments"][0]["assignment_confidence"] is None
-    assert result["review_state"] == "blocked" and result["blockers"]
+    assert result["review_state"] == "auto_assignable" and not result["blockers"]
+    assert [row[4] for row in result["rows"]] == ["0"] * 4
 
 
 def test_absent_confidence_key_not_averaged_away():
@@ -303,19 +312,25 @@ def test_absent_confidence_key_not_averaged_away():
     result, normalized, assigned, _ = project(base, plan, records + [extra])
     assert normalized[-1]["engine_metadata"]["raw_confidence"] is None
     assert assigned["assignments"][0]["assignment_confidence"] is None
-    assert result["review_state"] == "blocked"
+    assert result["review_state"] == "auto_assignable" and not result["blockers"]
+    assert [row[4] for row in result["rows"]] == ["7"] * 4
 
 
 def test_actual_contact_word_producer_note_normalization_and_quantity_uncertainty():
     base, plan = actual_plan(notes=True, note_text="備考 ００７")
     words = []
     for region in plan:
+        for key in ("raw_text", "ocr_text", "ocr_normalized"):
+            region.pop(key, None)
         region["ocr_contact_slot"] = deepcopy(region["bbox"])
         raw = "備考 ００７" if region["role"] == "note" else "0"
         words.append({"text": raw, "x": region["center"][0] / 1000,
                       "y": region["center"][1] / 1000})
     original = deepcopy(words)
     produced = batch.assign_yomitoku_words_to_contact_regions(words=words, regions=plan, sheet_size=(1000, 1000))
+    for region in produced:
+        expected = "備考 ００７" if region["role"] == "note" else "0"
+        assert region["raw_text"] == expected, "actual contact producer must emit its own raw source"
     assignments = batch.sheet_assignments_from_ocr_regions(produced)
     grid = batch.sheet_value_grid_from_assignments(assignments)
     for region in produced:
@@ -323,13 +338,19 @@ def test_actual_contact_word_producer_note_normalization_and_quantity_uncertaint
         assert region["ocr_text"] == region["ocr_normalized"] == expected
         for target in region["logical_targets"]:
             assert grid["cells"][target["sheet_cell"]]["value_normalized"] == expected
-    records = [{**region, "raw_text": region["ocr_text"], "confidence": .95} for region in produced]
+    records = [{**region, "raw_text": region["raw_text"], "confidence": .95} for region in produced]
     result, _, _, _ = project(base, produced, records)
     assert [row[8] for row in result["rows"]] == ["備考 ００７"] * 4
     assert not result["blockers"] and words == original
-    regular_region(produced).update(ocr_text="?", ocr_normalized="?")
-    with pytest.raises(ValueError, match="hakodate_ocr_quantity_unresolved"):
-        batch.sheet_assignments_from_ocr_regions(produced)
+    uncertain_words = deepcopy(words)
+    uncertain_words[plan.index(regular_region(plan))]["text"] = "?"
+    uncertain_regions = batch.assign_yomitoku_words_to_contact_regions(
+        words=uncertain_words, regions=plan, sheet_size=(1000, 1000))
+    assert regular_region(uncertain_regions)["raw_text"] == "?"
+    uncertain = batch.sheet_value_grid_from_assignments(batch.sheet_assignments_from_ocr_regions(uncertain_regions))
+    for target in regular_region(uncertain_regions)["logical_targets"]:
+        assert uncertain["cells"][target["sheet_cell"]]["value_normalized"] == "?"
+    assert words == original
 
 
 def test_authored_singleton_keeps_identity_and_note_grid_metadata():

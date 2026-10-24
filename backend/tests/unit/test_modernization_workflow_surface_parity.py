@@ -37,7 +37,7 @@ def surface(tmp_path, monkeypatch):
     from src.main import app
 
     # The fixture's separate output app/dependency overrides are never used.
-    client = TestClient(app)
+    client = TestClient(app, headers={"Accept-Encoding": "identity"})
     try:
         yield fixture, client
     finally:

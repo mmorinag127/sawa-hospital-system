@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import ast
 from uuid import uuid4
@@ -16,35 +17,37 @@ spec=importlib.util.spec_from_file_location('sidecar',ROOT/'scripts/configure_ag
 sidecar=importlib.util.module_from_spec(spec);spec.loader.exec_module(sidecar)
 
 
-@pytest.mark.asyncio
-async def test_lookup_does_not_copy_models_or_persist_orphan_before_images(tmp_path):
-    from experiments.agent_assistant.tests.test_trial import prepared
-    _, sandbox, _, _ = prepared(tmp_path, ('shift',))
-    worktree = tmp_path / 'source'; worktree.mkdir(); (worktree / '.git').touch()
-    models = tmp_path / 'models'; models.mkdir(); (models / 'weights').write_bytes(b'fixed-model')
-    sandbox.configs['shift'].update(worktree=str(worktree), python='unused', model_cache=str(models))
-    durable = Mock(); sandbox.durable_store = durable
-    lookup = {'id': uuid4().hex, 'domains': ['shift'], 'purpose': 'target_lookup'}
-    sandbox.prepare(lookup)
-    durable.persist_files.assert_not_called()
-    async def launch(*args): pass
-    sandbox.launch = launch
-    await sandbox.start(lookup)
-    assert not list(sandbox.path(lookup['id']).rglob('model-cache'))
+def test_lookup_does_not_copy_models_or_persist_orphan_before_images(tmp_path):
+    async def scenario():
+        from experiments.agent_assistant.tests.test_trial import prepared
+        _, sandbox, _, _ = prepared(tmp_path, ('shift',))
+        worktree = tmp_path / 'source'; worktree.mkdir(); (worktree / '.git').touch()
+        models = tmp_path / 'models'; models.mkdir(); (models / 'weights').write_bytes(b'fixed-model')
+        sandbox.configs['shift'].update(worktree=str(worktree), python='unused', model_cache=str(models))
+        durable = Mock(); sandbox.durable_store = durable
+        lookup = {'id': uuid4().hex, 'domains': ['shift'], 'purpose': 'target_lookup'}
+        sandbox.prepare(lookup)
+        durable.persist_files.assert_not_called()
+        async def launch(*args): pass
+        sandbox.launch = launch
+        await sandbox.start(lookup)
+        assert not list(sandbox.path(lookup['id']).rglob('model-cache'))
+    asyncio.run(scenario())
 
 
-@pytest.mark.asyncio
-async def test_stop_reclaims_only_models_and_retains_business_and_before_data(tmp_path):
-    from experiments.agent_assistant.tests.test_trial import prepared
-    _, sandbox, _, run = prepared(tmp_path, ('shift',))
-    directory = sandbox.path(run['id'])
-    originals = {p.relative_to(directory): p.read_bytes() for p in directory.rglob('*') if p.is_file()}
-    cache = directory / 'data/shift/home/model-cache'
-    cache.mkdir(parents=True); (cache / 'weights').write_bytes(b'rebuildable-model')
-    await sandbox.stop(run['id'])
-    assert not cache.exists()
-    assert {p.relative_to(directory): p.read_bytes() for p in directory.rglob('*') if p.is_file()} == originals
-    await sandbox.stop(run['id'])
+def test_stop_reclaims_only_models_and_retains_business_and_before_data(tmp_path):
+    async def scenario():
+        from experiments.agent_assistant.tests.test_trial import prepared
+        _, sandbox, _, run = prepared(tmp_path, ('shift',))
+        directory = sandbox.path(run['id'])
+        originals = {p.relative_to(directory): p.read_bytes() for p in directory.rglob('*') if p.is_file()}
+        cache = directory / 'data/shift/home/model-cache'
+        cache.mkdir(parents=True); (cache / 'weights').write_bytes(b'rebuildable-model')
+        await sandbox.stop(run['id'])
+        assert not cache.exists()
+        assert {p.relative_to(directory): p.read_bytes() for p in directory.rglob('*') if p.is_file()} == originals
+        await sandbox.stop(run['id'])
+    asyncio.run(scenario())
 
 
 def test_native_absolute_output_defaults_are_confined_per_request(tmp_path):

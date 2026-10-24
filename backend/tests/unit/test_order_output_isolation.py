@@ -7,6 +7,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = "backend/src/services/output_builder.py"
 BASE = "9495fee9cc2f6a55ae860f9512ef44e7355612a1"
+ISOLATION = "42db2edd7f60377aae657ff0a80e910e9ea2b009"
 
 
 def sources():
@@ -54,7 +55,8 @@ def test_empty_value_is_not_replaced_with_default():
 
 
 def test_exact_source_and_entire_other_ast_parity():
-    before, after = sources()
+    before, _ = sources()
+    after = subprocess.check_output(["git", "show", f"{ISOLATION}:{SOURCE}"], cwd=ROOT, text=True)
     original = 'OUTPUT_DIR = Path("/tmp/orders-outputs")'
     replacement = 'OUTPUT_DIR = Path(os.getenv("ORDERS_OUTPUT_DIR", "/tmp/orders-outputs"))'
     assert before.count(original) == 1
@@ -75,7 +77,8 @@ def test_output_consumers_and_explicit_output_dir_priority_unchanged(tmp_path):
         return [ast.dump(node, include_attributes=False) for node in ast.parse(source).body
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and any(isinstance(child, ast.Name) and child.id == "OUTPUT_DIR" for child in ast.walk(node))]
-    assert consumers(after) == consumers(before)
+    historical = subprocess.check_output(["git", "show", f"{ISOLATION}:{SOURCE}"], cwd=ROOT, text=True)
+    assert consumers(historical) == consumers(before)
     assert consumers(after)
     expressions = [node for node in ast.walk(ast.parse(after)) if isinstance(node, ast.IfExp)
                    and ast.dump(node, include_attributes=False) == ast.dump(

@@ -89,9 +89,9 @@ def registration_only_order(monkeypatch, tmp_path):
         facility = {"facility_id": "FAC00001", "facility_name": "Authored evidence component",
             "areas": [{"area_id": "2F", "name": "Second floor"}],
             "fax_template_id": template_id,
-            "fax_template": {"template_id": template_id, "page": 1, "columns": columns,
+            "fax_template": {"template_id": template_id, "page": 1, "units": "normalized", "columns": columns,
                 "table_box": [0.1, 0.2, 0.9, 0.8],
-                "grid_column_edges": [0.1, 0.5, 0.9], "grid_row_edges": [0.2, 0.4, 0.8]}}
+                "grid_column_edges": [0.1, 0.3, 0.5, 0.7, 0.9], "grid_row_edges": [0.2, 0.4, 0.8]}}
         uri, digest = authored_sources(monkeypatch, tmp_path, facility_id="FAC00001",
             menu_date=date(2026, 3, 22), daypart="breakfast", facility_config=facility)
         saved = ManualUploadSavedFile(message_id=message_id, pdf_uri=uri, content_sha256=digest,

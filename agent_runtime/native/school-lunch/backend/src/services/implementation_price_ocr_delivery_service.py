@@ -8,6 +8,7 @@ import math
 
 from sqlalchemy import func, select, update
 
+from src import staging_data as datasets
 from src.db import session_scope
 from src.models.implementation_price_ocr_job import ImplementationPriceOcrJob
 from src.services import implementation_price_ocr_dispatch_service as dispatch
@@ -25,6 +26,28 @@ def job_write(job_id):
             from src.services.implementation_price_ocr_job_service import OcrJobNotFoundError
             raise OcrJobNotFoundError(f"ocr job not found: {job_id}")
         yield session, job
+
+
+def _captured_task_id(contract, job_id, generation):
+    namespace = ""
+    if "dataset" in contract:
+        identity = contract["dataset"]
+        if not isinstance(identity, str) or identity == "test":
+            raise dispatch.OcrDispatchConfigurationError("Original delivery dataset is invalid")
+        try:
+            with datasets.dataset_context(identity):
+                namespace = datasets.delivery_namespace(feature="school-lunch")
+        except datasets.DatasetUnavailable as exc:
+            raise dispatch.OcrDispatchConfigurationError("Original delivery dataset is invalid") from exc
+        if "-stg-" not in urlparse(contract["url"]).netloc:
+            raise dispatch.OcrDispatchConfigurationError("Original copy worker URL is invalid")
+    return f"{namespace}ocr-{job_id}-delivery-{generation}"
+
+
+def _require_task_identity(contract, job_id, generation):
+    name = contract.get("task_name")
+    if not isinstance(name, str) or not name.endswith("/tasks/" + _captured_task_id(contract, job_id, generation)):
+        raise dispatch.OcrDispatchConfigurationError("Original task identity is invalid")
 
 
 def intent(job):
@@ -48,8 +71,8 @@ def intent(job):
         raise dispatch.OcrDispatchConfigurationError("Original Cloud Tasks contract is invalid")
     if value["mode"] == "local" and (type(contract["timeout_seconds"]) not in {float, int} or not math.isfinite(contract["timeout_seconds"]) or contract["timeout_seconds"] <= 0 or not isinstance(contract["token_digest"], str) or len(contract["token_digest"]) != 64):
         raise dispatch.OcrDispatchConfigurationError("Original local delivery contract is invalid")
-    if value["mode"] == "cloud_tasks" and not contract["task_name"].endswith(f"/tasks/ocr-{job.id}-delivery-{value['generation']}"):
-        raise dispatch.OcrDispatchConfigurationError("Original task identity is invalid")
+    if value["mode"] == "cloud_tasks":
+        _require_task_identity(contract, job.id, value["generation"])
     return dict(value)
 
 
@@ -71,12 +94,13 @@ def new_intent(job, *, mode):
         contract = deepcopy(saved["contract"])
         contract["body"] = json.dumps({"job_id": job.id, "delivery_generation": previous + 1})
         if mode == "cloud_tasks":
-            contract["task_name"] = contract["task_name"].rsplit("/tasks/", 1)[0] + f"/tasks/ocr-{job.id}-delivery-{previous + 1}"
+            contract["task_name"] = contract["task_name"].rsplit("/tasks/", 1)[0] + "/tasks/" + _captured_task_id(contract, job.id, previous + 1)
     else:
         contract = dispatch.capture_contract(job.id, 1, mode)
     job.delivery_json = {"generation": previous + 1,
         "expected_attempt_count": int(job.attempt_count), "state": "pending", "mode": mode,
         "contract": contract, "input_digest": job.input_digest, "business_attempt_id": job.business_attempt_id}
+    intent(job)
 
 
 def renew_missing_delivery(job_id, observed):
@@ -118,9 +142,8 @@ def dispatch_delivery(job_id, generation):
                 raise dispatch.OcrDispatchConfigurationError("Original delivery source/attempt changed")
             require_transport_source(job, mode)
             task_name = delivery["contract"].get("task_name")
-            if task_name is not None and (not isinstance(task_name, str)
-                    or not task_name.endswith(f"/tasks/ocr-{job_id}-delivery-{generation}")):
-                raise dispatch.OcrDispatchConfigurationError("OCR delivery task identity is invalid")
+            if task_name is not None:
+                _require_task_identity(delivery["contract"], job_id, generation)
         if mode == "cloud_tasks":
             provider_state = dispatch.inspect_cloud_task(task_name, contract=delivery["contract"])
             if provider_state == "missing" and delivery["state"] == "sent":

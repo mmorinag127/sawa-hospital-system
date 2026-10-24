@@ -32,6 +32,11 @@ def owned_bagging(surface):
     fixture.authored["packaging_policy"] = {
         "split_key": ["facility", "date", "daypart", "menu_name", "diet_type", "area_id", "bag_type"],
     }
+    fixture.authored["invoice_template"] = {"include_menu_name": True, "columns": [
+        {"name": "Date", "source": "date"},
+        {"name": "Menu", "source": "menu_name"},
+        {"name": "Quantity", "source": "quantity", "diet_type": "regular", "area_id": "X"},
+    ]}
     fixture.republish()
     with fixture.session_scope() as session:
         orders._record_current_order_version(

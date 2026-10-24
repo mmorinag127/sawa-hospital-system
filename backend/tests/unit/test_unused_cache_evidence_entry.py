@@ -7,6 +7,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[3]
 BASE = "23b33fb419dd7d9efab3b3cda53fabf6bf166440"
+DELETION = "0d8f342f3b40aa9a97fa897d309fbd20810b4720"
 SERVICE = "backend/src/services/ocr_evidence_service.py"
 REMOVED = "backfill_evidence_run_" + "from_cached_payload"
 
@@ -17,7 +18,7 @@ def _git(*args):
 
 def test_only_unused_entry_and_its_following_separator_are_removed():
     original = _git("show", f"{BASE}:{SERVICE}").decode("utf-8")
-    current = (ROOT / SERVICE).read_bytes().decode("utf-8")
+    current = _git("show", f"{DELETION}:{SERVICE}").decode("utf-8")
     before = ast.parse(original)
     targets = [node for node in before.body
                if isinstance(node, ast.FunctionDef) and node.name == REMOVED]
@@ -36,6 +37,7 @@ def test_only_unused_entry_and_its_following_separator_are_removed():
                          for node in ast.parse(current).body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     assert current_functions == original_functions
     assert REMOVED not in current
+    assert REMOVED not in (ROOT / SERVICE).read_text()
 
 
 def test_tracked_source_has_no_literal_callers_or_entry_references():

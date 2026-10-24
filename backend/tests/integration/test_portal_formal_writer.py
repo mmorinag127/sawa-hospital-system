@@ -80,8 +80,9 @@ def test_fourteen_nullable_attributes_match_formal_schema(formal_database):
             columns = {column["name"]: column for column in inspector.get_columns(table)}
             for name in names:
                 model = db.Base.metadata.tables[table].c[name]
-                assert columns[name]["nullable"] is False
-                assert model.nullable is False
+                expected_nullable = name == "created_at" and table in {"users", "audit_logs"}
+                assert columns[name]["nullable"] is expected_nullable
+                assert model.nullable is expected_nullable
                 assert model.default is not None
                 count += 1
         assert count == 14

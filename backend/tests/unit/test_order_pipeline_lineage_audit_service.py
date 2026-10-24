@@ -10,6 +10,7 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services.order_pipeline_lineage_audit_service import audit_order_pipeline_lineage
+from tests.unit.test_order_pipeline_lineage_repair_service import confirmed_order
 
 
 Base.metadata.create_all(bind=engine)
@@ -107,91 +108,32 @@ def test_audit_reports_confirmed_legacy_lineage_gaps() -> None:
     assert result["counts_by_type"]["confirmed_snapshot_row_missing"] == 1
 
 
-def test_audit_reports_snapshot_draft_and_output_source_mismatches() -> None:
-    order_id = _create_order()
-    evidence_id = _id("OEV")
-    draft_id = _id("ODR")
-    other_draft_id = _id("ODR")
-    snapshot_id = _id("OCS")
-    template_version_id = _id("FTV")
-    bagging_result_id = _id("OBG")
-    output_bundle_id = _id("OOB")
+def test_audit_reports_snapshot_draft_and_output_source_mismatches(confirmed_order) -> None:
+    from copy import deepcopy
+    from src.models.order_output_artifact import OrderBaggingResult
+    from src.services.order_output_artifact_service import save_bagging_result_artifact
+    from tests.unit.test_disabled_facility_columns import _snapshot
 
+    order_id = confirmed_order["id"]
     with session_scope() as session:
-        session.add(
-            OrderOcrEvidenceRun(
-                id=evidence_id,
-                order_id=order_id,
-                template_version_id=template_version_id,
-                schema_version="test",
-                producer_version="test",
-                source="test",
-                status="ready",
-                payload_json={},
-                artifact_digest=f"digest-{evidence_id}",
-                created_at=datetime.utcnow(),
-            )
-        )
-        session.add(
-            OrderSheetDraft(
-                id=draft_id,
-                order_id=order_id,
-                template_version_id=template_version_id,
-                base_evidence_run_id=evidence_id,
-                draft_sheet_json={"rows": []},
-                draft_state="saved",
-                edited_by="test",
-                edited_at=datetime.utcnow(),
-                created_at=datetime.utcnow(),
-            )
-        )
-        session.add(
-            OrderConfirmedSnapshot(
-                id=snapshot_id,
-                order_id=order_id,
-                template_version_id=template_version_id,
-                draft_id=other_draft_id,
-                snapshot_digest="digest",
-                snapshot_json={},
-                confirmed_by="test",
-                confirmed_at=datetime.utcnow(),
-                created_at=datetime.utcnow(),
-            )
-        )
-        session.add(
-            OrderWorkflowState(
-                order_id=order_id,
-                template_version_id=template_version_id,
-                evidence_run_id=evidence_id,
-                draft_id=draft_id,
-                confirmed_snapshot_id=snapshot_id,
-                state="confirmed",
-                headline="confirmed",
-                primary_action=None,
-                secondary_actions_json={
-                    "workflow_v2": {
-                        "template_version_id": template_version_id,
-                        "bagging_result_id": bagging_result_id,
-                        "bagging_result": {
-                            "bagging_result_id": bagging_result_id,
-                            "source_saved_sheet_id": other_draft_id,
-                            "template_version_id": template_version_id,
-                        },
-                        "output_bundle_id": output_bundle_id,
-                        "output_bundle": {
-                            "output_bundle_id": output_bundle_id,
-                            "source_bagging_result_id": _id("OBGstale"),
-                            "source_saved_sheet_id": other_draft_id,
-                            "template_version_id": template_version_id,
-                        },
-                    }
-                },
-                blockers_json=[],
-                warnings_json=[],
-                last_transition_at=datetime.utcnow(),
-            )
-        )
-
+        state = session.get(OrderWorkflowState, order_id)
+        original = session.get(OrderSheetDraft, state.draft_id)
+        newer = OrderSheetDraft(id=_id("ODR"), order_id=order_id,
+            template_version_id=original.template_version_id,
+            base_evidence_run_id=original.base_evidence_run_id,
+            draft_sheet_json=deepcopy(original.draft_sheet_json), draft_state="saved",
+            edited_by="audit-component", edited_at=datetime.utcnow(), created_at=datetime.utcnow())
+        session.add(newer)
+        session.flush()
+        meta = deepcopy(state.secondary_actions_json)
+        current = meta["workflow_v2"]
+        payload = deepcopy(session.get(OrderBaggingResult, current["bagging_result_id"]).payload_json)
+        payload["bagging_result_id"] = _id("OBG")
+        alternate = save_bagging_result_artifact(session, payload=payload, created_by="audit-component")
+        state.draft_id = newer.id
+        current["bagging_result_id"] = alternate.id
+        state.secondary_actions_json = meta
+    before = _snapshot(engine)
     result = audit_order_pipeline_lineage(order_id=order_id)
 
     issue_types = {issue["issue_type"] for issue in result["issues"]}
@@ -199,3 +141,4 @@ def test_audit_reports_snapshot_draft_and_output_source_mismatches() -> None:
     assert "bagging_result_source_saved_sheet_mismatch" in issue_types
     assert "output_bundle_source_bagging_mismatch" in issue_types
     assert "output_bundle_source_saved_sheet_mismatch" in issue_types
+    assert _snapshot(engine) == before

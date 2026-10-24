@@ -590,7 +590,7 @@ def build_column_mapping_resolution(payload: dict[str, Any] | None) -> dict[str,
         explicit_requires_user_choice = True
         if "position_fallback_removed" not in blocked_reasons:
             blocked_reasons.append("position_fallback_removed")
-    requires_user_choice = _should_require_choice(
+    requires_user_choice = (explicit_requires_user_choice and not resolved_value) or _should_require_choice(
         resolved_value=resolved_value,
         candidates=candidates,
         score=score,

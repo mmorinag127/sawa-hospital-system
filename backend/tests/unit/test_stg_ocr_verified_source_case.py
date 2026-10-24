@@ -254,7 +254,20 @@ def test_upload_case_label_does_not_supply_business_owner(monkeypatch):
     assert b'source_order_id' not in calls[0][1]
 
 
-def test_ci_retains_native_module_and_adds_verified_source_module():
-    text = (Path(__file__).resolve().parents[3] / '.github/workflows/ci.yml').read_text()
+def test_ci_retains_native_module_and_adds_verified_source_module(monkeypatch):
+    root = Path(__file__).resolve().parents[3]
+    text = (root / 'local-checks/legacy/ci.yml').read_text()
     assert text.count('tests/unit/test_stg_ocr_verified_source_case.py') == 1
     assert text.count('tests/unit/test_stg_ocr_native_empty_resolution.py') == 1
+    manifest = json.loads((root/'scripts/local_hospital_test_manifest.json').read_text())
+    entries = [entry for entry in manifest['commands'] if entry['name'] == 'backend-tests']
+    assert len(entries) == 1
+    assert entries[0]['command'] == 'python3 scripts/run_local_backend_tests.py'
+    import runpy
+    monkeypatch.syspath_prepend(str(root / 'scripts'))
+    runner = runpy.run_path(str(root / 'scripts/run_local_backend_tests.py'))
+    dedicated = {path for modules in runner['DEDICATED_MODULES'].values() for path in modules}
+    for target in ('test_stg_ocr_verified_source_case.py', 'test_stg_ocr_native_empty_resolution.py'):
+        assert 'backend/tests/unit/' + target not in dedicated
+        assert (root / 'backend/tests/unit' / target).is_file()
+    assert not (root/'.github/workflows/ci.yml').exists()

@@ -11,6 +11,7 @@ from src.services import order_workflow_v2_service as service
 from test_order_workflow_v2_service import (
     _create_order_with_evidence,
     _standard_active_template_for_workflow_tests,
+    authored_april_context,
 )
 
 
@@ -44,7 +45,7 @@ def metrics(messages):
 
 @pytest.mark.parametrize('include', [False, True])
 def test_inspection_timing_keeps_response_queries_signing_validation_and_storage(
-    include, monkeypatch, timing_logs, isolated_formal_schema,
+    include, monkeypatch, timing_logs, isolated_formal_schema, authored_april_context,
 ):
     order_id, first, second = _create_order_with_evidence()
     monkeypatch.setattr(service, '_now', lambda: datetime(2026, 4, 26, 12))
@@ -58,9 +59,9 @@ def test_inspection_timing_keeps_response_queries_signing_validation_and_storage
         signs.append(uri)
         return 'https://SECRET/signature'
     original = service.ocr_evidence_service.evidence_run_is_selectable
-    def validate(row):
+    def validate(row, **kwargs):
         validations.append(row.id)
-        return original(row)
+        return original(row, **kwargs)
     monkeypatch.setattr(service._get_order_service_module(), '_signed_url_from_uri', sign)
     monkeypatch.setattr(service.ocr_evidence_service, 'evidence_run_is_selectable', validate)
     def track(conn, cursor, statement, parameters, context, executemany):
@@ -93,7 +94,7 @@ def test_inspection_timing_keeps_response_queries_signing_validation_and_storage
     '_get_order_or_error', '_get_workflow_readonly', '_serialize_uninitialized_workflow',
     '_serialize_ocr_result', '_project_ocr_candidates', 'sign_url', 'selectability',
 ])
-def test_failure_is_same_exception_and_call_count_without_secret_logging(boundary, monkeypatch, timing_logs):
+def test_failure_is_same_exception_and_call_count_without_secret_logging(boundary, monkeypatch, timing_logs, authored_april_context):
     order_id, first, _ = _create_order_with_evidence()
     monkeypatch.setattr(service._get_order_service_module(), '_signed_url_from_uri', lambda uri: 'https://SECRET/fixed')
     with session_scope() as session:

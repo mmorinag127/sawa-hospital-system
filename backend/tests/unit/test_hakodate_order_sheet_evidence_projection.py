@@ -4,6 +4,18 @@ from types import SimpleNamespace
 from src.services import order_service
 
 
+def _component_projection_config():
+    """Explicit pure projection schema; not an owned OCR receipt or live source."""
+    return {"facility_id": "FAC_TEST", "facility_name": "Synthetic projection component",
+        "areas": [{"area_id": "X", "name": "Explicit component area"}],
+        "fax_template_id": "tpl-1", "fax_template": {"template_id": "tpl-1", "columns": [
+            {"index": 0, "source_index": 0, "name": "date_mmdd", "role": "date"},
+            {"index": 1, "source_index": 1, "name": "daypart", "role": "daypart"},
+            {"index": 2, "source_index": 2, "name": "menu", "role": "menu_name"},
+            {"index": 3, "source_index": 3, "name": "qty.regular_x", "role": "quantity",
+             "diet_type": "regular", "area_id": "X"}]}}
+
+
 def test_sheet_header_from_template_keeps_header_group_for_area_quantity_columns() -> None:
     template = {
         "columns": [
@@ -237,6 +249,7 @@ def test_hakodate_evidence_assignment_blocks_without_new_payload_contract() -> N
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",
+        facility_config=_component_projection_config(),
         payload={"tables": [{"rows": [["legacy", "ocr"]]}]},
     )
 
@@ -662,6 +675,7 @@ def test_hakodate_evidence_assignment_rejects_generic_legacy_payload_keys() -> N
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",
+        facility_config=_component_projection_config(),
         payload={
             "target_cell_map": [
                 {
@@ -689,6 +703,7 @@ def test_hakodate_evidence_projection_applies_assigned_cells_to_sheet_rows() -> 
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",
+        facility_config=_component_projection_config(),
         payload={
             "hakodate_preprocessing": {
                 "target_cell_map": [
@@ -729,6 +744,7 @@ def test_hakodate_evidence_projection_applies_assigned_cells_to_sheet_rows() -> 
     projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
+        facility_config=_component_projection_config(),
     )
 
     assert assignment["status"] == "auto_assignable"
@@ -917,6 +933,7 @@ def test_hakodate_projection_clears_legacy_quantities_when_evidence_missing() ->
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",
+        facility_config=_component_projection_config(),
         payload={
             "hakodate_preprocessing": {
                 "target_cell_map": [
@@ -946,6 +963,7 @@ def test_hakodate_projection_clears_legacy_quantities_when_evidence_missing() ->
     projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
+        facility_config=_component_projection_config(),
     )
 
     assert assignment["status"] == "blocked"
@@ -995,6 +1013,7 @@ def test_hakodate_projection_rejects_worksheet_grid_when_cell_identity_is_absent
     projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
+        facility_config=_component_projection_config(),
     )
 
     assert projected["rows"] == [["04/26", "朝", "献立A", "", ""], ["04/26", "朝", "献立B", "", ""]]
@@ -1008,6 +1027,7 @@ def test_hakodate_projection_defers_low_confidence_ocr_to_sheet_overlay() -> Non
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",
+        facility_config=_component_projection_config(),
         payload={
             "hakodate_preprocessing": {
                 "target_cell_map": [
@@ -1068,6 +1088,7 @@ def test_hakodate_projection_defers_low_confidence_ocr_to_sheet_overlay() -> Non
     projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
+        facility_config=_component_projection_config(),
     )
 
     assert projected["rows"] == [["4/26", "朝", "献立A", "", ""]]
@@ -1095,6 +1116,7 @@ def test_hakodate_evidence_projection_blocks_stale_row_identity_instead_of_sheet
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",
+        facility_config=_component_projection_config(),
         payload={
             "hakodate_preprocessing": {
                 "target_cell_map": [
@@ -1125,6 +1147,7 @@ def test_hakodate_evidence_projection_blocks_stale_row_identity_instead_of_sheet
     projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
+        facility_config=_component_projection_config(),
     )
 
     assert projected["rows"] == [["4/26", "朝", "献立A", ""]]
@@ -1139,6 +1162,7 @@ def test_hakodate_evidence_projection_uses_logical_identity_when_physical_rows_h
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",
+        facility_config=_component_projection_config(),
         payload={
             "hakodate_preprocessing": {
                 "target_cell_map": [
@@ -1173,6 +1197,7 @@ def test_hakodate_evidence_projection_uses_logical_identity_when_physical_rows_h
     projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
+        facility_config=_component_projection_config(),
     )
 
     assert projected["rows"] == [
@@ -1197,6 +1222,10 @@ def test_hakodate_evidence_projection_requires_logical_identity_even_without_tar
                     "worksheet_row": 11,
                     "worksheet_col": 5,
                     "field": "qty.regular_x",
+                    "semantic_field": "qty.regular_x",
+                    "role": "quantity",
+                    "assignment_state": "blank_evidence",
+                    "raw_texts": [""],
                     "date": "2026-04-26",
                     "daypart": "昼",
                     "menu_name": "献立B",
@@ -1217,15 +1246,18 @@ def test_hakodate_evidence_projection_requires_logical_identity_even_without_tar
     projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
+        facility_config=_component_projection_config(),
     )
 
     assert projected["hakodate_evidence_projection"]["metrics"]["skipped_count"] == 1
     assert projected["hakodate_evidence_projection"]["metrics"]["applied_count"] == 0
     assert projected["hakodate_evidence_projection"]["metrics"]["deferred_count"] == 0
-    assert "hakodate_sheet_projection_incomplete" not in projected["blockers"]
+    assert projected["hakodate_evidence_projection"]["skipped"][0]["skip_reason"] == "logical_row_identity_not_found"
+    assert "hakodate_sheet_projection_incomplete" in projected["blockers"]
 
 
 def test_hakodate_evidence_projection_uses_logical_identity_without_cell_id() -> None:
+    from copy import deepcopy
     assignment = {
         "status": "review_required",
         "blockers": [],
@@ -1237,6 +1269,9 @@ def test_hakodate_evidence_projection_uses_logical_identity_without_cell_id() ->
                     "worksheet_col": 5,
                     "field": "qty.regular_x",
                     "semantic_field": "qty.regular_x",
+                    "role": "quantity",
+                    "assignment_state": "assigned",
+                    "raw_texts": ["7"],
                     "date": "2026-04-26",
                     "daypart": "朝",
                     "menu_name": "献立A",
@@ -1254,10 +1289,24 @@ def test_hakodate_evidence_projection_uses_logical_identity_without_cell_id() ->
         "blockers": [],
     }
 
-    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
+    original = deepcopy(assignment)
+    refused = order_service._apply_hakodate_sheet_output_to_sheet_payload(
         base_sheet=base_sheet,
         assignment=assignment,
+        facility_config=_component_projection_config(),
     )
+    assert assignment == original
+    assert refused["rows"] == base_sheet["rows"]
+    assert refused["hakodate_evidence_projection"]["metrics"]["applied_count"] == 0
+    assert refused["hakodate_evidence_projection"]["skipped"][0]["skip_reason"] == "hakodate_logical_targets_invalid"
+    assert "hakodate_sheet_projection_incomplete" in refused["blockers"]
+    # Separate explicit physical identity; never derive an adopted cell from its position.
+    explicit = deepcopy(assignment)
+    cell = explicit["sheet_output"]["cells"].pop("legacy-region-1")
+    cell["sheet_cell"] = "E11"
+    explicit["sheet_output"]["cells"]["E11"] = cell
+    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(
+        base_sheet=base_sheet, assignment=explicit, facility_config=_component_projection_config())
 
     assert projected["rows"] == [["4/26", "朝", "献立A", "7"]]
     assert projected["hakodate_evidence_projection"]["metrics"]["applied_count"] == 1
@@ -1281,6 +1330,10 @@ def test_hakodate_evidence_projection_blocks_quantity_without_logical_identity()
                     "worksheet_row": 12,
                     "worksheet_col": 5,
                     "field": "qty.regular_x",
+                    "semantic_field": "qty.regular_x",
+                    "role": "quantity",
+                    "assignment_state": "assigned",
+                    "raw_texts": ["9"],
                     "value_text": "9",
                     "value_normalized": "9",
                 }
@@ -1298,6 +1351,7 @@ def test_hakodate_evidence_projection_blocks_quantity_without_logical_identity()
     projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
         base_sheet=base_sheet,
         assignment=assignment,
+        facility_config=_component_projection_config(),
     )
 
     projection = projected["hakodate_evidence_projection"]

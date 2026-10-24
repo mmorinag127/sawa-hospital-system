@@ -126,6 +126,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(planning_router)
+from .staging_copy_migration import router as staging_copy_migration_router
+app.include_router(staging_copy_migration_router)
 
 
 @app.get("/staging-dataset-ready")

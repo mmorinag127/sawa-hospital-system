@@ -803,7 +803,7 @@ def test_get_daily_bags_groups_rows_by_menu_diet_and_bag_type(owned_outputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 50, "unit_type": "g", "daypart": "昼", "category": "主A"},
+        {"qty_per_serving": 50, "unit_type": "g", "daypart": "昼", "category": "主A", "diet_type": "regular"},
     )
     payload = IngestEmailPayload(
         message_id="msg-status-api-daily-bags-001",
@@ -850,7 +850,8 @@ def test_get_daily_bags_groups_rows_by_menu_diet_and_bag_type(owned_outputs):
             "quantity_original": 3,
         },
     ]
-    owned_outputs.create_order_from_ingest(payload, physical_slot=0, lines=lines)
+    owned_outputs.create_order_from_ingest(payload, physical_slot=0, lines=lines,
+        daily_label_comparable_diet_types=["mixer"])
 
     client = TestClient(app)
     res = client.get("/orders/daily-bags?date=2026-02-18")
@@ -877,7 +878,7 @@ def test_get_daily_bags_uses_current_lines_without_materialized_rebuild(monkeypa
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 50, "unit_type": "g", "daypart": "昼", "category": "主A"},
+        {"qty_per_serving": 50, "unit_type": "g", "daypart": "昼", "category": "主A", "diet_type": "regular"},
     )
     payload = IngestEmailPayload(
         message_id="msg-status-api-daily-bags-stale-001",
@@ -970,7 +971,7 @@ def test_daily_bags_prefers_line_daypart_over_snapshot_daypart(owned_outputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     payload = IngestEmailPayload(
         message_id="msg-status-api-daily-bags-daypart-001",
@@ -1032,7 +1033,7 @@ def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master(owned_o
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     with session_scope() as session:
         session.add(
@@ -1057,7 +1058,7 @@ def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master(owned_o
             week_hint="2099-03@2099-03-24~2099-03-24",
         ),
         recipe={"qty_per_serving": 70, "unit_type": "g", "category": "主菜"},
-        physical_category="副菜", physical_slot=2, lines=[
+        physical_category="副菜", physical_slot=2, prepared_menu_sources=True, lines=[
             {
                 "date": "2099-03-24",
                 "daypart": "昼",
@@ -1092,7 +1093,7 @@ def test_daily_bags_prefers_monthly_menu_entry_over_item_defaults(owned_outputs)
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 70, "unit_type": "g", "daypart": "朝食", "category": "主菜"},
+        {"qty_per_serving": 70, "unit_type": "g", "daypart": "朝食", "category": "主菜", "diet_type": "regular"},
     )
     with session_scope() as session:
         session.add(
@@ -1117,7 +1118,7 @@ def test_daily_bags_prefers_monthly_menu_entry_over_item_defaults(owned_outputs)
             week_hint="2099-03@2099-03-24~2099-03-24",
         ),
         recipe={"qty_per_serving": 70, "unit_type": "g", "category": "主菜"},
-        physical_category="副菜", physical_slot=1, lines=[
+        physical_category="副菜", physical_slot=1, prepared_menu_sources=True, lines=[
             {
                 "date": "2099-03-24",
                 "daypart": "昼",
@@ -1151,7 +1152,7 @@ def test_daily_bags_prefers_current_menu_qty_over_stale_snapshot_qty(owned_outpu
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 50, "unit_type": "g", "daypart": "夕食", "category": "副菜"},
+        {"qty_per_serving": 50, "unit_type": "g", "daypart": "夕食", "category": "副菜", "diet_type": "regular"},
     )
     order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -1213,7 +1214,7 @@ def test_daily_bags_treats_staff_as_regular(owned_outputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -1223,7 +1224,7 @@ def test_daily_bags_treats_staff_as_regular(owned_outputs):
             facility_hint="FAC00014",
             week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        physical_slot=0, lines=[
+        physical_slot=0, daily_label_comparable_diet_types=["staff"], lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -1266,7 +1267,7 @@ def test_daily_bags_treats_daycare_as_regular(owned_outputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -1276,7 +1277,7 @@ def test_daily_bags_treats_daycare_as_regular(owned_outputs):
             facility_hint="FAC00004",
             week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        physical_slot=0, lines=[
+        physical_slot=0, daily_label_comparable_diet_types=["daycare"], lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -1319,7 +1320,7 @@ def test_daily_bags_treats_regular_bag_and_1600_as_regular(owned_outputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -1329,7 +1330,7 @@ def test_daily_bags_treats_regular_bag_and_1600_as_regular(owned_outputs):
             facility_hint="FAC00004",
             week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        physical_slot=0, lines=[
+        physical_slot=0, daily_label_comparable_diet_types=[], lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -1381,7 +1382,7 @@ def test_daily_bags_splits_garnish_and_canonicalizes_cut_units(owned_outputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 1, "unit_type": "切", "daypart": "夕食", "category": "主菜"},
+        {"qty_per_serving": 1, "unit_type": "切", "daypart": "夕食", "category": "主菜", "diet_type": "regular"},
     )
     order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -1440,13 +1441,14 @@ def test_build_order_lines_for_outputs_matches_owned_split_main_and_explicit_gar
     garnish_line = next(item for item in lines if item.get("menu_name") == "ﾌﾞﾛｯｺﾘｰ")
     assert main_line["menu_category"] == "主菜"
     assert main_line["menu_qty_per_serving"] == 1
-    assert main_line["menu_unit_type"] == "枚"
+    assert main_line["menu_unit_type"] == "cut"
+    assert main_line["quantity_original"] == 4
     assert garnish_line["menu_category"] == "添え"
     assert garnish_line["menu_qty_per_serving"] == 30
     assert garnish_line["menu_unit_type"] == "g"
 
 
-def test_daily_bags_merges_forbidden_diets(owned_outputs):
+def test_daily_bags_excludes_forbidden_but_keeps_saved_quantities(owned_outputs):
     order_service.clear_all()
     month_id = "2026-03"
     menu_csv = "menu\n豆腐の煮物\n".encode("utf-8")
@@ -1455,7 +1457,7 @@ def test_daily_bags_merges_forbidden_diets(owned_outputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 40, "unit_type": "g", "daypart": "昼食", "category": "副菜"},
+        {"qty_per_serving": 40, "unit_type": "g", "daypart": "昼食", "category": "副菜", "diet_type": "regular"},
     )
     order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -1466,6 +1468,11 @@ def test_daily_bags_merges_forbidden_diets(owned_outputs):
             week_hint="2026-03@2026-03-24~2026-03-24",
         ),
         physical_slot=0, lines=[
+            {
+                "date": "2026-03-24", "daypart": "昼", "menu_name": "豆腐の煮物",
+                "diet_type": "regular", "area_id": "X", "bag_type": "standard",
+                "quantity_original": 5,
+            },
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -1511,13 +1518,19 @@ def test_daily_bags_merges_forbidden_diets(owned_outputs):
 
     assert res.status_code == 200
     group = next(item for item in res.json()["groups"] if item.get("menu_name") == "豆腐の煮物")
-    forbidden = next(item for item in group["diet_groups"] if item.get("diet_type") == "forbidden")
-    assert forbidden["total_quantity"] == 10.0
-    assert forbidden["calculation_basis_label"] == "40g/人"
+    regular = next(item for item in group["diet_groups"] if item.get("diet_type") == "regular")
+    assert regular["total_quantity"] == 5.0
+    assert regular["calculation_basis_label"] == "40g/人"
     assert not any(
         item.get("diet_type") in {"no_meat", "no_fish", "forbidden_other", "no_fried"}
         for item in group["diet_groups"]
     )
+    sheet, error = order_service.get_ocr_sheet(order["id"])
+    assert error is None
+    for diet, quantity in (("no_meat", 2), ("no_fish", 1), ("forbidden_other", 3), ("no_fried", 4)):
+        raw = sheet["rows"][0][sheet["fields"].index(f"qty.{diet}_x")]
+        assert raw == quantity
+        assert type(raw) is int
 
 
 def test_download_document_does_not_fetch_signed_substitute_when_own_read_fails(monkeypatch):
@@ -1872,7 +1885,7 @@ def test_owned_rerun_callback_acquires_real_slot_before_external_recognition(his
         result = orders_api._run_ocr_rerun_background(f.id, f.job,
             expected_revision=f.queued["workflow"]["revision"],
             workflow_attempt_id=f.queued["ocr_job"]["workflow_attempt_id"])
-    assert stages == ["ocr_slot_acquired"]
+    assert stages == ["ocr_pipeline"]
     assert len(calls) == 1
     assert result["terminal_receipt"]["job_id"] == f.job
     assert result["terminal_receipt"]["order_id"] == f.id

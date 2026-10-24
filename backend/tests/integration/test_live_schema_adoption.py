@@ -50,7 +50,7 @@ def captured(environment):
 def test_generated_contract_preserves_reviewed_baselines_and_uses_fresh_postgresql_catalog():
     generated_path = os.environ.get("LIVE_SCHEMA_ADOPTION_CONTRACT")
     if generated_path is None:
-        pytest.skip("generated contract is supplied only by the GitHub Actions proof")
+        pytest.skip("generated contract is supplied by the dedicated fresh-catalog runner")
     generated = json.loads(Path(generated_path).read_text())
     source = json.loads(SOURCE_CONTRACT.read_text())
     assert generated["adoption_baselines"] == source["adoption_baselines"]
@@ -191,7 +191,7 @@ def test_captured_adoption_preserves_nulls_and_matches_fresh(pg, environment):
         assert conn.exec_driver_sql("SELECT id,account FROM users ORDER BY id").mappings().first() == {"id": "old-0", "account": "old-0"}
         actual = schema.table_shapes(schema.read_catalog(conn), "postgresql")
         contract = json.loads(schema.CONTRACT.read_text())
-        expected = contract["revisions"]["postgresql"]["0035"]
+        expected = contract["revisions"]["postgresql"][schema.formal_head_revision()]
         for table, ref in expected["tables"].items():
             shape = schema._normalize_reflected_index_aliases(contract["shapes"][ref], "postgresql")
             assert schema._named_columns(actual[table]) == schema._named_columns(shape)

@@ -16,6 +16,9 @@ RUN python -m venv --system-site-packages /opt/agent/hospital \
 RUN for environment in hospital gateway shift school-lunch; do \
     /opt/agent/$environment/bin/python -m pip install --no-cache-dir --upgrade --no-deps 'pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70' 'certifi @ https://files.pythonhosted.org/packages/c4/51/29046e48f693c54e5b7412216d447a1d8362c9653148d98c02cdf65fa733/certifi-2026.10.19-py3-none-any.whl#sha256=42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b' || exit 1; \
     done
+RUN for environment in hospital gateway shift school-lunch; do \
+    /opt/agent/$environment/bin/python -m pip install --no-cache-dir --upgrade --no-deps setuptools==84.2.1 || exit 1; \
+    done
 RUN /opt/agent/hospital/bin/pip install --no-cache-dir httpx==0.28.1 psutil==7.2.2
 COPY experiments/agent_assistant/requirements.lock /tmp/agent-requirements.lock
 RUN /opt/agent/gateway/bin/pip install --no-cache-dir -r /tmp/agent-requirements.lock psycopg2-binary==2.9.11

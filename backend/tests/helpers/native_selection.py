@@ -19,6 +19,7 @@ from src.services import workflow_ocr_delivery_service as delivery
 from src.services.sheet_week_service import parse_sheet_week_value
 from src.services.storage_service import load_selected_pdf_bytes
 from tests.helpers.ingest_original import configure_delivery
+from tests.helpers.authored_cell_values import assert_declared_cells_used, declared_field
 from tests.unit.test_h2_operator_repair_revision import _provider_output_files
 
 
@@ -27,6 +28,7 @@ def produce_authored_native_result(monkeypatch, *, order_id, table_rows, columns
     """Consume an already registered/context-confirmed original, never fabricate ownership."""
     assert isinstance(unlisted_cells, str), "unlisted component cells require an explicit literal"
     assert type(recognizer_score) in (int, float) and 0 <= recognizer_score <= 1
+    assert not {"note", "remarks"} <= {column["name"] for column in columns}, "ambiguous declared note aliases"
     monkeypatch.setenv("OCR_ARTIFACT_DIR", str(artifact_root))
     for key in ("OCR_OUTPUT_BUCKET", "RAW_BUCKET", "K_SERVICE"):
         monkeypatch.delenv(key, raising=False)
@@ -74,7 +76,7 @@ def produce_authored_native_result(monkeypatch, *, order_id, table_rows, columns
             assert key not in values, "duplicate authored cell identity"
             value = row[column["source_index"]]
             values[key] = "" if value is None else str(value)
-            if column["role"] == "quantity":
+            if column["role"] in {"quantity", "note"}:
                 required.add(key)
     current, error = workflow.get_workflow_readonly(order_id)
     assert error is None
@@ -108,13 +110,14 @@ def produce_authored_native_result(monkeypatch, *, order_id, table_rows, columns
             for target in region["logical_targets"]:
                 daypart = order_service._normalize_daypart_key(target["daypart"])
                 assert daypart in {"朝", "昼", "夕"}, "physical daypart must have a canonical identity"
-                key = str(target["date"]), daypart, assignment._normalize_slot_text(target["menu_name"]), target["field"]
+                key = (str(target["date"]), daypart, assignment._normalize_slot_text(target["menu_name"]),
+                       declared_field(target, [column["name"] for column in columns]))
                 explicit.add(values[key] if key in values else unlisted_cells)
                 if key in values:
                     used.add(key)
             assert len(explicit) == 1, "a merged authored region must have one explicit value"
             cell_values[region["sheet_cell"]] = explicit.pop()
-        assert required <= used, "authored quantity cells must belong to the unchanged physical target plan"
+        assert_declared_cells_used(required, used)
         records = [{**region, "ocr_text": cell_values[region["sheet_cell"]], "recognizer_score": recognizer_score,
                     "recognizer_accepted_candidate": {"normalized_digits": cell_values[region["sheet_cell"]]}}
                    for region in regions]

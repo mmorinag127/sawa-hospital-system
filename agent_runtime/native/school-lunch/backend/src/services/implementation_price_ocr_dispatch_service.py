@@ -38,7 +38,7 @@ def cloud_task_name(job_id: str, generation: int) -> str:
         _required_env("IMPLEMENTATION_PRICE_OCR_TASKS_PROJECT"),
         _required_env("IMPLEMENTATION_PRICE_OCR_TASKS_LOCATION"),
         _required_env("IMPLEMENTATION_PRICE_OCR_TASKS_QUEUE"),
-        f"{datasets.delivery_namespace()}ocr-{job_id}-delivery-{generation}")
+        f"{datasets.delivery_namespace(feature='school-lunch')}ocr-{job_id}-delivery-{generation}")
 
 
 def inspect_cloud_task(task_name: str, *, contract) -> str:
@@ -79,8 +79,8 @@ def configured_mode() -> str:
 def capture_contract(job_id, generation, mode):
     contract = {"schema": 1, "url": _worker_process_url(job_id), "method": "POST",
                 "body": json.dumps({"job_id": job_id, "delivery_generation": generation}), "mode": mode}
-    if datasets.current_dataset() != "test":
-        contract["dataset"] = datasets.current_dataset()
+    if datasets.current_dataset(feature="school-lunch") != "test":
+        contract["dataset"] = datasets.current_dataset(feature="school-lunch")
     if mode == "cloud_tasks":
         deadline = int(_required_env("IMPLEMENTATION_PRICE_OCR_TASKS_DISPATCH_DEADLINE_SECONDS"))
         if not 1 <= deadline <= 1800:
@@ -101,8 +101,8 @@ def capture_contract(job_id, generation, mode):
 
 
 def send_captured(contract):
-    if datasets.current_dataset() != "test":
-        if (contract.get("dataset") != datasets.current_dataset()
+    if datasets.current_dataset(feature="school-lunch") != "test":
+        if (contract.get("dataset") != datasets.current_dataset(feature="school-lunch")
                 or "-stg-" not in urlsplit(contract.get("url", "")).netloc):
             raise datasets.DatasetUnavailable("staging_dataset_original_delivery_not_replayable")
     if contract["mode"] == "local":
@@ -111,7 +111,7 @@ def send_captured(contract):
             raise OcrDispatchConfigurationError("Local delivery credential changed from original contract")
         try:
             response = requests.post(contract["url"], data=contract["body"].encode(),
-                headers={"Content-Type": "application/json", "Authorization": "Bearer " + token, **datasets.delivery_headers()},
+                headers={"Content-Type": "application/json", "Authorization": "Bearer " + token, **datasets.delivery_headers(feature="school-lunch")},
                 timeout=contract["timeout_seconds"])
             response.raise_for_status()
             return "exists"

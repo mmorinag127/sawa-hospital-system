@@ -16,7 +16,7 @@ import shutil
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font
 import pytest
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import event, select
 from sqlalchemy.orm import sessionmaker
 
 from src import db, models  # noqa: F401 -- register real FK targets
@@ -51,15 +51,18 @@ JOB = "UNIT-NATIVE-JOB"
 
 
 class OwnedProducer:
-    def __init__(self, root, monkeypatch):
+    def __init__(self, root, monkeypatch, *, formal_template):
+        from tests.integration.sqlite_fixture_template import sqlite_engine_from_template
+        from src.maintenance.formal_migration_schema import require_formal_head
         self.root = root
-        self.engine = create_engine(f"sqlite:///{root / 'owned.sqlite'}")
+        self.engine = sqlite_engine_from_template(formal_template, root / 'owned.sqlite')
 
         @event.listens_for(self.engine, "connect")
         def foreign_keys(connection, _record):
             connection.execute("PRAGMA foreign_keys=ON")
 
-        db.Base.metadata.create_all(self.engine)
+        with self.engine.connect() as connection:
+            require_formal_head(connection)
         self.sessions = sessionmaker(bind=self.engine, expire_on_commit=False)
         monkeypatch.setattr(db, "SessionLocal", self.sessions)
         monkeypatch.setattr(db, "engine", self.engine)
@@ -96,7 +99,7 @@ class OwnedProducer:
             {"index": 3, "source_index": 3, "role": "menu_name", "header": "献立"},
             {"index": 4, "source_index": 4, "role": "quantity", "header": "常食",
              "diet_type": "regular", "area_id": "X", "header_group": "常食"},
-            {"index": 5, "source_index": 5, "role": "aux", "name": "aux.notes",
+            {"index": 5, "source_index": 5, "role": "note", "name": "remarks",
              "header": "備考", "header_group": "常食"},
         ]
         self.facility = {
@@ -128,6 +131,9 @@ class OwnedProducer:
                             category="主", diet_type="regular", slot_index=slot,
                         ))
             session.flush()
+            from tests.helpers.authored_menu_recipe import declare_recipes
+            declare_recipes(session, session.query(MonthlyMenuEntry).filter_by(
+                monthly_menu_id="2026-03").all(), qty_per_serving=1, unit_type="g")
             selected, _ = lineage.resolve(session, FACILITY, START)
             _, projection = lineage.materialize(session, selected)
             self.projection_id = projection.id
@@ -140,10 +146,16 @@ class OwnedProducer:
         self.plan = batch.capture_original_target_plan(
             configured_input=configured, physical_menu_entries=entries, week_code=WEEK,
         )
-        assert len(self.plan) == 56
+        self.quantity_plan = [target for target in self.plan if target["role"] == "quantity"]
+        self.notes_plan = [target for target in self.plan if target["role"] == "note"]
+        assert len(self.quantity_plan) == len(self.notes_plan) == len(entries) == 56
+        assert len(self.plan) == len(self.quantity_plan) + len(self.notes_plan)
+        assert {target["sheet_cell"] for target in self.quantity_plan}.isdisjoint(
+            target["sheet_cell"] for target in self.notes_plan
+        )
         self.expected = {region["sheet_cell"]: "" for region in self.plan}
-        self.expected[self.plan[0]["sheet_cell"]] = "7"
-        self.expected[self.plan[1]["sheet_cell"]] = "0"
+        self.expected[self.quantity_plan[0]["sheet_cell"]] = "7"
+        self.expected[self.quantity_plan[1]["sheet_cell"]] = "0"
         fax_xlsx = master.build_facility_template_xlsx(
             facility_config=self.facility, master_template_path=self.master_copy,
             output_path=root / "synthetic-fax.xlsx", week_value=WEEK, week_menu_entries=entries,
@@ -227,8 +239,8 @@ class OwnedProducer:
 
 
 @pytest.fixture
-def owned_producer(tmp_path, monkeypatch):
-    fixture = OwnedProducer(tmp_path, monkeypatch)
+def owned_producer(tmp_path, monkeypatch, isolated_formal_sqlite_template):
+    fixture = OwnedProducer(tmp_path, monkeypatch, formal_template=isolated_formal_sqlite_template)
     try:
         yield fixture
     finally:
@@ -269,7 +281,13 @@ def test_native_producer_real_lineage_terminal_select_projection_and_save(owned_
     assert projected["blockers"] == []
     sheet = projected["sheet"]
     qty = sheet["fields"].index("qty.regular_x")
-    assert [row[qty] for row in sheet["rows"]] == list(f.expected.values())
+    assert [row[qty] for row in sheet["rows"]] == [
+        f.expected[target["sheet_cell"]] for target in f.quantity_plan
+    ]
+    notes = sheet["fields"].index("remarks")
+    assert [row[notes] for row in sheet["rows"]] == [
+        f.expected[target["sheet_cell"]] for target in f.notes_plan
+    ]
     original = deepcopy(sheet)
     with db.session_scope() as session:
         revision = session.get(OrderWorkflowState, ORDER).revision

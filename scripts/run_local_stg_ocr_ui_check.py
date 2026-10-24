@@ -7,19 +7,24 @@ import subprocess
 from local_hospital_legacy_step import execute
 
 
-def main():
-    if os.environ.get('GITHUB_ACTIONS') or os.environ.get('CI'):
+def validate_inputs(env):
+    if env.get('GITHUB_ACTIONS') or env.get('CI'):
         raise SystemExit('OCR UI checks require local execution')
     for key in ('EXPECTED_SOURCE_SHA', 'OCR_EXISTING_RUN', 'REVIEW_ORDER_ID', 'LIVE_ID_TOKEN',
                 'GOOGLE_OAUTH_CLIENT_ID'):
-        if not os.getenv(key):
+        if not env.get(key):
             raise SystemExit(key + ' required for local read-only staging UI verification')
-    expected, run_id, review = (os.environ[key] for key in ('EXPECTED_SOURCE_SHA', 'OCR_EXISTING_RUN', 'REVIEW_ORDER_ID'))
+    expected, run_id, review = (env[key] for key in ('EXPECTED_SOURCE_SHA', 'OCR_EXISTING_RUN', 'REVIEW_ORDER_ID'))
     if not re.fullmatch('[0-9a-f]{40}', expected) or not re.fullmatch('[0-9]+', run_id) or not re.fullmatch('ORD[0-9a-f]{8}', review):
         raise ValueError('exact source, artifact run and review order are required')
-    audience = os.environ['GOOGLE_OAUTH_CLIENT_ID']
-    if not re.fullmatch('[0-9]+-[a-z0-9]+\\.apps\\.googleusercontent\\.com', audience) or audience == '167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com':
+    audience = env['GOOGLE_OAUTH_CLIENT_ID']
+    if not re.fullmatch(r'[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com', audience) or audience == '167795504375-hu5316gut0ke8vruc857qsb524q4kq50.apps.googleusercontent.com':
         raise ValueError('explicit staging audience required')
+    return expected, run_id, review
+
+
+def main():
+    expected, run_id, review = validate_inputs(os.environ)
     root = Path(__file__).resolve().parents[1]
     def git(*argv):
         return subprocess.check_output(['git', *argv], cwd=root, text=True).strip()

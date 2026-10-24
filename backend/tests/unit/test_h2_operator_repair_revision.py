@@ -174,6 +174,9 @@ def _make_repair_order(monkeypatch, tmp_path, *, extra_columns=(), merged=False,
         configured["facility"]["fax_template"]["columns"][-1]["body_merge"] = "daypart"
     configured["facility"]["fax_template"]["columns"].extend(deepcopy(extra_columns))
     if invoice_template is not None:
+        if "template_uri" not in invoice_template:
+            from tests.helpers.authored_invoice import declare_invoice
+            invoice_template = declare_invoice(tmp_path, invoice_template)
         configured["facility"]["invoice_template"] = deepcopy(invoice_template)
     configured["facility"].update(facility_name="Synthetic October repair fixture", areas=None)
     config_service._validate_authored_facility_config(configured["facility"], "own")
@@ -520,15 +523,13 @@ def test_job_owned_cache_canonicalization_uses_original_receipt(repair_order, su
             else:
                 assert guard.processing_start_read_input()["configured_input"] == configured
                 result = order_service._save_order_ocr_cache(order_id, {"own": 0}, job_id=job_id, augment_hakodate_artifacts=False, persist_evidence=False, refresh_workflow=False)
-                assert result is not None
+                assert result is None
     finally:
         order_service._workflow_ocr_attempt_id.reset(token_attempt)
         order_service._workflow_ocr_revision.reset(token_revision)
     with session_scope() as session:
         cache = session.get(OrderOcrCache, order_id)
-        assert (cache is None) is superseded
-        if cache is not None:
-            assert cache.payload["own"] == 0
+        assert cache is None
 
 
 @pytest.mark.parametrize("failure", [None, "partial", "coordinated_shrink", "physical_identity", "wrong_page", "wrong_config", "missing_version", "missing_record_id", "conflicting_records", "changed_current_config"])
@@ -875,6 +876,7 @@ def connected_physical_pipeline(isolated_formal_schema, monkeypatch, tmp_path, r
 def _make_connected_physical_pipeline(monkeypatch, tmp_path, *, merged=False, extra_columns=(), duplicate_names=False, invoice_template=None, register_menu_amounts=False):
     import cv2
     import numpy as np
+    from PIL import Image
     from src.services import hakodate_cell_ocr_batch_service as batch, hakodate_preprocessing_pipeline_service as collector, hakodate_step_review_pipeline_service as pipeline, master_order_form_template_service as master, order_workflow_v2_service as workflow
     order_id, _, configured = _make_repair_order(monkeypatch, tmp_path, extra_columns=extra_columns, merged=merged, invoice_template=invoice_template)
     week = "2026-10@2026-10-01~2026-10-03"
@@ -919,6 +921,10 @@ def _make_connected_physical_pipeline(monkeypatch, tmp_path, *, merged=False, ex
     cv2.imwrite(str(image_path), image)
     draft = batch.original_physical_draft(physical_menu_entries=physical, week_code=week)
     item = {"order_id": order_id, "facility_code": "fixture", "configured_input": deepcopy(configured), "template_id": "own", "fax_template_id": "own", "fax_pdf": receipt["selected_pdf_receipt"]["storage_uri"], "template_pdf": receipt["selected_pdf_receipt"]["storage_uri"], "step2_png": str(image_path), "template_xlsx": str(workbook_path), "template_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME, "week_sheet_name": master.FACILITY_TEMPLATE_SHEET_NAME, "template_axes_x": xs, "template_axes_y": template_ys, "template_bbox": [xs[0], template_ys[0], xs[-1], template_ys[-1]], "original_physical_draft": draft, "original_expected_sheet_cells": batch.expected_sheet_cells_from_target_regions(plan), "original_target_semantics": pipeline.canonical_target_semantics(plan), "selected_pdf_receipt": deepcopy(receipt["selected_pdf_receipt"])}
+    item.update(week_code=week, selected_page=configured["facility"]["fax_template"]["page"],
+                quad_px=[[20, 20], [270, 20], [270, 290], [20, 290]],
+                quad_source="explicit-fixture", quad_override=None,
+                header_axis_override=None, row_axis_override=None)
     axis = {"row_intersection_y_match": {"structural_match": {"body_day_boundary_indexes": [0, 1, 2, 3, 4, 7, 8, 9] if merged else list(range(8)), "detected_body_band_count": 9 if merged else 7}, "corrected_ys": fax_ys}, "header_intersection_x_match": {"header_roi": [20, 20, 270, 80]}}
     # Inject only external raster/registration observations. Actual target plan,
     # row mapping, preprocessing, snap, runtime evaluation and adoption stay real.
@@ -927,7 +933,8 @@ def _make_connected_physical_pipeline(monkeypatch, tmp_path, *, merged=False, ex
         monkeypatch.setattr(module, "render_pdf_page_to_bgr", lambda *args, **kwargs: image.copy())
         monkeypatch.setattr(module, "resolve_fixed_quad_px_for_manifest_item", lambda *args, **kwargs: ([[20, 20], [270, 20], [270, 290], [20, 290]], "explicit-fixture", {}))
         monkeypatch.setattr(module, "build_fixed_quad_template_registration", lambda **kwargs: (type("Registration", (), {"template_outer_grid_bbox_used": item["template_bbox"]})(), {}))
-        monkeypatch.setattr(module, "_align_axes", lambda **kwargs: (xs, fax_ys, deepcopy(axis), None))
+        monkeypatch.setattr(module, "_align_axes", lambda **kwargs: (
+            xs, fax_ys, deepcopy(axis), Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))))
     def manifest(**kwargs):
         from src.services.storage_service import load_selected_pdf_bytes
         result = deepcopy(item)

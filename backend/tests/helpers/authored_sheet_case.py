@@ -45,7 +45,7 @@ def authored_sheet_case(isolated_formal_schema, tmp_path, monkeypatch):
                 columns=columns, menu_entries=[{
                     "id": f"{menu_date.isoformat()}-breakfast-menu-a", "monthly_menu_id": menu_date.strftime("%Y-%m"),
                     "menu_date": menu_date, "daypart": "朝", "name": "Menu A",
-                    "slot_index": 0, "diet_type": "regular",
+                    "slot_index": 0, "diet_type": "regular", "category": "副菜",
                 }])
             cases.append(case)
             if produce:

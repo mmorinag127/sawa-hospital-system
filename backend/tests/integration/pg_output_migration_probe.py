@@ -12,26 +12,34 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
+from c1_pg_ownership import additional_profile, require_server
 
 
 def main():
     # Reject targets before importing any production module or connecting.
-    expected = (
-        "postgresql+psycopg2://sawa_output_test:isolated-test-only"
-        "@127.0.0.1:5432/sawa_modernization_output_test"
-    )
+    expected = os.environ.get("MODERNIZATION_PG_TEST_URI")
     if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI") or any(
-        os.environ.get(key) != expected for key in
+        not expected or os.environ.get(key) != expected for key in
         ("MODERNIZATION_PG_TEST_URI", "DB_URI", "DATABASE_URL", "ALEMBIC_DB_URI")
     ):
         raise RuntimeError("migration probe requires the exact isolated local test target")
+    url = sa.engine.make_url(expected)
+    major = additional_profile(url, "output")
     parser = argparse.ArgumentParser()
     parser.add_argument("--evidence", type=Path, required=True)
     args = parser.parse_args()
-    root = Path(os.environ["RUNNER_TEMP"]).resolve() / "pg-output-boundary"
+    root = Path(os.environ["SAWA_OWNED_PG_ROOT"]).parent / "evidence"
+    if os.environ.get("SAWA_LOCAL_PG_EVIDENCE_DIR") != str(root):
+        raise RuntimeError("migration probe evidence owner mismatch")
     destination = args.evidence.resolve()
-    if not destination.is_relative_to(root) or destination.exists():
+    if args.evidence.is_symlink() or not destination.is_relative_to(root) or destination.exists():
         raise RuntimeError("migration probe requires a new owned evidence path")
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as connection:
+            require_server(connection, major)
+    finally:
+        engine.dispose()
 
     from src.maintenance.formal_migration_schema import (
         CONTRACT, formal_head_revision, read_catalog, table_shapes,

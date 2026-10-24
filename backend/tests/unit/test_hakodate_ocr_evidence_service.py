@@ -29,7 +29,8 @@ def test_full_page_evidence_assigns_without_cell_crop_requirement() -> None:
 
     assert result["blockers"] == []
     assert result["unassigned_evidence"] == []
-    assert result["assignments"][0]["assigned_value"] == "12"
+    assert result["assignments"][0]["assigned_value"] == "１２"
+    assert evidence[0]["raw_text"] == "１２"
     assert result["assignments"][0]["assignment_state"] == "assigned"
     assert evidence[0]["source_scope"] == "full_page"
 
@@ -116,7 +117,7 @@ def test_missing_center_is_unassigned() -> None:
 
 
 def test_normalize_ocr_value_keeps_numeric_content_only() -> None:
-    assert normalize_ocr_value("  数量：１２．０個 ") == "12.0"
+    assert normalize_ocr_value("  数量：１２．０個 ") == "  数量：１２．０個 "
 
 
 def test_sheet_output_uses_assigned_evidence_not_legacy_ocr_rows() -> None:

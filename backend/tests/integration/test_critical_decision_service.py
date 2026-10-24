@@ -1,10 +1,11 @@
+"""Diagnostic decision-store rows, not OCR execution or selectable evidence."""
 import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.services import critical_decision_service, order_service  # noqa: E402
+from src.services import critical_decision_service  # noqa: E402
 from src.db import session_scope
 from src.models.order import Order
 
@@ -12,7 +13,8 @@ from src.models.order import Order
 def test_sync_pending_decisions_adds_and_prunes_entries(isolated_formal_schema) -> None:
     # Explicit existing order state; decision persistence is not OCR proof.
     with session_scope() as session:
-        session.add(Order(id="ORD-CRIT-1", message_id="critical-component-1"))
+        session.add(Order(id="ORD-CRIT-1", message_id="critical-component-1",
+                          document_uri="component:critical-decision-1"))
 
     first = critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-1",
@@ -57,7 +59,8 @@ def test_sync_pending_decisions_adds_and_prunes_entries(isolated_formal_schema) 
 def test_choose_decision_marks_value_and_preserves_latest_entry(isolated_formal_schema) -> None:
     # Explicit existing order state; decision persistence is not OCR proof.
     with session_scope() as session:
-        session.add(Order(id="ORD-CRIT-2", message_id="critical-component-2"))
+        session.add(Order(id="ORD-CRIT-2", message_id="critical-component-2",
+                          document_uri="component:critical-decision-2"))
 
     critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-2",
@@ -94,7 +97,8 @@ def test_choose_decision_marks_value_and_preserves_latest_entry(isolated_formal_
 def test_sync_pending_decisions_preserves_selected_value_when_refreshing_candidates(isolated_formal_schema) -> None:
     # Explicit existing order state; decision persistence is not OCR proof.
     with session_scope() as session:
-        session.add(Order(id="ORD-CRIT-3", message_id="critical-component-3"))
+        session.add(Order(id="ORD-CRIT-3", message_id="critical-component-3",
+                          document_uri="component:critical-decision-3"))
 
     critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-3",
@@ -132,7 +136,8 @@ def test_sync_pending_decisions_preserves_selected_value_when_refreshing_candida
 def test_sync_pending_decisions_preserves_structured_choice_metadata(isolated_formal_schema) -> None:
     # Explicit existing order state; decision persistence is not OCR proof.
     with session_scope() as session:
-        session.add(Order(id="ORD-CRIT-4", message_id="critical-component-4"))
+        session.add(Order(id="ORD-CRIT-4", message_id="critical-component-4",
+                          document_uri="component:critical-decision-4"))
 
     synced = critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-4",
@@ -162,7 +167,8 @@ def test_sync_pending_decisions_preserves_structured_choice_metadata(isolated_fo
 def test_sync_pending_decisions_invalidates_selected_value_when_evidence_lineage_changes(isolated_formal_schema) -> None:
     # Explicit existing order state; decision persistence is not OCR proof.
     with session_scope() as session:
-        session.add(Order(id="ORD-CRIT-5", message_id="critical-component-5"))
+        session.add(Order(id="ORD-CRIT-5", message_id="critical-component-5",
+                          document_uri="component:critical-decision-5"))
 
     critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-5",
@@ -209,7 +215,8 @@ def test_sync_pending_decisions_invalidates_selected_value_when_evidence_lineage
 def test_choose_decision_returns_none_when_evidence_lineage_is_stale(isolated_formal_schema) -> None:
     # Explicit existing order state; decision persistence is not OCR proof.
     with session_scope() as session:
-        session.add(Order(id="ORD-CRIT-6", message_id="critical-component-6"))
+        session.add(Order(id="ORD-CRIT-6", message_id="critical-component-6",
+                          document_uri="component:critical-decision-6"))
 
     critical_decision_service.sync_pending_decisions(
         "ORD-CRIT-6",

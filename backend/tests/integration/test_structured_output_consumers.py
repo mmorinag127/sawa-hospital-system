@@ -150,7 +150,7 @@ def test_menu_entry_override_fills_missing_daypart_and_category():
     assert rows[0]["menu_category"] == "副菜"
 
 
-def test_build_pipeline_match_text_includes_structured_rows_for_facility_match():
+def test_build_pipeline_match_text_includes_structured_rows_for_facility_match(repository_layout_source):
     match_text = ingest_worker._build_pipeline_match_text(
         {
             "pages": [
@@ -177,7 +177,7 @@ def test_build_pipeline_match_text_includes_structured_rows_for_facility_match()
     assert candidates[0]["auto"] is True
 
 
-def test_build_pipeline_match_text_includes_roi_facility_name():
+def test_build_pipeline_match_text_includes_roi_facility_name(repository_layout_source):
     match_text = ingest_worker._build_pipeline_match_text(
         {
             "roi_extraction": {

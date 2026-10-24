@@ -7,7 +7,6 @@ from datetime import date, datetime
 from typing import Any, TYPE_CHECKING
 
 from sqlalchemy import inspect
-from src.db import get_engine
 
 if TYPE_CHECKING:
     from src.models.facility_template_version import FacilityTemplateVersion
@@ -16,6 +15,12 @@ if TYPE_CHECKING:
 WORKFLOW_V2_META_KEY = "workflow_v2"
 VALID_TEMPLATE_VERSION_STATUSES = {"draft", "active", "archived", "invalid", "repair_blocked"}
 _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED = False
+
+
+def get_engine():
+    from src.db import get_engine as database_engine
+
+    return database_engine()
 
 
 def ensure_facility_template_version_schema() -> None:

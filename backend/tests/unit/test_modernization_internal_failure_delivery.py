@@ -33,8 +33,8 @@ from src.services import order_workflow_v2_service as workflow
 
 
 @pytest.fixture
-def owned_failure(tmp_path, monkeypatch):
-    f = OwnedProducer(tmp_path, monkeypatch)
+def owned_failure(tmp_path, monkeypatch, isolated_formal_sqlite_template):
+    f = OwnedProducer(tmp_path, monkeypatch, formal_template=isolated_formal_sqlite_template)
     monkeypatch.setattr(execution, "get_engine", lambda: f.engine)
     monkeypatch.setattr(slots, "get_engine", lambda: f.engine)
     try:

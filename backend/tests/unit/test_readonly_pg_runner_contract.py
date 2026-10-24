@@ -1,5 +1,6 @@
 """Runner definition contracts; these tests do not start PostgreSQL."""
 import importlib.util
+import os
 from pathlib import Path
 import sys
 
@@ -14,7 +15,7 @@ SPEC.loader.exec_module(runner)
 
 @pytest.mark.parametrize('run_id,attempt', [('0', '1'), ('1', '../bad'), (' 1', '1'), ('1', ''), ('a', '2')])
 def test_owned_root_rejects_non_ci_identity(run_id, attempt):
-    with pytest.raises(ValueError, match='explicit numeric CI identity required'):
+    with pytest.raises(ValueError, match='explicit numeric local run identity required'):
         runner.owned_root(run_id, attempt)
 
 
@@ -31,7 +32,7 @@ def test_existing_module_runs_unfiltered_with_owned_artifacts():
         'backend/tests/integration/test_menu_readonly_boundary.py',
         '--basetemp', str(root / 'tests'), '--junitxml', str(root / 'evidence/results.xml'), '-v',
     ]
-    assert runner.PG_BIN == Path('/usr/lib/postgresql/16/bin')
+    assert runner.PG_BIN == Path(os.environ.get('PG_BIN', '/usr/lib/postgresql/16/bin'))
 
 
 def test_workflow_only_owner_feature_push_or_manual_without_cloud_permissions():

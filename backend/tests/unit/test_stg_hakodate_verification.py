@@ -34,7 +34,9 @@ def existing(inputs, monkeypatch):
             workflow.update(revision=4, ocr_job=copy.deepcopy(job))
             return {'workflow': copy.deepcopy(workflow)}
         if path == '/orders/' + order['id'] + '/evidence':
-            assert workflow.get('ocr_job') is None
+            # A retry may already have a recorded old job. This read must still
+            # precede publication of this request's new job/attempt.
+            assert workflow.get('ocr_job') != job
             return {'id': 'previous-evidence'}
         if path == '/orders/' + order['id'] + '/workflow-v2/ocr-results':
             assert workflow['ocr_job'] == job

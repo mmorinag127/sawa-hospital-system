@@ -3,7 +3,7 @@
 Not hospital business-flow, OCR parity, native/live acceptance, exploitability,
 or vulnerability-elimination proof. No network or model load. Google certificate
 transport is doubled; RSA signing, verification and PDF decryption are real.
-This batch updates Pillow and backend gRPC only; the Torch risk remains unresolved.
+Runtime package updates require separate actual-image audits and OCR parity evidence.
 Native image/model compatibility requires separate verification from these pin contracts.
 """
 
@@ -134,6 +134,8 @@ def test_actual_installed_distribution_meets_fixed_security_range(name):
         "pillow": "13.0.0", "opencv-python-headless": "4.10.0.84", "pypdfium2": "4.30.0",
         "yomitoku": "0.9.5", "huggingface-hub": "0.36.2",
     }),
+    (ROOT / "agent_runtime/native/school-lunch/backend/requirements.txt", {"pillow": "13.0.0"}),
+    (ROOT / "agent_runtime/native/school-lunch/worker/requirements.txt", {"pillow": "13.0.0"}),
 ])
 def test_explicit_image_and_ocr_source_pins_remain_unchanged(path, baseline):
     parsed = requirements(path)
@@ -143,12 +145,16 @@ def test_explicit_image_and_ocr_source_pins_remain_unchanged(path, baseline):
         assert requirement.marker is None
 
 
-@pytest.mark.parametrize("path", [BACKEND / "requirements.txt", ROOT / "ocr_pipeline" / "requirements.txt"])
+@pytest.mark.parametrize("path", [
+    BACKEND / "requirements.txt", BACKEND / "constraints-yomitoku-cpu.txt",
+    ROOT / "ocr_pipeline" / "requirements.txt", ROOT / "ocr_pipeline" / "constraints-yomitoku-cpu.txt",
+    ROOT / "agent_runtime/native/school-lunch/worker/requirements.txt",
+])
 @pytest.mark.parametrize("system,machine,suffix", [("Linux", "x86_64", "+cpu"), ("Darwin", "arm64", "")])
-def test_explicit_model_platform_source_pins_remain_unchanged(path, system, machine, suffix):
+def test_patched_model_platform_source_pins_are_aligned(path, system, machine, suffix):
     environment = {**default_environment(), "platform_system": system, "platform_machine": machine}
     parsed = requirements(path)
-    for name, pinned in (("torch", "2.6.0"), ("torchvision", "0.21.0")):
+    for name, pinned in (("torch", "2.13.0"), ("torchvision", "0.28.0")):
         variants = named(parsed, name)
         assert len(variants) == 2
         active = one([item for item in variants if item.marker is not None and item.marker.evaluate(environment)])
@@ -427,3 +433,35 @@ def test_pdfminer_actual_owned_aes_pdf_passwords(tmp_path):
     assert extract_text(path, password="owned-reader").strip() == "Owned AES component"
     with pytest.raises(PDFPasswordIncorrect):
         extract_text(path, password="wrong-password")
+
+
+@pytest.mark.parametrize("relative", [
+    "backend/Dockerfile.base", "ocr_pipeline/Dockerfile", "agent_runtime/Dockerfile",
+    "agent_runtime/native/shift/backend/Dockerfile",
+    "agent_runtime/native/shift/backend/Dockerfile.solve-worker",
+    "agent_runtime/native/school-lunch/backend/Dockerfile",
+    "agent_runtime/native/school-lunch/worker/Dockerfile",
+])
+def test_python_image_bootstraps_do_not_inherit_old_setuptools(relative):
+    assert "--upgrade --no-deps setuptools==84.2.1" in (ROOT / relative).read_text()
+
+
+def test_producer_http_and_protobuf_source_security_floor():
+    parsed = requirements(ROOT / "ocr_pipeline/requirements.txt")
+    for name, fixed in (("flask", "3.1.3"), ("protobuf", "6.33.6"), ("google-cloud-firestore", "2.34.1")):
+        assert one(named(parsed, name)).specifier == SpecifierSet("==" + fixed)
+
+
+@pytest.mark.parametrize("module,relative", [("src", "backend"), ("app", "ocr_pipeline"), ("experiments.agent_assistant", ".")])
+def test_package_bootstrap_disables_provider_before_native_import(module, relative):
+    import os
+    import subprocess
+    import sys
+
+    code = ("import importlib,os,sys; importlib.import_module(sys.argv[1]); "
+            "assert os.environ['ORT_DISABLE_TELEMETRY']=='1'; "
+            "assert 'onnxruntime' not in sys.modules")
+    result = subprocess.run([sys.executable, "-c", code, module], cwd=ROOT,
+        env={**os.environ, "PYTHONPATH": str(ROOT / relative), "ORT_DISABLE_TELEMETRY": "0"},
+        capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr

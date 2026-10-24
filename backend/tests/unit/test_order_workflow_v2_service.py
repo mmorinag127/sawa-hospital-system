@@ -46,7 +46,7 @@ def _id(prefix: str) -> str:
     order_workflow_v2_service.confirm_bagging,
     order_workflow_v2_service.prepare_output_review,
 ])
-def test_output_review_entrypoints_keep_missing_source_blockers(action):
+def test_output_review_entrypoints_keep_missing_source_blockers(action, authored_april_context):
     assert action(_id("MISSING"), expected_revision=0) == (None, "order_not_found")
     order_id, _, _ = _create_order_with_evidence()
     assert action(order_id, expected_revision=_current_workflow_revision(order_id)) == (
@@ -653,7 +653,7 @@ def authored_april_context(tmp_path, monkeypatch) -> None:
         "facility_name": "Template Facility FAC00001",
         "areas": None,
         "fax_template_id": "template-fac00001",
-        "fax_template": {"template_id": "template-fac00001", "columns": _template_columns()},
+        "fax_template": {"template_id": "template-fac00001", "page": 1, "columns": _template_columns()},
     }
     source = tmp_path / "facility-master.json"
     source.write_text(json.dumps({"facilities": [{
@@ -727,7 +727,7 @@ def test_context_suggestion_is_recorded_without_confirming_step1() -> None:
         assert order.week_code == "2026-04-26"
 
 
-def test_workflow_v2_get_endpoints_do_not_create_workflow_rows() -> None:
+def test_workflow_v2_get_endpoints_do_not_create_workflow_rows(authored_april_context) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
 
     workflow, error = order_workflow_v2_service.get_workflow(order_id)
@@ -948,7 +948,7 @@ def test_ensure_ocr_prerequisites_blocks_when_weekly_menu_base_sheet_missing(mon
     assert workflow["blockers"] == ["monthly_menu_object_missing"]
 
 
-def test_select_ocr_result_requires_confirmed_context() -> None:
+def test_select_ocr_result_requires_confirmed_context(authored_april_context) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
 
     workflow, error = order_workflow_v2_service.select_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
@@ -960,7 +960,7 @@ def test_select_ocr_result_requires_confirmed_context() -> None:
         assert row is None or row.evidence_run_id is None
 
 
-def test_get_workflow_does_not_recover_missing_context_from_ingest_context() -> None:
+def test_get_workflow_does_not_recover_missing_context_from_ingest_context(authored_april_context) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     template_version_id = _install_active_template_version("FAC00001", "template-fac00001")
     draft_id = _id("ODS")
@@ -1062,7 +1062,7 @@ def test_context_confirm_blocks_when_facility_template_unresolved(monkeypatch, t
     assert source.read_bytes() == original_source
 
 
-def test_ocr_run_blocks_legacy_context_without_active_template_version(monkeypatch) -> None:
+def test_ocr_run_blocks_legacy_context_without_active_template_version(monkeypatch, authored_april_context) -> None:
     order_id, _, _ = _create_order_with_evidence()
     facility_id = _id("FAC_NO_ACTIVE")
     job_id = _id("OCRnoactive")
@@ -1431,7 +1431,7 @@ def test_ocr_job_order_mismatch_blocks_queue(monkeypatch, authored_april_context
                 assert {k: v for k, v in current.items() if k not in allowed} == {k: v for k, v in previous.items() if k not in allowed}
 
 
-def test_workflow_refuses_legacy_meta_without_canonical_template(monkeypatch) -> None:
+def test_workflow_refuses_legacy_meta_without_canonical_template(monkeypatch, authored_april_context) -> None:
     order_id, _, _ = _create_order_with_evidence()
     monkeypatch.setattr(
         order_workflow_v2_service.config_service,
@@ -1934,7 +1934,7 @@ def test_stale_saved_sheet_requires_explicit_reselection_before_selected_ocr_reb
     assert source_path.read_bytes() == source_bytes
 
 
-def test_save_sheet_blocks_when_selected_ocr_has_no_confirmed_context() -> None:
+def test_save_sheet_blocks_when_selected_ocr_has_no_confirmed_context(authored_april_context) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     with session_scope() as session:
         session.add(
@@ -2106,7 +2106,7 @@ def test_selecting_ocr_result_blocks_template_version_mismatch(authored_april_co
     assert database_snapshot() == before
 
 
-def test_selecting_ocr_result_clears_downstream_sheet(authored_april_context) -> None:
+def test_selecting_ocr_result_clears_active_sheet_but_retains_history(authored_april_context) -> None:
     order_id, evidence_id_1, evidence_id_2 = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -2137,7 +2137,14 @@ def test_selecting_ocr_result_clears_downstream_sheet(authored_april_context) ->
     assert switched["selected_ocr_result_id"] == evidence_id_2
     assert switched["saved_sheet_id"] is None
     with session_scope() as session:
-        assert session.get(OrderSheetDraft, first_saved_sheet_id) is None
+        historical = session.get(OrderSheetDraft, first_saved_sheet_id)
+        assert historical.base_evidence_run_id == evidence_id_1
+        assert historical.draft_sheet_json == {"rows": [{"menu": "A", "qty": "1"}]}
+    before = database_snapshot()
+    removed, error = order_workflow_v2_service.delete_ocr_result(
+        order_id, evidence_id_1, expected_revision=switched["revision"])
+    assert removed is None and error == "ocr_result_saved_history_conflict"
+    assert database_snapshot() == before
 
 
 def test_deleting_selected_ocr_result_deletes_derived_sheet_and_returns_to_step1_context(authored_april_context) -> None:
@@ -2727,7 +2734,7 @@ def test_workflow_v2_sheet_anomaly_review_is_separate_from_bagging(monkeypatch, 
     assert "anomaly_review" not in inspection["bagging_result"]
 
 
-def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_and_persists_check(monkeypatch) -> None:
+def test_workflow_v2_sheet_anomaly_review_accepts_unsaved_sheet_and_persists_check(monkeypatch, authored_april_context) -> None:
     _install_fake_materialization(monkeypatch)
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
@@ -3060,7 +3067,7 @@ def test_workflow_v2_dismiss_sheet_anomaly_warning_matches_uncelled_llm_warning(
     assert dismissed["pre_save_status"]["anomaly_review_confirmed"] is True
 
 
-def test_workflow_v2_sheet_anomaly_review_llm_payload_uses_sheet_only(monkeypatch) -> None:
+def test_workflow_v2_sheet_anomaly_review_llm_payload_uses_sheet_only(monkeypatch, authored_april_context) -> None:
     captured: dict[str, object] = {}
 
     def fake_gemini_json_request(**kwargs):
@@ -3119,7 +3126,7 @@ def test_workflow_v2_sheet_anomaly_review_llm_payload_uses_sheet_only(monkeypatc
     assert user_payload["rows"][0]["quantities"][0]["value"] == "110"
 
 
-def test_workflow_v2_sheet_anomaly_review_always_returns_suggestions() -> None:
+def test_workflow_v2_sheet_anomaly_review_always_returns_suggestions(authored_april_context) -> None:
     order_id, _, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,

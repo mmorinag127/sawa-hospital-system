@@ -54,11 +54,15 @@ def require_process_group_owner(pid, run_id, created=None):
                 or str(Path(__file__).with_name("domain_host.py")) not in command
                 or os.getpgid(pid) != pid):
             raise Conflict("試用APIのプロセス所有権を確認できません")
+    except (psutil.AccessDenied, PermissionError) as exc:
+        raise Conflict("試用APIのプロセス所有権確認がOSに拒否されました。終了未確認です") from exc
     except psutil.NoSuchProcess:
         try:
             os.killpg(pid, 0)
         except ProcessLookupError:
             return False
+        except PermissionError as exc:
+            raise Conflict("残存プロセスグループの確認がOSに拒否されました。終了未確認です") from exc
         raise Conflict("残存プロセスグループの所有権を確認できません")
     return True
 
@@ -66,12 +70,25 @@ def require_process_group_owner(pid, run_id, created=None):
 async def terminate_process_group(pid, wait, owner):
     waiting = asyncio.create_task(wait())
     try:
+        # Reap an already-exited child before inspecting its command line.
+        # A completed wait alone never proves that its process group is gone.
+        await asyncio.sleep(0)
+        if waiting.done():
+            try:
+                os.killpg(pid, 0)
+            except ProcessLookupError:
+                await waiting
+                return
+            except PermissionError as exc:
+                raise Conflict("試用APIの終了確認がOSに拒否されました。終了未確認です") from exc
         for action in (signal.SIGTERM, signal.SIGKILL):
             try:
                 if owner():
                     os.killpg(pid, action)
             except ProcessLookupError:
                 pass
+            except PermissionError as exc:
+                raise Conflict("試用APIの停止がOSに拒否されました。終了未確認です") from exc
             deadline = asyncio.get_running_loop().time() + 8
             while True:
                 try:
@@ -79,6 +96,8 @@ async def terminate_process_group(pid, wait, owner):
                     exists = True
                 except ProcessLookupError:
                     exists = False
+                except PermissionError as exc:
+                    raise Conflict("試用APIの終了確認がOSに拒否されました。終了未確認です") from exc
                 if not exists and waiting.done():
                     await waiting
                     return
@@ -183,6 +202,7 @@ class Sandbox:
             env["HF_HOME"] = str(target_cache)
         uri = "sqlite:///"+str(data / "database.sqlite3")
         env.update({"DB_URI": uri, "DATABASE_URL": uri, "SAWA_TRIAL_TOKEN": token,
+                    "ORT_DISABLE_TELEMETRY": "1",
                     "SAWA_ENVIRONMENT": "test",
                     "SAWA_TRIAL_MODULE": MODULES[domain], "SAWA_TRIAL_SOURCE": str(worktree / "backend"),
                     "SAWA_TRIAL_DATA": str(data), "SAWA_API_SERVICE_TOKEN": token,

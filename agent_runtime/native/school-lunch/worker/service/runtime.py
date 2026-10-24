@@ -4,6 +4,8 @@ import os
 import sys
 from pathlib import Path
 
+os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+
 
 def _ocr_pipeline_root() -> Path:
     configured = os.getenv("OCR_PIPELINE_ROOT", "").strip()

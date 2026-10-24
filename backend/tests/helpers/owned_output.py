@@ -19,7 +19,8 @@ def owned_outputs(monkeypatch, tmp_path, isolated_formal_schema):
 
         def create_order_from_ingest(self, payload, *, lines, recipe=None,
                                      declared_quantity_pairs=None, accessory_masters=None, physical_slot=None,
-                                     physical_category=None):
+                                     physical_category=None, prepared_menu_sources=False,
+                                     daily_label_comparable_diet_types=None):
             assert lines, "explicit authored lines/identity required"
             assert isinstance(payload.facility_hint, str) and payload.facility_hint.strip(), "explicit authored facility required"
             name, day, daypart = (lines[0][key] for key in ("menu_name", "date", "daypart"))
@@ -76,6 +77,8 @@ def owned_outputs(monkeypatch, tmp_path, isolated_formal_schema):
                 menu_unit_type=recipe["unit_type"], menu_category=recipe["category"],
                 menu_temp_type=recipe.get("temp_type"),
                 physical_menu_category=physical_category,
+                prepared_menu_sources=prepared_menu_sources,
+                daily_label_comparable_diet_types=daily_label_comparable_diet_types,
                 physical_slot_indexes=slots, week_start=start.isoformat(), week_end=end.isoformat(),
                 accessory_masters=accessory_masters,
                 declared_quantity_pairs=declared_quantity_pairs, confirm=True)

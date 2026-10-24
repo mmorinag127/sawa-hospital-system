@@ -75,8 +75,8 @@ def version_start(version: dict) -> date | None:
 
 def selected_version_matches(current: dict, selected: dict) -> bool:
     """Closing applicability never changes an already selected configuration."""
-    if {key: value for key, value in current.items() if key != "valid_to"} != \
-            {key: value for key, value in selected.items() if key != "valid_to"}:
+    if digest({key: value for key, value in current.items() if key != "valid_to"}) != \
+            digest({key: value for key, value in selected.items() if key != "valid_to"}):
         return False
     if "valid_to" not in current or "valid_to" not in selected:
         return False

@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
+from tests.integration.c1_pg_ownership import additional_profile, require_server
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -30,8 +31,9 @@ def connection(monkeypatch):
     uri = os.environ.get("TEST_BOOTSTRAP_DB_URI")
     if not uri:
         pytest.skip("TEST_BOOTSTRAP_DB_URI is required for real PostgreSQL tests")
-    assert make_url(uri).get_backend_name() == "postgresql", "PostgreSQL is required"
-    engine = create_engine(uri, future=True)
+    url = make_url(uri)
+    profile = additional_profile(url, "bootstrap")
+    engine = create_engine(url, future=True)
     schema = f"automation_bootstrap_{uuid.uuid4().hex}"
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setenv("GITHUB_RUN_ID", "123")
@@ -39,6 +41,8 @@ def connection(monkeypatch):
     monkeypatch.setenv("GITHUB_REF", "refs/heads/develop")
     try:
         with engine.connect() as connection:
+            require_server(connection, profile)
+            connection.rollback()
             created = False
             try:
                 with connection.begin():

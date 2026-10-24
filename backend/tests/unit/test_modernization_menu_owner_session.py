@@ -249,8 +249,8 @@ def test_synchronous_capture_and_fence_under_writer_lock(owned_bagging, fault):
 
 
 @pytest.fixture
-def owned_producer(tmp_path, monkeypatch):
-    f = OwnedProducer(tmp_path, monkeypatch)
+def owned_producer(tmp_path, monkeypatch, isolated_formal_sqlite_template):
+    f = OwnedProducer(tmp_path, monkeypatch, formal_template=isolated_formal_sqlite_template)
     try:
         yield f
     finally:

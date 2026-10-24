@@ -354,8 +354,9 @@ def test_get_ocr_pages_defers_grid_recovery_when_template_metadata_is_partial(mo
     envelope = authored["facilities"][0]
     for config in (envelope, envelope["versions"][0]["facility"]):
         template = config["fax_template"]
+        template["units"] = "normalized"
         template["table_box"] = [0.1, 0.2, 0.9, 0.8]
-        template["grid_column_edges"] = [0.1, 0.5, 0.9]
+        template["grid_column_edges"] = [0.1, 0.3, 0.5, 0.7, 0.9]
         template.pop("grid_row_edges", None)
     case.source.write_text(json.dumps(authored), encoding="utf-8")
     case.produce(cell_values="2")
@@ -371,7 +372,7 @@ def test_get_ocr_pages_defers_grid_recovery_when_template_metadata_is_partial(mo
         assert isinstance(pages, dict)
         assert len(pages["pages"]) == 1
         assert pages["table_box"] == [0.1, 0.2, 0.9, 0.8]
-        assert pages["grid_column_edges"] == [0.1, 0.5, 0.9]
+        assert pages["grid_column_edges"] == [0.1, 0.3, 0.5, 0.7, 0.9]
         assert pages["grid_row_edges"] is None
         assert pages["grid_detection_status"] == "deferred"
         assert pages["grid_detection_deferred_reason"] == "missing_template_grid_metadata:grid_row_edges"
@@ -1023,7 +1024,7 @@ def test_owned_canonical_columns_do_not_invent_aux_totals_from_unowned_headers(s
         ["", "昼", "副", "Menu B", "9", "8", "", "1"]]}]})
 
 
-def test_extract_sheet_rows_from_payload_preserves_authoritative_aux_columns_for_noisy_fac00004_table():
+def test_extract_sheet_rows_from_payload_preserves_authoritative_aux_columns_for_noisy_fac00004_table(repository_layout_source):
     template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
     rows = _fac00004_aux_rows()
     payload = {
@@ -1064,7 +1065,7 @@ def test_extract_sheet_rows_from_payload_preserves_authoritative_aux_columns_for
     ]
 
 
-def test_extract_sheet_rows_from_resolved_mapping_overlays_explicit_aux_columns_when_mapping_meta_omits_them(monkeypatch):
+def test_extract_sheet_rows_from_resolved_mapping_overlays_explicit_aux_columns_when_mapping_meta_omits_them(monkeypatch, repository_layout_source):
     template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
     rows = _fac00004_aux_rows()
     payload = {
@@ -1139,7 +1140,7 @@ def test_extract_sheet_rows_from_resolved_mapping_overlays_explicit_aux_columns_
     assert extracted[1][:7] == ["", "夕", "主", "麻婆豆腐", "59", "58", ""]
 
 
-def test_overlay_structured_block_total_cells_projects_live_like_sequences_by_canonical_date_order():
+def test_overlay_structured_block_total_cells_projects_live_like_sequences_by_canonical_date_order(repository_layout_source):
     template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)
@@ -1203,7 +1204,7 @@ def test_overlay_structured_block_total_cells_projects_live_like_sequences_by_ca
     assert any(item.get("raw_date") == "04/20" and item.get("canonical_date") == "04/29" for item in assignments)
 
 
-def test_extract_sheet_rows_from_resolved_column_mapping_uses_template_columns_for_aux_markdown_tables():
+def test_extract_sheet_rows_from_resolved_column_mapping_uses_template_columns_for_aux_markdown_tables(repository_layout_source):
     template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
     payload = {
         "table_raw": "\n".join(
@@ -1229,7 +1230,7 @@ def test_extract_sheet_rows_from_resolved_column_mapping_uses_template_columns_f
     assert extracted[1][:7] == ["04/26", "朝", "副①", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "67", "3"]
 
 
-def test_project_payload_quantities_onto_weekly_menu_shell_maps_exact_date_group_with_menu_anchor():
+def test_project_payload_quantities_onto_weekly_menu_shell_maps_exact_date_group_with_menu_anchor(repository_layout_source):
     template = (config_service.get_facility_config("FAC00001") or {}).get("fax_template") or {}
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
 
@@ -1283,7 +1284,7 @@ def test_project_payload_quantities_onto_weekly_menu_shell_maps_exact_date_group
     assert stats["overflow_row_count"] == 0
 
 
-def test_project_payload_quantities_onto_weekly_menu_shell_leaves_unresolved_date_group_blank():
+def test_project_payload_quantities_onto_weekly_menu_shell_leaves_unresolved_date_group_blank(repository_layout_source):
     template = (config_service.get_facility_config("FAC00001") or {}).get("fax_template") or {}
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
 
@@ -1330,7 +1331,7 @@ def test_project_payload_quantities_onto_weekly_menu_shell_leaves_unresolved_dat
     assert stats["unresolved_payload_dates"] == ["04/20"]
 
 
-def test_extract_first_pass_rows_from_payload_builds_fragmented_quantity_rows_from_header_columns():
+def test_extract_first_pass_rows_from_payload_builds_fragmented_quantity_rows_from_header_columns(repository_layout_source):
     template = (config_service.get_facility_config("FAC00005") or {}).get("fax_template") or {}
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
     payload = {
@@ -1385,7 +1386,7 @@ def test_extract_first_pass_rows_from_payload_builds_fragmented_quantity_rows_fr
     assert rows[3][menu_idx] == ""
 
 
-def test_extract_first_pass_rows_from_payload_prefers_structured_identity_over_fragmented_rows():
+def test_extract_first_pass_rows_from_payload_prefers_structured_identity_over_fragmented_rows(repository_layout_source):
     template = (config_service.get_facility_config("FAC00005") or {}).get("fax_template") or {}
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
     payload = {
@@ -1430,7 +1431,7 @@ def test_extract_first_pass_rows_from_payload_prefers_structured_identity_over_f
     assert rows[1][field_index["qty.regular_bag_x"]] == "4"
 
 
-def test_extract_sheet_rows_from_payload_does_not_use_position_fallback_pseudo_menu_tokens():
+def test_extract_sheet_rows_from_payload_does_not_use_position_fallback_pseudo_menu_tokens(repository_layout_source):
     template = (config_service.get_facility_config("FAC00005") or {}).get("fax_template") or {}
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
     payload = {
@@ -1467,7 +1468,7 @@ def test_extract_sheet_rows_from_payload_does_not_use_position_fallback_pseudo_m
     assert all(row[menu_idx] not in {"41 4", "MD"} for row in rows)
 
 
-def test_project_payload_quantities_onto_weekly_menu_shell_fills_global_anchor_gaps_without_daypart_tokens():
+def test_project_payload_quantities_onto_weekly_menu_shell_fills_global_anchor_gaps_without_daypart_tokens(repository_layout_source):
     template = (config_service.get_facility_config("FAC00005") or {}).get("fax_template") or {}
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
 
@@ -1526,7 +1527,7 @@ def test_project_payload_quantities_onto_weekly_menu_shell_fills_global_anchor_g
     assert stats["overflow_row_count"] == 0
 
 
-def test_project_payload_quantities_onto_weekly_menu_shell_blocks_blank_rows_without_any_exact_anchor():
+def test_project_payload_quantities_onto_weekly_menu_shell_blocks_blank_rows_without_any_exact_anchor(repository_layout_source):
     template = (config_service.get_facility_config("FAC00005") or {}).get("fax_template") or {}
     fields, field_index = order_service._build_sheet_fields_and_indexes(template)
 
@@ -1567,7 +1568,7 @@ def test_normalize_menu_text_collapses_halfwidth_katakana_and_spacing():
     )
 
 
-def test_overlay_structured_block_total_cells_skips_extra_values_beyond_canonical_block_count():
+def test_overlay_structured_block_total_cells_skips_extra_values_beyond_canonical_block_count(repository_layout_source):
     template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)
@@ -1611,7 +1612,7 @@ def test_overlay_structured_block_total_cells_skips_extra_values_beyond_canonica
     assert skipped[0]["values"] == ["70", "80", "90", "100"]
 
 
-def test_overlay_structured_block_total_cells_derives_missing_totals_when_structured_segments_absent():
+def test_overlay_structured_block_total_cells_derives_missing_totals_when_structured_segments_absent(repository_layout_source):
     template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)
@@ -1638,7 +1639,7 @@ def test_overlay_structured_block_total_cells_derives_missing_totals_when_struct
     assert int(stats.get("derived_block_total_assignment_count") or 0) == 6
 
 
-def test_overlay_structured_block_total_cells_keeps_blank_when_no_explicit_or_derivable_total_exists():
+def test_overlay_structured_block_total_cells_keeps_blank_when_no_explicit_or_derivable_total_exists(repository_layout_source):
     template = (config_service.get_facility_config("FAC00004") or {}).get("fax_template") or {}
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)
@@ -1743,7 +1744,7 @@ def test_owned_regular_and_diabetes_cells_ignore_ambiguous_header_names(selected
     _assert_unowned_projection_is_not_adopted(case, {"table_rows": [["日付", "区分", "メニュー", "数量A", "数量B"], ["03/21", "朝", "Menu A", "9", "4"]], "template_resolution": {"resolved_template_id": "", "candidate_template_ids": ["fax_layout_regular_diabetes_v1", "fax_layout_regular_forbidden_v1"], "confidence": 0.41}})
 
 
-def test_fac00013_uses_forbidden_template_as_single_canonical_config():
+def test_fac00013_uses_forbidden_template_as_single_canonical_config(repository_layout_source):
     facility_config = config_service.get_facility_config("FAC00013")
 
     assert isinstance(facility_config, dict)
@@ -1778,7 +1779,8 @@ def test_get_ocr_sheet_projects_fac00006_repeated_regular_round_columns_from_sou
             "menu_date": date(2026, 4, 26), "daypart": "朝", "name": raw[3], "slot_index": 0, "diet_type": "regular"}])
 
     def recognize(region):
-        declared = {values[target["field"]] for target in region["logical_targets"]}
+        from tests.helpers.authored_cell_values import declared_field
+        declared = {values[declared_field(target, fields)] for target in region["logical_targets"]}
         assert len(declared) == 1, "one physical target cannot silently merge different declared values"
         (value,) = declared
         return value

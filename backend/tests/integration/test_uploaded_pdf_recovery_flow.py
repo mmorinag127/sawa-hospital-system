@@ -114,7 +114,8 @@ def test_owned_runner_uses_canonical_order_ocr_job_id(monkeypatch, tmp_path):
     row = get_uploaded_pdf(uploaded_pdf_id)
     assert row["status"] == "completed"
     assert row["current_order_id"] == registered["id"]
-    assert get_job(f"OCR-{row['current_order_id']}")["order_id"] == row["current_order_id"]
+    from tests.helpers.ingest_original import recorded_upload_ocr_job
+    assert recorded_upload_ocr_job(uploaded_pdf_id)["order_id"] == row["current_order_id"]
 
 
 def test_owned_delivery_business_failure_is_terminal_after_stale_lease(monkeypatch, tmp_path):
@@ -213,8 +214,9 @@ def test_owned_first_pass_duplicate_keeps_evidence_and_original_receipt(monkeypa
     assert process_uploaded_original(uploaded_pdf_id)["result"] == "business_done"
     evidence = order_service.get_latest_ocr_evidence_run(registered["id"], backfill_from_cache=False)
     assert evidence is not None
-    job_id = f"OCR-{registered['id']}"
-    before = get_job(job_id)
+    from tests.helpers.ingest_original import recorded_upload_ocr_job
+    before = recorded_upload_ocr_job(uploaded_pdf_id)
+    job_id = before["id"]
     monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", lambda **kwargs: pytest.fail("duplicate provider execution"))
     assert process_uploaded_original(uploaded_pdf_id)["acknowledged"] is True
     latest = order_service.get_latest_ocr_evidence_run(registered["id"], backfill_from_cache=False)

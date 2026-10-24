@@ -11,8 +11,34 @@ from src.services.fax_extractor import (  # noqa: E402
 )
 
 
+def _declared_structured_template(template):
+    from src.services.template_field_schema_service import (
+        _parse_quantity_field_name, canonical_field_name_from_template_column,
+    )
+    roles = {"date_mmdd": "date", "daypart": "daypart", "menu": "menu_name", "remarks": "note"}
+    if "columns" not in template:
+        columns = []
+        for index, field in enumerate(template["main_ocr_row_fields"]):
+            column = {"index": index, "source_index": index, "name": field}
+            if field in roles:
+                column["role"] = roles[field]
+            else:
+                identity = _parse_quantity_field_name(field)
+                assert identity is not None, "component column must be explicitly declared"
+                diet, area = identity
+                column.update(role="quantity", diet_type=diet, area_id=area.upper())
+            columns.append(column)
+        template["columns"] = columns
+    else:
+        for column in template["columns"]:
+            column["source_index"] = column["index"]
+            column["name"] = canonical_field_name_from_template_column(column)
+            assert column["name"], "explicit component column has no canonical identity"
+    return template
+
+
 def _template() -> dict:
-    return {
+    return _declared_structured_template({
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -21,11 +47,11 @@ def _template() -> dict:
             "qty.soft_x",
             "remarks",
         ]
-    }
+    })
 
 
 def _template_staff_daycare() -> dict:
-    return {
+    return _declared_structured_template({
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -37,11 +63,11 @@ def _template_staff_daycare() -> dict:
             "qty.no_fish_x",
             "remarks",
         ]
-    }
+    })
 
 
 def _template_fureai() -> dict:
-    return {
+    return _declared_structured_template({
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -70,11 +96,11 @@ def _template_fureai() -> dict:
             {"index": 11, "role": "quantity", "header": "変更1", "diet_type": "change_1", "area_id": "X"},
             {"index": 12, "role": "note", "header": "備考欄"},
         ],
-    }
+    })
 
 
 def _template_fureai_compact() -> dict:
-    return {
+    return _declared_structured_template({
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -88,11 +114,11 @@ def _template_fureai_compact() -> dict:
             "qty.change_1_x",
             "remarks",
         ]
-    }
+    })
 
 
 def _template_staff_forbidden_sesame() -> dict:
-    return {
+    return _declared_structured_template({
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -105,11 +131,11 @@ def _template_staff_forbidden_sesame() -> dict:
             "qty.sesame_allergy_x",
             "remarks",
         ]
-    }
+    })
 
 
 def _template_staff_forbidden_sesame_with_aux() -> dict:
-    return {
+    return _declared_structured_template({
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -135,11 +161,11 @@ def _template_staff_forbidden_sesame_with_aux() -> dict:
             {"index": 9, "role": "quantity", "header": "ゴマアレルギー", "diet_type": "sesame_allergy", "area_id": "X"},
             {"index": 10, "role": "note", "header": "備考欄"},
         ],
-    }
+    })
 
 
 def _template_diabetes_forbidden_change() -> dict:
-    return {
+    return _declared_structured_template({
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -152,11 +178,11 @@ def _template_diabetes_forbidden_change() -> dict:
             "qty.change_2_x",
             "remarks",
         ]
-    }
+    })
 
 
 def _template_mixed() -> dict:
-    return {
+    return _declared_structured_template({
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -169,11 +195,11 @@ def _template_mixed() -> dict:
             "qty.no_fish_x",
             "remarks",
         ]
-    }
+    })
 
 
 def _template_drifted_floor_split() -> dict:
-    return {
+    return _declared_structured_template({
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -198,7 +224,7 @@ def _template_drifted_floor_split() -> dict:
             {"index": 8, "role": "quantity", "header": "ミキサー3F", "diet_type": "mixer", "area_id": "3F"},
             {"index": 9, "role": "note", "header": "備考"},
         ],
-    }
+    })
 
 
 def test_rows_from_pipeline_payload_merges_multiple_markdown_tables():

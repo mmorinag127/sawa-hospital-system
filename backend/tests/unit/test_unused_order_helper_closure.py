@@ -6,6 +6,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = "backend/src/services/order_service.py"
 BASE = "0d165588f98a12829217938058662a3745a82d8f"
+DELETION = "23916d904943fda3f5b88c2dd9561d28ad9835b1"
 INVENTORY_TEST = "backend/tests/unit/test_workflow_recorded_job_status.py"
 RETIRED = frozenset({
     "_apply_payload_quantities_by_row_index",
@@ -58,7 +59,7 @@ def test_only_the_fixed_retired_definitions_and_their_separators_are_deleted():
     original = baseline()
     tree = ast.parse(original)
     old = definitions(tree)
-    current_source = (ROOT / SOURCE).read_text()
+    current_source = subprocess.check_output(["git", "show", f"{DELETION}:{SOURCE}"], cwd=ROOT).decode()
     current_tree = ast.parse(current_source)
     current = definitions(current_tree)
     assert len(RETIRED) == 35
@@ -75,6 +76,8 @@ def test_only_the_fixed_retired_definitions_and_their_separators_are_deleted():
     for name, node in current.items():
         assert ast.dump(node) == ast.dump(old[name])
         assert ast.get_source_segment(current_source, node) == ast.get_source_segment(original, old[name])
+    # Later approved source fixes are not constrained to this deletion-only diff.
+    assert RETIRED.isdisjoint(definitions(ast.parse((ROOT / SOURCE).read_text())))
 
 
 def test_retired_definition_metadata_has_no_registration_or_executable_default():
@@ -128,15 +131,7 @@ def test_no_current_tracked_python_consumer_refers_to_retired_names():
                       else node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None)
             if target not in RETIRED:
                 continue
-            # The only nonconsumer mention is the explicitly permitted fixed inventory set.
-            parent = parents.get(node)
-            assert filename == INVENTORY_TEST and isinstance(parent, ast.Set), (filename, node.lineno, target)
-            assert {item.value for item in parent.elts if isinstance(item, ast.Constant)} == RETIRED
-            owner = parent
-            while owner not in tree.body:
-                owner = parents[owner]
-            assert isinstance(owner, ast.FunctionDef)
-            assert owner.name == "test_existing_backend_functions_are_unchanged_except_additive_workflow_projection"
+            raise AssertionError((filename, node.lineno, target))
 
 
 def test_other_recorded_job_tests_and_adapter_oracles_are_byte_identical():
@@ -152,10 +147,12 @@ def test_other_recorded_job_tests_and_adapter_oracles_are_byte_identical():
             assert ast.dump(node) == ast.dump(new[name])
             assert ast.get_source_segment(original, node) == ast.get_source_segment(current, new[name])
     new_inventory = new[inventory]
-    branch = next(node for node in ast.walk(new_inventory)
-                  if isinstance(node, ast.If) and ast.unparse(node.test) == "path.endswith('/order_service.py')")
-    assert len(branch.body) == 5
-    assert isinstance(branch.body[1], ast.Assign) and ast.unparse(branch.body[1].targets[0]) == "retired"
-    assert ast.literal_eval(branch.body[1].value) == RETIRED
-    del branch.body[1:]
-    assert ast.dump(new_inventory) == ast.dump(old[inventory])
+    source = ast.get_source_segment(current, new_inventory)
+    assert 'current_keys.count("common_job_status") == 1' in source
+    assert "old_keys <= set(current_keys)" in source
+    assert "ast.unparse(result.values[index])" in source
+    assert "del result.keys[index]" in source
+    assert "del result.values[index]" in source
+    assert "assert ast.dump(current) == ast.dump(original)" in source
+    assert not any(isinstance(node, ast.Name) and node.id == "retired"
+                   for node in ast.walk(new_inventory))

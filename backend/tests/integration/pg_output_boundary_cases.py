@@ -8,16 +8,14 @@ import pytest
 from sqlalchemy import create_engine, insert, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
+from c1_pg_ownership import additional_profile, require_server
 
 
 @pytest.fixture(scope="module")
 def pg():
     uri = os.environ["MODERNIZATION_PG_TEST_URI"]
     url = make_url(uri)
-    assert url.drivername == "postgresql+psycopg2"
-    assert url.host == "127.0.0.1" and url.port == 5432
-    assert url.database == "sawa_modernization_output_test"
-    assert url.username == "sawa_output_test" and not url.query
+    major = additional_profile(url, "output")
     assert all(os.environ[key] == uri for key in ("DB_URI", "DATABASE_URL", "ALEMBIC_DB_URI"))
     # Import production only after rejecting any non-test target.
     from src import db
@@ -28,8 +26,9 @@ def pg():
     assert db.engine.url == url
     independent = create_engine(url)
     with independent.connect() as connection:
+        require_server(connection, major)
         assert connection.exec_driver_sql("SELECT current_database(), current_user").one() == (
-            "sawa_modernization_output_test", "sawa_output_test")
+            "sawa_modernization_output_test", "mmorinag")
         assert int(connection.exec_driver_sql("SHOW server_version_num").scalar_one()) // 10000 == 16
         require_formal_head(connection)
     try:

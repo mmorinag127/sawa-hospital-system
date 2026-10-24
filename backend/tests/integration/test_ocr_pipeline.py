@@ -5557,7 +5557,7 @@ def test_overlay_payload_aux_cells_onto_sheet_rows_derives_block_total_without_s
     assert [row.get("values", [])[4] for row in overlaid] == ["72", "72", "72"]
 
 
-def test_build_rows_from_menu_entries_populates_slot_label_from_weekly_menu_category():
+def test_build_rows_from_menu_entries_populates_slot_label_from_weekly_menu_category(repository_layout_source):
     template = config_service.get_facility_config("FAC00004").get("fax_template")
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)

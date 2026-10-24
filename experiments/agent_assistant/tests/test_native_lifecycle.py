@@ -242,6 +242,67 @@ def test_owner_timestamp_and_group_checks_are_independent(monkeypatch, mismatch)
     assert not signals
 
 
+def test_os_denied_owner_inspection_never_signals_unknown_process(monkeypatch):
+    def denied(_):
+        raise module.psutil.AccessDenied(123456)
+    monkeypatch.setattr(module.psutil, 'Process', denied)
+    signals = []
+    monkeypatch.setattr(module.os, 'killpg', lambda *args: signals.append(args))
+    with pytest.raises(Conflict, match='OS'):
+        module.require_process_group_owner(123456, 'a' * 32, 12)
+    assert signals == []
+
+
+@pytest.mark.parametrize('denied_action', [0, module.signal.SIGTERM])
+def test_os_denied_cleanup_keeps_markers_and_native_handles(tmp_path, monkeypatch, denied_action):
+    async def scenario():
+        _, sandbox, run = owned(tmp_path)
+        key, pid = (run['id'], 'shift'), 123456
+        async def wait():
+            await asyncio.Event().wait()
+        sandbox.children[key] = SimpleNamespace(pid=pid, wait=wait)
+        log = open(sandbox.path(run['id']) / 'shift.log', 'ab')
+        sandbox.logs[key] = log
+        marker = sandbox.path(run['id']) / 'shift.process.json'
+        marker.write_text(json.dumps({'pid': pid, 'created': 12}))
+        before = marker.read_bytes()
+        signals = []
+        def killpg(ident, action):
+            assert ident == pid
+            signals.append(action)
+            if action == denied_action:
+                raise PermissionError('synthetic OS restriction')
+        monkeypatch.setattr(module.os, 'killpg', killpg)
+        monkeypatch.setattr(module, 'require_process_group_owner', lambda *args: True)
+        try:
+            with pytest.raises(Conflict, match='OS'):
+                await sandbox.stop(run['id'])
+            assert key in sandbox.children
+            assert marker.read_bytes() == before
+            assert sandbox.logs[key] is log and not log.closed
+            assert module.signal.SIGKILL not in signals
+        finally:
+            log.close()
+    asyncio.run(scenario())
+
+
+def test_reaped_child_requires_absent_group_before_cleanup_success(monkeypatch):
+    async def scenario():
+        async def wait():
+            return 0
+        calls = []
+        def absent(pid, action):
+            calls.append((pid, action))
+            assert action == 0
+            raise ProcessLookupError()
+        def forbidden_owner():
+            raise AssertionError('already reaped leader has no inspectable command')
+        monkeypatch.setattr(module.os, 'killpg', absent)
+        await module.terminate_process_group(123456, wait, forbidden_owner)
+        assert calls == [(123456, 0)]
+    asyncio.run(scenario())
+
+
 def test_kill_uncertainty_retains_native_maps_and_marker(tmp_path, monkeypatch):
     async def scenario():
         _, sandbox, run = owned(tmp_path)

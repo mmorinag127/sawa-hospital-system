@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actions-only, GET-only staging evidence for the output canonical source."""
+"""Local, GET-only staging evidence for the output canonical source."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ for entry in (ROOT / "backend", ROOT):
         sys.path.insert(0, str(entry))
 
 from scripts.staging_db_target import read_http  # noqa: E402
+from scripts.local_stg_verification_context import require_local_source  # noqa: E402
 from scripts.verify_stg_menu_master_ui import WEB, WORKER, deployed_sources, private_command  # noqa: E402
 
 DEFAULT_OUTPUT = ROOT / "tmp/output-source-live"
@@ -56,18 +57,14 @@ def write_json(path: Path, value: object) -> None:
 
 
 def require_context(env: dict[str, str], head: str) -> tuple[str, str]:
+    require_local_source(env, head, require)
     fixed = {
-        "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch",
-        "GITHUB_REF": "refs/heads/develop", "GITHUB_REF_NAME": "develop",
         "PROJECT_ID": "sawahospitalsystem", "REGION": "asia-northeast2",
         "WEB_SERVICE": "web-stg", "WORKER_SERVICE": "worker-stg", "WEB_URL": WEB,
         "WORKER_URL": WORKER, "LIVE_SERVICE_ACCOUNT": SA_EMAIL,
     }
     for key, expected in fixed.items():
         require(env.get(key) == expected, "context-invalid-" + key)
-    require(bool(re.fullmatch(r"[1-9][0-9]*", env.get("GITHUB_RUN_ID", ""))), "context-invalid-run-id")
-    require(bool(re.fullmatch(r"[1-9][0-9]*", env.get("GITHUB_RUN_ATTEMPT", ""))), "context-invalid-run-attempt")
-    require(bool(re.fullmatch(r"[0-9a-f]{40}", env.get("GITHUB_SHA", ""))) and env["GITHUB_SHA"] == head, "checkout-source-SHA-mismatch")
     order_id = env.get("OUTPUT_SOURCE_VERIFY_ORDER_ID", "").strip()
     require(bool(ORDER_PATTERN.fullmatch(order_id)), "order-id-required-or-invalid")
     target_date = env.get("OUTPUT_SOURCE_VERIFY_DATE", "").strip()
@@ -243,7 +240,7 @@ def extract_case(order: dict[str, object], workflow: dict[str, object], sheet: d
 def run_browser(token: str, order_id: str, target_date: str, output: Path) -> None:
     env = {key: value for key, value in os.environ.items() if key not in {"DEBUG", "PWDEBUG", "NODE_OPTIONS"}}
     env.update({"LIVE_ID_TOKEN": token, "OUTPUT_SOURCE_ORDER_ID": order_id, "OUTPUT_SOURCE_TARGET_DATE": target_date,
-                "OUTPUT_SOURCE_WEB": WEB, "OUTPUT_SOURCE_SHA": os.environ["GITHUB_SHA"]})
+                "OUTPUT_SOURCE_WEB": WEB, "OUTPUT_SOURCE_SHA": os.environ["EXPECTED_SOURCE_SHA"]})
     process = subprocess.Popen(["node", str(ROOT / "frontend/scripts/verify-output-source-live.mjs"), str(output)], cwd=ROOT, env=env,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     try:

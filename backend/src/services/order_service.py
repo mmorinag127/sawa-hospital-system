@@ -9940,6 +9940,7 @@ def _hakodate_canonical_payload_from_manifest_item(
             elif ((mode == recovery.FULL_MANUAL and source_receipt.get("recognition_mode") == mode)
                   or (mode is None and "recognition_mode" not in source_receipt)):
                 # Stored pre-mode overrides have the original complete-manual contract.
+                recovery.validate_manual_resume(recognition_override, item=runtime_item)
                 required_cells = runtime_item["original_expected_sheet_cells"]
             else:
                 raise ValueError("recognition_recovery_mode_changed")
@@ -13851,19 +13852,14 @@ def _acknowledge_current_candidate_after_authoritative_action(
 
 
 def get_candidate_draft_preview(order_id: str) -> tuple[Optional[dict], Optional[str]]:
-    workflow_state = get_order_workflow_state(order_id, refresh=False)
+    workflow_state = workflow_state_service.project_workflow_state(
+        order_id, include_candidate_preview=False,
+    )
     candidate_evidence_run_id = (
         str((workflow_state or {}).get("candidate_evidence_run_id") or "").strip()
         if isinstance(workflow_state, dict)
         else ""
     )
-    if not candidate_evidence_run_id:
-        workflow_state = get_order_workflow_state(order_id, refresh=True)
-        candidate_evidence_run_id = (
-            str((workflow_state or {}).get("candidate_evidence_run_id") or "").strip()
-            if isinstance(workflow_state, dict)
-            else ""
-        )
     if not candidate_evidence_run_id:
         return None, "candidate_not_found"
 

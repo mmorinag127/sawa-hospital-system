@@ -139,8 +139,8 @@ def _owned_declared_cells(history_case, *, facility, period, rows, quantity_colu
             identity = (str(target["date"]), order_service._normalize_daypart_key(target["daypart"]),
                         hakodate_assignment_service._normalize_slot_text(target["menu_name"]))
             assert identity in declared
-            assert target["field"] in fields
-            values.add(declared[identity][fields.index(target["field"])])
+            from tests.helpers.authored_cell_values import declared_field
+            values.add(declared[identity][fields.index(declared_field(target, fields))])
         assert len(values) == 1, "merged physical targets require identical authored values"
         return values.pop()
 
@@ -463,7 +463,7 @@ def test_project_workflow_state_does_not_sync_critical_decisions_on_read(monkeyp
     order = authored_layout_registration(message_id="msg-workflow-read-no-decision-sync-001",
         facility_id="FAC00001", received_at=datetime(2026, 3, 22, 9),
         week=PERIOD, effective_date="2026-03-22", lines=[])
-    order_payload = order_service.get_order_by_id(order["id"])
+    current = order_service.get_current_sheet_context(order["id"])
 
     monkeypatch.setattr(
         workflow_state_service.candidate_resolution_service,
@@ -482,20 +482,7 @@ def test_project_workflow_state_does_not_sync_critical_decisions_on_read(monkeyp
 
     projected = workflow_state_service.project_workflow_state(
         order["id"],
-        current_sheet_context={
-            "order_id": order["id"],
-            "order_payload": order_payload,
-            "draft_record": None,
-            "draft_payload": {},
-            "draft_id": None,
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
-            "header": ["日付", "区分", "メニュー", "常食2F"],
-            "rows": [],
-            "row_ids": [],
-            "warnings": [],
-            "blockers": [],
-            "source": "test_projection",
-        },
+        current_sheet_context=current,
         include_candidate_preview=False,
     )
     persisted_decisions = critical_decision_service.list_decisions(order["id"])
@@ -760,7 +747,8 @@ def test_explicit_owned_columns_work_without_legacy_grid_or_position_fallback(hi
     values = dict(zip(fields[3:], rows[1][3:], strict=True))
 
     def recognize(region):
-        declared = {values[target["field"]] for target in region["logical_targets"]}
+        from tests.helpers.authored_cell_values import declared_field
+        declared = {values[declared_field(target, fields)] for target in region["logical_targets"]}
         assert len(declared) == 1
         return declared.pop()
 
@@ -1107,7 +1095,8 @@ def _owned_fac2_twenty_three_twenty_seven(history_case, *, schema_fault=False):
         for name, _, quantity in menus for field in fields[3:]}
 
     def recognize(region):
-        declared = {values[(target["menu_name"], target["field"])] for target in region["logical_targets"]}
+        from tests.helpers.authored_cell_values import declared_field
+        declared = {values[(target["menu_name"], declared_field(target, fields))] for target in region["logical_targets"]}
         assert len(declared) == 1
         return declared.pop()
 
@@ -1278,9 +1267,15 @@ def test_project_workflow_state_new_evidence_available_retains_apply_readiness_f
 ])
 def test_unpreviewable_owned_candidate_cannot_replace_saved_five(authored_sheet_case, fault, artifact, code):
     from src.services import canonical_ocr_artifact_service
+    from copy import deepcopy
 
     case, active, saved, candidate = _saved_five_with_owned_candidate(authored_sheet_case)
     before_job = get_ocr_job(case.job)
+    with session_scope() as session:
+        original_row = session.get(OrderOcrEvidenceRun, candidate["id"])
+        original_payload = deepcopy(original_row.payload_json)
+        original_manifest = deepcopy(original_row.artifact_manifest_json)
+        original_digest = original_row.artifact_digest
     with case.readonly():
         preview = order_service.candidate_sheet_state(case.id, candidate_evidence_run_id=candidate["id"])
         assert preview["candidate_preview_available"] is True
@@ -1306,8 +1301,22 @@ def test_unpreviewable_owned_candidate_cannot_replace_saved_five(authored_sheet_
         assert current["base_evidence_run_id"] == active["id"]
         assert current["rows"] == [["03/22", "朝", "Menu A", "5"]]
         stored = order_service.get_ocr_evidence_run(candidate["id"])
-        assert stored["payload_json"] == candidate["payload_json"]
+        payload = stored["payload_json"]
+        assert set(payload) == set(candidate["payload_json"])
+        read_diagnostics = {"evidence_manifest", "evidence_digest"}
+        assert {key: value for key, value in payload.items() if key not in read_diagnostics} == {
+            key: value for key, value in candidate["payload_json"].items() if key not in read_diagnostics}
+        assert payload["evidence_manifest"]["validation_errors"] == [code]
+        assert payload["evidence_manifest"]["artifacts_complete"] is False
+        assert payload["evidence_digest"] == payload["evidence_manifest"]["digest"]
+        assert payload["evidence_digest"] != candidate["payload_json"]["evidence_digest"]
+        assert stored["selectable"] is False
         assert stored["artifact_digest"] == candidate["artifact_digest"]
+        with session_scope() as session:
+            original_row = session.get(OrderOcrEvidenceRun, candidate["id"])
+            assert original_row.payload_json == original_payload
+            assert original_row.artifact_manifest_json == original_manifest
+            assert original_row.artifact_digest == original_digest
         assert get_ocr_job(case.job) == before_job
 
 
@@ -1345,11 +1354,19 @@ def _produce_unselected_nine(case):
     return evidence
 
 
+def _assert_owned_refresh_states(case, result, derived_state):
+    with case.readonly():
+        canonical, error = order_workflow_v2_service.get_workflow_readonly(case.id)
+        assert error is None
+        assert result["state"] == canonical["state"] == "ocr_completed"
+        assert result["legacy_workflow_state"]["state"] == derived_state
+
+
 def test_refresh_workflow_state_hides_new_candidate_after_acknowledging_current_sheet(authored_sheet_case):
     case, active, saved, candidate = _saved_five_with_owned_candidate(authored_sheet_case)
     workflow = workflow_state_service.refresh_workflow_state(case.id)
     assert isinstance(workflow, dict)
-    assert workflow["state"] == "new_evidence_available"
+    _assert_owned_refresh_states(case, workflow, "new_evidence_available")
     assert workflow["candidate_prompt_visible"] is True
     assert workflow["candidate_evidence_run_id"] == candidate["id"]
 
@@ -1361,7 +1378,7 @@ def test_refresh_workflow_state_hides_new_candidate_after_acknowledging_current_
     refreshed = workflow_state_service.refresh_workflow_state(case.id)
 
     assert isinstance(refreshed, dict)
-    assert refreshed["state"] == "apply_ready"
+    _assert_owned_refresh_states(case, refreshed, "apply_ready")
     assert refreshed["candidate_prompt_visible"] is False
     assert refreshed["candidate_evidence_run_id"] is None
     assert refreshed["acknowledged_candidate_evidence_run_id"] == candidate["id"]
@@ -1383,7 +1400,7 @@ def test_refresh_workflow_state_reprompts_when_new_candidate_arrives_after_ackno
     refreshed = workflow_state_service.refresh_workflow_state(case.id)
 
     assert isinstance(refreshed, dict)
-    assert refreshed["state"] == "new_evidence_available"
+    _assert_owned_refresh_states(case, refreshed, "new_evidence_available")
     assert refreshed["candidate_prompt_visible"] is True
     assert refreshed["candidate_evidence_run_id"] == newer["id"]
     assert refreshed["acknowledged_candidate_evidence_run_id"] == candidate["id"]
@@ -1402,7 +1419,7 @@ def test_refresh_workflow_state_suppresses_older_pending_candidate_ids_after_ack
     case, active, saved, older = _saved_five_with_owned_candidate(authored_sheet_case)
     visible = _produce_unselected_nine(case)
     initial = workflow_state_service.refresh_workflow_state(case.id)
-    assert initial["state"] == "new_evidence_available"
+    _assert_owned_refresh_states(case, initial, "new_evidence_available")
     assert initial["candidate_prompt_visible"] is True
     assert initial["candidate_evidence_run_id"] == visible["id"]
     decision = critical_decision_service.acknowledge_candidate_evidence(
@@ -1419,7 +1436,7 @@ def test_refresh_workflow_state_suppresses_older_pending_candidate_ids_after_ack
     refreshed = workflow_state_service.refresh_workflow_state(case.id)
 
     assert isinstance(refreshed, dict)
-    assert refreshed["state"] == "apply_ready"
+    _assert_owned_refresh_states(case, refreshed, "apply_ready")
     assert refreshed["candidate_prompt_visible"] is False
     assert refreshed["candidate_evidence_run_id"] is None
     assert refreshed["acknowledged_candidate_evidence_run_id"] == visible["id"]
@@ -1445,7 +1462,7 @@ def test_refresh_workflow_state_skips_candidate_preview_build_when_requested(mon
     )
 
     assert isinstance(workflow, dict)
-    assert workflow["state"] == "new_evidence_available"
+    _assert_owned_refresh_states(case, workflow, "new_evidence_available")
     assert workflow["candidate_prompt_visible"] is True
     assert workflow["candidate_evidence_run_id"] == candidate["id"]
     assert workflow["current_sheet_revision_id"] == current_revision
@@ -2141,7 +2158,8 @@ def test_formal_regular_twenty_one_and_mixer_three_are_not_inferred_from_unowned
     raw_values = {"qty.regular_x": "5", "qty.mixer_x": ""}
 
     def recognize(region):
-        values = {raw_values[target["field"]] for target in region["logical_targets"]}
+        from tests.helpers.authored_cell_values import declared_field
+        values = {raw_values[declared_field(target, fields)] for target in region["logical_targets"]}
         assert len(values) == 1
         return values.pop()
 
@@ -2170,7 +2188,7 @@ def test_formal_regular_twenty_one_and_mixer_three_are_not_inferred_from_unowned
 
 def test_owned_semantic_twenty_six_and_manual_five_are_not_blocked_by_stale_low_trust_diagnostics(authored_sheet_case):
     case = authored_sheet_case(quantity=26, include_remarks=True, area="X",
-        cell_values=lambda region: "" if region["logical_targets"][0]["field"] == "remarks" else "26",
+        cell_values=lambda region: "" if region["role"] == "note" else "26",
         facility="FAC00015", menu_date=date(2026, 4, 26), period="2026-04@2026-04-26~2026-04-30")
     original = _legacy_unowned_evidence_payload(extra_payload={
             "facility_id": "FAC00015",
@@ -2243,13 +2261,14 @@ def test_real_saved_review_warning_is_visible_without_blocking_quantity_edit_or_
 
 
 def _assert_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing(authored_sheet_case):
-    from src.models.menu import MonthlyMenu
+    from src.models.menu import MonthlyMenu, MonthlyMenuItem
 
     case = authored_sheet_case(quantity=5, include_remarks=False)
     evidence = order_service.get_ocr_evidence_run(case.evidence)
     assert case.selected_sheet["rows"] == [["03/22", "朝", "Menu A", "5"]]
     with session_scope() as session:
         session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
         session.query(MonthlyMenu).delete()
     with case.readonly():
         workflow = workflow_state_service.project_workflow_state(case.id)
@@ -2275,7 +2294,7 @@ def test_project_workflow_state_blocks_when_monthly_menu_object_is_missing(autho
 
 
 def test_formal_saved_five_preserves_weekly_warning_but_missing_physical_menu_blocks_output(authored_sheet_case):
-    from src.models.menu import MonthlyMenu
+    from src.models.menu import MonthlyMenu, MonthlyMenuItem
     from src.services import order_workflow_v2_service as workflow
 
     case = authored_sheet_case(quantity=5, include_remarks=False)
@@ -2283,6 +2302,7 @@ def test_formal_saved_five_preserves_weekly_warning_but_missing_physical_menu_bl
     saved = save_draft(case, sheet)
     with session_scope() as session:
         session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
         session.query(MonthlyMenu).delete()
     with case.readonly():
         current = order_service.get_current_sheet_context(case.id)

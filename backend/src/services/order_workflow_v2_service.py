@@ -157,18 +157,36 @@ def workflow_command(func):
         command_token = _workflow_command_identity.set({"order_id": order_id, "command": func.__name__, "token": uuid4().hex})
         conflict_error = None
         try:
+            if kwargs.get("write_session") is None:
+                # Already stale requests must not acquire SQLite's write lock.
+                # The command still repeats CAS under its original lock.
+                with session_scope() as session, session.no_autoflush:
+                    current = session.get(OrderWorkflowState, order_id)
+                    if current is not None:
+                        _assert_command_revision(current)
+                    elif expected_revision != 0 and session.get(Order, order_id) is not None:
+                        raise _WorkflowRevisionError(WORKFLOW_REVISION_CONFLICT)
             result = func(*args, **kwargs)
         except _WorkflowRevisionError as exc:
             conflict_error = exc.error
         except StaleDataError:
             conflict_error = WORKFLOW_REVISION_CONFLICT
+        except CanonicalStoreError as exc:
+            return None, exc.detail["error"]
+        except SelectedPdfReceiptError as exc:
+            return None, str(exc)
         finally:
             _expected_workflow_revision.reset(token)
             _workflow_command_identity.reset(command_token)
         if conflict_error:
             if kwargs.get("write_session") is not None:
                 return None, conflict_error
-            current, _ = get_workflow_readonly(order_id)
+            try:
+                current, _ = get_workflow_readonly(order_id)
+            except CanonicalStoreError:
+                # The rejected command keeps its conflict even if the current
+                # source cannot be read; no stale workflow becomes executable.
+                current = None
             return current or {}, conflict_error
         payload, error = result
         if error:
@@ -1269,8 +1287,6 @@ def _workflow_has_downstream_lineage(row: OrderWorkflowState) -> bool:
         row.evidence_run_id
         or row.draft_id
         or row.confirmed_snapshot_id
-        or _normalize_id(row.template_version_id)
-        or _normalize_id(meta.get("template_version_id"))
         or _normalize_id(meta.get("latest_ocr_result_id"))
         or _normalize_id(meta.get("bagging_result_id"))
         or _normalize_id(meta.get("output_bundle_id"))
@@ -1706,9 +1722,10 @@ def _workflow_menu_amount_resolution(session, order, workflow):
     return {"status": "unresolved", "blocker": error, "message": error, "affected_lines": []}
 
 
-def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflowState | None, *, _analysis=None) -> dict[str, Any]:
-    ocr_job = None
-    if workflow is None:
+def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflowState | None, *, _analysis=None, _checked_workflow=None) -> dict[str, Any]:
+    if _checked_workflow is not None:
+        serialized = copy.deepcopy(_checked_workflow)
+    elif workflow is None:
         serialized = _serialize_uninitialized_workflow(order)
     else:
         meta = _workflow_meta(workflow)
@@ -3134,13 +3151,14 @@ def _delete_materialized_downstream_rows_for_order(session: Any, order_id: str) 
     session.flush()
 
 
-def _delete_downstream_after_ocr_change(session: Any, order_id: str) -> None:
+def _delete_downstream_after_ocr_change(session: Any, order_id: str, *, preserve_saved: bool = False) -> None:
     _delete_materialized_downstream_rows_for_order(session, order_id)
     _clear_downstream_references_before_delete(session, order_id, clear_evidence=True)
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
     order_output_artifact_service.delete_artifacts_for_order(session, order_id)
     session.flush()
-    session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
+    if not preserve_saved:
+        session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
 
 def _delete_all_ocr_and_downstream_after_template_change(session: Any, order_id: str) -> int:
@@ -3255,7 +3273,8 @@ def select_ocr_result(
             required_template_version_id=workflow_template_version_id,
         )
         if template_error:
-            return _serialize_workflow(workflow), template_error
+            revision_error = _finalize_workflow_blocker(session, workflow, template_error)
+            return _serialize_workflow(workflow), revision_error or template_error
         from src.services.recognition_acceptance_service import KEY
         if KEY in (ocr_result.artifact_manifest_json or {}):
             if (meta.get("latest_ocr_result_id") != ocr_result.id
@@ -3273,11 +3292,19 @@ def select_ocr_result(
                     captured, _analysis=analysis)
             except ValueError as exc:
                 return None, str(exc)
+        selected_draft = None
+        mismatched_saved_template = False
         if workflow.evidence_run_id == normalized_ocr_result_id and workflow.draft_id:
-            # Re-selecting reviewed evidence must not destroy an operator's draft.
             draft = session.get(OrderSheetDraft, workflow.draft_id)
             if draft is None or draft.order_id != order.id or draft.base_evidence_run_id != ocr_result.id:
                 return None, "saved_sheet_evidence_lineage_mismatch"
+            if _normalize_id(draft.template_version_id) == workflow_template_version_id:
+                selected_draft = draft
+            else:
+                mismatched_saved_template = True
+        if selected_draft is not None:
+            # Preserve valid operator edits, not a mismatched current selection.
+            draft = selected_draft
             if workflow.state == "ocr_failed" and KEY in (ocr_result.artifact_manifest_json or {}):
                 # Reconcile only the reviewed OCR failure, using existing lineage
                 # and saved-sheet readiness. Unrelated blockers remain visible.
@@ -3306,11 +3333,11 @@ def select_ocr_result(
             workflow.last_transition_at = _now()
             revision_error = _finalize_workflow_mutation(session, workflow)
             return _serialize_workflow(workflow), revision_error
-        if workflow.evidence_run_id != normalized_ocr_result_id:
+        if workflow.evidence_run_id != normalized_ocr_result_id or mismatched_saved_template:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
             session.flush()
-            _delete_downstream_after_ocr_change(session, order.id)
+            _delete_downstream_after_ocr_change(session, order.id, preserve_saved=True)
         workflow.template_version_id = evidence_template_version_id or workflow_template_version_id or None
         workflow.evidence_run_id = normalized_ocr_result_id
         workflow.draft_id = None
@@ -3346,6 +3373,11 @@ def delete_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         if ocr_result is None or ocr_result.order_id != order.id:
             return None, "ocr_result_not_found"
         workflow = _get_or_create_workflow(session, order.id)
+        if workflow.evidence_run_id != normalized_ocr_result_id and session.query(OrderSheetDraft.id).filter(
+            OrderSheetDraft.order_id == order.id,
+            OrderSheetDraft.base_evidence_run_id == normalized_ocr_result_id,
+        ).first() is not None:
+            return None, "ocr_result_saved_history_conflict"
         if workflow.evidence_run_id == normalized_ocr_result_id:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None
@@ -3873,7 +3905,6 @@ def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
     session.query(OrderConfirmedSnapshot).filter(OrderConfirmedSnapshot.order_id == order_id).delete(synchronize_session=False)
     order_output_artifact_service.delete_artifacts_for_order(session, order_id)
     session.flush()
-    session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
 
 def _serialize_saved_sheet(row: OrderSheetDraft) -> dict[str, Any]:
@@ -4008,6 +4039,8 @@ def _build_materialization_candidate_for_saved_sheet(
     order_service_module = _get_order_service_module()
     try:
         captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session, for_materialization=True)
+    except SelectedPdfReceiptError:
+        raise
     except ValueError as exc:
         return {"error": str(exc), "lines": []}
     if not isinstance(captured, dict) or captured.get("draft_id") != saved_sheet.id:
@@ -4930,11 +4963,23 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
             else {}
         )
         _inspection_next("response_serialization")
+        if workflow is not None:
+            job_id = _normalize_id(_workflow_meta(workflow).get("ocr_job_id"))
+            checked_workflow = _inspection_call(
+                "workflow_serialize", _serialize_workflow_checked, session,
+                order=order, workflow=workflow, ocr_job=session.get(OcrJob, job_id) if job_id else None,
+                _analysis=analysis,
+            )
+        else:
+            checked_workflow = _inspection_call(
+                "workflow_serialize", _serialize_uninitialized_workflow, order,
+            )
         result = {
             "order_id": order.id,
             "source": "workflow_v2_inspection",
-            "workflow": _inspection_call(
-                "workflow_serialize", _workflow_read_projection, session, order, workflow, _analysis=analysis,
+            "workflow": _workflow_read_projection(
+                session, order, workflow,
+                _analysis=analysis, _checked_workflow=checked_workflow,
             ),
             "ocr_results": [
                 _inspection_call(
@@ -4987,7 +5032,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
             serialized_rows = {row.id: serialized for row, serialized in zip(ocr_results, result["ocr_results"])}
             candidates, error = _project_ocr_candidates(
                 session, order=order, workflow=workflow, rows=ocr_results, serialized_rows=serialized_rows,
-                _analysis=analysis, checked_workflow=result["workflow"],
+                _analysis=analysis, checked_workflow=checked_workflow if workflow is not None else None,
             )
             if error:
                 return None, error

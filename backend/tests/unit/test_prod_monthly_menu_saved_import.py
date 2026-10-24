@@ -97,7 +97,7 @@ def test_actual_main_never_reports_saved_receipt_as_applied(importer, monkeypatc
     class Connector:
         def close(self):
             pass
-    monkeypatch.setattr(importer, "Connector", Connector)
+    monkeypatch.setattr(importer, "_create_connector", Connector)
     monkeypatch.setattr(importer.storage, "Client", lambda **kwargs: object())
     monkeypatch.setattr(importer, "_load_secret", lambda *_args: "fixture-secret")
     monkeypatch.setattr(importer, "_connect", lambda *_args: ClosedSource())

@@ -141,7 +141,9 @@ def test_old_attempt_cannot_finish_fail_or_capture_new_attempt(store, payload, r
     first = owned_uploaded_original(store, payload, monkeypatch, pending=True, uploaded=False)
     result = process_original(first)
     with store() as session:
-        actual = session.query(OcrJob).one()
+        actual = session.query(OcrJob).filter(
+            OcrJob.metrics["ingest_lease"]["id"].as_string() == first["id"]
+        ).one()
         diagnostic = (actual.status, actual.error_message, actual.metrics)
     assert result["result"] == "durable_handoff", repr(diagnostic)
     job_id, before = original_ocr(store, first)

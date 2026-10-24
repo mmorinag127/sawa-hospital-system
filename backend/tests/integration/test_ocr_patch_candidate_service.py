@@ -1,6 +1,5 @@
 import pathlib
 import sys
-from datetime import datetime
 
 from sqlalchemy import delete
 
@@ -9,8 +8,8 @@ sys.path.append(str(ROOT))
 
 from src.db import session_scope  # noqa: E402
 from src.models.order_sheet_patch_candidate import OrderSheetPatchCandidate  # noqa: E402
-from src.models.order import Order  # noqa: E402
 from src.services import ocr_patch_candidate_service, order_service  # noqa: E402
+from tests.contract.test_orders_ocr_sheet_history_api import history_case  # noqa: E402,F401
 
 
 def _clear_candidates(*, order_id: str | None = None) -> None:
@@ -21,18 +20,22 @@ def _clear_candidates(*, order_id: str | None = None) -> None:
         session.execute(delete(OrderSheetPatchCandidate))
 
 
-def _seed_order(order_id: str) -> None:
-    order = Order(
-        id=order_id,
-        facility_code="FAC00001",
-        week_code="2026-01",
-        document_uri=f"file:///{order_id}.pdf",
-        message_id=f"msg-{order_id}",
-        received_at=datetime(2026, 1, 8, 9, 0, 0),
-    )
-    with session_scope() as session:
-        if session.get(Order, order_id) is None:
-            session.add(order)
+def _owned_base(history_case):
+    case = history_case()
+    case.produce(cell_values="5")
+    case.save(_draft_sheet("5"))
+    return case
+
+
+def _persist(case, **inputs):
+    captured = order_service._capture_synchronous_cache_write_input(case.id)
+    assert captured is not None
+    assert captured["evidence_run_id"] == case.evidence
+    assert captured["draft_id"] is not None
+    return ocr_patch_candidate_service.persist_patch_candidate(
+        order_id=case.id, base_draft_id=captured["draft_id"],
+        base_evidence_run_id=captured["evidence_run_id"],
+        synchronous_write_input=captured, **inputs)
 
 
 def _draft_sheet(quantity: str) -> dict:
@@ -46,14 +49,12 @@ def _draft_sheet(quantity: str) -> dict:
     }
 
 
-def test_persist_and_get_patch_candidate() -> None:
+def test_persist_and_get_patch_candidate(history_case) -> None:
     order_service.clear_all()
-    _seed_order("ORD_PATCH_1")
+    case = _owned_base(history_case)
+    base = order_service._capture_synchronous_cache_write_input(case.id)
 
-    stored = ocr_patch_candidate_service.persist_patch_candidate(
-        order_id="ORD_PATCH_1",
-        base_draft_id="BAS-001",
-        base_evidence_run_id="EVD-001",
+    stored = _persist(case,
         provider="gemini",
         model="gemini-2.5-pro",
         prompt_preset="numeric_verification",
@@ -67,9 +68,9 @@ def test_persist_and_get_patch_candidate() -> None:
     )
 
     assert stored is not None
-    assert stored["order_id"] == "ORD_PATCH_1"
-    assert stored["base_draft_id"] == "BAS-001"
-    assert stored["base_evidence_run_id"] == "EVD-001"
+    assert stored["order_id"] == case.id
+    assert stored["base_draft_id"] == base["draft_id"]
+    assert stored["base_evidence_run_id"] == case.evidence
     assert stored["candidate_state"] == "proposed"
     assert stored["provider"] == "gemini"
     assert stored["model"] == "gemini-2.5-pro"
@@ -78,33 +79,30 @@ def test_persist_and_get_patch_candidate() -> None:
     assert stored["patches_json"]["applied_overwrites"] == [{"row_id": "row-1"}]
     assert stored["proposed_draft_sheet_json"]["rows"][0][3] == "10"
 
-    fetched = ocr_patch_candidate_service.get_patch_candidate("ORD_PATCH_1", stored["id"])
+    fetched = ocr_patch_candidate_service.get_patch_candidate(case.id, stored["id"])
     assert fetched is not None
     assert fetched["id"] == stored["id"]
     assert fetched["candidate_state"] == "proposed"
 
 
-def test_list_patch_candidates() -> None:
+def test_list_patch_candidates(history_case) -> None:
     order_service.clear_all()
-    _seed_order("ORD_PATCH_2")
-    _clear_candidates(order_id="ORD_PATCH_2")
+    case = _owned_base(history_case)
+    _clear_candidates(order_id=case.id)
 
-    first = ocr_patch_candidate_service.persist_patch_candidate(
-        order_id="ORD_PATCH_2",
+    first = _persist(case,
         proposed_draft_sheet_json=_draft_sheet("5"),
     )
-    second = ocr_patch_candidate_service.persist_patch_candidate(
-        order_id="ORD_PATCH_2",
+    second = _persist(case,
         candidate_state="review_required",
         proposed_draft_sheet_json=_draft_sheet("6"),
     )
-    third = ocr_patch_candidate_service.persist_patch_candidate(
-        order_id="ORD_PATCH_2",
+    third = _persist(case,
         candidate_state="proposed",
         proposed_draft_sheet_json=_draft_sheet("7"),
     )
 
-    all_candidates = ocr_patch_candidate_service.list_patch_candidates("ORD_PATCH_2")
+    all_candidates = ocr_patch_candidate_service.list_patch_candidates(case.id)
     assert len(all_candidates) == 3
     assert {item["id"] for item in all_candidates} == {first["id"], second["id"], third["id"]}
     states = {item["id"]: item["candidate_state"] for item in all_candidates}
@@ -113,21 +111,13 @@ def test_list_patch_candidates() -> None:
     assert states[third["id"]] == "proposed"
 
 
-def test_mark_patch_candidate_as_applied_and_apply_to_draft() -> None:
+def test_mark_patch_candidate_as_applied_and_apply_to_draft(history_case) -> None:
     order_service.clear_all()
-    _seed_order("ORD_PATCH_3")
-    base_draft = order_service.persist_sheet_draft(
-        order_id="ORD_PATCH_3",
-        draft_sheet_json=_draft_sheet("5"),
-        draft_state="draft_ready",
-        blockers=[],
-        warnings=[],
-    )
+    case = _owned_base(history_case)
+    base_draft = order_service._capture_synchronous_cache_write_input(case.id)["draft"]
     assert base_draft is not None
 
-    draft = ocr_patch_candidate_service.persist_patch_candidate(
-        order_id="ORD_PATCH_3",
-        base_draft_id=base_draft["id"],
+    draft = _persist(case,
         candidate_state="proposed",
         proposed_draft_sheet_json=_draft_sheet("8"),
         summary_json={"status": "verified"},
@@ -137,7 +127,7 @@ def test_mark_patch_candidate_as_applied_and_apply_to_draft() -> None:
     assert draft is not None
 
     applied_result, apply_error = ocr_patch_candidate_service.apply_patch_candidate_to_draft(
-        "ORD_PATCH_3",
+        case.id,
         patch_candidate_id=draft["id"],
         edited_by="operator",
     )

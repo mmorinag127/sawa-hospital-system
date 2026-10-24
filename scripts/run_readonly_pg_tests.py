@@ -11,7 +11,7 @@ import sys
 import traceback
 from urllib.parse import urlencode
 
-PG_BIN = Path('/usr/lib/postgresql/16/bin')
+PG_BIN = Path(os.environ.get('PG_BIN', '/usr/lib/postgresql/16/bin'))
 MODULE = 'backend/tests/integration/test_menu_readonly_boundary.py'
 MODULES = {
     'readonly': [MODULE],
@@ -21,16 +21,20 @@ MODULES = {
                   'backend/tests/integration/test_stg_menu_master_migration.py',
                   'backend/tests/contract/test_automation_bootstrap_postgres.py'],
     'menu-identity': ['backend/tests/integration/test_monthly_menu_identity_migration.py'],
+    'output': ['backend/tests/integration/pg_output_boundary_cases.py'],
+    'formal': ['backend/tests/integration/test_formal_alembic_fresh_chain.py'],
 }
-FIXED_PG = {
-    'c1-guards': (Path('/private/tmp/sawa-c2-hospital-catalog-20261006/pg16'), '55470', {
+DATABASES = {
+    'readonly': {'C2_MENU_READONLY_PG_URI': 'postgres'},
+    'c1': {'C1_POSTGRES_URI': 'c1_menu_master'},
+    'c1-guards': {
         'C1_LIVE_PG_URI': 'c2_hospital_c1_live_pg16',
         'C1_STG_PG_URI': 'c2_hospital_c1_migration_pg16',
         'TEST_BOOTSTRAP_DB_URI': 'c2_hospital_c1_bootstrap_pg16',
-    }),
-    'menu-identity': (Path('/private/tmp/sawa-c2-menu-migration-20261006'), '55463', {
-        'C2_MENU_PG_URI': 'postgres',
-    }),
+    },
+    'menu-identity': {'C2_MENU_PG_URI': 'postgres'},
+    'output': {'MODERNIZATION_PG_TEST_URI': 'sawa_modernization_output_test'},
+    'formal': {'C2_FORMAL_PG_URI': 'postgres'},
 }
 
 
@@ -38,9 +42,10 @@ def owned_root(run_id, attempt, suite='readonly'):
     if suite not in MODULES:
         raise ValueError('unknown suite')
     if any(not re.fullmatch(r'[1-9][0-9]{0,19}', value) for value in (run_id, attempt)):
-        raise ValueError('explicit numeric CI identity required')
+        raise ValueError('explicit numeric local run identity required')
     prefix = {'readonly': 'sawa-ro', 'c1': 'sawa-c1',
-              'c1-guards': 'sawa-c1-guards', 'menu-identity': 'sawa-menu-identity'}[suite]
+              'c1-guards': 'sawa-c1-guards', 'menu-identity': 'sawa-menu-identity',
+              'output': 'sawa-output', 'formal': 'sawa-formal'}[suite]
     return Path('/tmp').resolve() / f'{prefix}-{run_id}-{attempt}'
 
 
@@ -64,55 +69,41 @@ def run(source, run_id, attempt, suite='readonly'):
     if os.environ.get('GITHUB_ACTIONS') or os.environ.get('CI'):
         raise ValueError('readonly PG suites run only from the local hospital test entry')
     root = owned_root(run_id, attempt, suite)
-    if suite != 'readonly' and sys.platform != 'linux':
-        raise ValueError('C1 runner requires local Linux with PG16')
-    fixed_profile = suite in FIXED_PG
     root.mkdir(mode=0o700, exist_ok=False)
     evidence = root / 'evidence'
     evidence.mkdir()
     home = root / 'home'
     home.mkdir(mode=0o700)
     pg = root / 'pg'
-    if fixed_profile:
-        pg, port, databases = FIXED_PG[suite]
-    else:
-        pg.mkdir(mode=0o700)
-        port = '55471'
-        databases = {'C1_POSTGRES_URI': 'c1_menu_master'} if suite == 'c1' else {}
+    pg.mkdir(mode=0o700)
+    port, databases = '55471', DATABASES[suite]
     data, socket = pg / 'pgdata', pg / 'socket'
-    if suite == 'readonly':
-        socket.mkdir(mode=0o700)
-    elif suite == 'c1':
-        socket, port = source / 'tmp/pgs', '55437'
-    for owner in ((root / 'OWNER',) if fixed_profile else (root / 'OWNER', pg / 'OWNER')):
+    socket.mkdir(mode=0o700)
+    for owner in (root / 'OWNER', pg / 'OWNER'):
         owner.write_text(str(source))
-    env = os.environ.copy()
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(('PG', 'C1_', 'C2_', 'SAWA_OWNED_PG_'))
+           and key not in ('TEST_BOOTSTRAP_DB_URI', 'MODERNIZATION_PG_TEST_URI', 'PYTEST_ADDOPTS', 'PYTEST_PLUGINS')}
     uri = 'sqlite:///' + str(root / 'bootstrap.sqlite3')
     env.update({key: uri for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')})
     env.update({
         'C2_MENU_READONLY_OWNED_ROOT': str(root),
-        'C2_MENU_READONLY_PG_URI': 'postgresql+psycopg2://mmorinag@/postgres?' + urlencode({'host': str(socket), 'port': '55471'}),
+        'SAWA_OWNED_PG_ROOT': str(pg), 'SAWA_OWNED_PG_PORT': port,
+        'SAWA_OWNED_PG_SOURCE': str(source),
+        'SAWA_LOCAL_PG_EVIDENCE_DIR': str(evidence),
         'PYTHONPATH': str(source / 'backend'), 'PYTHONDONTWRITEBYTECODE': '1',
         'AUTH_DISABLED': 'true', 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
         'HF_DATASETS_OFFLINE': '1', 'ORDERS_OUTPUT_DIR': str(root / 'output'),
         'XDG_CACHE_HOME': str(root / 'cache'), 'HF_HOME': str(root / 'models'), 'TMPDIR': str(root),
         'HOME': str(home),
     })
-    if suite == 'c1':
-        for key in tuple(env):
-            if key.startswith(('PG', 'C1_', 'C2_')) or key == 'PYTEST_ADDOPTS':
-                env.pop(key)
-        env['C1_POSTGRES_URI'] = 'postgresql+psycopg2://mmorinag@/c1_menu_master?' + urlencode(
-            {'host': str(socket), 'port': port})
-    elif fixed_profile:
-        for key in tuple(env):
-            if key.startswith(('PG', 'C1_', 'C2_')) or key in ('TEST_BOOTSTRAP_DB_URI', 'PYTEST_ADDOPTS'):
-                env.pop(key)
-        env.update({key: f'postgresql+psycopg2://mmorinag@/{database}?' + urlencode(
-            {'host': str(socket), 'port': port}) for key, database in databases.items()})
+    env.update({key: f'postgresql+psycopg2://mmorinag@/{database}?' + urlencode(
+        {'host': str(socket), 'port': port}) for key, database in databases.items()})
+    if suite == 'output':
+        env.update({key: env['MODERNIZATION_PG_TEST_URI']
+                    for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')})
     lifecycle = []
     initialized = False
-    socket_owned = False
     owned_pid = None
     result = 1
 
@@ -130,38 +121,13 @@ def run(source, run_id, attempt, suite='readonly'):
     try:
         sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True)
         (evidence / 'git-sha.txt').write_text(sha)
-        if fixed_profile:
-            (evidence / 'run.json').write_text(json.dumps({
-                'source_sha': sha.strip(), 'source': str(source), 'suite': suite,
-                'modules': MODULES[suite], 'argv': pytest_command(root, suite),
-                'root': str(root), 'pg_root': str(pg), 'data': str(data), 'socket': str(socket),
-                'port': port, 'pg_bin': str(PG_BIN), 'uris': {key: env[key] for key in databases},
-            }, indent=2) + '\n')
-            # These literal paths belong to unchanged fixtures, not configurable targets.
-            parent = pg.parent if suite == 'menu-identity' else pg.parent.parent
-            if (not parent.is_dir() or parent.is_symlink() or parent.resolve() != parent
-                    or parent.stat().st_uid != os.getuid()):
-                raise ValueError('fixed PG parent must be physical and runner-owned')
-            if suite == 'c1-guards':
-                pg.parent.mkdir(mode=0o700, exist_ok=False)
-            pg.mkdir(mode=0o700, exist_ok=False)
-            (pg / 'OWNER').write_text(str(source))
-            socket.mkdir(mode=0o700, exist_ok=False)
-            socket_owned = True
-        if suite == 'c1':
-            (evidence / 'run.json').write_text(json.dumps({
-                'source_sha': sha.strip(), 'source': str(source), 'suite': suite,
-                'modules': MODULES[suite], 'argv': pytest_command(root, suite),
-                'root': str(root), 'data': str(data), 'socket': str(socket),
-                'port': port, 'pg_bin': str(PG_BIN), 'uri': env['C1_POSTGRES_URI'],
-            }, indent=2) + '\n')
-            if socket.parent.is_symlink() or socket.parent.resolve() != socket.parent:
-                raise ValueError('C1 socket parent must be physical')
-            socket.parent.mkdir(mode=0o700, exist_ok=True)
-            # The unchanged fixture requires this exact checkout path, never an alias.
-            socket.mkdir(mode=0o700, exist_ok=False)
-            socket_owned = True
-        for name in (('initdb', 'pg_ctl', 'createdb', 'psql') if suite != 'readonly' else ('initdb', 'pg_ctl')):
+        (evidence / 'run.json').write_text(json.dumps({
+            'source_sha': sha.strip(), 'source': str(source), 'suite': suite,
+            'modules': MODULES[suite], 'argv': pytest_command(root, suite),
+            'root': str(root), 'pg_root': str(pg), 'data': str(data), 'socket': str(socket),
+            'port': port, 'pg_bin': str(PG_BIN), 'uris': {key: env[key] for key in databases},
+        }, indent=2) + '\n')
+        for name in ('initdb', 'pg_ctl', 'createdb', 'psql'):
             tool = PG_BIN / name
             if not tool.is_file() or not os.access(tool, os.X_OK):
                 raise ValueError(f'missing PG16 executable: {tool}')
@@ -172,20 +138,20 @@ def run(source, run_id, attempt, suite='readonly'):
             raise ValueError('PG16 required')
         command([PG_BIN / 'pg_ctl', '-D', data, '-l', evidence / 'postgres.log', '-o',
                  f"-p {port} -k {socket} -c listen_addresses='' -c unix_socket_permissions=0700", '-w', 'start'], 'start.log')
-        if suite != 'readonly':
-            owned_pid = require_postmaster(data, socket, port)
-            if fixed_profile:
-                if (pg.resolve() != pg or data.resolve() != data or socket.resolve() != socket
-                        or any(owner.is_symlink() or owner.read_text() != str(source)
-                               for owner in (root / 'OWNER', pg / 'OWNER'))):
-                    raise ValueError('fixed PG OWNER/source mismatch')
-                lifecycle.append({'owned_postmaster_pid': owned_pid})
+        owned_pid = require_postmaster(data, socket, port)
+        env['SAWA_OWNED_PG_PID'] = str(owned_pid)
+        if (pg.resolve() != pg or data.resolve() != data or socket.resolve() != socket
+                or any(owner.is_symlink() or owner.read_text() != str(source)
+                       for owner in (root / 'OWNER', pg / 'OWNER'))):
+            raise ValueError('owned PG OWNER/source mismatch')
+        lifecycle.append({'owned_postmaster_pid': owned_pid})
+        if databases:
             connection = ['-h', socket, '-p', port, '-U', 'mmorinag']
             for database in databases.values():
                 if database != 'postgres':
                     command([PG_BIN / 'createdb', *connection, database], 'createdb.log')
             for database in databases.values():
-                server_log = f'server-{database}.json' if fixed_profile else 'server.json'
+                server_log = f'server-{database}.json'
                 command([PG_BIN / 'psql', '-X', '-w', *connection, '-d', database,
                          '-v', 'ON_ERROR_STOP=1', '-At', '-c',
                          "SELECT json_build_object('data_directory', current_setting('data_directory'), "
@@ -197,7 +163,10 @@ def run(source, run_id, attempt, suite='readonly'):
                 if actual != {'data_directory': str(data), 'port': port, 'socket': str(socket),
                               'listen_addresses': '', 'major': 16, 'role': 'mmorinag', 'database': database}:
                     raise ValueError('C1 physical server identity mismatch')
-        # The readonly fixture separately validates PID, server, role and case databases.
+        if suite == 'output':
+            command([sys.executable, 'backend/tests/integration/pg_output_migration_probe.py',
+                     '--evidence=' + str(evidence / 'migration-probe.json')], 'migration.log')
+        # Every fixture validates the owned server before exercising its cases.
         result = command(pytest_command(root, suite), 'pytest.log', check=False)
         lifecycle.append({'pytest_exit': result})
     except BaseException:
@@ -208,16 +177,15 @@ def run(source, run_id, attempt, suite='readonly'):
             if initialized:
                 status = command([PG_BIN / 'pg_ctl', '-D', data, 'status'], 'stop.log', check=False)
                 if status == 0:
-                    if fixed_profile:
-                        current_pid = require_postmaster(data, socket, port)
-                        if owned_pid is not None and current_pid != owned_pid:
-                            raise RuntimeError('owned PG PID changed before cleanup')
-                        owned_pid = current_pid
+                    current_pid = require_postmaster(data, socket, port)
+                    if owned_pid is not None and current_pid != owned_pid:
+                        raise RuntimeError('owned PG PID changed before cleanup')
+                    owned_pid = current_pid
                     command([PG_BIN / 'pg_ctl', '-D', data, '-m', 'fast', '-w', 'stop'], 'stop.log')
                 status = command([PG_BIN / 'pg_ctl', '-D', data, 'status'], 'stop.log', check=False)
                 if status != 3 or (data / 'postmaster.pid').exists() or (socket / f'.s.PGSQL.{port}').exists():
                     raise RuntimeError('owned PG shutdown not verified')
-                if fixed_profile and owned_pid is not None:
+                if owned_pid is not None:
                     try:
                         os.kill(owned_pid, 0)
                     except ProcessLookupError:
@@ -225,12 +193,11 @@ def run(source, run_id, attempt, suite='readonly'):
                     else:
                         raise RuntimeError('owned PG process still exists after shutdown')
                 lifecycle.append({'shutdown_verified': True, 'socket_alias_used': False})
-            if suite != 'readonly' and socket_owned:
-                if (socket.is_symlink() or socket.resolve() != socket or any(socket.iterdir())
-                        or (data / 'postmaster.pid').exists()):
-                    raise RuntimeError('owned C1 socket shutdown not verified')
-                lifecycle.append({'socket_empty_after_run': True, 'postmaster_pid_absent': True,
-                                  'socket_alias_used': False, 'initialized': initialized})
+            if (socket.is_symlink() or socket.resolve() != socket or any(socket.iterdir())
+                    or (data / 'postmaster.pid').exists()):
+                raise RuntimeError('owned C1 socket shutdown not verified')
+            lifecycle.append({'socket_empty_after_run': True, 'postmaster_pid_absent': True,
+                              'socket_alias_used': False, 'initialized': initialized})
         except BaseException:
             (evidence / 'cleanup-error.log').write_text(traceback.format_exc())
             raise

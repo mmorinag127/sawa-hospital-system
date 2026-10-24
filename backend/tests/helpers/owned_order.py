@@ -62,6 +62,8 @@ def authored_layout_registration(owned_registration):
         if "fax_template" not in facility:
             facility["fax_template"] = deepcopy(facility["fax_template_override"])
             facility["fax_template"]["template_id"] = facility["fax_template_id"]
+        # authored_sources creates this component's one-page PDF.
+        facility["fax_template"]["page"] = 1
         for column in facility["fax_template"]["columns"]:
             column["name"] = canonical_field_name_from_template_column(column)
         return owned_registration(**inputs, facility_config=facility)

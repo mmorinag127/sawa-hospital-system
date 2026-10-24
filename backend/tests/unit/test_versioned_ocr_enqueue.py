@@ -73,7 +73,7 @@ def test_version_only_confirmed_master_enqueues(version_only, kind):
     ('ambiguous', 'template_version_mismatch'),
 ])
 def test_version_only_invalid_selection_blocks(version_only, kind, fault, reason):
-    order_id, revision, _, dispatched = version_only
+    order_id, revision, selected_version, dispatched = version_only
     if fault in {'authored_missing', 'ambiguous'}:
         path = Path(os.environ['FACILITY_MASTER_PATH'])
         master = json.loads(path.read_text())
@@ -82,7 +82,9 @@ def test_version_only_invalid_selection_blocks(version_only, kind, fault, reason
         path.write_text(json.dumps(master))
     else:
         with session_scope() as session:
-            session.get(Order, order_id).template_version_id = None if fault == 'missing' else 'foreign'
+            from tests.helpers.invalid_template_projection import add_invalid_projection
+            session.get(Order, order_id).template_version_id = (None if fault == 'missing' else
+                add_invalid_projection(session, selected_version))
     with pytest.raises(HTTPException) as error:
         enqueue(kind, order_id, revision)
     assert reason in str(error.value.detail)

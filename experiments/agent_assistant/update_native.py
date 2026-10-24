@@ -25,14 +25,14 @@ def blob(repo, revision, path):
 
 def published(path, manifest):
     return path in manifest['files'] or path.startswith(('backend/src/','backend/shift_scheduler_backend/',
-                                                       'backend/migrations/','worker/service/'))
+                                                       'backend/migrations/','worker/service/','ocr_pipeline/app/'))
 
 
 def merge(repo, bundle, manifest, target, report):
     base = manifest['source_revision']
     target = git(repo,'rev-parse',target+'^{commit}').decode().strip()
-    delta = git(repo,'diff','--binary',base,target,'--','backend','worker','pyproject.toml')
-    changed = git(repo,'diff','--name-only',base,target,'--','backend','worker','pyproject.toml').decode().splitlines()
+    delta = git(repo,'diff','--binary',base,target,'--','backend','worker','ocr_pipeline','pyproject.toml')
+    changed = git(repo,'diff','--name-only',base,target,'--','backend','worker','ocr_pipeline','pyproject.toml').decode().splitlines()
     result = {'base':base,'target':target,'delta_sha256':hashlib.sha256(delta).hexdigest(),
               'files':[],'conflicts':[]}
     for relative in changed:

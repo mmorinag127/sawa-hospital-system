@@ -141,7 +141,8 @@ def test_actual_delivery_authoritative_empty_does_not_read_current(monkeypatch):
 
 @pytest.mark.parametrize("area", ["2F", None, "X"])
 @pytest.mark.parametrize("quantity", [7, 0, None])
-def test_actual_nonempty_delivery_columns_use_only_authored_mapping(area, quantity):
+def test_actual_nonempty_delivery_columns_use_only_authored_mapping(area, quantity, tmp_path):
+    from tests.helpers.authored_invoice import declare_invoice
     column = {"source": "quantity", "name": "肉禁3F misleading display", "diet_type": "regular", "area_id": area}
     line = {"date": "2026-10-07", "daypart": "lunch", "menu_name": "own", "menu_category": "主菜", "diet_type": "regular", "area_id": area, "quantity_original": quantity}
     configured = {"areas": [{"area_id": area, "name": "explicit authored area"}]}
@@ -153,7 +154,8 @@ def test_actual_nonempty_delivery_columns_use_only_authored_mapping(area, quanti
         assert rows[0][column["name"]] == quantity
     signature = output_builder._invoice_quantity_signature(column, {})
     assert signature == ("regular", None if area is None else str(area))
-    invoice = output_builder._resolve_captured_invoice_template({"invoice_template": {"columns": [column]}})
+    declared = declare_invoice(tmp_path, {"columns": [column]})
+    invoice = output_builder._resolve_captured_invoice_template({"invoice_template": declared})
     quantity_columns = [col for col in invoice["columns"] if col.get("source") == "quantity"]
     assert len(quantity_columns) == 1
     assert quantity_columns[0]["area_id"] == (None if area is None else str(area))
@@ -196,7 +198,10 @@ def test_authored_optional_area_aggregates_without_display_name_inference(area_d
 
 
 def test_generated_invoice_aggregate_and_explicit_x_preserve_both_quantities(monkeypatch, tmp_path):
+    from openpyxl import load_workbook
+    from tests.helpers.authored_invoice import declare_invoice
     facility = {"invoice_template": {"columns": [{"name": "soft total", "header": "soft total", "source": "quantity", "diet_type": "soft"}, {"name": "soft X", "header": "soft X", "source": "quantity", "diet_type": "soft", "area_id": "X"}]}}
+    facility["invoice_template"] = declare_invoice(tmp_path, facility["invoice_template"])
     invoice = output_builder._resolve_captured_invoice_template(facility)
     columns = [col for col in invoice["columns"] if col.get("source") == "quantity"]
     assert len(columns) == 2 and columns[0]["name"] != columns[1]["name"]
@@ -204,11 +209,17 @@ def test_generated_invoice_aggregate_and_explicit_x_preserve_both_quantities(mon
     rows = output_builder._build_delivery_rows({"lines": lines}, invoice, {"zero_as_empty": False}, facility, {"entries": [], "entry_defaults": {}})
     assert rows[0][columns[0]["name"]] == 10
     assert rows[0][columns[1]["name"]] == 3
-    exported = []
-    monkeypatch.setattr(output_builder.pd.DataFrame, "to_excel", lambda frame, *args, **kwargs: exported.append(frame.copy()))
-    output_builder._write_delivery_note(tmp_path / "delivery.xlsx", rows, columns, None, False)
-    assert list(exported[0].iloc[0]) == [10, 3]
-    assert list(exported[0].columns) == [col["header"] for col in columns]
+    destination = tmp_path / "delivery.xlsx"
+    output_builder._write_delivery_note(destination, rows, columns, invoice["template_uri"], False,
+                                        invoice["sheet_name"])
+    workbook = load_workbook(destination)
+    try:
+        sheet = workbook[invoice["sheet_name"]]
+        assert [sheet.cell(2, column).value for column in (1, 2)] == [10, 3]
+        assert [sheet.cell(1, column).value for column in (1, 2)] == [col["header"] for col in columns]
+        assert all(sheet.cell(2, column).border.left.style == "thin" for column in (1, 2))
+    finally:
+        workbook.close()
 
 
 def test_requested_delivery_template_failure_never_exports_alternative(monkeypatch, tmp_path):
@@ -458,6 +469,7 @@ def test_captured_side_number_conflicts_stop_without_shift(categories):
 
 def test_repeated_explicit_side_numbers_preserved_through_shared_paths_and_writer(tmp_path):
     from openpyxl import load_workbook
+    from tests.helpers.authored_invoice import declare_invoice
     entries = [{"menu_date": "2026-10-07", "daypart": "昼", "slot_index": slot, "category": "副菜2", "name": f"own{slot}", "diet_type": "regular"} for slot in (0, 1)]
     lines = [{"date": "2026-10-07", "daypart": "昼", "menu_name": f"own{slot}", "diet_type": "regular", "source_row_index": slot, "quantity_original": quantity} for slot, quantity in [(0, 5), (1, 7)]]
     enriched = output_builder._apply_label_meal_slot_categories(output_builder._apply_menu_entry_overrides(lines, entries))
@@ -467,7 +479,9 @@ def test_repeated_explicit_side_numbers_preserved_through_shared_paths_and_write
     rows = output_builder._build_delivery_rows({"facility": "fixture", "lines": enriched}, {"columns": columns}, {"zero_as_empty": False}, {}, {"entries": [], "entry_defaults": {}})
     assert len(rows) == 2
     target = tmp_path / "repeated-categories.xlsx"
-    output_builder._write_delivery_note(target, rows, columns, None, False)
+    template = declare_invoice(tmp_path, {"columns": columns})
+    output_builder._write_delivery_note(target, rows, columns, template["template_uri"], False,
+                                      template["sheet_name"])
     workbook = load_workbook(target, read_only=True)
     try:
         assert list(workbook.active.values) == [("menu_category", "menu_name", "qty"), ("副②", "own0", 5), ("副②", "own1", 7)]

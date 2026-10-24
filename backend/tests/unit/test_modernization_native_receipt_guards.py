@@ -1,6 +1,6 @@
 """One real native run plus explicit original-FAX operator save and guard probes.
 
-The reused scenario performs recognition, strict low-score holds, pre-save
+The reused scenario performs recognition with low scores kept editable, pre-save
 review and actual SQL save. Faults below are restored component injections,
 not public operator actions. No native result/threshold/validator doubles;
 this is not UI/auth/live proof and does not waive the five native failures.
@@ -40,7 +40,10 @@ def _assert_saved_original(f, evidence_id, draft_id, original_sheet):
         assert draft.template_version_id == state.template_version_id == f.projection_id
         assert draft.draft_sheet_json == original_sheet
         index = original_sheet["fields"].index("qty.regular_x")
-        assert [row[index] for row in draft.draft_sheet_json["rows"]] == list(f.expected.values())
+        assert [row[index] for row in draft.draft_sheet_json["rows"]] == [
+            f.expected[target["sheet_cell"]] for target in f.quantity_plan]
+        note_index = original_sheet["fields"].index("remarks")
+        assert [row[note_index] for row in draft.draft_sheet_json["rows"]] == [""] * len(f.notes_plan)
 
 
 def test_native_saved_receipt_guards_without_recognition_regeneration(numeric_fax):
@@ -54,8 +57,8 @@ def test_native_saved_receipt_guards_without_recognition_regeneration(numeric_fa
     }
     original_files[master.MASTER_TEMPLATE_PATH] = f.locked_hash
 
-    # This alias calls the unchanged scenario once, including its 56-value,
-    # strict confidence-hold, real review/save and immutable-input assertions.
+    # Reuse all 56 quantity values and explicit notes, real review/save,
+    # visible original scores and immutable-input assertions.
     run_original_fax_operator_scenario(numeric_fax)
     evidence = deepcopy(f.evidence)
     evidence_id = evidence["id"]

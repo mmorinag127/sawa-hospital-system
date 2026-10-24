@@ -139,10 +139,10 @@ def test_gcs_sdk_absence_is_explicit_for_both_storage_wrappers(monkeypatch, oper
 @pytest.mark.parametrize("trigger_url", [None, "https://pipeline.invalid/run"])
 @pytest.mark.parametrize("wait_for_output", [False, True])
 def test_real_owned_caller_request_write_failure_propagates_before_http_or_poll(
-    tmp_path, monkeypatch, trigger_url, wait_for_output,
+    tmp_path, monkeypatch, trigger_url, wait_for_output, isolated_formal_sqlite_template,
 ):
     """Transport component: real ownership, no real GCS/HTTP/recognition."""
-    f = OwnedProducer(tmp_path, monkeypatch)
+    f = OwnedProducer(tmp_path, monkeypatch, formal_template=isolated_formal_sqlite_template)
     try:
         monkeypatch.setenv("OCR_PIPELINE_STATE_URI", str(tmp_path / "caller-state.json"))
         monkeypatch.setenv("OCR_PIPELINE_BUCKET", "explicit-component-input")

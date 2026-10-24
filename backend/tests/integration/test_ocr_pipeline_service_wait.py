@@ -17,11 +17,16 @@ class _FakeBlob:
     def __init__(self, payloads):
         self._payloads = list(payloads)
         self._index = 0
+        self.generation = 71
+
+    def reload(self, **_kwargs):
+        return None
 
     def exists(self, **_kwargs):
         return True
 
     def download_as_bytes(self, **_kwargs):
+        assert _kwargs["if_generation_match"] == self.generation
         payload = self._payloads[min(self._index, len(self._payloads) - 1)]
         self._index += 1
         if isinstance(payload, Exception):

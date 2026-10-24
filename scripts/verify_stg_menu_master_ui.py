@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Existing staging Actions only. Own-record cleanup is fail-closed, including on failure."""
+"""Local staging verification. Own-record cleanup is fail-closed on failure."""
 
 import base64
 import hashlib
@@ -27,6 +27,7 @@ from staging_db_target import (  # noqa: E402
     read_http, image_config, revision_image_digest, REGISTRY,
 )
 from stg_menu_master_safety import Blocked, SA_EMAIL, cleanup_owned, fingerprint, preflight, require  # noqa: E402
+from local_stg_verification_context import require_local_source  # noqa: E402
 
 WEB = "https://web-stg-avlnzjjrca-dt.a.run.app"
 WORKER = "https://worker-stg-avlnzjjrca-dt.a.run.app"
@@ -35,23 +36,17 @@ OUTPUT = ROOT / "tmp/menu-master-live"
 
 
 def require_context(env, head):
-    fixed = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch", "C1_LIVE_VERIFY": "true",
-             "GITHUB_REF": "refs/heads/develop", "GITHUB_REF_NAME": "develop",
+    require_local_source(env, head, require)
+    fixed = {"C1_LIVE_VERIFY": "true",
              "PROJECT_ID": "sawahospitalsystem", "REGION": "asia-northeast2", "WEB_SERVICE": "web-stg",
              "WORKER_SERVICE": "worker-stg", "WEB_URL": WEB, "WORKER_URL": WORKER, "LIVE_SERVICE_ACCOUNT": SA_EMAIL}
     for key, value in fixed.items():
         require(env.get(key) == value, "context-invalid-" + key)
-    for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
-        require(bool(re.fullmatch(r"[1-9][0-9]*", env.get(key, ""))), "context-invalid-" + key)
-    require(bool(re.fullmatch(r"[0-9a-f]{40}", env.get("GITHUB_SHA", ""))) and env["GITHUB_SHA"] == head, "checkout-source-SHA-mismatch")
-    require(bool(re.fullmatch(r"[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com", env.get("GOOGLE_OAUTH_CLIENT_ID", ""))), "staging-audience-missing")
-    require(bool(env.get("PROD_GOOGLE_OAUTH_CLIENT_ID")), "production-audience-comparison-missing")
-    require(env["GOOGLE_OAUTH_CLIENT_ID"] != env.get("PROD_GOOGLE_OAUTH_CLIENT_ID"), "production-audience-forbidden")
 
 
 def private_command(args):
     result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True, timeout=60)
-    require(result.returncode == 0, "cloud-command-failed-check-existing-Actions-identity")
+    require(result.returncode == 0, "cloud-command-failed-check-existing-identity")
     return result.stdout.strip()
 
 
@@ -143,7 +138,8 @@ def run(result):
     worker = _load_service_db_config("sawahospitalsystem", "asia-northeast2", "worker-stg", expected_revision=result["sources"]["worker-stg"]["revision"])
     require((web.instance_connection_name, web.db_name, web.db_user) == (INSTANCE, "orders", "orders_app")
             and (worker.instance_connection_name, worker.db_name, worker.db_user) == (INSTANCE, "orders", "orders_app"), "cloud-database-target-mismatch")
-    name = f"c1-live-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-{uuid4().hex}"
+    run_id = str(int(os.environ["LOCAL_STG_RUN_ID"], 16))
+    name = f"c1-live-{run_id}-1-{uuid4().hex}"
     result["phase"] = "existing-SQL-proxy"
     with cloud_sql_proxy(INSTANCE):
         engine = create_engine(URL.create("postgresql+psycopg2", username=web.db_user, password=web.db_password,
@@ -161,7 +157,7 @@ def run(result):
             listing = api(query, token)
             require(listing.get("items") == [] and listing.get("total") == 0, "filtered-name-not-absent")
             api("/api/menu-masters?q=" + name, None, 401)
-            initial = {"version": 1, "source": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+            initial = {"version": 1, "source": sha, "runId": run_id, "attempt": "1",
                        "nonce": uuid4().hex, "name": name, "schemaSHA256": fingerprint(proof), "absentBefore": True,
                        "writeAttempted": False, "pending": None, "receipts": []}
             ledger_path = OUTPUT / "ledger.json"

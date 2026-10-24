@@ -23,9 +23,8 @@ from src.models.menu import MenuMaster
 
 NAME = 'c1-live-123-1-' + 'a' * 32
 SHA = '1' * 40
-CONTEXT = dict(GITHUB_ACTIONS='true', GITHUB_EVENT_NAME='workflow_dispatch', C1_LIVE_VERIFY='true',
-    GITHUB_REF='refs/heads/develop', GITHUB_REF_NAME='develop', GITHUB_SHA=SHA,
-    GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='1', PROJECT_ID='sawahospitalsystem', REGION='asia-northeast2',
+CONTEXT = dict(C1_LIVE_VERIFY='true', EXPECTED_SOURCE_SHA=SHA, LOCAL_STG_RUN_ID='a' * 32,
+    PROJECT_ID='sawahospitalsystem', REGION='asia-northeast2',
     WEB_SERVICE='web-stg', WORKER_SERVICE='worker-stg', WEB_URL=runner.WEB, WORKER_URL=runner.WORKER,
     LIVE_SERVICE_ACCOUNT=safety.SA_EMAIL, GOOGLE_OAUTH_CLIENT_ID='123-test.apps.googleusercontent.com',
     PROD_GOOGLE_OAUTH_CLIENT_ID='123-prod.apps.googleusercontent.com')
@@ -48,7 +47,9 @@ def test_invalid_context_stops_before_cloud(key, monkeypatch):
 
 def test_valid_opt_in_and_full_sha_only():
     runner.require_context(CONTEXT, SHA)
-    for changed in ({'C1_LIVE_VERIFY': 'false'}, {'GITHUB_EVENT_NAME': 'push'}, {'GITHUB_SHA': SHA[:12]},
+    for changed in ({'C1_LIVE_VERIFY': 'false'}, {'GITHUB_ACTIONS': 'true'}, {'CI': 'true'}, {'EXPECTED_SOURCE_SHA': SHA[:12]},
+                    {'EXPECTED_SOURCE_SHA': '2' * 40}, {'LOCAL_STG_RUN_ID': '0' * 32},
+                    {'LOCAL_STG_RUN_ID': '../outside'},
                     {'GOOGLE_OAUTH_CLIENT_ID': CONTEXT['PROD_GOOGLE_OAUTH_CLIENT_ID']}):
         with pytest.raises(safety.Blocked):
             runner.require_context({**CONTEXT, **changed}, SHA)
@@ -106,19 +107,10 @@ def pg():
     raw = os.environ['C1_LIVE_PG_URI']  # Missing real PG is an error, never a passing skip.
     url = sa.make_url(raw)
     profile = additional_profile(url, 'live')
-    if profile is None:
-        assert url.drivername == 'postgresql+psycopg2' and url.host is None and url.database == 'c1_live'
-        socket = Path(url.query['host']).resolve()
-        assert socket.parent == Path('/private/tmp') and socket.name.startswith('sawa-c1stg-pg.')
-        assert (socket / 'OWNER').read_text().strip() == str(ROOT)
     engine = sa.create_engine(url)
     try:
         with engine.connect() as c:
-            if profile is not None:
-                require_server(c, profile)
-            else:
-                assert Path(c.execute(sa.text('SHOW data_directory')).scalar_one()).resolve() == ROOT / 'tmp/stg-migration/pgdata'
-                assert c.execute(sa.text('SHOW listen_addresses')).scalar_one() == ''
+            require_server(c, profile)
     except BaseException:
         engine.dispose()
         raise

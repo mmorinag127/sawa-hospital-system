@@ -141,13 +141,14 @@ UNSELECTED_BOOTSTRAP_CASES = (
 
 
 def test_unselected_legacy_bootstrap_inputs_never_create_successful_sheet(authored_sheet_case):
-    from src.models.menu import MonthlyMenu, MonthlyMenuEntry
+    from src.models.menu import MonthlyMenu, MonthlyMenuEntry, MonthlyMenuItem
     from src.models.order_ocr_cache import OrderOcrCache
 
     case = authored_sheet_case(quantity=3, include_remarks=False, produce=False)
     case.queue()
     with session_scope() as session:
         session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
         session.query(MonthlyMenu).delete()
     for case_id, old_name, kind, payload in UNSELECTED_BOOTSTRAP_CASES:
         if payload is None:
@@ -288,7 +289,8 @@ def _fac00004_owned_source(history_case, *, rows, menu_entries, lines,
                         hakodate_assignment_service._normalize_slot_text(target["menu_name"]))
             assert identity in declared, "physical target lacks an explicit authored menu"
             row = declared[identity]
-            values.add(row[fields.index(target["field"])])
+            from tests.helpers.authored_cell_values import declared_field
+            values.add(row[fields.index(declared_field(target, fields))])
         assert len(values) == 1, "a physical cell cannot merge different declared values"
         return values.pop()
     source = case.produce(cell_values=recognize)
@@ -536,7 +538,8 @@ def _owned_march_projection(history_case, *, menu_entries, regular_values):
     values = {(name, field): regular_values[name] if field == "qty.regular_2f" else ""
               for name in regular_values for field in fields[3:]}
     def recognize(region):
-        recognized = {values[(target["menu_name"], target["field"])]
+        from tests.helpers.authored_cell_values import declared_field
+        recognized = {values[(target["menu_name"], declared_field(target, fields))]
                       for target in region["logical_targets"]}
         assert len(recognized) == 1
         return recognized.pop()
@@ -835,7 +838,8 @@ def test_owned_rerun_keeps_saved_quantities_and_requires_explicit_candidate_adop
         assert retained.draft_sheet_json == saved_sheet
         assert retained.base_evidence_run_id == saved["base_evidence_run_id"]
         lines = session.query(OrderLine).filter_by(order_id=case.id).all()
-        assert len(lines) == 1 and lines[0].quantity_original == 3
+        # A saved sheet is not a bagging materialization; reruns cannot create one.
+        assert lines == []
     case.command("POST", f"ocr-results/{rerun['id']}/select")
     source = case.get("workflow-v2/sheet-source")
     assert source["selected_ocr_result_id"] == rerun["id"]
@@ -881,7 +885,10 @@ def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
         assert state.confirmed_snapshot_id is None
         assert state.state == "ocr_failed" and state.blockers_json == [error]
         assert state.revision == receipt["workflow_revision"] + 1
-        assert session.query(OrderLine).filter(OrderLine.order_id == case.id).all() == []
+        retained = session.query(OrderLine).filter(OrderLine.order_id == case.id).one()
+        assert (retained.date, retained.daypart, retained.menu_name, retained.diet_type,
+                retained.area_id, retained.quantity_original) == (
+            date(2026, 3, 22), "朝", "Menu A", "regular", "2F", 3)
 
     # Real authenticated commands may acquire CAS locks, but cannot adopt or mutate state.
     revision = case.revision()

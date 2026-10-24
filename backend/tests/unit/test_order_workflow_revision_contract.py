@@ -198,7 +198,18 @@ def test_migration_0029_only_initializes_when_adding_the_revision_column():
 )
 def test_every_public_workflow_mutator_finalizes_before_its_success_snapshot(command_name):
     source = Path(order_workflow_v2_service.__file__).read_text(encoding="utf-8")
-    if command_name in {"confirm_bagging", "prepare_output_review"}:
+    if command_name == "confirm_context":
+        command = _source_function(order_workflow_v2_service.__file__, command_name)
+        calls = [node for node in ast.walk(command) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name)]
+        apply = [node for node in calls if node.func.id == "_apply_context_selection"]
+        snapshots = [node for node in calls if node.func.id == "_serialize_workflow"]
+        assert len(apply) == 1 and snapshots
+        assert all(apply[0].lineno < snapshot.lineno for snapshot in snapshots)
+        shared = _source_function(order_workflow_v2_service.__file__, "_apply_context_selection")
+        assert ast.unparse(shared.body[-1]) == "return _finalize_workflow_mutation(session, row)"
+        command_source = ast.get_source_segment(source, shared)
+    elif command_name in {"confirm_bagging", "prepare_output_review"}:
         command = _source_function(order_workflow_v2_service.__file__, command_name)
         assert [ast.unparse(node) for node in command.decorator_list] == ["workflow_command"]
         assert [ast.unparse(node) for node in command.body] == ["return _prepare_output_review(order_id)"]
@@ -590,8 +601,12 @@ def test_cache_actual_write_requires_the_callers_real_job_id_and_keeps_first_pas
         guard = guards[condition]
         assert isinstance(guard.body[0], ast.Return)
         assert isinstance(guard.body[0].value, ast.Constant) and guard.body[0].value.value is None
-    synchronous = guards["not normalized_job_id"]
-    assert ast.unparse(synchronous.body[0]) == "persist_evidence = False"
+    evidence_refusal = guards["persist_evidence"]
+    assert isinstance(evidence_refusal.body[0], ast.Return)
+    assert evidence_refusal.body[0].value.value is None
+    defaults = dict(zip((arg.arg for arg in function.args.kwonlyargs), function.args.kw_defaults))
+    assert isinstance(defaults["persist_evidence"], ast.Constant)
+    assert defaults["persist_evidence"].value is False
     fence = next(node for node in ast.walk(function) if isinstance(node, ast.If)
                  and ast.unparse(node.test) == "normalized_job_id"
                  and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
@@ -609,7 +624,15 @@ def test_cache_actual_write_requires_the_callers_real_job_id_and_keeps_first_pas
     assert isinstance(config_guard.body[0], ast.Return)
     assert config_guard.body[0].value.value is False
     assert "_workflow_attempt_write_fence(session, normalized_job_id, order_id)" in cache
-    assert "workflow_job_id=normalized_job_id" in cache
+    assert "persist_evidence_run" not in cache
+    assert "workflow_job_id=normalized_job_id" not in cache
+    owned_validation = next(node for node in ast.walk(function) if isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Name)
+                            and node.func.id == "_validate_hakodate_owned_artifacts")
+    cache_write = next(node for node in ast.walk(function) if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Attribute) and target.attr == "payload"
+                               for target in node.targets))
+    assert owned_validation.lineno < cache_write.lineno
 
 
 def test_confirmed_snapshot_without_immutable_artifacts_is_not_rebuilt_from_current_state():

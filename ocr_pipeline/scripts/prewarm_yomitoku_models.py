@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 
+os.environ["ORT_DISABLE_TELEMETRY"] = "1"
 os.environ.setdefault("HF_HOME", "/opt/hf")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 

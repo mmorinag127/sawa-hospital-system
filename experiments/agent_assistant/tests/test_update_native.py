@@ -8,26 +8,29 @@ from experiments.agent_assistant.runtime import verify_source
 from experiments.agent_assistant.store import Conflict
 
 
-def source(tmp_path, monkeypatch, before, current, after):
-    relative='backend/src/contract.py'
+def source(tmp_path, monkeypatch, before, current, after, relative='backend/src/contract.py'):
     bundle=tmp_path/'bundle'; path=bundle/relative
     path.parent.mkdir(parents=True);path.write_bytes(current)
     manifest={'source_revision':'base','files':{relative:hashlib.sha256(current).hexdigest()}}
     manifest_path=tmp_path/'manifest.json';manifest_path.write_text(json.dumps(manifest))
     def git(repo,*args):
         if args[0]=='rev-parse':return b'target\n'
-        if args[0]=='diff':return relative.encode()+b'\n' if '--name-only' in args else b'explicit delta'
+        if args[0]=='diff':
+            if relative.startswith('ocr_pipeline/'):
+                assert 'ocr_pipeline' in args
+            return relative.encode()+b'\n' if '--name-only' in args else b'explicit delta'
         raise AssertionError(args)
     monkeypatch.setattr(upgrade,'git',git)
     monkeypatch.setattr(upgrade,'blob',lambda repo,revision,name: before if revision=='base' else after)
     return relative,bundle,path,manifest,manifest_path,tmp_path/'report.json'
 
 
-def test_three_way_upgrade_retains_extension_and_pins_exact_hashes(tmp_path,monkeypatch):
+@pytest.mark.parametrize('relative',['backend/src/contract.py','ocr_pipeline/app/__init__.py'])
+def test_three_way_upgrade_retains_extension_and_pins_exact_hashes(tmp_path,monkeypatch,relative):
     before=b'a=1\nb=1\nc=1\nd=1\ne=1\nf=1\n'
     current=before+b'agent_extension=True\n'
     after=before.replace(b'a=1',b'a=2')
-    relative,bundle,path,manifest,pin,report=source(tmp_path,monkeypatch,before,current,after)
+    relative,bundle,path,manifest,pin,report=source(tmp_path,monkeypatch,before,current,after,relative)
     result=upgrade.merge(tmp_path,bundle,manifest,'target',report)
     assert not result['conflicts']
     assert path.read_bytes()==after+b'agent_extension=True\n'
@@ -66,10 +69,12 @@ def test_owned_native_environment_keeps_auth_enabled(tmp_path,monkeypatch):
     _,sandbox,_,run=prepared(tmp_path,('shift',))
     monkeypatch.setenv('SAWA_TEST_DISABLE_API_AUTH','true')
     monkeypatch.setenv('AUTH_DISABLED','true')
+    monkeypatch.setenv('ORT_DISABLE_TELEMETRY','0')
     data=sandbox.path(run['id'])/'data/shift'
     env=sandbox.environment(run,'shift',{},data,tmp_path,'synthetic-token')
     assert env['SAWA_ENVIRONMENT']=='test'
     assert env['SAWA_REQUIRE_API_AUTH']=='true'
+    assert env['ORT_DISABLE_TELEMETRY']=='1'
     assert 'SAWA_TEST_DISABLE_API_AUTH' not in env
     assert 'AUTH_DISABLED' not in env
     assert env['DATABASE_URL']=='sqlite:///'+str(data/'database.sqlite3')

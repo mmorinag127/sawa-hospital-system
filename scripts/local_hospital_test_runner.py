@@ -70,6 +70,7 @@ def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash:
 
 def run(output: Path) -> int:
     reject_hosted_runner()
+    os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     if not clean_tree():
         raise SystemExit("local hospital tests require a clean tree before execution")
     source_sha_start = git("rev-parse", "HEAD")
@@ -81,6 +82,10 @@ def run(output: Path) -> int:
     output.mkdir(parents=True, exist_ok=False)
     os.environ["SAWA_LOCAL_RUN_ID"] = str(time.time_ns())
     os.environ["SAWA_LOCAL_EVIDENCE_DIR"] = str(output.resolve())
+    environment = dict(os.environ)
+    for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
+        environment.pop(key, None)
+    environment["SAWA_IMPACT_FULL"] = "1"
     records = []
     source_stable = True
     for index, item in enumerate(commands):
@@ -89,7 +94,8 @@ def run(output: Path) -> int:
             raise SystemExit("invalid local hospital test command")
         log = output / f"{index:02d}-{name}.log"
         with log.open("wb") as stream:
-            result = subprocess.run(["bash", "-euo", "pipefail", "-c", command], cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT)
+            result = subprocess.run(["bash", "-euo", "pipefail", "-c", command], cwd=ROOT,
+                                    env=environment, stdout=stream, stderr=subprocess.STDOUT)
         records.append({"name": name, "command_sha256": hashlib.sha256(command.encode()).hexdigest(),
                         "log_sha256": digest(log), "exit_code": result.returncode})
         if (git("rev-parse", "HEAD") != source_sha_start

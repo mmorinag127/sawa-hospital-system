@@ -38,7 +38,9 @@ def test_combined_exact_parity_and_one_history_read(context, authored_april_cont
                 session.get(OrderOcrEvidenceRun, second).template_version_id = None
             if context in {'no_version', 'invalid'}:
                 state = session.get(OrderWorkflowState, order_id)
-                state.template_version_id = None if context == 'no_version' else 'missing-version'
+                from tests.helpers.invalid_template_projection import add_invalid_projection
+                state.template_version_id = (None if context == 'no_version' else
+                    add_invalid_projection(session, workflow['template_version_id']))
                 state.secondary_actions_json = {}
                 if context == 'no_version':
                     state.state = 'uploaded'

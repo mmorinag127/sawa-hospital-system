@@ -158,6 +158,48 @@ def resume_diagnostic_source(override, *, item, captured):
         return records, deepcopy(evidence.payload_json["hakodate_ocr_evidence_records"])
 
 
+def validate_manual_resume(override, *, item):
+    receipt = override["source_receipt"]
+    with workflow.session_scope() as session:
+        order = session.get(workflow.Order, item["order_id"])
+        job = session.get(workflow.OcrJob, receipt.get("recognition_job_id"))
+        if order is None or job is None or job.order_id != order.id or job.status not in {"done", "failed"}:
+            raise ValueError("recognition_review_result_changed")
+        metrics = job.metrics or {}
+        if metrics.get("recognition_checkpoint") != override["checkpoint"]:
+            raise ValueError("recognition_checkpoint_changed")
+        if receipt.get("selected_pdf_receipt") != item["selected_pdf_receipt"]:
+            raise ValueError("recognition_native_source_changed")
+        if _is_native(job):
+            if receipt.get("native_recognition_owner") != _native_owner(session, order, job):
+                raise ValueError("recognition_native_terminal_changed")
+            owner = None
+        else:
+            owner = _workflow_terminal_owner(session, order, job, item["selected_pdf_receipt"])
+        terminal = metrics.get("rerun_terminal_receipt")
+        evidence_id = receipt.get("recognition_evidence_run_id")
+        if not isinstance(terminal, dict) or terminal.get("evidence_run_id") != evidence_id:
+            raise ValueError("recognition_review_result_changed")
+        if evidence_id is not None:
+            evidence = session.get(workflow.OrderOcrEvidenceRun, evidence_id)
+            payload = evidence.payload_json if evidence is not None else None
+            execution = payload.get("_ocr_execution") if isinstance(payload, dict) else None
+            if (evidence is None or evidence.order_id != order.id
+                    or not isinstance(execution, dict) or execution.get("job_id") != job.id
+                    or execution.get("evidence_run_id") != evidence_id
+                    or execution.get("selected_pdf_receipt") != item["selected_pdf_receipt"]):
+                raise ValueError("recognition_review_result_changed")
+            if owner is None:
+                capture = metrics.get("nonworkflow_execution") or {}
+                if (execution.get("nonworkflow_execution_id") != capture.get("execution_id")
+                        or execution.get("workflow_attempt_id") is not None):
+                    raise ValueError("recognition_native_owner_changed")
+            elif (execution.get("workflow_attempt_id") != owner.workflow_attempt_id
+                    or execution.get("workflow_revision") != owner.workflow_revision
+                    or execution.get("processing_start_input") != owner.request_identity["reparse_read_input"]):
+                raise ValueError("recognition_review_result_changed")
+
+
 def current_item(checkpoint, captured, receipt, order_id):
     stored = checkpoint.get("resume_item")
     if not isinstance(stored, dict):
@@ -303,9 +345,12 @@ def _failed_checkpoint(session, order, state, ocr_result_id=None):
                 or (not native and (not (job.metrics or {}).get("workflow_attempt_id")
                     or execution.get("workflow_attempt_id") != job.metrics["workflow_attempt_id"]))
                 or (native and (execution.get("workflow_attempt_id") is not None
+                    or execution.get("nonworkflow_execution_id") != job.metrics.get("nonworkflow_execution", {}).get("execution_id")
+                    or execution.get("selected_pdf_receipt") != job.metrics.get("nonworkflow_execution", {}).get("selected_pdf_receipt")
                     or (job.metrics or {}).get("rerun_terminal_receipt", {}).get("evidence_run_id") != ocr_result_id))
                 or not isinstance(review, dict) or not isinstance(review.get("cells"), list)
-                or not review["cells"] or type(review.get("count")) is not int
+                or (not review["cells"] and job.status != "failed")
+                or type(review.get("count")) is not int
                 or review["count"] != len(review["cells"])):
             raise ValueError("recognition_review_result_changed")
     elif job.status != "failed":

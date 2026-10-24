@@ -80,7 +80,7 @@ def authenticated_output(bundle_order, monkeypatch):
     assert not app.dependency_overrides
     # Bind the existing real registration helper to the fixture's owned DB,
     # not the process bootstrap DB. Auth session_scope already uses this DB.
-    monkeypatch.setattr(registered_users, "engine", fixture.engine)
+    monkeypatch.setattr(registered_users.db, "engine", fixture.engine)
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", fixture.output)
     return fixture, client, candidate
 

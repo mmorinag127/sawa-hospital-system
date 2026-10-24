@@ -1,5 +1,6 @@
 """Offline workflow guards, not Docker/image execution proof."""
 from pathlib import Path
+import re
 import subprocess
 import unittest
 
@@ -50,6 +51,13 @@ class ImageProofGuards(unittest.TestCase):
         self.assertIn("--entrypoint node", self.script)
         self.assertNotIn("NEXT_PUBLIC_GOOGLE_CLIENT_ID=", self.script)
         self.assertNotIn("API_PROXY_TARGET=", self.script)
+
+    def test_container_node_assertion_matches_the_actual_runtime_base(self):
+        dockerfile = (ROOT / "frontend/Dockerfile").read_text()
+        majors = re.findall(r"^FROM node:(\d+)[^\n]*", dockerfile, re.MULTILINE)
+        self.assertTrue(majors)
+        self.assertEqual(set(majors), {"24"})
+        self.assertIn('process.versions.node.split(".")[0]!=="24"', self.script)
 
     def test_bash_syntax(self):
         subprocess.run(["bash", "-n"], input=self.script, text=True, check=True)

@@ -372,7 +372,7 @@ def test_cross_month_output_keeps_accepted_second_month_identity_after_menu_edit
         "date": "2026-05-01", "daypart": "朝", "menu_name": "B",
         "diet_type": "regular", "area_id": "X", "bag_type": "standard",
         "quantity_original": 1}],
-        recipe={"qty_per_serving": 1, "unit_type": "g", "category": "side"}, physical_slot=0)
+        recipe={"qty_per_serving": 1, "unit_type": "g", "category": "副菜"}, physical_slot=0)
     with session_scope() as session:
         entry = session.query(MonthlyMenuEntry).filter_by(name="B",
             menu_date=date(2026, 5, 1), facility_override="FAC00001").one()
@@ -380,5 +380,5 @@ def test_cross_month_output_keeps_accepted_second_month_identity_after_menu_edit
     lines = output_builder.build_order_lines_for_outputs(order)
     assert len(lines) == 1
     assert lines[0]["daypart"] == "朝"
-    assert lines[0]["menu_category"] == "side"
+    assert lines[0]["menu_category"] == "副菜1"
     assert str(lines[0]["date"]) == "2026-05-01"

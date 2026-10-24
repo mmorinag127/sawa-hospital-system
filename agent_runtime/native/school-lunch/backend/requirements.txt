@@ -12,7 +12,7 @@ xlrd==2.0.2
 python-multipart>=0.0.9
 google-auth>=2.0.0
 requests>=2.32.0
-Pillow==12.1.1
+Pillow==13.0.0
 opencv-python-headless>=4.9.0.80
 pytest>=8.3.0
 httpx>=0.28.0
