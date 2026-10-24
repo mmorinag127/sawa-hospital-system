@@ -41,6 +41,7 @@ commits, push or deploy are delegated. Nash reviews scope and staged differences
 | Python scalar equality conflates JSON boolean/integer/float configuration identity | Compare canonical typed JSON digests, retaining valid-to-only closure semantics | Implemented, unverified |
 | Rendered main-delivery label cannot round-trip through sorting | Recognize both full-width and ASCII A labels as the existing main category | Implemented, unverified |
 | Optional Cloud SQL CLI driver imported during pure receipt validation | Import the connector only when the CLI actually opens a connection | Implemented, unverified |
+| Canonical JSON validation imports the database through template validation | Resolve the database engine only on database access; preserve the existing engine hook and explicit database requirement | Implemented, unverified |
 | Stored blank regular-entry encoding leaks into unresolved master-item/request selection | Separate master-item identity/filter and require explicit entry-lookup diet; retain stored-entry encoding | Implemented, unverified |
 | Rejected OCR template mismatch is missing from returned workflow blockers | Use the existing canonical blocker transition, preserving archived evidence/sheets | Implemented, unverified |
 | Explicit reselect preserves a template-mismatched current draft | Preserve valid same-evidence drafts only; detach invalid current references without deleting saved rows | Implemented, unverified |
