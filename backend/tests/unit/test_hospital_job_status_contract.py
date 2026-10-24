@@ -8,7 +8,7 @@ import pytest
 
 from src.services import order_service as service
 
-BASE = "cfedb6ea72735bd6a2b5307699e5a9c35eb90503"
+BASE = "9d046f3be08ed895ca5cc791a3576812a2de9412"
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -22,18 +22,7 @@ def test_business_function_ast_unchanged():
     new = next(node for node in after.body if getattr(node, "name", None) == old.name)
     assert ast.dump(old.args) == ast.dump(new.args)
     assert ast.dump(old.returns) == ast.dump(new.returns)
-    class StripAdditiveProjection(ast.NodeTransformer):
-        def visit_Dict(self, node):
-            self.generic_visit(node)
-            pairs = [(key, value) for key, value in zip(node.keys, node.values)
-                     if not (isinstance(key, ast.Constant) and key.value == "job_status")]
-            node.keys = [key for key, _ in pairs]
-            node.values = [value for _, value in pairs]
-            if len(pairs) == 1 and pairs[0][0] is None:
-                return pairs[0][1]
-            return node
-    restored = StripAdditiveProjection().visit(new)
-    assert ast.dump(restored) == ast.dump(old)
+    assert ast.dump(new) == ast.dump(old)
 
 
 def test_error_record_and_missing_fields_are_not_inferred():
@@ -109,16 +98,23 @@ def test_no_fabricated_job_id(job):
     assert service._recorded_hospital_job_status(job, {}) is None
 
 
-def test_existing_response_fields_and_request_mode_gate(monkeypatch):
+def test_existing_response_fields_and_recorded_job_binding(monkeypatch):
     job = {"id": "own", "status": "running", "metrics": {"request_mode": "ocr_reparse"}}
     state = {"status": "running", "job_id": "own", "blockers": ["unchanged"]}
-    monkeypatch.setattr(service, "get_latest_order_job", lambda order_id: job)
+    monkeypatch.setattr(service, "get_recorded_order_job", lambda order_id: job)
     monkeypatch.setattr(service, "describe_ocr_job_state", lambda value: state if value is job else {"status": "idle"})
     result = service.get_hakodate_pipeline_job_status("order")
     assert {key: value for key, value in result.items() if key != "job_status"} == {
         **state, "request_mode": "ocr_reparse", "processing_stage": None,
         "result_state": None, "error": None, "output_reference": None}
     job["metrics"]["request_mode"] = "other"
+    current = service.get_hakodate_pipeline_job_status("order")
+    assert current["request_mode"] == "other" and current["status"] == "running"
+    assert current["job_status"]["jobId"] == "own"
+    monkeypatch.setattr(service, "get_recorded_order_job", lambda order_id: None)
     assert service.get_hakodate_pipeline_job_status("order") == {"status": "idle", "job_status": None}
-    monkeypatch.setattr(service, "get_latest_order_job", lambda order_id: None)
-    assert service.get_hakodate_pipeline_job_status("order") == {"status": "idle", "job_status": None}
+    def rejected(order_id):
+        raise ValueError("ocr_recorded_job_input_changed")
+    monkeypatch.setattr(service, "get_recorded_order_job", rejected)
+    assert service.get_hakodate_pipeline_job_status("order") == {
+        "status": "blocked", "blockers": ["ocr_recorded_job_input_changed"], "job_status": None}

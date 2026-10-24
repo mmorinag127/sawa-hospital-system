@@ -81,7 +81,7 @@ def stored_records(isolated_formal_schema, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("case,status,detail", [
     ("current", 400, ERROR),
-    ("stale", 400, ERROR),
+    ("stale", 409, {"error": "workflow_revision_conflict"}),
     ("missing-revision", 428, {"error": "workflow_revision_required"}),
     ("missing-order", 404, "order_not_found"),
     ("unauthenticated", 401, "Unauthorized"),

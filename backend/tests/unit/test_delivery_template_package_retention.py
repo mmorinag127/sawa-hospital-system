@@ -6,6 +6,7 @@ from zipfile import ZipFile
 from xml.etree import ElementTree as ET
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils.cell import quote_sheetname
 from openpyxl.drawing.image import Image as WorkbookImage
 from openpyxl.worksheet.table import Table
 from PIL import Image
@@ -72,10 +73,9 @@ def test_writer_keeps_support_sheets_images_and_print_settings(tmp_path, slot, d
         invoices = [sheet for sheet in result.worksheets if sheet.title != "Rules"]
         assert len(invoices) == (days if slot else 1)
         for sheet in invoices:
-            assert "A1" in str(sheet.print_area) and "D3" in str(sheet.print_area)
+            assert str(sheet.print_area) == quote_sheetname(sheet.title) + "!$A$1:$D$3"
             assert sheet.print_title_rows.replace("$", "") == "1:1"
             assert len(sheet._images) == 1
-            from openpyxl.utils.cell import quote_sheetname
             assert sheet["G1"].value == "=" + quote_sheetname(sheet.title) + "!D2"
             assert sheet["H1"].value == '="Invoice!D2"'
         quantities = [sheet["D2"].value for sheet in invoices] if slot else [result["Invoice"].cell(2 + i, 4).value for i in range(days)]

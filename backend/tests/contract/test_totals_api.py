@@ -112,20 +112,6 @@ def test_totals_prefers_monthly_menu_entry_category_over_menu_master(totals_inpu
         menu_item["id"],
         {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
-    with session_scope() as session:
-        session.add(
-            MonthlyMenuEntry(
-                id=f"MME{uuid4().hex[:8]}",
-                monthly_menu_id=month_id,
-                menu_date=date(2099, 3, 24),
-                daypart="昼食",
-                name=menu_name,
-                category="副菜",
-                slot_index=2,
-                diet_type="regular",
-                facility_override=None,
-            )
-        )
     order = inputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-totals-entry-category-001",

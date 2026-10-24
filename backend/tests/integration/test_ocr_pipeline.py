@@ -1,5 +1,6 @@
 import sys
 import pathlib
+from copy import deepcopy
 from datetime import date, datetime
 from uuid import uuid4
 import pytest
@@ -16,6 +17,7 @@ from src.db import session_scope  # noqa: E402
 from src.models.menu import MonthlyMenu, MonthlyMenuEntry  # noqa: E402
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 from tests.helpers.owned_order import owned_registration  # noqa: E402,F401
+from tests.helpers.authored_parser_templates import authored_aux_component_template  # noqa: E402
 
 
 @pytest.mark.parametrize('provider,assist', [
@@ -103,9 +105,11 @@ def _make_first_pass_payload(rows: list[list[str]] | None = None, table_raw: str
     return {
         "rows": [list(row) for row in normalized_rows],
         "table_rows": [list(row) for row in normalized_rows],
-        "tables": [{"rows": [list(row) for row in normalized_rows]}] if normalized_rows else [],
+        "tables": [{"table_id": "authored-first-pass-page-1-table-1", "page_index": 1,
+                    "rows": [list(row) for row in normalized_rows]}] if normalized_rows else [],
         "table_raw": table_raw or "",
-        "pages": [{"page_index": 1, "tables": [{"rows": [list(row) for row in normalized_rows]}]}] if normalized_rows else [],
+        "pages": [{"page_index": 1, "tables": [{"table_id": "authored-first-pass-page-1-table-1", "page_index": 1,
+                  "rows": [list(row) for row in normalized_rows]}]}] if normalized_rows else [],
     }
 
 
@@ -396,7 +400,9 @@ def test_canonicalize_sheet_daypart_rows_keeps_blank_continuations_but_does_not_
 
     normalized = order_service._canonicalize_sheet_daypart_rows(rows=rows, fields=fields)
 
-    assert [row[1] for row in normalized] == ["朝", "朝", "昼", "夕"]
+    assert [row[1] for row in normalized] == ["朝", "", "タ", "夕"]
+    assert normalized == rows
+    assert all(result is not original for result, original in zip(normalized, rows))
 
 
 def test_canonicalize_sheet_daypart_rows_leaves_unsupported_block_unresolved_without_later_anchor():
@@ -995,28 +1001,26 @@ def test_build_position_entries_for_lines_expands_dense_source_row_span(monkeypa
     assert scoped[-1].get("menu_date") == date(2026, 2, 9)
 
 
-def test_build_reparse_position_entries_prefers_existing_line_dates_when_new_line_dates_collapse(
+def _assert_month_only_reparse_scope_rejected(monkeypatch, **inputs):
+    before = deepcopy(inputs)
+    menu_reads = []
+
+    def _forbidden_menu_read(*args):
+        menu_reads.append(args)
+        raise AssertionError("month-only reparse must not read canonical menu entries")
+
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", _forbidden_menu_read)
+
+    with pytest.raises(ValueError, match="^week_choice_required$"):
+        order_service._build_reparse_position_menu_entries(week_id="2026-02", **inputs)
+
+    assert inputs == before
+    assert menu_reads == []
+
+
+def test_build_reparse_position_entries_rejects_month_only_with_existing_line_dates(
     monkeypatch,
 ):
-    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
-
-    def _fake_weekly_entries(_week_id: str):
-        entries = []
-        for day in range(1, 29):
-            menu_date = date(2026, 2, day)
-            for slot, daypart in enumerate(dayparts):
-                entries.append(
-                    {
-                        "menu_date": menu_date,
-                        "daypart_key": daypart,
-                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
-                    }
-                )
-        assert len(entries) == 224
-        return entries
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
-
     # Simulate broken LLM parse collapsing all rows to a single date.
     new_lines = [
         {
@@ -1037,8 +1041,9 @@ def test_build_reparse_position_entries_prefers_existing_line_dates_when_new_lin
         for day in range(8, 14)
     ]
 
-    scoped = order_service._build_reparse_position_menu_entries(
-        week_id="2026-02",
+    _assert_month_only_reparse_scope_rejected(
+        monkeypatch,
+        template=authored_aux_component_template(),
         lines=new_lines,
         rows=[["", "", "", "6"] for _ in range(54)],
         parsed_output={},
@@ -1047,39 +1052,10 @@ def test_build_reparse_position_entries_prefers_existing_line_dates_when_new_lin
         received_at=datetime(2026, 2, 8, 9, 0, 0),
     )
 
-    assert scoped
-    assert {entry.get("menu_date") for entry in scoped} == {
-        date(2026, 2, 8),
-        date(2026, 2, 9),
-        date(2026, 2, 10),
-        date(2026, 2, 11),
-        date(2026, 2, 12),
-        date(2026, 2, 13),
-    }
 
-
-def test_build_reparse_position_entries_ignores_payload_date_outlier_with_existing_scope(
+def test_build_reparse_position_entries_rejects_month_only_with_payload_date_outlier(
     monkeypatch,
 ):
-    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
-
-    def _fake_weekly_entries(_week_id: str):
-        entries = []
-        for day in range(1, 29):
-            menu_date = date(2026, 2, day)
-            for slot, daypart in enumerate(dayparts):
-                entries.append(
-                    {
-                        "menu_date": menu_date,
-                        "daypart_key": daypart,
-                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
-                    }
-                )
-        assert len(entries) == 224
-        return entries
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
-
     # Broken parse collapsed rows to one wrong date (2/1).
     new_lines = [
         {
@@ -1100,8 +1076,9 @@ def test_build_reparse_position_entries_ignores_payload_date_outlier_with_existi
         for day in range(8, 14)
     ]
 
-    scoped = order_service._build_reparse_position_menu_entries(
-        week_id="2026-02",
+    _assert_month_only_reparse_scope_rejected(
+        monkeypatch,
+        template=authored_aux_component_template(),
         lines=new_lines,
         rows=[["", "", "", "4"] for _ in range(224)],
         parsed_output={},
@@ -1110,39 +1087,10 @@ def test_build_reparse_position_entries_ignores_payload_date_outlier_with_existi
         received_at=datetime(2026, 2, 8, 9, 0, 0),
     )
 
-    assert scoped
-    assert {entry.get("menu_date") for entry in scoped} == {
-        date(2026, 2, 8),
-        date(2026, 2, 9),
-        date(2026, 2, 10),
-        date(2026, 2, 11),
-        date(2026, 2, 12),
-        date(2026, 2, 13),
-    }
 
-
-def test_build_reparse_position_entries_ignores_out_of_scope_line_date_range_with_existing_scope(
+def test_build_reparse_position_entries_rejects_month_only_with_out_of_scope_line_dates(
     monkeypatch,
 ):
-    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
-
-    def _fake_weekly_entries(_week_id: str):
-        entries = []
-        for day in range(1, 29):
-            menu_date = date(2026, 2, day)
-            for slot, daypart in enumerate(dayparts):
-                entries.append(
-                    {
-                        "menu_date": menu_date,
-                        "daypart_key": daypart,
-                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
-                    }
-                )
-        assert len(entries) == 224
-        return entries
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
-
     # Broken parse shifted to prior week range (2/1-2/6).
     new_lines = []
     for day in range(1, 7):
@@ -1166,8 +1114,9 @@ def test_build_reparse_position_entries_ignores_out_of_scope_line_date_range_wit
         for day in range(8, 14)
     ]
 
-    scoped = order_service._build_reparse_position_menu_entries(
-        week_id="2026-02",
+    _assert_month_only_reparse_scope_rejected(
+        monkeypatch,
+        template=authored_aux_component_template(),
         lines=new_lines,
         rows=[["", "", "", "4"] for _ in range(224)],
         parsed_output={},
@@ -1176,38 +1125,11 @@ def test_build_reparse_position_entries_ignores_out_of_scope_line_date_range_wit
         received_at=datetime(2026, 2, 8, 9, 0, 0),
     )
 
-    assert scoped
-    assert {entry.get("menu_date") for entry in scoped} == {
-        date(2026, 2, 8),
-        date(2026, 2, 9),
-        date(2026, 2, 10),
-        date(2026, 2, 11),
-        date(2026, 2, 12),
-        date(2026, 2, 13),
-    }
 
-
-def test_build_reparse_position_entries_does_not_override_existing_scope_for_sparse_payload_noise(
+def test_build_reparse_position_entries_rejects_month_only_with_sparse_payload_noise(
     monkeypatch,
 ):
     dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
-
-    def _fake_weekly_entries(_week_id: str):
-        entries = []
-        for day in range(1, 29):
-            menu_date = date(2026, 2, day)
-            for slot, daypart in enumerate(dayparts):
-                entries.append(
-                    {
-                        "menu_date": menu_date,
-                        "daypart_key": daypart,
-                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
-                    }
-                )
-        assert len(entries) == 224
-        return entries
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
 
     # Existing lines preserve the correct scope (2/8-2/13).
     existing_lines = [
@@ -1232,8 +1154,9 @@ def test_build_reparse_position_entries_does_not_override_existing_scope_for_spa
         for idx in range(56)
     ]
 
-    scoped = order_service._build_reparse_position_menu_entries(
-        week_id="2026-02",
+    _assert_month_only_reparse_scope_rejected(
+        monkeypatch,
+        template=authored_aux_component_template(),
         lines=new_lines,
         rows=[["", "", "", "6"] for _ in range(56)],
         parsed_output=parsed_output,
@@ -1242,39 +1165,10 @@ def test_build_reparse_position_entries_does_not_override_existing_scope_for_spa
         received_at=datetime(2026, 2, 8, 9, 0, 0),
     )
 
-    assert scoped
-    assert {entry.get("menu_date") for entry in scoped} == {
-        date(2026, 2, 8),
-        date(2026, 2, 9),
-        date(2026, 2, 10),
-        date(2026, 2, 11),
-        date(2026, 2, 12),
-        date(2026, 2, 13),
-    }
 
-
-def test_build_reparse_position_entries_allows_payload_week_shift_when_existing_scope_is_stale(
+def test_build_reparse_position_entries_rejects_month_only_with_stale_existing_scope(
     monkeypatch,
 ):
-    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
-
-    def _fake_weekly_entries(_week_id: str):
-        entries = []
-        for day in range(1, 29):
-            menu_date = date(2026, 2, day)
-            for slot, daypart in enumerate(dayparts):
-                entries.append(
-                    {
-                        "menu_date": menu_date,
-                        "daypart_key": daypart,
-                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
-                    }
-                )
-        assert len(entries) == 224
-        return entries
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
-
     # Existing order lines were already shifted to an old week (2/1-2/7).
     existing_lines = [
         {
@@ -1298,8 +1192,9 @@ def test_build_reparse_position_entries_allows_payload_week_shift_when_existing_
         ]
     }
 
-    scoped = order_service._build_reparse_position_menu_entries(
-        week_id="2026-02",
+    _assert_month_only_reparse_scope_rejected(
+        monkeypatch,
+        template=authored_aux_component_template(),
         lines=[{"source_row_index": idx, "menu_name": f"OCR-{idx}"} for idx in range(48)],
         rows=[["", "", "", "6"] for _ in range(48)],
         parsed_output=parsed_output,
@@ -1308,39 +1203,11 @@ def test_build_reparse_position_entries_allows_payload_week_shift_when_existing_
         received_at=datetime(2026, 1, 28, 9, 0, 0),
     )
 
-    assert scoped
-    assert {entry.get("menu_date") for entry in scoped} == {
-        date(2026, 2, 8),
-        date(2026, 2, 9),
-        date(2026, 2, 10),
-        date(2026, 2, 11),
-        date(2026, 2, 12),
-        date(2026, 2, 13),
-        date(2026, 2, 14),
-    }
 
-
-def test_build_reparse_position_entries_ignores_stale_line_dates_when_payload_override_is_enabled(
+def test_build_reparse_position_entries_rejects_month_only_with_stale_line_dates_and_payload(
     monkeypatch,
 ):
     dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
-
-    def _fake_weekly_entries(_week_id: str):
-        entries = []
-        for day in range(1, 29):
-            menu_date = date(2026, 2, day)
-            for slot, daypart in enumerate(dayparts):
-                entries.append(
-                    {
-                        "menu_date": menu_date,
-                        "daypart_key": daypart,
-                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
-                    }
-                )
-        assert len(entries) == 224
-        return entries
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
 
     existing_lines = [
         {"date": f"2026-02-{day:02d}", "daypart": "朝", "menu_name": f"existing-{day}"}
@@ -1369,8 +1236,9 @@ def test_build_reparse_position_entries_ignores_stale_line_dates_when_payload_ov
         ]
     }
 
-    scoped = order_service._build_reparse_position_menu_entries(
-        week_id="2026-02",
+    _assert_month_only_reparse_scope_rejected(
+        monkeypatch,
+        template=authored_aux_component_template(),
         lines=new_lines,
         rows=[["", "", "", "6"] for _ in range(48)],
         parsed_output=parsed_output,
@@ -1379,39 +1247,11 @@ def test_build_reparse_position_entries_ignores_stale_line_dates_when_payload_ov
         received_at=datetime(2026, 1, 28, 9, 0, 0),
     )
 
-    assert scoped
-    assert {entry.get("menu_date") for entry in scoped} == {
-        date(2026, 2, 8),
-        date(2026, 2, 9),
-        date(2026, 2, 10),
-        date(2026, 2, 11),
-        date(2026, 2, 12),
-        date(2026, 2, 13),
-        date(2026, 2, 14),
-    }
 
-
-def test_build_reparse_position_entries_keeps_week_scope_when_existing_dates_are_partial(
+def test_build_reparse_position_entries_rejects_month_only_with_partial_existing_dates(
     monkeypatch,
 ):
     dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
-
-    def _fake_weekly_entries(_week_id: str):
-        entries = []
-        for day in range(1, 29):
-            menu_date = date(2026, 2, day)
-            for slot, daypart in enumerate(dayparts):
-                entries.append(
-                    {
-                        "menu_date": menu_date,
-                        "daypart_key": daypart,
-                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
-                    }
-                )
-        assert len(entries) == 224
-        return entries
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
 
     # Persisted lines still reflect an older partial scope (2/8-2/9 only).
     existing_lines = [
@@ -1435,8 +1275,9 @@ def test_build_reparse_position_entries_keeps_week_scope_when_existing_dates_are
         "date_strings": ["2/8", "2/9", "2/10", "2/11", "2/12", "2/13", "2/14"]
     }
 
-    scoped = order_service._build_reparse_position_menu_entries(
-        week_id="2026-02",
+    _assert_month_only_reparse_scope_rejected(
+        monkeypatch,
+        template=authored_aux_component_template(),
         lines=new_lines,
         rows=[["", "", "", "6"] for _ in range(56)],
         parsed_output=parsed_output,
@@ -1445,40 +1286,11 @@ def test_build_reparse_position_entries_keeps_week_scope_when_existing_dates_are
         received_at=datetime(2026, 2, 8, 9, 0, 0),
     )
 
-    assert scoped
-    assert len(scoped) == 56
-    assert {entry.get("menu_date") for entry in scoped} == {
-        date(2026, 2, 8),
-        date(2026, 2, 9),
-        date(2026, 2, 10),
-        date(2026, 2, 11),
-        date(2026, 2, 12),
-        date(2026, 2, 13),
-        date(2026, 2, 14),
-    }
 
-
-def test_build_reparse_position_entries_extends_small_source_row_overflow_with_existing_scope(
+def test_build_reparse_position_entries_rejects_month_only_with_source_row_overflow(
     monkeypatch,
 ):
     dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
-
-    def _fake_weekly_entries(_week_id: str):
-        entries = []
-        for day in range(1, 29):
-            menu_date = date(2026, 2, day)
-            for slot, daypart in enumerate(dayparts):
-                entries.append(
-                    {
-                        "menu_date": menu_date,
-                        "daypart_key": daypart,
-                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
-                    }
-                )
-        assert len(entries) == 224
-        return entries
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
 
     # Parsed lines keep existing date anchors (2/8-2/13) but include small
     # source-row overflow (54 rows instead of 48) from OCR table noise.
@@ -1503,8 +1315,9 @@ def test_build_reparse_position_entries_extends_small_source_row_overflow_with_e
         for day in range(8, 14)
     ]
 
-    scoped = order_service._build_reparse_position_menu_entries(
-        week_id="2026-02",
+    _assert_month_only_reparse_scope_rejected(
+        monkeypatch,
+        template=authored_aux_component_template(),
         lines=new_lines,
         rows=[["", "", "", "4"] for _ in range(54)],
         parsed_output={},
@@ -1513,39 +1326,15 @@ def test_build_reparse_position_entries_extends_small_source_row_overflow_with_e
         received_at=datetime(2026, 2, 8, 9, 0, 0),
     )
 
-    assert scoped
-    assert len(scoped) == 54
-    scoped_dates = {entry.get("menu_date") for entry in scoped}
-    assert date(2026, 2, 8) in scoped_dates
-    assert date(2026, 2, 14) in scoped_dates
 
-
-def test_build_reparse_position_entries_extends_payload_anchor_scope_for_moderate_overflow(
+def test_build_reparse_position_entries_rejects_month_only_with_payload_anchor_overflow(
     monkeypatch,
 ):
-    dayparts = ["朝", "朝", "昼", "昼", "昼", "夕", "夕", "夕"]
-
-    def _fake_weekly_entries(_week_id: str):
-        entries = []
-        for day in range(1, 29):
-            menu_date = date(2026, 2, day)
-            for slot, daypart in enumerate(dayparts):
-                entries.append(
-                    {
-                        "menu_date": menu_date,
-                        "daypart_key": daypart,
-                        "menu_name": f"{menu_date.isoformat()}-{daypart}-{slot}",
-                    }
-                )
-        assert len(entries) == 224
-        return entries
-
-    monkeypatch.setattr(order_service, "_build_position_menu_entries", _fake_weekly_entries)
-
     # Payload anchors only two days, but OCR rows span much further.
     parsed_output = {"date_strings": ["2/8", "2/9"]}
-    scoped = order_service._build_reparse_position_menu_entries(
-        week_id="2026-02",
+    _assert_month_only_reparse_scope_rejected(
+        monkeypatch,
+        template=authored_aux_component_template(),
         lines=[{"source_row_index": idx, "menu_name": f"OCR-{idx}"} for idx in range(43)],
         rows=[["", "", "", "6"] for _ in range(43)],
         parsed_output=parsed_output,
@@ -1554,11 +1343,106 @@ def test_build_reparse_position_entries_extends_payload_anchor_scope_for_moderat
         received_at=datetime(2026, 2, 8, 9, 0, 0),
     )
 
-    assert scoped
-    assert len(scoped) == 43
-    scoped_dates = {entry.get("menu_date") for entry in scoped}
-    assert date(2026, 2, 8) in scoped_dates
-    assert date(2026, 2, 13) in scoped_dates
+
+def test_build_reparse_position_entries_uses_explicit_period_facility_canonical_entries_unchanged(
+    monkeypatch,
+):
+    period = "2026-02@2026-02-08~2026-02-14"
+    facility_id = "FAC-CANONICAL"
+    canonical_entries = [
+        {
+            "menu_date": date(2026, 2, 8),
+            "daypart_key": "朝",
+            "menu_name": "Canonical breakfast",
+            "slot_index": 11,
+            "metadata": {"source_row_index": 0, "confidence": None, "note": ""},
+        },
+        {
+            "menu_date": date(2026, 2, 9),
+            "daypart_key": "昼",
+            "menu_name": "Canonical lunch",
+            "slot_index": 13,
+            "metadata": {"source_row_index": 0, "confidence": None, "note": ""},
+        },
+    ]
+    canonical_entries_before = deepcopy(canonical_entries)
+    inputs = {
+        "template": authored_aux_component_template(),
+        "facility_id": facility_id,
+        "lines": [{"date": "2026-02-01", "menu_name": "stale OCR", "source_row_index": 0}],
+        "rows": [["2/1", "朝", "stale OCR", "17"]],
+        "parsed_output": {"date_strings": ["2/1", "2/2"]},
+        "existing_lines": [{"date": "2026-02-01", "menu_name": "stale saved"}],
+        "extra_payload_dates": {date(2026, 2, 1)},
+        "received_at": datetime(2026, 2, 8, 9, 0, 0),
+    }
+    before = deepcopy(inputs)
+    reads = []
+
+    def _canonical_menu_entries(week_id, resolved_facility_id):
+        reads.append((week_id, resolved_facility_id))
+        return canonical_entries
+
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", _canonical_menu_entries)
+
+    entries = order_service._build_reparse_position_menu_entries(week_id=period, **inputs)
+
+    assert entries == canonical_entries_before
+    assert canonical_entries == canonical_entries_before
+    assert reads == [(period, facility_id)]
+    assert inputs == before
+
+
+def test_build_reparse_position_entries_rejects_missing_facility_without_menu_read(monkeypatch):
+    reads = []
+
+    def _forbidden_menu_read(*args):
+        reads.append(args)
+        raise AssertionError("facility-unresolved reparse must not read canonical menu entries")
+
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", _forbidden_menu_read)
+
+    with pytest.raises(ValueError, match="^facility_unresolved$"):
+        order_service._build_reparse_position_menu_entries(
+            week_id="2026-02@2026-02-08~2026-02-14",
+            facility_id=None,
+            template=authored_aux_component_template(),
+            lines=[],
+            rows=[],
+            parsed_output={},
+            existing_lines=[],
+            extra_payload_dates=set(),
+            received_at=datetime(2026, 2, 8, 9, 0, 0),
+        )
+
+    assert reads == []
+
+
+def test_build_reparse_position_entries_rejects_empty_canonical_menu(monkeypatch):
+    period = "2026-02@2026-02-08~2026-02-14"
+    facility_id = "FAC-EMPTY-MENU"
+    reads = []
+
+    def _empty_menu_entries(week_id, resolved_facility_id):
+        reads.append((week_id, resolved_facility_id))
+        return []
+
+    monkeypatch.setattr(order_service, "_build_position_menu_entries_safe", _empty_menu_entries)
+
+    with pytest.raises(ValueError, match="^menu_entries_missing$"):
+        order_service._build_reparse_position_menu_entries(
+            week_id=period,
+            facility_id=facility_id,
+            template=authored_aux_component_template(),
+            lines=[{"date": "2026-02-01", "menu_name": "stale OCR"}],
+            rows=[["2/1", "朝", "stale OCR", "17"]],
+            parsed_output={"date_strings": ["2/1"]},
+            existing_lines=[{"date": "2026-02-01", "menu_name": "stale saved"}],
+            extra_payload_dates={date(2026, 2, 1)},
+            received_at=datetime(2026, 2, 8, 9, 0, 0),
+        )
+
+    assert reads == [(period, facility_id)]
 
 
 def test_owned_registration_does_not_apply_legacy_position_mapping(monkeypatch, owned_registration):
@@ -3961,16 +3845,11 @@ def test_build_quantity_only_repair_prompts_include_evaluator_feedback_and_struc
 @pytest.fixture
 def revision_case(isolated_formal_schema, tmp_path, monkeypatch):
     """Owned February source; only external recognition/rendering is doubled."""
-    from copy import deepcopy
-    import json
     from tests.contract.auth_support import registered_hospital_operator
     from tests.contract.test_orders_ocr_sheet_history_api import HistoryCase
     from src.services.template_field_schema_service import canonical_field_name_from_template_column
 
-    specimens = json.loads((ROOT / "src/data/facility_master.template.json").read_text())["facilities"]
-    specimen = next(item for item in specimens if item["facility_id"] == "FAC00004")
-    template = specimen.get("fax_template") or specimen["fax_template_override"]
-    columns = deepcopy(template["columns"])
+    columns = authored_aux_component_template()["columns"]
     for column in columns:
         column["name"] = canonical_field_name_from_template_column(column)
     with registered_hospital_operator(monkeypatch) as actor:
@@ -4418,7 +4297,8 @@ def test_build_llm_assist_prompt_uses_yomitoku_rows_and_generic_cell_issues_with
     assert "87" not in prompt
 
 
-def test_apply_payload_quantities_numeric_only_relaxes_noisy_daypart_constraint():
+def test_apply_payload_quantities_numeric_only_rejects_unresolved_identity_without_mutation():
+    from copy import deepcopy
     fields = [
         "date_mmdd",
         "daypart",
@@ -4443,24 +4323,21 @@ def test_apply_payload_quantities_numeric_only_relaxes_noisy_daypart_constraint(
         ["2/9", "明<br>長", "Menu D", "7", "8"],
     ]
 
-    stats = order_service._apply_payload_quantities_numeric_only(
-        rows=rows,
-        fields=fields,
-        quantity_index=quantity_index,
-        payload_rows=payload_rows,
-        allow_heuristics=False,
-    )
-
-    assert stats.get("row_index") == 4
-    assert [row["values"][3:5] for row in rows] == [
-        ["1", "2"],
-        ["3", "4"],
-        ["5", "6"],
-        ["7", "8"],
-    ]
+    original_rows, original_payload = deepcopy(rows), deepcopy(payload_rows)
+    with pytest.raises(order_service._CanonicalOcrProjectionError, match="sheet_canonical_mismatch"):
+        order_service._apply_payload_quantities_numeric_only(
+            rows=rows,
+            fields=fields,
+            quantity_index=quantity_index,
+            payload_rows=payload_rows,
+            allow_heuristics=False,
+        )
+    assert rows == original_rows
+    assert payload_rows == original_payload
 
 
 def test_extract_first_pass_rows_from_payload_keeps_yomitoku_baseline_without_roi_merge():
+    from copy import deepcopy
     template = {
         "columns": [{"index": 3, "role": "quantity", "name": "qty.regular_x", "source_index": 3,
                      "diet_type": "regular", "area_id": "X"}],
@@ -4494,11 +4371,13 @@ def test_extract_first_pass_rows_from_payload_keeps_yomitoku_baseline_without_ro
         ],
     }
 
+    original_payload = deepcopy(payload)
     first_pass_rows = order_service._extract_first_pass_rows_from_payload(payload, template)
     merged_rows = order_service._extract_sheet_rows_from_payload(payload, template)
 
     assert first_pass_rows == [["2/15", "朝", "Menu A", "", ""]]
-    assert merged_rows == [["2/15", "朝", "Menu A", "88", ""]]
+    assert merged_rows == first_pass_rows
+    assert payload == original_payload
 
 
 def test_build_llm_assist_prompt_includes_yomitoku_context_and_generic_cell_issues():
@@ -4564,7 +4443,7 @@ def test_build_llm_assist_prompt_includes_yomitoku_context_and_generic_cell_issu
 def test_build_llm_assist_prompt_includes_numeric_verification_preset_instructions():
     prompt = order_service._build_llm_assist_prompt(
         provider="gemini",
-        template={"gemini_ocr_prompt": "", "gemini_ocr_enabled": True},
+        template={**authored_aux_component_template(), "gemini_ocr_prompt": "", "gemini_ocr_enabled": True},
         pipeline_output={
             "table_raw": "|日付|区分|メニュー|常食|\n|03/22|朝|Menu A|5|",
             "pages": [],
@@ -4587,7 +4466,7 @@ def test_build_llm_assist_prompt_includes_numeric_verification_preset_instructio
 def test_build_llm_assist_prompt_includes_merged_cell_span_preset_instructions():
     prompt = order_service._build_llm_assist_prompt(
         provider="gemini",
-        template={"gemini_ocr_prompt": "", "gemini_ocr_enabled": True},
+        template={**authored_aux_component_template(), "gemini_ocr_prompt": "", "gemini_ocr_enabled": True},
         pipeline_output={
             "pages": [
                 {
@@ -5197,7 +5076,8 @@ def test_validate_and_merge_reparse_full_table_candidate_ignores_display_only_au
     assert {item["field"] for item in detail.get("ignored_shell_drift_cells") or []} == {"aux.col_2", "aux.col_4"}
 
 
-def test_canonicalize_block_helper_display_rows_reanchors_total_to_first_row_of_each_block():
+def test_canonicalize_block_helper_display_rows_keeps_total_at_its_original_cell():
+    from copy import deepcopy
     fields = [
         "date_mmdd",
         "daypart",
@@ -5215,20 +5095,22 @@ def test_canonicalize_block_helper_display_rows_reanchors_total_to_first_row_of_
         ["04/26", "昼", "", "小松菜のお浸し", "105", "105", ""],
     ]
 
+    original = deepcopy(rows)
     resolved_rows, stats = order_service._canonicalize_block_helper_display_rows(
         rows=rows,
         fields=fields,
         header=header,
     )
 
-    assert [row[4] for row in resolved_rows] == ["70", "70", "105", "105"]
+    assert resolved_rows == original and rows == original
+    assert [row[4] for row in resolved_rows] == ["", "70", "", "105"]
     assert [row[3] for row in resolved_rows] == [
         "大豆のトマト煮",
         "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ",
         "サワラの揚げ浸し",
         "小松菜のお浸し",
     ]
-    assert stats.get("helper_reanchor_count") == 2
+    assert stats.get("helper_reanchor_count") == 0
     assert stats.get("helper_conflict_count") == 0
 
 
@@ -5454,21 +5336,24 @@ def test_project_payload_quantities_onto_sheet_row_lists_maps_first_row_in_stric
     assert stats["exact"] == 1
 
 
-def test_overlay_payload_aux_cells_onto_sheet_rows_derives_block_total_without_structured_segments(repository_layout_source):
-    template = config_service.get_facility_config("FAC00004").get("fax_template")
+def test_overlay_payload_aux_cells_onto_sheet_rows_keeps_blank_total_without_derivation():
+    from copy import deepcopy
+    template = authored_aux_component_template()
+    template["columns"][4]["header"] = "合計"
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)
     rows = [
         {"values": ["04/26", "夕", "", "豚肉のピリ辛炒め", "", "67", "", "5", "", "", "", "", ""]},
-        {"values": ["", "", "", "春雨サラダ", "", "67", "", "5", "", "", "", "", ""]},
-        {"values": ["", "", "", "味噌汁", "", "67", "", "5", "", "", "", "", ""]},
+        {"values": ["04/26", "夕", "", "春雨サラダ", "", "67", "", "5", "", "", "", "", ""]},
+        {"values": ["04/26", "夕", "", "味噌汁", "", "67", "", "5", "", "", "", "", ""]},
     ]
     payload_rows = [
         ["04/26", "夕", "", "豚肉のピリ辛炒め", "", "67", "", "5", "", "", "", "", ""],
-        ["", "", "", "春雨サラダ", "", "67", "", "5", "", "", "", "", ""],
-        ["", "", "", "味噌汁", "", "67", "", "5", "", "", "", "", ""],
+        ["04/26", "夕", "", "春雨サラダ", "", "67", "", "5", "", "", "", "", ""],
+        ["04/26", "夕", "", "味噌汁", "", "67", "", "5", "", "", "", "", ""],
     ]
 
+    original_rows, original_payload = deepcopy(rows), deepcopy(payload_rows)
     overlaid = order_service._overlay_payload_aux_cells_onto_sheet_rows(
         rows=rows,
         fields=fields,
@@ -5478,11 +5363,15 @@ def test_overlay_payload_aux_cells_onto_sheet_rows_derives_block_total_without_s
         template=template,
     )
 
-    assert [row.get("values", [])[4] for row in overlaid] == ["72", "72", "72"]
+    assert overlaid == original_rows and rows == original_rows
+    assert payload_rows == original_payload
+    assert [row["values"][4] for row in overlaid] == ["", "", ""]
 
 
-def test_build_rows_from_menu_entries_populates_slot_label_from_weekly_menu_category(repository_layout_source):
-    template = config_service.get_facility_config("FAC00004").get("fax_template")
+def test_build_rows_from_menu_entries_populates_declared_slot_label_from_weekly_menu_category():
+    template = authored_aux_component_template()
+    template["columns"][2]["header"] = "副区分"
+    template["columns"][4]["header"] = "合計"
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)
     field_index = {field: idx for idx, field in enumerate(fields)}
@@ -5521,6 +5410,30 @@ def test_build_rows_from_menu_entries_populates_slot_label_from_weekly_menu_cate
         ["04/26", "朝", "主", "大豆のトマト煮", ""],
         ["04/26", "朝", "副①", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", ""],
     ]
+
+
+@pytest.mark.parametrize("line_dates,payload_dates", [
+    ({date(2026, 4, 30)}, set()),
+    (set(), {date(2026, 4, 30)}),
+    ({date(2026, 4, 30)}, {date(2026, 5, 1)}),
+])
+def test_weekly_rows_keep_all_declared_physical_menu_dates_despite_sparse_observations(line_dates, payload_dates):
+    entries = [{"menu_date": day, "daypart_key": "朝", "slot_index": 0,
+                "menu_name": f"Declared menu {day.isoformat()}"}
+               for day in (date(2026, 4, 30), date(2026, 5, 1), date(2026, 5, 2))]
+    before = deepcopy(entries)
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x"]
+    rows, source = order_service._build_rows_from_menu_entries(
+        entries=entries, fields=fields, field_index={field: index for index, field in enumerate(fields)},
+        line_dates=line_dates, source="weekly_menu", payload_dates=payload_dates,
+        payload_row_count=1, scope_anchor_date=date(2026, 4, 30))
+    assert source == "weekly_menu"
+    assert [row["values"] for row in rows] == [
+        ["04/30", "朝", "Declared menu 2026-04-30", ""],
+        ["05/01", "朝", "Declared menu 2026-05-01", ""],
+        ["05/02", "朝", "Declared menu 2026-05-02", ""],
+    ]
+    assert entries == before
 
 
 def test_overlay_payload_aux_cells_onto_sheet_rows_preserves_canonical_slot_label_when_payload_is_invalid():
@@ -5753,7 +5666,8 @@ def test_validate_and_merge_reparse_full_table_candidate_resets_omitted_quantiti
     assert any(cell.get("field") == "qty.daycare_x" for cell in (detail.get("authoritative_quantity_resets") or []))
 
 
-def test_validate_and_merge_reparse_full_table_candidate_blanks_omitted_quantities_when_authoritative_rows_unavailable():
+def test_validate_and_merge_reparse_full_table_candidate_rejects_missing_identity_without_clearing_saved_quantities():
+    from copy import deepcopy
     baseline = {
         "baseline_source": "sheet",
         "fields": ["date_mmdd", "daypart", "menu", "aux.col_4", "qty.regular_x", "qty.daycare_x"],
@@ -5765,6 +5679,7 @@ def test_validate_and_merge_reparse_full_table_candidate_blanks_omitted_quantiti
         "row_ids": ["row-1", "row-2"],
     }
 
+    original = deepcopy(baseline)
     merged_rows, result = order_service._validate_and_merge_reparse_full_table_candidate(
         baseline=baseline,
         candidate_rows=[
@@ -5776,10 +5691,6 @@ def test_validate_and_merge_reparse_full_table_candidate_blanks_omitted_quantiti
         authoritative_quantity_rows=[],
     )
 
-    assert result["error"] is None
-    assert merged_rows == [
-        ["04/26", "朝", "Menu A", "70", "11", ""],
-        ["04/26", "昼", "Menu B", "", "", ""],
-    ]
-    detail = result.get("detail") or {}
-    assert detail.get("authoritative_quantity_reset_count") == 4
+    assert result["error"] == "sheet_canonical_mismatch"
+    assert merged_rows == []
+    assert baseline == original

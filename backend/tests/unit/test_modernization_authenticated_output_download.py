@@ -97,7 +97,7 @@ def test_registered_operator_download_preserves_owned_receipts_without_sql_write
         with readonly_request(fixture):
             response = client.get(path, params=params, headers=operator.headers)
         operator.verifier.assert_called_once()
-        zipped = case == "bundle-labels"
+        zipped = case.startswith("bundle-")
         mime = "text/csv; charset=ms932" if case == "labels-csv" else "application/zip" if zipped else MIME
         extension = "csv" if case == "labels-csv" else "zip" if zipped else "xlsx"
         body = receive(response, fixture, f"authenticated-{case}.{extension}", mime, capsys)
@@ -107,20 +107,28 @@ def test_registered_operator_download_preserves_owned_receipts_without_sql_write
         elif zipped:
             with ZipFile(BytesIO(body)) as archive:
                 assert archive.testzip() is None
-                assert len(archive.namelist()) == 1
-                sheets = workbook_rows(archive.read(archive.namelist()[0]))
-            assert len(sheets) == 1
-            label_rows(next(iter(sheets.values())), zero=True)
+                names = archive.namelist()
+                assert len(names) == (2 if case == "bundle-both" else 1)
+                facility = candidate["configured_input"]["facility"]["facility_name"]
+                assert all(facility in name and str(candidate["lines"][0]["date"])[:10] in name for name in names)
+                labels = [name for name in names if name.endswith("_labels.xlsx")]
+                deliveries = [name for name in names if name.endswith("_delivery.xlsx")]
+                assert len(labels) == (0 if case == "bundle-delivery" else 1)
+                assert len(deliveries) == (0 if case == "bundle-labels" else 1)
+                for name in labels:
+                    sheets = workbook_rows(archive.read(name))
+                    assert len(sheets) == 1
+                    label_rows(next(iter(sheets.values())), zero=case == "bundle-labels")
+                for name in deliveries:
+                    sheets = workbook_rows(archive.read(name))
+                    assert set(sheets) == {"Authored invoice"}
+                    delivery = sheets["Authored invoice"]
+                    assert delivery[0] == ("Date", "Menu", "Quantity")
+                    assert {row[1]: row[2] for row in delivery[1:]} == {"選択献立0": 7}
         else:
             sheets = workbook_rows(body)
-            facility = candidate["configured_input"]["facility"]["facility_name"]
-            if case == "bundle-both":
-                assert set(sheets) == {"ラベル_" + facility, "納品書_" + facility}
-                label_rows(sheets["ラベル_" + facility], zero=False)
-                delivery = sheets["納品書_" + facility]
-            else:
-                assert len(sheets) == 1
-                delivery = next(iter(sheets.values()))
+            assert len(sheets) == 1
+            delivery = next(iter(sheets.values()))
             assert delivery[0] == ("Date", "Menu", "Quantity")
             assert {row[1]: row[2] for row in delivery[1:]} == {"選択献立0": 7}
         assert candidate == candidate_before

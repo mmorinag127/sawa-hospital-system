@@ -6,6 +6,7 @@ import sqlalchemy as sa
 from src.db import session_scope
 from src.models.facility import Facility
 from src.services import facility_template_version_service as versions
+from src.services.canonical_facility_store import CanonicalStoreError
 from src.maintenance.formal_migration_schema import read_catalog
 
 
@@ -27,7 +28,7 @@ def test_each_case_owns_empty_template_history(isolated_formal_schema, repetitio
         assert session.get(Facility, "isolation-facility").name == "Isolation Facility"
 
 
-def test_reachable_template_writer_history_collision_preserves_rows(isolated_formal_schema):
+def test_legacy_current_config_cannot_stamp_template_history(isolated_formal_schema):
     config = {
         "fax_template_id": "explicit-template-A",
         "fax_template": {"columns": [
@@ -40,21 +41,15 @@ def test_reachable_template_writer_history_collision_preserves_rows(isolated_for
     }
     with session_scope() as session:
         session.add(Facility(id="history-facility", name="History Facility"))
-    with session_scope() as session:
-        assert versions.ensure_active_template_version_from_resolved_config(
-            session, facility_id="history-facility", facility_config=config
-        ) is not None
     changed = deepcopy(config)
     changed["fax_template_id"] = "explicit-template-B"
-    with session_scope() as session:
-        assert versions.ensure_active_template_version_from_resolved_config(
-            session, facility_id="history-facility", facility_config=changed
-        ) is not None
     before = _snapshot(isolated_formal_schema)
-    # Characterize the reachable product defect, not a successful reactivation.
-    with pytest.raises(sa.exc.IntegrityError):
-        with session_scope() as session:
-            versions.ensure_active_template_version_from_resolved_config(
-                session, facility_id="history-facility", facility_config=config
-            )
-    assert _snapshot(isolated_formal_schema) == before
+    for candidate in (config, changed, config):
+        original = deepcopy(candidate)
+        with pytest.raises(CanonicalStoreError, match="legacy_current_config_lineage_stamp_disabled"):
+            with session_scope() as session:
+                versions.ensure_active_template_version_from_resolved_config(
+                    session, facility_id="history-facility", facility_config=candidate
+                )
+        assert candidate == original
+        assert _snapshot(isolated_formal_schema) == before

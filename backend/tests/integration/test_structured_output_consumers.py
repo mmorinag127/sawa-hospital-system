@@ -51,7 +51,7 @@ def test_build_delivery_rows_adds_menu_rows_without_copying_ocr_quantities():
 
     assert len(rows) == 1
     assert rows[0]["menu_display"] == "Menu A"
-    assert "qty_regular_total" not in rows[0]
+    assert rows[0]["qty_regular_total"] is None
 
 
 def test_build_delivery_rows_uses_only_materialized_saved_sheet_rows():
@@ -104,7 +104,7 @@ def test_build_delivery_rows_uses_only_materialized_saved_sheet_rows():
 
     assert len(rows) == 1
     assert rows[0]["qty_regular_total"] == 12.0
-    assert rows[0]["menu_display"] == "主菜 Menu A"
+    assert rows[0]["menu_display"] == "主 Menu A"
 
 
 @pytest.mark.parametrize("existing_context", [False, True])

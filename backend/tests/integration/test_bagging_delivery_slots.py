@@ -298,7 +298,8 @@ def test_delivery_slot_template_preserves_authored_fixed_headers(tmp_path):
     )
 
     actual = load_workbook(output_path)
-    ws_out = actual["2026-05-24"]
+    assert actual.sheetnames == ["Template"]
+    ws_out = actual["Template"]
     authored = load_workbook(template_path)["Template"]
     assert [[ws_out.cell(row=row, column=col).value for col in range(1, 9)] for row in (1, 2)] == [
         [authored.cell(row=row, column=col).value for col in range(1, 9)] for row in (1, 2)]

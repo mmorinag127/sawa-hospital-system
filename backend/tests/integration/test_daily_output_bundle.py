@@ -1087,12 +1087,17 @@ def test_build_daily_output_bundle_delivery_groups_and_merges_quantities(tmp_pat
         bundle_type="delivery",
     )
 
-    assert bundle_path.suffix == ".xlsx"
+    assert bundle_path.suffix == ".zip"
     assert summary["success_orders"] == 1
-    workbook = load_workbook(bundle_path)
-    assert workbook.sheetnames == ["そよかぜ"]
-    assert workbook["そよかぜ"]["A2"].value == "献立A"
-    assert workbook["そよかぜ"]["B2"].value == 5
+    with zipfile.ZipFile(bundle_path) as archive:
+        assert archive.testzip() is None
+        assert len(archive.namelist()) == 1
+        name = archive.namelist()[0]
+        assert TARGET_DATE.isoformat() in name and "そよかぜ" in name and name.endswith("_delivery.xlsx")
+        workbook = load_workbook(BytesIO(archive.read(name)))
+    assert workbook.sheetnames == ["納品書"]
+    assert workbook["納品書"]["A2"].value == "献立A"
+    assert workbook["納品書"]["B2"].value == 5
 
 
 def test_build_daily_output_bundle_empty_orders_are_not_errors(tmp_path, monkeypatch):
@@ -1156,7 +1161,7 @@ def test_build_daily_output_bundle_empty_orders_are_not_errors(tmp_path, monkeyp
         bundle_type="delivery",
     )
 
-    assert bundle_path.suffix == ".xlsx"
+    assert bundle_path.suffix == ".zip"
     assert summary["success_orders"] == 1
     assert summary["empty_orders"] == 1
     assert summary["error_orders"] == 0
@@ -1255,7 +1260,7 @@ def test_daily_output_bundle_all_empty_keeps_existing_no_output_block(tmp_path, 
         output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type=bundle_type)
 
 
-def test_build_daily_output_bundle_both_uses_prefixed_sheet_titles(tmp_path, monkeypatch):
+def test_build_daily_output_bundle_both_preserves_separate_workbooks(tmp_path, monkeypatch):
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(
         output_builder.order_service,
@@ -1311,8 +1316,19 @@ def test_build_daily_output_bundle_both_uses_prefixed_sheet_titles(tmp_path, mon
         bundle_type="both",
     )
 
-    workbook = load_workbook(bundle_path)
-    assert workbook.sheetnames == ["ラベル_そよかぜ", "納品書_そよかぜ"]
+    assert bundle_path.suffix == ".zip"
+    with zipfile.ZipFile(bundle_path) as archive:
+        assert archive.testzip() is None
+        names = archive.namelist()
+        assert len(names) == 2
+        assert all(TARGET_DATE.isoformat() in name and "そよかぜ" in name for name in names)
+        delivery, = [name for name in names if name.endswith("_delivery.xlsx")]
+        labels, = [name for name in names if name.endswith("_labels.xlsx")]
+        delivery_book = load_workbook(BytesIO(archive.read(delivery)))
+        label_book = load_workbook(BytesIO(archive.read(labels)))
+    assert len(delivery_book.sheetnames) == len(label_book.sheetnames) == 1
+    assert delivery_book.active["A2"].value == "献立A"
+    assert label_book.active["A2"].value == "献立A"
 
 
 def test_weekly_weight_collect_rows_preserves_raw_diabetes_and_matches_current_production_buckets(monkeypatch, tmp_path, isolated_formal_schema):
@@ -2513,7 +2529,7 @@ def test_daily_output_both_bundle_keeps_authored_delivery_workbook_and_label_row
         saved = load_workbook(BytesIO(archive.read(label_files[0])), data_only=False)
     assert delivery.sheetnames == ["component-invoice"]
     assert [cell.value for cell in delivery.active[1]] == [
-        "日付", "区分", "献立", "qty.regular_2f", "qty.no_fish_2f"]
+        "日付", "区分", "献立", "qty.regular_2F", "qty.no_fish_2F"]
     assert delivery.active["D2"].value == 3
     assert saved.sheetnames == ["そよかぜ"]
     label_ws = saved["そよかぜ"]

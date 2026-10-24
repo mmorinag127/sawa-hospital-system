@@ -234,7 +234,7 @@ def test_effective_date_overlapping_active_template_versions_are_blocker(monkeyp
     assert source.read_bytes() == original
 
 
-def test_output_builder_blocks_template_version_date_mismatch(monkeypatch, tmp_path) -> None:
+def test_output_builder_retains_accepted_dated_source_after_current_config_change(monkeypatch, tmp_path) -> None:
     import json
     from pathlib import Path
     from src.db import get_engine
@@ -262,21 +262,17 @@ def test_output_builder_blocks_template_version_date_mismatch(monkeypatch, tmp_p
     authored = accepted["configured_input"]["selected_authored_version"]
     assert authored["valid_from"] == "2026-07-01"
     assert authored["valid_to"] == "2026-07-31"
-    # Positive precondition: the real saved-sheet receipt is usable before the
-    # authoritative source is changed to exclude the complete order period.
-    output_builder._prepare_output_context(order["id"], include_bags=False)
+    context_before = output_builder._prepare_output_context(order["id"], include_bags=False)
     original = Path(prepared["path"]).read_bytes()
     captured = deepcopy(accepted)
     before = _snapshot(get_engine())
     version["valid_to"] = "2026-07-10"
     source.write_text(json.dumps(master))
     narrowed_source = source.read_bytes()
-    # This is a dated canonical-source change, not an unowned legacy FTV stamp.
-    # Both the captured-config consumer and the current output entry must stop.
-    with pytest.raises(ValueError, match="^original_template_configured_source_mismatch$"):
-        output_builder._resolve_facility_config_for_order(captured_order)
-    with pytest.raises(ValueError, match="^original_template_configured_source_mismatch$"):
-        output_builder._prepare_output_context(order["id"], include_bags=False)
+    assert output_builder._resolve_facility_config_for_order(captured_order) == captured["configured_input"]["facility"]
+    context_after = output_builder._prepare_output_context(order["id"], include_bags=False)
+    assert context_after == context_before
+    assert output_builder._accepted_output_candidate(captured_order) == captured
     assert _snapshot(get_engine()) == before
     assert accepted == captured
     assert Path(prepared["path"]).read_bytes() == original
@@ -438,7 +434,7 @@ def test_current_state_cache_requires_matching_template_version(monkeypatch, tmp
     }], facility_id=_id("FAC"))
     current, error = workflow.get_workflow(order["id"])
     assert error is None
-    saved, error = workflow.save_sheet(order["id"], sheet=sheet,
+    saved, error = workflow.save_sheet(order_id=order["id"], sheet=sheet,
         expected_revision=current["revision"])
     assert error is None
     stored, error = workflow.get_saved_sheet(order["id"])

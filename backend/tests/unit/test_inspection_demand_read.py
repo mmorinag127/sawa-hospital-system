@@ -15,6 +15,7 @@ from src.models.ocr_job import OcrJob
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import order_workflow_v2_service as service
 from src.services.ocr_history_read import read_history, read_history_detail, read_history_summary
+from tests.helpers.authored_sheet_case import authored_sheet_case  # noqa: F401
 from test_order_workflow_v2_service import (
     _create_order_with_evidence,
     _stamp_evidence_with_workflow_template,
@@ -50,7 +51,7 @@ def base_readers():
     return namespace["get_inspection"], namespace["get_workflow_readonly"]
 
 
-@pytest.mark.parametrize("state", ["empty", "no_selected", "selected", "missing_selected", "saved"])
+@pytest.mark.parametrize("state", ["empty", "no_selected", "selected", "foreign_selected", "saved"])
 def test_summary_full_and_detail_parity(state, authored_april_context, isolated, base_readers):
     if state == "saved":
         seed_saved_lineage(authored_april_context)
@@ -59,7 +60,8 @@ def test_summary_full_and_detail_parity(state, authored_april_context, isolated,
             order_id = workflow.order_id
     else:
         order_id, first, second = _create_order_with_evidence()
-        if state in {"selected", "missing_selected"}:
+        foreign = _create_order_with_evidence()[1] if state == "foreign_selected" else None
+        if state in {"selected", "foreign_selected"}:
             _, error = service.confirm_context(
                 order_id=order_id, expected_revision=0, facility_id="FAC00001",
                 week_start="2026-04-26", week_end="2026-04-30", template_id="template-fac00001",
@@ -67,7 +69,7 @@ def test_summary_full_and_detail_parity(state, authored_april_context, isolated,
             assert error is None
             with session_scope() as session:
                 workflow = session.get(OrderWorkflowState, order_id)
-                workflow.evidence_run_id = first if state == "selected" else "absent"
+                workflow.evidence_run_id = first if state == "selected" else foreign
                 workflow.state = "ocr_selected"
         if state == "empty":
             with session_scope() as session:
@@ -234,16 +236,11 @@ def test_candidate_sidecar_filters_current_template_without_loading_all_details(
     assert all(item.get("detail_state") == "not_loaded" for item in candidates["results"] if not item["selected"])
 
 
-def test_ocr_progress_reads_only_the_recorded_owned_job(monkeypatch):
-    order_id, _, _ = _create_order_with_evidence()
-    with session_scope() as session:
-        session.add(OrderWorkflowState(order_id=order_id, revision=1, state="ocr_running", primary_action="wait_ocr",
-            secondary_actions_json={service.WORKFLOW_V2_META_KEY: {"ocr_job_id": "progress-job", "ocr_job_attempt_id": "attempt-1"}}))
-        session.add(OcrJob(
-            id="progress-job", order_id=order_id, status="running", input_reference="gs://test/input.pdf",
-            metrics={"workflow_attempt_id": "attempt-1", "processing_stage": "hakodate_live_pipeline"},
-            created_at=datetime(2026, 4, 26, 12), updated_at=datetime(2026, 4, 26, 12),
-        ))
+def test_ocr_progress_reads_only_the_recorded_owned_job(monkeypatch, authored_sheet_case):
+    case = authored_sheet_case(quantity=5, produce=False)
+    case.queue()
+    order_id = case.id
+    attempt = case.queued["ocr_job"]["workflow_attempt_id"]
     calls = []
     original = service._recorded_workflow_job_status
     def recorded(*args):
@@ -254,18 +251,19 @@ def test_ocr_progress_reads_only_the_recorded_owned_job(monkeypatch):
     assert error is None
     assert progress["order_id"] == order_id
     assert progress["state"] == "ocr_running"
-    assert progress["ocr_job"]["ocr_job_id"] == "progress-job"
-    assert progress["ocr_job"]["workflow_attempt_id"] == "attempt-1"
+    assert progress["ocr_job"]["ocr_job_id"] == case.job
+    assert progress["ocr_job"]["workflow_attempt_id"] == attempt
     assert calls == [order_id]
-    assert progress["common_job_status"]["jobId"] == "progress-job"
-    assert progress["common_job_status"]["attemptIdentity"] == "attempt-1"
+    assert progress["common_job_status"]["jobId"] == case.job
+    assert progress["common_job_status"]["attemptIdentity"] == attempt
 
     with session_scope() as session:
-        session.get(OcrJob, "progress-job").metrics = {"workflow_attempt_id": "other"}
-    assert service.get_ocr_progress(order_id) == (None, "ocr_job_ownership_mismatch")
+        job = session.get(OcrJob, case.job)
+        job.metrics = {**job.metrics, "workflow_attempt_id": "other"}
+    assert service.get_ocr_progress(order_id) == (None, "ocr_recorded_job_attempt_mismatch")
 
 
-def test_ocr_progress_preserves_native_owner_and_terminal_receipt():
+def test_ocr_progress_refuses_fabricated_native_owner_and_terminal_receipt():
     order_id, _, _ = _create_order_with_evidence()
     with session_scope() as session:
         session.add(OrderWorkflowState(order_id=order_id, revision=1, state="ocr_running",
@@ -280,7 +278,10 @@ def test_ocr_progress_preserves_native_owner_and_terminal_receipt():
             created_at=datetime(2026, 4, 26, 12), updated_at=datetime(2026, 4, 26, 12),
         ))
     progress, error = service.get_ocr_progress(order_id)
-    assert error is None
-    assert progress["ocr_job"]["native_ingest"] == {
-        "mode": "hakodate", "execution_id": "native-1", "intake_protocol": "native_ingest_v2", "terminal_receipt": {"status": "running"},
-    }
+    assert progress is None
+    assert error == "ocr_recorded_job_input_missing"
+    with session_scope() as session:
+        job = session.get(OcrJob, "native-progress-job")
+        assert job.status == "running"
+        assert job.metrics["nonworkflow_execution"]["execution_id"] == "native-1"
+        assert job.metrics["rerun_terminal_receipt"] == {"status": "running"}

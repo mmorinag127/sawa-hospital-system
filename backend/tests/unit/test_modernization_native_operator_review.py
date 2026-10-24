@@ -72,13 +72,13 @@ def test_real_low_score_hold_then_explicit_original_fax_operator_save(numeric_fa
     for item in deferred:
         assert item["sheet_cell"] in note_cells
         assert item["field"] == "remarks" and item["value"] == ""
-        assert item["assignment_confidence"] == by_cell[item["sheet_cell"]]["confidence"]
+        assert item["assignment_confidence"] == round(by_cell[item["sheet_cell"]]["confidence"], 4)
         assert item["classification"] != "accepted"
         assert item["defer_reason"] == "hakodate_ocr_confidence_below_strict_threshold"
         assert original_sheet["rows"][item["row_index"]][original_sheet["fields"].index("remarks")] == ""
     for item in projection["applied"]:
         assert item["value"] == original_expected[item["sheet_cell"]]
-        assert item["assignment_cell"]["assignment_confidence"] == by_cell[item["sheet_cell"]]["confidence"]
+        assert item["assignment_cell"]["assignment_confidence"] == round(by_cell[item["sheet_cell"]]["confidence"], 4)
     assert low_cells <= {item["sheet_cell"] for item in projection["applied"]}
     with db.session_scope() as session:
         state = session.get(OrderWorkflowState, ORDER)

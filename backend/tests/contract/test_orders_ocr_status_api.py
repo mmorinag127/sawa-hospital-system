@@ -13,7 +13,7 @@ sys.path.append(str(ROOT))
 import src.api.orders as orders_api  # noqa: E402
 from src.db import session_scope  # noqa: E402
 from src.main import app  # noqa: E402
-from src.models.menu import MonthlyMenuEntry  # noqa: E402
+from src.models.menu import MonthlyMenuEntry, MonthlyMenuItem  # noqa: E402
 from src.models.order import Order, OrderMenuSnapshot  # noqa: E402
 from src.models.order_ocr_cache import OrderOcrCache  # noqa: E402
 from src.models.output import Bag  # noqa: E402
@@ -1042,8 +1042,6 @@ def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master(owned_o
                 category="副菜",
                 slot_index=2,
                 diet_type="regular",
-                qty_per_serving=70,
-                unit_type="g",
                 facility_override=None,
             )
         )
@@ -1081,7 +1079,7 @@ def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master(owned_o
     assert regular["total_amount_label"] == "630g"
 
 
-def test_daily_bags_prefers_monthly_menu_entry_over_item_defaults(owned_outputs):
+def test_daily_bags_uses_explicit_meal_recipe_and_physical_category_over_master_defaults(owned_outputs):
     order_service.clear_all()
     month_id = "2099-03"
     menu_name = f"豆腐の煮物-{uuid4().hex[:6]}"
@@ -1104,10 +1102,12 @@ def test_daily_bags_prefers_monthly_menu_entry_over_item_defaults(owned_outputs)
                 category="副菜",
                 slot_index=1,
                 diet_type="regular",
-                qty_per_serving=70,
-                unit_type="g",
             )
         )
+        session.add(MonthlyMenuItem(id=f"MI-lunch-{uuid4().hex}", monthly_menu_id=month_id,
+            menu_master_id=menu_item["menu_master_id"], name=menu_name, daypart="昼",
+            diet_type="regular", facility_override="FAC00003", category="副菜",
+            qty_per_serving=70, unit_type="g", master_resolution_mode="manual"))
 
     owned_outputs.create_order_from_ingest(
         IngestEmailPayload(

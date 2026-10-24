@@ -23,8 +23,8 @@ def readonly_jobs(monkeypatch):
     monkeypatch.setattr(orders.order_workflow_v2_service, "mark_ocr_run_completed", forbidden)
     monkeypatch.setattr(orders, "_is_job_stale", lambda job: True)
     monkeypatch.setattr(orders, "_get_ocr_stale_minutes", lambda: 30)
-    monkeypatch.setattr(orders, "get_ocr_jobs", lambda ids: {job["id"]: job})
-    monkeypatch.setattr(orders, "get_latest_order_job", lambda order_id: job)
+    monkeypatch.setattr(orders, "get_recorded_order_job_bindings", lambda ids: {
+        order_id: {"job_id": job["id"], "job": job, "error": None} for order_id in ids})
     monkeypatch.setattr(orders, "get_ocr_job", lambda job_id: job)
     return job
 

@@ -2652,6 +2652,19 @@ export default function OrderWorkflowV2Page() {
       const readGeneration=refreshGenerationRef.current;
       const readRevision=workflowRevisionRef.current?.revision;
       const readCurrent=()=>current() && ownsPageInput(readOwn);
+      const refreshProgress = async () => {
+        const pendingRefresh=refreshAll(readCurrent, native ? nativeOwner! : {jobId,attemptId:attemptId as string});
+        const refreshGeneration=refreshGenerationRef.current;
+        try {
+          return await pendingRefresh;
+        } catch (err) {
+          if (readCurrent() && refreshGeneration===refreshGenerationRef.current
+              && workflowRevisionRef.current?.revision===readRevision) {
+            setError(formatApiError(err, "OCR完了結果の取得に失敗しました"));
+          }
+          return false;
+        }
+      };
       void apiClient.get<Pick<WorkflowV2, "order_id" | "state" | "ocr_job" | "common_job_status"> & {workflow_revision?: number}>(
         `/orders/${orderId}/workflow-v2/ocr-progress`,
         {signal: progressController.signal},
@@ -2669,7 +2682,7 @@ export default function OrderWorkflowV2Page() {
         }
         if (!owned) return;
         if (progress.workflow_revision !== workflowRevisionRef.current?.revision) {
-          await refreshAll(readCurrent, native ? nativeOwner! : {jobId,attemptId:attemptId as string});
+          await refreshProgress();
           return;
         }
         if (progress.state === "ocr_running") {
@@ -2681,7 +2694,7 @@ export default function OrderWorkflowV2Page() {
         }
         const completionKey = `${jobId}:${native ? nativeOwner?.executionId : attemptId}`;
         if (ocrCompletionRefreshRef.current === completionKey) return;
-        const accepted = await refreshAll(readCurrent, native ? nativeOwner! : {jobId,attemptId:attemptId as string});
+        const accepted = await refreshProgress();
         if (accepted === true && readCurrent()) {
           ocrCompletionRefreshRef.current = completionKey;
           active=false;
@@ -3479,7 +3492,9 @@ export default function OrderWorkflowV2Page() {
         else {
           const rowReview = review as RowAxisReviewPayload;
           const boundaries = validSource ? rowReview.saved_override?.body_day_boundary_indexes ?? rowReview.body_day_boundary_indexes : null;
-          setRowDayBoundaries(Array.from({length: 8}, (_, index) => boundaries?.[index]?.toString() ?? ""));
+          setRowDayBoundaries(Array.isArray(rowReview.calendar_days) && rowReview.calendar_days.length > 0
+            ? Array.from({length: rowReview.calendar_days.length + 1}, (_, index) => boundaries?.[index]?.toString() ?? "")
+            : []);
           setRowAxisYs(points); setSelectedRowAxisIndex(null); setRowAxisAddMode(false);
         }
         if (!validSource) message("保存済み補正のPDF・入力の正本を確認できません。補正点は反映していません。");
@@ -3501,8 +3516,10 @@ export default function OrderWorkflowV2Page() {
     }
     const coordinateSpace=review?.coordinate_space;
     if (points.length<2 || !coordinateSpace?.width || !coordinateSpace.height) { message("交点または座標系が不足しています。"); return; }
-    if (axis === "row" && (rowDayBoundaries.length !== 8 || rowDayBoundaries.some(value => !/^\d+$/.test(value)))) {
-      message("7日分の日境界と最終境界を整数で指定してください。"); return;
+    if (axis === "row" && (!rowAxisReview?.calendar_days?.length
+        || rowDayBoundaries.length !== rowAxisReview.calendar_days.length + 1
+        || rowDayBoundaries.some(value => !/^\d+$/.test(value)))) {
+      message("対象期間の日境界と最終境界を整数で指定してください。"); return;
     }
     if (axis==="header") {
       const expectedCount=getHeaderAxisExpectedCount();
@@ -5600,10 +5617,10 @@ export default function OrderWorkflowV2Page() {
               </label>
             ))}
             <label>最終境界
-              <input type="number" min={0} step={1} value={rowDayBoundaries[7] ?? ""}
+              <input type="number" min={0} step={1} value={rowDayBoundaries.at(-1) ?? ""}
                 disabled={Boolean(busy)} onChange={event => {
                   beginWorkflowEditorEdit("row", true);
-                  setRowDayBoundaries(current => current.map((value, i) => i === 7 ? event.target.value : value));
+                  setRowDayBoundaries(current => current.map((value, i) => i === current.length - 1 ? event.target.value : value));
                 }} />
             </label>
           </div>

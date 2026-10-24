@@ -1988,126 +1988,12 @@ def _build_reparse_position_menu_entries(
     template: dict[str, Any],
 ) -> list[dict]:
     week_id = require_explicit_ingest_week(week_id)
-    lines_for_scope = list(lines or [])
-    payload_dates: set[date] = {
-        item for item in (extra_payload_dates or set()) if isinstance(item, date)
-    }
-    existing_line_dates = _collect_line_dates_for_position_scope(existing_lines)
-    line_dates = _collect_line_dates_for_position_scope(lines_for_scope)
-    if isinstance(parsed_output, dict):
-        payload_dates = {
-            item
-            for item in _collect_sheet_dates_from_payload(parsed_output, received_at, template, explicit_week=require_explicit_ingest_week(week_id))
-            if isinstance(item, date)
-        }
-    payload_dates |= _collect_sheet_dates_from_rows(
-        rows, received_at=received_at, fields=_get_row_fields(template), explicit_week=require_explicit_ingest_week(week_id),
-    )
-    observed_payload_dates = {
-        item for item in payload_dates if isinstance(item, date)
-    }
-    if len(existing_line_dates) >= 2:
-        lower = min(existing_line_dates) - timedelta(days=1)
-        upper = max(existing_line_dates) + timedelta(days=1)
-        existing_min = min(existing_line_dates)
-        existing_max = max(existing_line_dates)
-        existing_span_days = (existing_max - existing_min).days
-        entry_dates_for_scope: set[date] = set()
-        if week_id:
-            entry_dates_for_scope = {
-                item.get("menu_date")
-                for item in _build_position_menu_entries_safe(week_id, facility_id)
-                if isinstance(item, dict) and isinstance(item.get("menu_date"), date)
-            }
-        payload_dates_in_scope = {
-            item for item in observed_payload_dates if item in entry_dates_for_scope
-        }
-        payload_dates_inside_existing = {
-            item for item in payload_dates_in_scope if lower <= item <= upper
-        }
-        payload_dates_outside_existing = {
-            item for item in payload_dates_in_scope if item < lower or item > upper
-        }
-        dominant_payload_dates = _select_dominant_date_cluster(payload_dates_in_scope)
-        dominant_payload_dates_inside_existing = {
-            item for item in dominant_payload_dates if lower <= item <= upper
-        }
-        dominant_payload_dates_outside_existing = {
-            item for item in dominant_payload_dates if item < lower or item > upper
-        }
-        payload_scope_span_days = 0
-        if dominant_payload_dates:
-            payload_scope_span_days = (
-                max(dominant_payload_dates) - min(dominant_payload_dates)
-            ).days
-        payload_suggests_week_scope = (
-            len(dominant_payload_dates) >= 5
-            and len(dominant_payload_dates_outside_existing) >= 3
-            and 5 <= payload_scope_span_days <= 10
-        )
-        existing_scope_is_partial = (
-            existing_span_days <= 2 or len(existing_line_dates) <= 3
-        )
-        allow_payload_scope_override = (
-            payload_suggests_week_scope
-            and (
-                len(dominant_payload_dates_outside_existing)
-                > (len(dominant_payload_dates_inside_existing) * 2)
-                or existing_scope_is_partial
-            )
-        )
-        if allow_payload_scope_override:
-            logger.warning(
-                "Reparse existing anchors look stale; prefer payload date anchors",
-                existing_dates=[item.isoformat() for item in sorted(existing_line_dates)],
-                payload_inside_existing=[item.isoformat() for item in sorted(payload_dates_inside_existing)],
-                payload_outside_existing=[item.isoformat() for item in sorted(payload_dates_outside_existing)],
-                dominant_payload_dates=[item.isoformat() for item in sorted(dominant_payload_dates)],
-                dominant_payload_inside_existing=[
-                    item.isoformat() for item in sorted(dominant_payload_dates_inside_existing)
-                ],
-                dominant_payload_outside_existing=[
-                    item.isoformat() for item in sorted(dominant_payload_dates_outside_existing)
-                ],
-                payload_scope_span_days=payload_scope_span_days,
-                existing_scope_is_partial=existing_scope_is_partial,
-            )
-            # Parsed line dates can still be stale (carried from old scope). When
-            # payload anchors are strong enough to override existing scope, defer
-            # to payload-driven positioning.
-            lines_for_scope = []
-        # When persisted lines already define a week scope, ignore parsed line-date
-        # anchors that are clearly outside that scope (typical LLM date drift).
-        if (
-            not allow_payload_scope_override
-            and line_dates
-            and any(item < lower or item > upper for item in line_dates)
-        ):
-            logger.warning(
-                "Reparse parsed line dates out of existing scope; fallback to existing anchors",
-                existing_dates=[item.isoformat() for item in sorted(existing_line_dates)],
-                parsed_line_dates=[item.isoformat() for item in sorted(line_dates)],
-            )
-            lines_for_scope = []
-        if not allow_payload_scope_override:
-            payload_dates = {
-                item for item in observed_payload_dates if lower <= item <= upper
-            } | existing_line_dates
-        else:
-            # Use full in-scope payload anchors when overriding stale/partial
-            # existing scope. Keeping only "outside" anchors can drop valid
-            # leading/trailing week dates.
-            payload_dates = dominant_payload_dates or _select_dominant_date_cluster(
-                payload_dates_in_scope or observed_payload_dates
-            )
-    else:
-        payload_dates = observed_payload_dates | existing_line_dates
-    return _build_position_entries_for_lines(
-        week_id=week_id,
-        facility_id=facility_id,
-        lines=lines_for_scope,
-        payload_dates=payload_dates,
-    )
+    if not isinstance(facility_id, str) or not facility_id.strip():
+        raise ValueError("facility_unresolved")
+    entries = _build_position_menu_entries_safe(week_id, facility_id)
+    if not entries:
+        raise ValueError("menu_entries_missing")
+    return entries
 
 
 def _collect_line_dates_for_position_scope(lines: list[dict[str, Any]] | None) -> set[date]:
@@ -4387,7 +4273,10 @@ def _captured_reparse_read_input(order_id, *, write_session=None):
 
 
 def _resolve_reparse_own_week(*, captured_week, received_at, lines, own_payload):
-    return _normalize_sheet_week_value(captured_week)
+    try:
+        return require_explicit_ingest_week(captured_week)
+    except ValueError:
+        return None
 
 
 def _persist_ingest_pipeline_evidence(session: Any, order: Order, pipeline_result: dict[str, Any], document_status: str) -> dict[str, Any]:
@@ -9735,7 +9624,8 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
                 diagnostic_error = str(exc)
         from src.services import ocr_row_recovery_service, master_order_form_template_service
         days = ocr_row_recovery_service.calendar_contract(
-            master_order_form_template_service.validated_body_row_plan(worksheet)
+            master_order_form_template_service.validated_body_row_plan(worksheet),
+            week_value=master_order_form_template_service.validated_body_week_value(worksheet),
         )
         structural = match.get("structural_match") or {}
         day_source = match.get("canonical_day_source") or structural.get("canonical_day_source") or {}
@@ -12860,7 +12750,7 @@ def _complete_ocr_rerun_in_session(session, order_id, job_id, evidence, *, error
         "rerun_terminal_receipt": deepcopy(receipt),
     }
     session.flush()
-    return receipt
+    return deepcopy(job.metrics["rerun_terminal_receipt"])
 
 
 def _persist_ocr_rerun_completion(
@@ -19293,6 +19183,8 @@ def get_ocr_output(
     if parsed is None:
         if job_binding_error:
             return None, job_binding_error
+        if isinstance(active_evidence_run, dict):
+            return None, "ocr_evidence_recovery_required"
         active_job = job
         if not active_job:
             return None, "ocr_job_not_found"
@@ -20140,44 +20032,7 @@ def _build_rows_from_menu_entries(
     payload_row_count: int = 0,
     scope_anchor_date: date | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    should_filter_by_line_dates = _source_uses_weekly_menu_shell(source)
     filtered = list(entries)
-    if should_filter_by_line_dates:
-        scoped_entries = list(entries)
-        normalized_line_dates = {item for item in line_dates if isinstance(item, date)}
-        normalized_payload_dates = {item for item in (payload_dates or set()) if isinstance(item, date)}
-        if normalized_line_dates and normalized_payload_dates:
-            anchor_dates = _select_dominant_date_cluster(
-                normalized_line_dates | normalized_payload_dates,
-                max_gap_days=2,
-                min_cluster_size=2,
-                min_cluster_share=0.5,
-            )
-            candidate_entries = _filter_position_menu_entries_by_dates(
-                entries,
-                anchor_dates or (normalized_line_dates | normalized_payload_dates),
-                min_anchor_dates=1,
-            )
-            if candidate_entries:
-                scoped_entries = candidate_entries
-        elif normalized_line_dates:
-            candidate_entries = _filter_position_menu_entries_by_dates(
-                entries,
-                normalized_line_dates,
-                min_anchor_dates=1,
-            )
-            if candidate_entries:
-                scoped_entries = candidate_entries
-        elif normalized_payload_dates:
-            candidate_entries = _filter_position_menu_entries_by_dates(
-                entries,
-                normalized_payload_dates,
-                min_anchor_dates=1 if int(payload_row_count or 0) > 0 else 2,
-            )
-            if candidate_entries:
-                scoped_entries = candidate_entries
-        if scoped_entries:
-            filtered = scoped_entries
     if not filtered:
         return [], source
     date_field = next((field for field in fields if field.startswith("date")), None)
@@ -20597,7 +20452,7 @@ def _canonicalize_block_helper_display_rows(
     if not helper_semantics:
         return normalized_rows, {}
 
-    date_idx, daypart_idx, menu_idx, _quantity_indexes = _resolve_structural_row_field_indexes(normalized_fields)
+    date_idx, daypart_idx, _menu_idx, _quantity_indexes = _resolve_structural_row_field_indexes(normalized_fields)
     blocks: list[dict[str, Any]] = []
     current_date_key = ""
     current_daypart_key = ""
@@ -20626,7 +20481,6 @@ def _canonicalize_block_helper_display_rows(
             if isinstance(row_indexes, list):
                 row_indexes.append(row_idx)
 
-    reanchors: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
     normalized_header = [str(cell or "").strip() for cell in (header or [])]
     if len(normalized_header) < len(normalized_fields):
@@ -20640,33 +20494,14 @@ def _canonicalize_block_helper_display_rows(
             row_indexes = [idx for idx in (block.get("row_indexes") or []) if isinstance(idx, int)]
             if not row_indexes:
                 continue
-            values_in_block: list[tuple[int, str]] = []
             distinct_values: list[str] = []
             for row_idx in row_indexes:
                 row = normalized_rows[row_idx]
                 cell_value = _field_value_to_str(row[col_idx] if col_idx < len(row) else "").strip()
                 if not cell_value or cell_value == "-":
                     continue
-                values_in_block.append((row_idx, cell_value))
                 if cell_value not in distinct_values:
                     distinct_values.append(cell_value)
-            if not values_in_block:
-                continue
-            anchor_row_idx = next(
-                (
-                    row_idx
-                    for row_idx in row_indexes
-                    if menu_idx is not None
-                    and menu_idx < len(normalized_rows[row_idx])
-                    and _normalize_sheet_text(normalized_rows[row_idx][menu_idx])
-                ),
-                row_indexes[0],
-            )
-            for row_idx in row_indexes:
-                row = normalized_rows[row_idx]
-                while len(row) <= col_idx:
-                    row.append("")
-                row[col_idx] = ""
             if len(distinct_values) > 1:
                 conflicts.append(
                     {
@@ -20678,486 +20513,11 @@ def _canonicalize_block_helper_display_rows(
                         "values": distinct_values,
                     }
                 )
-                continue
-            target_row_indexes = [
-                row_idx
-                for row_idx in row_indexes
-                if menu_idx is not None
-                and menu_idx < len(normalized_rows[row_idx])
-                and _normalize_sheet_text(normalized_rows[row_idx][menu_idx])
-            ]
-            if not target_row_indexes:
-                target_row_indexes = list(row_indexes)
-            for target_row_idx in target_row_indexes:
-                normalized_rows[target_row_idx][col_idx] = distinct_values[0]
-            source_indexes = [row_idx for row_idx, _value in values_in_block]
-            if source_indexes != target_row_indexes:
-                reanchors.append(
-                    {
-                        "field": field,
-                        "header": header_text,
-                        "semantic": semantic,
-                        "block_key": list(block.get("key") or []),
-                        "source_row_indexes": source_indexes,
-                        "target_row_indexes": target_row_indexes,
-                        "value": distinct_values[0],
-                    }
-                )
     return normalized_rows, {
-        "helper_reanchor_count": len(reanchors),
-        "helper_reanchors": reanchors[:20],
+        "helper_reanchor_count": 0,
+        "helper_reanchors": [],
         "helper_conflict_count": len(conflicts),
         "helper_conflicts": conflicts[:20],
-    }
-
-
-def _normalize_block_total_display_value(value: object) -> str:
-    text = _field_value_to_str(value).strip()
-    if not text or text == "-":
-        return ""
-    normalized = text.translate(_SHEET_TRANSLATION)
-    digit_groups = re.findall(r"\d+", normalized)
-    if not digit_groups:
-        return ""
-    if len(set(digit_groups)) == 1:
-        return digit_groups[0]
-    return ""
-
-
-def _collect_existing_block_total_display_values(
-    *,
-    rows: list[list[str]] | None,
-    blocks: list[dict[str, Any]] | None,
-    block_total_columns: set[int] | None,
-) -> dict[tuple[str, str, int], str]:
-    normalized_rows = [list(row) for row in (rows or []) if isinstance(row, list)]
-    normalized_blocks = [dict(block) for block in (blocks or []) if isinstance(block, dict)]
-    normalized_columns = {int(col_idx) for col_idx in (block_total_columns or set()) if isinstance(col_idx, int)}
-    if not normalized_rows or not normalized_blocks or not normalized_columns:
-        return {}
-    values_by_block: dict[tuple[str, str, int], str] = {}
-    for block in normalized_blocks:
-        block_key = block.get("key") or ("", "")
-        date_key = str(block_key[0] or "")
-        daypart_key = str(block_key[1] or "")
-        row_indexes = [
-            idx
-            for idx in (block.get("row_indexes") or [])
-            if isinstance(idx, int) and 0 <= idx < len(normalized_rows)
-        ]
-        if not row_indexes:
-            continue
-        for col_idx in normalized_columns:
-            distinct_values: list[str] = []
-            for row_idx in row_indexes:
-                row = normalized_rows[row_idx]
-                normalized_value = _normalize_block_total_display_value(
-                    row[col_idx] if col_idx < len(row) else ""
-                )
-                if not normalized_value or normalized_value in distinct_values:
-                    continue
-                distinct_values.append(normalized_value)
-            if len(distinct_values) == 1:
-                values_by_block[(date_key, daypart_key, int(col_idx))] = distinct_values[0]
-    return values_by_block
-
-
-_BLOCK_TOTAL_DISPLAY_EXCLUDED_DIETS = {
-    "no_meat",
-    "no_fish",
-    "no_fried",
-    "change_1",
-    "change_2",
-    "placeholder",
-    "sesame_allergy",
-    "forbidden_other",
-}
-
-
-def _block_total_display_contributor_indexes(
-    fields: list[str] | None,
-    *, template: dict[str, Any] | None = None,
-) -> list[int]:
-    contributor_indexes: list[int] = []
-    normalized_fields = [str(field or "").strip() for field in (fields or []) if str(field or "").strip()]
-    identities = quantity_field_identities_for_fields(template, normalized_fields)
-    for idx, field in enumerate(normalized_fields):
-        identity = identities.get(field)
-        if identity is None or identity[0] in _BLOCK_TOTAL_DISPLAY_EXCLUDED_DIETS:
-            continue
-        contributor_indexes.append(idx)
-    return contributor_indexes
-
-
-def _derive_block_total_display_value_from_rows(
-    *,
-    rows: list[list[str]] | None,
-    contributor_indexes: list[int] | None,
-) -> str:
-    normalized_rows = [list(row) for row in (rows or []) if isinstance(row, list)]
-    if not normalized_rows or not contributor_indexes:
-        return ""
-    max_total = 0.0
-    found_total = False
-    for row in normalized_rows:
-        row_total = 0.0
-        row_has_quantity = False
-        for col_idx in contributor_indexes:
-            if col_idx < 0 or col_idx >= len(row):
-                continue
-            parsed = _parse_strict_numeric_cell(row[col_idx])
-            if parsed is None:
-                continue
-            row_total += float(parsed)
-            row_has_quantity = True
-        if not row_has_quantity:
-            continue
-        found_total = True
-        if row_total > max_total:
-            max_total = row_total
-    if not found_total or max_total <= 0:
-        return ""
-    if float(max_total).is_integer():
-        return str(int(max_total))
-    return str(max_total)
-
-
-def _build_contiguous_sheet_blocks(
-    *,
-    rows: list[list[str]] | None,
-    fields: list[str] | None,
-) -> list[dict[str, Any]]:
-    normalized_rows = [
-        [_field_value_to_str(cell) for cell in row]
-        for row in (rows or [])
-        if isinstance(row, list)
-    ]
-    normalized_fields = [str(field or "").strip() for field in (fields or []) if str(field or "").strip()]
-    if not normalized_rows or not normalized_fields:
-        return []
-    date_idx, daypart_idx, _menu_idx, _quantity_indexes = _resolve_structural_row_field_indexes(normalized_fields)
-    blocks: list[dict[str, Any]] = []
-    current_date_key = ""
-    current_daypart_key = ""
-    current_key: tuple[str, str] | None = None
-    for row_idx, row in enumerate(normalized_rows):
-        raw_date = row[date_idx] if date_idx is not None and date_idx < len(row) else ""
-        raw_daypart = row[daypart_idx] if daypart_idx is not None and daypart_idx < len(row) else ""
-        date_key = _normalize_sheet_date_key(raw_date)
-        if date_key:
-            current_date_key = date_key
-        else:
-            date_key = current_date_key
-        daypart_key = _normalize_daypart_key(raw_daypart)
-        if daypart_key:
-            current_daypart_key = daypart_key
-        else:
-            daypart_key = current_daypart_key
-        block_key = (date_key, daypart_key)
-        if current_key != block_key:
-            blocks.append({"key": block_key, "row_indexes": [row_idx]})
-            current_key = block_key
-            continue
-        blocks[-1]["row_indexes"].append(row_idx)
-    return blocks
-
-
-def _extract_structured_block_total_sequences_from_payload(
-    *,
-    payload: dict[str, Any] | None,
-    template: dict[str, Any] | None,
-    fields: list[str] | None,
-    block_total_columns: set[int],
-) -> list[dict[str, Any]]:
-    if not isinstance(payload, dict) or not isinstance(template, dict):
-        return []
-    normalized_fields = [str(field or "").strip() for field in (fields or []) if str(field or "").strip()]
-    if not normalized_fields or not block_total_columns:
-        return []
-    date_idx, _daypart_idx, _menu_idx, _quantity_indexes = _resolve_structural_row_field_indexes(normalized_fields)
-    if date_idx is None:
-        return []
-
-    segments: list[dict[str, Any]] = []
-    for table_payload in fax_extractor._collect_structured_tables(payload):
-        if not isinstance(table_payload, dict):
-            continue
-        matrix = None
-        raw_rows = table_payload.get("rows")
-        if isinstance(raw_rows, list) and raw_rows:
-            matrix = fax_extractor._normalize_table_matrix_rows(raw_rows)
-        if matrix is None:
-            raw_cells = table_payload.get("cells")
-            if isinstance(raw_cells, list) and raw_cells:
-                matrix = fax_extractor._matrix_from_structured_cells(
-                    raw_cells,
-                    row_count_hint=table_payload.get("row_count")
-                    if isinstance(table_payload.get("row_count"), int)
-                    else table_payload.get("n_row"),
-                    col_count_hint=table_payload.get("col_count")
-                    if isinstance(table_payload.get("col_count"), int)
-                    else table_payload.get("n_col"),
-                )
-        if not matrix:
-            continue
-        normalized_matrix = fax_extractor._normalize_table_matrix_rows(matrix)
-        observed_width = max((len(row) for row in normalized_matrix), default=0)
-        if observed_width <= 0:
-            continue
-        explicit_mapped_indexes = fax_extractor._mapped_indexes_from_template_columns(
-            template=template,
-            fields=normalized_fields,
-            observed_width=observed_width,
-        )
-        if not explicit_mapped_indexes:
-            continue
-        explicit_dest_to_source = {
-            int(dest_idx): int(source_idx)
-            for source_idx, dest_idx in explicit_mapped_indexes.items()
-            if isinstance(source_idx, int) and isinstance(dest_idx, int)
-        }
-        date_source_idx = explicit_dest_to_source.get(int(date_idx))
-        block_total_sources = {
-            int(col_idx): explicit_dest_to_source.get(int(col_idx))
-            for col_idx in block_total_columns
-            if explicit_dest_to_source.get(int(col_idx)) is not None
-        }
-        if date_source_idx is None or not block_total_sources:
-            continue
-
-        pending_values_by_column: dict[int, list[str]] = {int(col_idx): [] for col_idx in block_total_sources}
-        current_segment: dict[str, Any] | None = None
-        for raw_row_index, row in enumerate(normalized_matrix):
-            raw_date = row[date_source_idx] if date_source_idx < len(row) else ""
-            date_key = _normalize_sheet_date_key(raw_date)
-            row_totals = {
-                int(col_idx): _normalize_block_total_display_value(
-                    row[source_idx] if source_idx is not None and source_idx < len(row) else ""
-                )
-                for col_idx, source_idx in block_total_sources.items()
-            }
-            if date_key:
-                if current_segment is not None:
-                    segments.append(current_segment)
-                current_segment = {
-                    "raw_date": date_key,
-                    "values_by_column": {
-                        int(col_idx): list(values)
-                        for col_idx, values in pending_values_by_column.items()
-                    },
-                    "source_row_indexes": [raw_row_index],
-                }
-                pending_values_by_column = {int(col_idx): [] for col_idx in block_total_sources}
-            elif current_segment is None:
-                for col_idx, total_value in row_totals.items():
-                    if not total_value:
-                        continue
-                    pending_values = pending_values_by_column.setdefault(int(col_idx), [])
-                    if not pending_values or pending_values[-1] != total_value:
-                        pending_values.append(total_value)
-                continue
-
-            if current_segment is None:
-                continue
-            current_segment.setdefault("source_row_indexes", []).append(raw_row_index)
-            values_by_column = current_segment.setdefault("values_by_column", {})
-            for col_idx, total_value in row_totals.items():
-                if not total_value:
-                    continue
-                current_values = values_by_column.setdefault(int(col_idx), [])
-                if not current_values or current_values[-1] != total_value:
-                    current_values.append(total_value)
-        if current_segment is not None:
-            segments.append(current_segment)
-    return segments
-
-
-def _overlay_structured_block_total_cells_onto_sheet_row_lists(
-    *,
-    rows: list[list[str]] | None,
-    fields: list[str] | None,
-    header: list[str] | None = None,
-    raw_payload: dict[str, Any] | None = None,
-    template: dict[str, Any] | None = None,
-) -> tuple[list[list[str]], dict[str, Any]]:
-    normalized_rows = [
-        [_field_value_to_str(cell) for cell in row]
-        for row in (rows or [])
-        if isinstance(row, list)
-    ]
-    normalized_fields = [str(field or "").strip() for field in (fields or []) if str(field or "").strip()]
-    if not normalized_rows or not normalized_fields or not isinstance(raw_payload, dict) or not isinstance(template, dict):
-        return normalized_rows, {}
-    if isinstance(raw_payload.get("_reparse_recognizer_result"), dict):
-        _extract_sheet_rows_from_payload_uncanonicalized(raw_payload, template)
-        return normalized_rows, {}
-    helper_semantics = _resolve_block_helper_column_indexes(fields=normalized_fields, header=header)
-    block_total_columns = {
-        idx for idx, semantic in helper_semantics.items() if semantic == "block_total"
-    }
-    if not block_total_columns:
-        return normalized_rows, {}
-
-    canonical_blocks = _build_contiguous_sheet_blocks(rows=normalized_rows, fields=normalized_fields)
-    if not canonical_blocks:
-        return normalized_rows, {}
-    existing_block_values = _collect_existing_block_total_display_values(
-        rows=normalized_rows,
-        blocks=canonical_blocks,
-        block_total_columns=block_total_columns,
-    )
-    canonical_date_order: list[str] = []
-    blocks_by_date: dict[str, list[dict[str, Any]]] = {}
-    for block in canonical_blocks:
-        block_key = block.get("key") or ("", "")
-        date_key = str(block_key[0] or "")
-        if not date_key:
-            continue
-        if date_key not in blocks_by_date:
-            blocks_by_date[date_key] = []
-            canonical_date_order.append(date_key)
-        blocks_by_date[date_key].append(block)
-    if not canonical_date_order:
-        return normalized_rows, {}
-
-    segments = _extract_structured_block_total_sequences_from_payload(
-        payload=raw_payload,
-        template=template,
-        fields=normalized_fields,
-        block_total_columns=block_total_columns,
-    )
-
-    assigned_by_date: dict[str, dict[int, list[str]]] = {}
-    assignment_trace: list[dict[str, Any]] = []
-    next_canonical_index = 0
-    for segment in segments:
-        raw_date = str(segment.get("raw_date") or "").strip()
-        mapped_index: int | None = None
-        if raw_date:
-            for idx in range(next_canonical_index, len(canonical_date_order)):
-                if canonical_date_order[idx] == raw_date:
-                    mapped_index = idx
-                    break
-        if mapped_index is None:
-            if next_canonical_index >= len(canonical_date_order):
-                break
-            mapped_index = next_canonical_index
-        canonical_date = canonical_date_order[mapped_index]
-        next_canonical_index = mapped_index + 1
-        values_by_column = segment.get("values_by_column")
-        if not isinstance(values_by_column, dict):
-            continue
-        assigned_by_date[canonical_date] = {
-            int(col_idx): [str(value).strip() for value in values if str(value).strip()]
-            for col_idx, values in values_by_column.items()
-            if isinstance(values, list)
-        }
-        assignment_trace.append(
-            {
-                "raw_date": raw_date,
-                "canonical_date": canonical_date,
-                "values_by_column": assigned_by_date[canonical_date],
-            }
-        )
-
-    if not assigned_by_date:
-        assigned_by_date = {}
-
-    overlaid_rows = [list(row) for row in normalized_rows]
-    for col_idx in block_total_columns:
-        for row in overlaid_rows:
-            while len(row) <= col_idx:
-                row.append("")
-            row[col_idx] = ""
-
-    assigned_cell_count = 0
-    preserved_assignment_count = 0
-    skipped_values: list[dict[str, Any]] = []
-    derived_assignment_count = 0
-    derived_assignments: list[dict[str, Any]] = []
-    preserved_assignments: list[dict[str, Any]] = []
-    contributor_indexes = _block_total_display_contributor_indexes(normalized_fields, template=template)
-    for canonical_date, date_blocks in blocks_by_date.items():
-        assigned_values = assigned_by_date.get(canonical_date) if isinstance(assigned_by_date.get(canonical_date), dict) else {}
-        for col_idx in block_total_columns:
-            block_values = [
-                str(value).strip()
-                for value in (assigned_values.get(int(col_idx)) or [])
-                if str(value).strip()
-            ]
-            if len(block_values) > len(date_blocks):
-                skipped_values.append(
-                    {
-                        "canonical_date": canonical_date,
-                        "column_index": col_idx,
-                        "values": block_values,
-                        "block_count": len(date_blocks),
-                    }
-                )
-        for block_index, block in enumerate(date_blocks):
-            row_indexes = [
-                idx
-                for idx in (block.get("row_indexes") or [])
-                if isinstance(idx, int) and 0 <= idx < len(overlaid_rows)
-            ]
-            if not row_indexes:
-                continue
-            derived_value = _derive_block_total_display_value_from_rows(
-                rows=[overlaid_rows[idx] for idx in row_indexes],
-                contributor_indexes=contributor_indexes,
-            )
-            block_key = block.get("key") or ("", "")
-            block_date_key = str(block_key[0] or "")
-            block_daypart_key = str(block_key[1] or "")
-            for col_idx in block_total_columns:
-                explicit_values = [
-                    str(value).strip()
-                    for value in (assigned_values.get(int(col_idx)) or [])
-                    if str(value).strip()
-                ]
-                explicit_value = explicit_values[block_index] if block_index < len(explicit_values) else ""
-                preserved_value = existing_block_values.get((block_date_key, block_daypart_key, int(col_idx)), "")
-                final_value = explicit_value or derived_value or preserved_value
-                if not final_value:
-                    continue
-                for target_row_index in row_indexes:
-                    while len(overlaid_rows[target_row_index]) <= col_idx:
-                        overlaid_rows[target_row_index].append("")
-                    overlaid_rows[target_row_index][col_idx] = final_value
-                if explicit_value:
-                    assigned_cell_count += len(row_indexes)
-                    continue
-                if derived_value:
-                    derived_assignment_count += len(row_indexes)
-                    derived_assignments.append(
-                        {
-                            "canonical_date": canonical_date,
-                            "block_key": list(block_key),
-                            "column_index": col_idx,
-                            "value": derived_value,
-                            "row_indexes": row_indexes,
-                        }
-                    )
-                    continue
-                preserved_assignment_count += len(row_indexes)
-                preserved_assignments.append(
-                    {
-                        "canonical_date": canonical_date,
-                        "block_key": list(block_key),
-                        "column_index": col_idx,
-                        "value": preserved_value,
-                        "row_indexes": row_indexes,
-                    }
-                )
-
-    return overlaid_rows, {
-        "structured_block_total_assignment_count": assigned_cell_count,
-        "structured_block_total_assignments": assignment_trace[:20],
-        "structured_block_total_skipped": skipped_values[:20],
-        "derived_block_total_assignment_count": derived_assignment_count,
-        "derived_block_total_assignments": derived_assignments[:20],
-        "preserved_block_total_assignment_count": preserved_assignment_count,
-        "preserved_block_total_assignments": preserved_assignments[:20],
     }
 
 
@@ -21303,7 +20663,7 @@ def _overlay_payload_aux_cells_onto_sheet_rows(
     raw_payload: dict[str, Any] | None = None,
     template: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    cloned_rows = [dict(item) for item in (rows or []) if isinstance(item, dict)]
+    cloned_rows = [deepcopy(item) for item in (rows or []) if isinstance(item, dict)]
     normalized_fields = [str(field or "").strip() for field in (fields or []) if str(field or "").strip()]
     normalized_payload_rows = [
         [_field_value_to_str(cell) for cell in row]
@@ -21346,10 +20706,6 @@ def _overlay_payload_aux_cells_onto_sheet_rows(
         if not isinstance(values, list):
             values = []
         payload_row = normalized_payload_rows[payload_idx]
-        for col_idx in block_total_columns:
-            while len(values) <= col_idx:
-                values.append("")
-            values[col_idx] = ""
         for col_idx in aux_columns:
             while len(values) <= col_idx:
                 values.append("")
@@ -21364,27 +20720,14 @@ def _overlay_payload_aux_cells_onto_sheet_rows(
                 continue
             if col_idx >= len(payload_row):
                 continue
-            aux_value = _field_value_to_str(payload_row[col_idx]).strip()
+            aux_value = _field_value_to_str(payload_row[col_idx])
+            if col_idx in block_total_columns:
+                values[col_idx] = aux_value
+                continue
             if not aux_value or aux_value == "-":
                 continue
             values[col_idx] = aux_value
         cloned_rows[row_idx]["values"] = values
-    if isinstance(raw_payload, dict) and isinstance(template, dict):
-        normalized_row_lists = [
-            list(row.get("values") or [])
-            for row in cloned_rows
-        ]
-        normalized_row_lists, _structured_helper_stats = _overlay_structured_block_total_cells_onto_sheet_row_lists(
-            rows=normalized_row_lists,
-            fields=normalized_fields,
-            header=header,
-            raw_payload=raw_payload,
-            template=template,
-        )
-        for row_idx, values in enumerate(normalized_row_lists):
-            if row_idx >= len(cloned_rows):
-                break
-            cloned_rows[row_idx]["values"] = values
     return cloned_rows
 
 
@@ -21415,10 +20758,6 @@ def _project_payload_display_cells_onto_sheet_row_lists(
         fields=normalized_fields,
         header=header,
     )
-    quantity_index = _build_sheet_quantity_index(normalized_fields, template=template)
-    if not quantity_index:
-        return normalized_rows, {}
-    quantity_columns = sorted(set(quantity_index.values()))
     display_columns = [
         idx
         for idx, field in enumerate(normalized_fields)
@@ -21430,38 +20769,28 @@ def _project_payload_display_cells_onto_sheet_row_lists(
     block_total_columns = {
         idx for idx, semantic in helper_semantics.items() if semantic == "block_total"
     }
-    projected_rows, projection_stats = _project_payload_quantities_onto_sheet_row_lists(
-        rows=normalized_rows,
+    row_mapping, projection_stats, _mapping_stage = _build_canonical_payload_row_mapping(
+        rows=[{"values": row} for row in normalized_rows],
         fields=normalized_fields,
         payload_rows=normalized_payload_rows,
-        strict_raw_ocr_only=True,
         template=template,
     )
     resolved_rows: list[list[str]] = []
     for row_idx, row in enumerate(normalized_rows):
         resolved = list(row)
-        for col_idx in block_total_columns:
-            if 0 <= col_idx < len(resolved):
-                resolved[col_idx] = ""
-        values = projected_rows[row_idx] if row_idx < len(projected_rows) else None
+        payload_idx = row_mapping.get(row_idx)
+        values = normalized_payload_rows[payload_idx] if payload_idx is not None else None
         if isinstance(values, list):
             for col_idx in display_columns:
                 if col_idx >= len(values):
                     continue
-                display_value = _field_value_to_str(values[col_idx]).strip()
-                if not display_value or display_value == "-":
+                display_value = _field_value_to_str(values[col_idx])
+                if col_idx not in block_total_columns and (not display_value.strip() or display_value == "-"):
                     continue
                 while len(resolved) <= col_idx:
                     resolved.append("")
                 resolved[col_idx] = display_value
         resolved_rows.append(resolved)
-    resolved_rows, _structured_helper_stats = _overlay_structured_block_total_cells_onto_sheet_row_lists(
-        rows=resolved_rows,
-        fields=normalized_fields,
-        header=header,
-        raw_payload=raw_payload,
-        template=template,
-    )
     return resolved_rows, projection_stats
 
 
@@ -21880,7 +21209,10 @@ def _resolve_sheet_week_id(
             captured_week=captured["order"].get("week_code"),
             received_at=received_at, lines=order_lines, own_payload=ocr_payload,
         )
-    return _normalize_sheet_week_value(current_week_id)
+    return _resolve_reparse_own_week(
+        captured_week=current_week_id, received_at=received_at,
+        lines=order_lines, own_payload=ocr_payload,
+    )
 
 
 def _apply_order_line_quantities_to_sheet_rows(

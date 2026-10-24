@@ -264,5 +264,7 @@ def test_sheet_output_blocks_unassigned_evidence_and_conflicts() -> None:
     assert "conflicting evidence for target: qty-E11" in sheet["blockers"]
     assert "conflicting assignment cannot enter sheet: E11" in sheet["blockers"]
     assert "unassigned OCR evidence exists: 1" in sheet["blockers"]
+    assert f"hakodate_target_role_unresolved: {evidence[2]['evidence_id']}" in sheet["blockers"]
+    assert "hakodate_ocr_quantity_unresolved" in sheet["blockers"]
     assert sheet["cells"]["E11"]["assignment_state"] == "conflict"
-    assert sheet["summary"]["blocker_count"] == 3
+    assert sheet["summary"]["blocker_count"] == 5

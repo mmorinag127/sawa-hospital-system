@@ -219,7 +219,7 @@ def test_old_attempt_cannot_finish_fail_or_capture_new_attempt(store, payload, r
     assert advances
     assert ingest.get_ingest_job_snapshot(first["id"])["generation"] == selected_generation
     current_job_id, prepared = original_ocr(store, current)
-    assert current_job_id == job_id
+    assert current_job_id != job_id
     new = prepared["ingest_lease"]
     assert new["claim_id"] != old["claim_id"]
     assert new["attempts"] == old["attempts"] + 1
@@ -229,7 +229,8 @@ def test_old_attempt_cannot_finish_fail_or_capture_new_attempt(store, payload, r
     with ingest.ingest_execution_context(old), pytest.raises(ValueError, match="ingest_attempt_changed"):
         guard.capture_nonworkflow_execution(job_id, order_id="not-read", input_reference=payload["pdf_uri"])
     with store() as session:
-        assert session.get(OcrJob, job_id).metrics == prepared
+        assert session.get(OcrJob, current_job_id).metrics == prepared
+        assert session.get(OcrJob, job_id).metrics == before
         assert session.get(IngestJob, first["id"]).claim_id == new["claim_id"]
     assert ingest.get_ingest_job_snapshot(first["id"])["status"] == "done"
     assert prepared["first_pass_terminal_receipt"]["execution_id"] == prepared["nonworkflow_execution"]["execution_id"]
@@ -586,12 +587,14 @@ def test_new_ocr_execution_is_not_adopted_as_old_terminal_result(store, payload,
     authored_pipeline_provider(monkeypatch, table_rows=[["10/07", "昼", "Menu A", "2"]])
     assert process_original(current)["result"] == "business_done"
     current_id, metrics = original_ocr(store, current)
-    assert current_id == job_id
+    assert current_id != job_id
     assert metrics["nonworkflow_execution"]["execution_id"] != original["execution_id"]
     before = ingest.get_ingest_job_snapshot(receipt["id"])
     assert ingest.settle_ingest_ocr_terminal(original) is None
     assert ingest.get_ingest_job_snapshot(receipt["id"]) == before
     assert original_ocr(store, current)[1] == metrics
+    with store() as session:
+        assert session.get(OcrJob, job_id).metrics == old_metrics
 
 
 def test_business_terminal_does_not_consume_ocr_recovery_slots(store, payload, monkeypatch):
@@ -608,12 +611,14 @@ def test_worker_old_capture_failure_does_not_fail_new_prepared_ocr(store, payloa
     uploads.requeue_uploaded_pdf("own-upload")
     current = ingest.get_ingest_job_snapshot(receipt["id"])
     assert process_original(current)["result"] == "durable_handoff"
-    _, prepared_new = original_ocr(store, current)
+    current_job_id, prepared_new = original_ocr(store, current)
+    assert current_job_id != job_id
     assert not ingest.fail_ingest_ocr_capture(old_metrics["ingest_lease"], job_id, ValueError("old capture failed"))
     with store() as session:
-        job = session.get(OcrJob, job_id)
+        job = session.get(OcrJob, current_job_id)
         assert job.status == "awaiting_output"
         assert job.metrics == prepared_new
+        assert session.get(OcrJob, job_id).metrics == old_metrics
     assert ingest.get_ingest_job_snapshot(receipt["id"])["status"] == "processing"
 
 

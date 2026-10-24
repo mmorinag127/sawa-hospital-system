@@ -355,22 +355,21 @@ def test_ocr_history_keeps_evidence_as_diagnostics_not_revision(history_case):
 ])
 def test_stored_terminal_reparse_error_survives_current_reads(history_case, error, stage, old, cache, retained):
     f = history_case()
-    f.confirm()
-    f.job = "OCR-" + f.id
-    metrics = {"request_mode": "llm_reparse", "requested_provider": "gemini", "provider": "gemini",
+    f.queue(job_id="OCR-" + f.id)
+    metrics = {"requested_provider": "gemini", "provider": "gemini",
                "processing_stage": stage, "result_state": "hard_failed", "error": error, "llm_assist": True}
     if retained is not None:
         metrics["confirmed_lines_retained"] = retained
-    # Existing terminal SQL is the read input. No success/claim/receipt is invented,
-    # and this is not proof of the current worker's completion-stage transitions.
-    with session_scope() as session:
-        current = session.get(OrderWorkflowState, f.id)
-        session.add(OcrJob(id=f.job, order_id=f.id, input_reference="stored:history-component",
-            status="failed", error_message=error, metrics=metrics, template_version_id=current.template_version_id,
-            updated_at=datetime.utcnow() - timedelta(minutes=45) if old else datetime.utcnow()))
-        secondary = deepcopy(current.secondary_actions_json)
-        secondary["workflow_v2"]["ocr_job_id"] = f.job
-        current.secondary_actions_json = secondary
+    with f.execution():
+        with session_scope() as session:
+            job = session.get(OcrJob, f.job)
+            job.metrics = {**deepcopy(job.metrics), **metrics}
+        _result, completion_error = order_service._persist_ocr_rerun_completion(
+            f.id, f.job, None, error=error)
+    assert completion_error == error
+    if old:
+        with session_scope() as session:
+            session.get(OcrJob, f.job).updated_at = datetime.utcnow() - timedelta(minutes=45)
     if cache:
         output = {"status": "done", "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|01/08|昼|Menu A|2|"}
         path = f.root / "original-diagnostic-output.json"
@@ -384,7 +383,7 @@ def test_stored_terminal_reparse_error_survives_current_reads(history_case, erro
             session.get(OcrJob, f.job).output_reference = f"file://{path}"
     detail = f.get()
     assert detail["ocr_status"] == "failed" and detail["ocr_error"] == error
-    assert detail["ocr_metrics"]["request_mode"] == "llm_reparse"
+    assert detail["ocr_metrics"]["request_mode"] == "ocr_rerun"
     assert detail["ocr_metrics"]["processing_stage"] == stage
     assert detail["ocr_metrics"]["result_state"] == "hard_failed"
     assert detail["ocr_processing_stage"] == stage
@@ -403,7 +402,7 @@ def test_stored_terminal_reparse_error_survives_current_reads(history_case, erro
         assert history["diagnostics"]["cache"]["payload"] == cached
     attempt = history["latest_reparse_attempt"]
     assert {key: attempt[key] for key in ("job_id", "request_mode", "requested_provider", "provider", "processing_stage", "result_state", "error_message")} == {
-        "job_id": f.job, "request_mode": "llm_reparse", "requested_provider": "gemini", "provider": "gemini",
+        "job_id": f.job, "request_mode": "ocr_rerun", "requested_provider": "gemini", "provider": "gemini",
         "processing_stage": stage, "result_state": "hard_failed", "error_message": error}
     f.get("history")
     with session_scope() as session:

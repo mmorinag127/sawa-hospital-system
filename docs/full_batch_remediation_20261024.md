@@ -296,3 +296,90 @@ Further source/fixture reconciliation (not executed):
   staged review. This is not a test, build, commit or deployment success. The
   next full local batch must use a new clean named verification worktree and
   fresh evidence directories, preserving the earlier failed 7dd source/run.
+
+## Fixed-source 9d batch and aggregate repairs
+
+Source `9d046f3be08ed895ca5cc791a3576812a2de9412` was checked in the
+clean `hospital-batch-verification-20261024` worktree. Evidence is retained at
+`/private/tmp/sawa-hospital-full-9d046f3be08e-20261024-2`.
+All 30 commands finished: 26 returned zero and four did not. Backend collected
+10,116 cases: 9,578 passed, 310 failed, 184 skipped and 44 setup errors, in
+3,491.03 seconds. The browser command was deliberately interrupted after
+repeated obsolete-selector failures: nine passed, 54 failed, one interrupted
+and 74 not run. It is not a full browser success. Config had three failures;
+the C1 guard command had one obsolete bootstrap-list assertion. Actual Linux
+agent checks passed 433 cases; four image proofs and TLS checks passed. These
+results do not establish success for the new dirty repair source.
+
+The following aggregate changes have not been rerun or deployed:
+- Preserve explicit monthly source category (including main-A variants) before
+  meal-slot category resolution, rather than collapsing it to an aggregate.
+- Return the flushed terminal receipt including its real delivery owner.
+- Read workflow candidate identity from a matching successful terminal receipt,
+  not mutable stale diagnostic pointers. Missing/foreign/failed receipts are
+  negative cases; selected values and source records remain unchanged.
+- Distinguish an unavailable selected artifact from an output never produced.
+- Allow workflow diagnostic reads to expose unresolved menu amounts without
+  bypassing quantity calculation or output gates.
+- Derive row-review calendar and boundary count from the explicitly selected
+  period, not a guessed Sunday-to-Saturday range, through producer, validator
+  and UI. Include cross-month and partial-period specimens.
+- Remove the reparse scope heuristic that reselected dates using OCR clusters
+  or old lines. The explicit facility/period and canonical physical menu rows
+  alone determine the scope; missing period/facility/menu is refused.
+- Retain a current refresh's own error across its generation increment while
+  fencing off errors from superseded routes, revisions and refreshes.
+- Bound the sticky date column in the monthly menu table so it does not cover
+  actionable menu cells. Pointer interception is fixed in layout, not bypassed
+  with forced test clicks.
+- Context reconfirmation deleted all OCR evidence while patch/history foreign
+  keys still referenced it. It now invalidates current selection and derived
+  materialized rows without deleting evidence, saved drafts, patch candidates,
+  confirmed snapshots or output-history artifacts. Regression assertions retain
+  every historical row and forbid automatically borrowing an old saved sheet.
+- Update recorded-job mocks, actual ownership fixtures, row calendar inputs,
+  full-source controls and current browser entry labels as one batch. Static
+  header fixtures explicitly identify a static master; generated body fixtures
+  use the real workbook builder rather than manufacturing a schema flag.
+
+The legacy real-PDF geometry cases included facility-14 files assigned to other
+facilities. Their unowned structure path recaptured current JSON and generated a
+workbook without the selected period; that fallback now explicitly refuses a
+missing captured structure. The five old cases are negative contracts that do
+not open those PDFs or invoke recognition, not replacement live-flow proof.
+The manifest's explicitly supplied structure workbook path is retained, as are
+current owned native artifact and numeric-FAX regressions. These changes have
+not been executed. Remaining fixture and implementation groups are still being
+repaired. No new full verification, commit, integration,
+Actions run, billing change or stg deployment is claimed for these edits.
+
+### Auxiliary total transcription follow-up (not yet verified)
+
+The shared display path erased conflicting totals, reanchored values across
+rows, guessed dates by sequence, and derived missing totals from quantities.
+Both display callers now use the existing canonical row identity mapping without
+the raw-table reoverlay or preemptive blanking. Conflict diagnostics no longer
+erase or redistribute cells. The dictionary caller copies nested values before
+writing, so refusal cannot mutate the caller's source. The unused 450-line
+sequence/derived-total helper chain was removed rather than left callable.
+
+The new auxiliary-cell regression covers both callers, unbound raw dates and
+missing dayparts, zero/blank/dash/symbol/full-width values, conflicting totals,
+and identity rejection with input preservation. Existing sequence datasets now
+check preservation rather than inferred totals. No execution success is claimed;
+the known remaining implementation and fixture groups must be finished before
+the serial aggregate verification starts.
+
+An awaiting pipeline resend also stored its new delivery receipt before changing
+the job's old output reference. The ingest flush fence correctly rejected that
+mixed pair. The common receipt writer now updates both in the same transaction,
+without changing original input, ownership, PDF/configured-input checks or
+generation checks. The existing real-ingest resend regression additionally checks
+the persisted handoff pair and rejection of the superseded output.
+
+The blank-rerun regression now checks the actual recognition boundary with an
+explicit operator quantity two in OrderLines. It requires the new evidence to
+remain blank and the old selected evidence, saved draft and every line column to
+remain unchanged. Queue/history fixtures use real queue/claim/completion instead
+of invented current-job pointers; native recovery uses an explicit isolated
+artifact directory. These additions are also unexecuted.

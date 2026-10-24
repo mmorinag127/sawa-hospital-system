@@ -312,17 +312,27 @@ def test_current_repair_actual_cache_write_gate(repair_order, monkeypatch, outco
 
 
 @pytest.mark.parametrize("axis", ["header", "row"])
-def test_axis_actual_save_and_consumption_original_source(repair_order, axis):
+def test_axis_actual_save_and_consumption_original_source(repair_order, monkeypatch, axis):
     from src.services import order_workflow_v2_service as workflow
     order_id, revision, configured = repair_order
     with session_scope() as session:
         order = session.get(Order, order_id)
         state = session.get(OrderWorkflowState, order_id)
+        if axis == "row":
+            order_service._record_current_order_version(session, order, session.get(OrderDocument, order.current_document_id))
         receipt, captured = workflow._axis_source_receipt(session, order, state)
     coordinates = [0, 50, 100]
     save = workflow.save_header_axis_review_decision if axis == "header" else workflow.save_row_axis_review_decision
     key = "corrected_xs" if axis == "header" else "corrected_ys"
-    result, error = save(order_id, **{key: coordinates}, coordinate_space={"width": 100, "height": 100}, source_receipt=receipt, expected_revision=revision)
+    declared = {key: coordinates, "coordinate_space": {"width": 100, "height": 100}}
+    if axis == "row":
+        from tests.helpers.authored_row_axis import install_image_provider, operator_input
+        install_image_provider(monkeypatch)
+        review, error = workflow.get_row_axis_review(order_id)
+        assert error is None, error
+        declared = operator_input(review)
+        coordinates = declared[key]
+    result, error = save(order_id, **declared, source_receipt=receipt, expected_revision=revision)
     assert error is None
     with session_scope() as session:
         state = session.get(OrderWorkflowState, order_id)
@@ -395,6 +405,10 @@ def test_actual_workbook_generation_uses_original_a_during_b_then_a(repair_order
 def test_axis_get_put_consume_get_keeps_original_proof(repair_order, monkeypatch, axis):
     from src.services import order_workflow_v2_service as workflow
     order_id, revision, _ = repair_order
+    if axis == "row":
+        with session_scope() as session:
+            order = session.get(Order, order_id)
+            order_service._record_current_order_version(session, order, session.get(OrderDocument, order.current_document_id))
     key = "corrected_xs" if axis == "header" else "corrected_ys"
     normalize = order_service._normalize_operator_header_axis_override if axis == "header" else order_service._normalize_operator_row_axis_override
     seen = []
@@ -405,19 +419,28 @@ def test_axis_get_put_consume_get_keeps_original_proof(repair_order, monkeypatch
         saved = (start_input["workflow"]["secondary_actions_json"] or {}).get("workflow_v2", {}).get(axis + "_axis_override")
         consumed = normalize(saved, selected_pdf_receipt=source_receipt["selected_pdf_receipt"], configured_input=start_input["configured_input"], order_input_identity=source_receipt["order_input_identity"])
         seen.append(consumed)
-        return {"status": "ready", "saved_override": consumed}
+        geometry = {}
+        if axis == "row":
+            from tests.helpers.authored_row_axis import review_geometry
+            geometry = review_geometry(source_receipt, start_input)
+        return {"status": "ready", "saved_override": consumed, **geometry}
     monkeypatch.setattr(order_service, "build_hakodate_" + axis + "_axis_review", image_provider)
     get = workflow.get_header_axis_review if axis == "header" else workflow.get_row_axis_review
     save = workflow.save_header_axis_review_decision if axis == "header" else workflow.save_row_axis_review_decision
     first, error = get(order_id)
     assert error is None
     original = deepcopy(first["source_receipt"])
-    _, error = save(order_id, **{key: [0, 50, 100]}, coordinate_space={"width": 100, "height": 100}, source_receipt=original, expected_revision=revision)
+    declared = {key: [0, 50, 100], "coordinate_space": {"width": 100, "height": 100}}
+    if axis == "row":
+        from tests.helpers.authored_row_axis import operator_input
+        declared = operator_input(first)
+    _, error = save(order_id, **declared, source_receipt=original, expected_revision=revision)
     assert error is None
     second, error = get(order_id)
     assert error is None
     assert seen[0] is None
-    assert seen[1][key] == [0, 50, 100]
+    assert all(value is None for value in seen[:-1])
+    assert seen[-1][key] == declared[key]
     assert second["saved_override"]["source_receipt"] == original
     assert second["source_receipt"]["geometry_source_digest"] == original["geometry_source_digest"]
     assert second["source_receipt"]["workflow_revision"] != original["workflow_revision"]
@@ -1038,12 +1061,10 @@ def test_connected_preprocess_runtime_producer_serialization_and_adoption(connec
     finally:
         for variable, token in reversed(variables):
             variable.reset(token)
-    assert saved["status"] == ("ready" if value == 0 else "diagnostic_only")
+    assert saved["status"] == "ready"
     from src.services import ocr_evidence_service
     with session_scope() as session:
-        assert ocr_evidence_service.evidence_run_is_selectable(session.get(OrderOcrEvidenceRun, saved["id"])) is (value == 0)
-    if value is None:
-        return
+        assert ocr_evidence_service.evidence_run_is_selectable(session.get(OrderOcrEvidenceRun, saved["id"])) is True
     evidence = json.loads(guard.canonical_snapshot_json(saved))
     current = order_service._capture_synchronous_cache_write_input(order_id)
     order_service._validate_selected_hakodate_artifacts(evidence, current)
@@ -1938,11 +1959,14 @@ def test_actual_daily_bundle_settings_mismatch_before_export(two_accepted_output
     order_ids, output = two_accepted_output_orders
     monkeypatch.setattr(order_service, "list_orders_by_line_date", lambda *args, **kwargs: [{"id": identity} for identity in order_ids])
     monkeypatch.setattr(output.Workbook, "save", lambda *args: pytest.fail("incompatible settings reached export"))
+    before = {path.relative_to(output.OUTPUT_DIR): sha256(path.read_bytes()).hexdigest()
+              for path in output.OUTPUT_DIR.rglob("*") if path.is_file()}
     with pytest.raises(HTTPException) as rejected:
         outputs.download_daily_bundle("2026-10-01", bundle_type=bundle_type)
     assert rejected.value.status_code == 400
     assert "daily_bundle_accepted_settings_mismatch" in rejected.value.detail
-    assert not output.OUTPUT_DIR.exists()
+    assert {path.relative_to(output.OUTPUT_DIR): sha256(path.read_bytes()).hexdigest()
+            for path in output.OUTPUT_DIR.rglob("*") if path.is_file()} == before
 
 
 @pytest.mark.parametrize("two_accepted_output_orders", [{"values": (7, 0, None)}], indirect=True)

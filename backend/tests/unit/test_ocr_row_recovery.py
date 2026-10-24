@@ -8,6 +8,7 @@ from PIL import Image
 from src.services import ocr_row_recovery_service as recovery
 from src.services import hakodate_step_review_pipeline_service as pipeline
 
+WEEK = "2026-10@2026-10-25~2026-10-31"
 
 def plan(first=0, last=6):
     return [{"date": (date(2026, 10, 25) + timedelta(days=i)).isoformat()}
@@ -18,11 +19,12 @@ def authored():
     return {"corrected_ys": [float(i * 10) + 0.123456 for i in range(60)],
             "coordinate_space": {"mode": "template_canvas", "width": 100, "height": 600},
             "body_day_boundary_indexes": list(range(0, 57, 8)),
-            "day_labels": [day["date"] for day in recovery.calendar_contract(plan())]}
+            "day_labels": [day["date"] for day in recovery.calendar_contract(plan(), week_value=WEEK)]}
 
 
 def match(value, rows=None):
     return recovery.manual_match(value, physical_plan=plan() if rows is None else rows,
+                                 week_value=WEEK,
                                  header_bands=3, canvas_height=600, canvas_width=100)
 
 
@@ -40,7 +42,36 @@ def test_partial_week_keeps_blank_physical_bands():
     ys, evidence = match(value, plan(2, 4))
     assert len(ys) == 60
     assert evidence["structural_match"]["detected_body_band_count"] == 56
-    assert recovery.calendar_contract(plan(2, 4))[0]["expected_band_count"] is None
+    assert recovery.calendar_contract(plan(2, 4), week_value=WEEK)[0]["expected_band_count"] is None
+
+
+@pytest.mark.parametrize("period,dates", [
+    ("2026-10@2026-10-26~2026-11-01", ["2026-10-26", "2026-11-01"]),
+    ("2026-10@2026-10-28~2026-10-30", ["2026-10-28", "2026-10-30"]),
+])
+def test_calendar_uses_exact_authored_period_without_sunday_replacement(period, dates):
+    rows = [{"date": day} for day in dates]
+    before = deepcopy(rows)
+    days = recovery.calendar_contract(rows, week_value=period)
+    assert days[0]["date"] == dates[0] and days[-1]["date"] == dates[-1]
+    count = (date.fromisoformat(dates[-1]) - date.fromisoformat(dates[0])).days + 1
+    assert len(days) == count
+    assert rows == before
+    body_count = count
+    value = {"corrected_ys": list(range(body_count + 2)),
+        "coordinate_space": {"mode": "template_canvas", "width": 100, "height": 100},
+        "body_day_boundary_indexes": list(range(body_count + 1)),
+        "day_labels": [day["date"] for day in days]}
+    ys, evidence = recovery.manual_match(value, physical_plan=rows, week_value=period,
+        header_bands=1, canvas_height=100, canvas_width=100)
+    assert ys == value["corrected_ys"]
+    assert evidence["structural_match"]["day_labels"] == value["day_labels"]
+
+
+@pytest.mark.parametrize("period", [None, "2026-10", "2026-10@2026-10-27~2026-10-31"])
+def test_calendar_cannot_guess_a_period_or_accept_rows_outside_it(period):
+    with pytest.raises(ValueError, match="fax_calendar_week_unresolved"):
+        recovery.calendar_contract(plan(), week_value=period)
 
 
 @pytest.mark.parametrize("boundaries", [None, [0, 8, 16, 32, 40, 48, 56], [0, 8, 16, 24, 32, 40, 48, 55],

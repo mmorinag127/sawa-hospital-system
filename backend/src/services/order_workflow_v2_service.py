@@ -2542,7 +2542,7 @@ def confirm_context(
 
         row = existing_workflow or _get_or_create_workflow(session, order.id)
         if existing_workflow is not None and _workflow_has_downstream_lineage(existing_workflow):
-            _delete_all_ocr_and_downstream_after_template_change(session, order.id)
+            _invalidate_ocr_selection_after_template_change(session, order.id)
         revision_error = _apply_context_selection(session, order, row, template_version,
             normalized_facility_id, normalized_week_start, normalized_week_end)
         if revision_error:
@@ -3173,20 +3173,9 @@ def _delete_downstream_after_ocr_change(session: Any, order_id: str, *, preserve
         session.query(OrderSheetDraft).filter(OrderSheetDraft.order_id == order_id).delete(synchronize_session=False)
 
 
-def _delete_all_ocr_and_downstream_after_template_change(session: Any, order_id: str) -> int:
-    workflow = session.get(OrderWorkflowState, order_id)
-    if workflow is not None:
-        workflow.evidence_run_id = None
-        workflow.draft_id = None
-        workflow.confirmed_snapshot_id = None
-    _delete_downstream_after_ocr_change(session, order_id)
-    session.flush()
-    deleted = (
-        session.query(OrderOcrEvidenceRun)
-        .filter(OrderOcrEvidenceRun.order_id == order_id)
-        .delete(synchronize_session=False)
-    )
-    return int(deleted or 0)
+def _invalidate_ocr_selection_after_template_change(session: Any, order_id: str) -> None:
+    _delete_materialized_downstream_rows_for_order(session, order_id)
+    _clear_downstream_references_before_delete(session, order_id, clear_evidence=True)
 
 
 @workflow_command

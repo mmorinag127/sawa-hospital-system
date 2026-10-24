@@ -12,8 +12,12 @@ def add_invalid_projection(session, source_id):
               for column in FacilityTemplateVersion.__table__.columns}
     values.update(id="FTV-invalid-component-" + uuid4().hex, status="invalid",
                   version="invalid-component", activated_at=None)
+    # This is deliberately invalid metadata, not a second valid source digest.
+    values["template_digest"] = "invalid-component:" + values["id"]
     invalid = FacilityTemplateVersion(**values)
     session.add(invalid)
     session.flush()
     assert invalid.facility_id == source.facility_id
+    assert invalid.template_digest != source.template_digest
+    assert invalid.status == "invalid"
     return invalid.id

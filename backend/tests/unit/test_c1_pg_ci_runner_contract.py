@@ -295,7 +295,11 @@ def test_c1_refuses_existing_or_aliased_ownership_without_using_tools(transport,
     with pytest.raises((FileExistsError, ValueError)):
         runner.run(transport.source, '123', '1', 'c1')
     assert not transport.commands
-    assert (transport.root if kind == 'root' else socket.parent if kind == 'parent-link' else socket).exists()
+    assert (transport.root if kind in {'root', 'parent-link'} else socket).exists()
+    if kind == 'parent-link':
+        assert transport.root.is_symlink()
+        assert transport.root.resolve() == target.resolve()
+        assert list(target.iterdir()) == []
 
 
 @pytest.mark.parametrize('suite', ['c1', 'c1-guards', 'menu-identity'])

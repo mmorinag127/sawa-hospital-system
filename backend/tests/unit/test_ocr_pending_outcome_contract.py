@@ -115,6 +115,8 @@ def pending_source(isolated_formal_schema, monkeypatch, tmp_path):
 
 @pytest.fixture
 def native_pending_recovery(pending_source, monkeypatch, tmp_path):
+    monkeypatch.setenv("OCR_ARTIFACT_DIR", str(tmp_path / "native-artifacts"))
+    monkeypatch.delenv("OCR_OUTPUT_BUCKET", raising=False)
     from datetime import datetime
     from pathlib import Path
     from src.db import session_scope
@@ -371,10 +373,15 @@ def test_actual_queue_captures_complete_original_request(monkeypatch, repair_ord
     from src.db import session_scope
     from src.models.ocr_job import OcrJob
     from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
-    from tests.helpers.ingest_original import configure_delivery
+    from tests.helpers.ingest_original import configure_workflow_delivery
+    from src.services import order_workflow_v2_service as workflow
 
-    configure_delivery(monkeypatch)
+    configure_workflow_delivery(monkeypatch)
     order_id, revision, _ = repair_order
+    confirmed, error = workflow.confirm_context(order_id=order_id, facility_id="fixture",
+        week_start="2026-10-05", week_end="2026-10-11", expected_revision=revision)
+    assert error is None, error
+    revision = confirmed["revision"]
     tasks = {}
     class Client:
         def get_task(self, request):
@@ -445,11 +452,13 @@ def test_actual_force_upload_timeout_records_own_delivery_before_wait(owned_pipe
 def test_nonworkflow_new_upload_wait_keeps_original_document_and_request(ingest_pipeline):
     from src.db import session_scope
     from src.models.ocr_job import OcrJob
+    from src.models.ingest_delivery import IngestDelivery
     from src.services import ocr_pipeline_service
     from tests.unit.test_disabled_facility_columns import _snapshot
     from src.db import get_engine
 
     f = ingest_pipeline
+    previous_receipt = deepcopy(f.transport.receipt())
     output = ocr_pipeline_service.run_ocr_pipeline(pdf_bytes=f.pdf, job_id=f.job_id,
         facility_id="authored-facility", input_reference=f.original_uri,
         force_upload=True, wait_for_output=False)
@@ -458,6 +467,16 @@ def test_nonworkflow_new_upload_wait_keeps_original_document_and_request(ingest_
     assert r["selected_pdf_receipt"] == f.selected
     assert r["selected_input_reference"] == f.original_uri
     assert r["input_reference"] == output["input_reference"] != f.original_uri
+    assert r["input_reference"] != previous_receipt["input_reference"]
+    assert r["output_reference"] != previous_receipt["output_reference"]
+    with session_scope() as session:
+        job = session.get(OcrJob, f.job_id)
+        assert job.status == "awaiting_output"
+        assert job.output_reference == r["output_reference"] == output["output_reference"]
+        assert job.metrics["pipeline_delivery_receipt"] == r
+        delivery = session.get(IngestDelivery, f.claim["delivery_id"])
+        assert delivery.handoff_receipt["pipeline_receipt"] == r
+        assert delivery.handoff_receipt["job_id"] == f.job_id
     updated = ocr_job_service.mark_own_pipeline_waiting(
         f.job_id, input_reference=output["input_reference"], output_reference=output["output_reference"],
         error_message="ocr_output_pending", metrics_patch={"processing_stage": "ocr_pipeline"})
@@ -468,6 +487,11 @@ def test_nonworkflow_new_upload_wait_keeps_original_document_and_request(ingest_
         f.job_id, input_reference="gs://bucket/input/foreign.pdf",
         output_reference=output["output_reference"], error_message="ocr_output_pending",
         metrics_patch={"processing_stage": "foreign"}) is None
+    assert _snapshot(get_engine()) == before
+    assert ocr_job_service.mark_own_pipeline_waiting(
+        f.job_id, input_reference=previous_receipt["input_reference"],
+        output_reference=previous_receipt["output_reference"], error_message="old-output",
+        metrics_patch={"processing_stage": "superseded"}) is None
     assert _snapshot(get_engine()) == before
     with session_scope() as session:
         job = session.get(OcrJob, f.job_id)

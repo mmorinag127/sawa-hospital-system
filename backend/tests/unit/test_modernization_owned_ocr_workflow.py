@@ -339,7 +339,7 @@ def test_selected_real_artifacts_stop_after_owned_pdf_document_retirement(owned_
     assert f.receipt["sha256"] == old_receipt["sha256"], "same bytes do not authorize another document"
     result, error = workflow.build_sheet_from_selected_ocr(ORDER)
     assert result is None
-    assert error == "hakodate_artifact_source_mismatch"
+    assert error == "hakodate_original_expectation_changed"
     with db.session_scope() as session:
         assert session.get(OrderWorkflowState, ORDER).evidence_run_id == evidence["id"]
         assert session.get(OrderOcrEvidenceRun, evidence["id"]).payload_json == evidence["payload_json"]

@@ -18,13 +18,12 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils import range_boundaries
 
 from src.services.grid_detector import GridDetectionResult, detect_table_grid
-from src.services import config_service, master_order_form_template_service
+from src.services import master_order_form_template_service
 from src.services.template_field_schema_service import (
     canonical_field_name_from_template_column,
     derive_row_fields_from_template,
 )
 from src.services import workbook_pdf_renderer
-from src.services.workbook_pdf_renderer import render_workbook_path_to_pdf
 
 
 _VALID_STRATEGIES = {"legacy", "hakodate", "both"}
@@ -1430,17 +1429,7 @@ def _worksheet_quantity_column_indexes(worksheet: Any) -> set[int]:
 
 
 def _source_worksheet_for_structure_template(*, facility_id: str, week_sheet_name: str) -> Any:
-    _ = week_sheet_name
-    facility = config_service.get_facility_config(facility_id)
-    if not facility:
-        raise ValueError("facility not found")
-    workbook = master_order_form_template_service.build_facility_template_workbook(
-        facility_config=facility,
-    )
-    sheet_name = master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME
-    if sheet_name not in workbook.sheetnames:
-        raise ValueError(f"facility template sheet not found: {sheet_name}")
-    return workbook[sheet_name]
+    raise ValueError("hakodate_captured_structure_required")
 
 
 def _worksheet_for_manifest_structure_template(
@@ -1468,35 +1457,7 @@ def _structure_grid_for_facility_template(
     week_sheet_name: str,
     dpi: int,
 ) -> tuple[dict[str, Any], Any]:
-    import tempfile
-    from pathlib import Path
-
-    with tempfile.TemporaryDirectory(prefix="hakodate_structure_") as tmp:
-        output_dir = Path(tmp)
-        _ = week_sheet_name
-        facility = config_service.get_facility_config(facility_id)
-        if not facility:
-            raise ValueError("facility not found")
-        structure_xlsx = master_order_form_template_service.build_facility_template_xlsx(
-            facility_config=facility,
-            output_path=output_dir / f"{facility_id}_facility_template.xlsx",
-        )
-        structure_pdf = output_dir / f"{structure_xlsx.stem}.pdf"
-        render_workbook_path_to_pdf(
-            structure_xlsx,
-            output_path=structure_pdf,
-            sheet_name=week_sheet_name,
-            dpi=dpi,
-        )
-        workbook = load_workbook(structure_xlsx, data_only=True)
-        worksheet_name = (
-            master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME
-            if master_order_form_template_service.FACILITY_TEMPLATE_SHEET_NAME in workbook.sheetnames
-            else week_sheet_name
-        )
-        worksheet = workbook[worksheet_name]
-        structure_grid = _structure_grid_from_rendered_worksheet(worksheet, dpi=dpi)
-        return structure_grid, worksheet
+    raise ValueError("hakodate_captured_structure_required")
 
 
 def _structure_grid_from_rendered_worksheet(worksheet: Any, *, dpi: int) -> dict[str, Any]:

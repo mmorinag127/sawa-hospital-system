@@ -143,7 +143,7 @@ def _load_order_payload(order_id: str) -> dict[str, Any] | None:
         return None
     from src.services import order_service as _order_service
 
-    return _order_service.get_order_by_id(normalized_order_id)
+    return _order_service.get_order_by_id(normalized_order_id, allow_unresolved_menu_amount=True)
 
 
 def _latest_confirmed_snapshot_id(order_id: str) -> str | None:
@@ -343,9 +343,16 @@ def _job_candidate_evidence_run_id(reparse_job: dict[str, Any] | None) -> str | 
         return None
     metrics = reparse_job.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
-    if metrics.get("new_evidence_available") is not True:
+    receipt = metrics.get("rerun_terminal_receipt")
+    if not isinstance(receipt, dict):
         return None
-    return str(metrics.get("evidence_run_id") or "").strip() or None
+    if (receipt.get("job_id") != reparse_job.get("id")
+            or receipt.get("order_id") != reparse_job.get("order_id")
+            or receipt.get("workflow_attempt_id") != metrics.get("workflow_attempt_id")
+            or receipt.get("status") != "done" or reparse_job.get("status") != "done"
+            or receipt.get("error") is not None):
+        return None
+    return str(receipt.get("evidence_run_id") or "").strip() or None
 
 
 def _infer_reparse_request_mode(

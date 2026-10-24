@@ -163,7 +163,7 @@ def test_invalid_accepted_invoice_stops_child_without_fabricating_template(owned
         fixture.authored["invoice_template"] = {"columns": []}
     else:
         fixture.authored.pop("invoice_template", None)
-    fixture.republish()
+    fixture.republish(prepare_invoice=False)
     with fixture.session_scope() as session:
         orders._record_current_order_version(
             session, session.get(Order, fixture.order_id), session.get(OrderDocument, "UNIT-DOC"),

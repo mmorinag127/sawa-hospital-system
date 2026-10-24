@@ -170,7 +170,7 @@ def test_synthetic_native_numeric_fax_adoption_save_and_four_packet_stops(numeri
     assert sheet["physical_menu_row_count"] == 56
     assert [[row[sheet["fields"].index(field)] for field in ("date_mmdd", "daypart", "menu")]
             for row in sheet["rows"]] == [
-                [date.fromisoformat(day).strftime("%m/%d"), meal, menu]
+                [date.fromisoformat(day).strftime("%m/%d"), {"朝食": "朝", "昼食": "昼", "夕食": "夕"}[meal], menu]
                 for day, meal, menu in identity["rows"]
             ]
     quantity = sheet["fields"].index("qty.regular_x")

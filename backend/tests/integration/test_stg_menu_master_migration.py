@@ -466,7 +466,8 @@ def test_workflow_gates_both_deploy_surfaces_and_retains_bootstraps():
         assert "continue-on-error" not in jobs[name]
     assert not any(step.get("continue-on-error") for step in gate["steps"])
     commands = [step["run"] for step in jobs["automation-bootstrap"]["steps"] if "run" in step]
-    assert commands == ["bash scripts/bootstrap_automation_user.sh stg", "bash scripts/bootstrap_automation_user.sh stg school-lunch"]
+    assert commands == [gate_commands[0], "bash scripts/bootstrap_automation_user.sh stg",
+                        "bash scripts/bootstrap_automation_user.sh stg school-lunch"]
     source = next(step["run"] for step in jobs["source-gate"]["steps"] if step.get("name") == "Assert staging source")
     for assertion in ('test "${GITHUB_REF_NAME}" = "develop"', 'test -z "$(git status --porcelain)"',
                       'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/develop)"'):

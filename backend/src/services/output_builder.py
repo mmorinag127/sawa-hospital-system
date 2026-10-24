@@ -1298,7 +1298,7 @@ def _apply_menu_entry_overrides(lines: list[dict], menu_entries: list[dict]) -> 
         entry_category = captured_categories[(entry_date.isoformat(), _normalize_output_daypart(entry.get("daypart")), entry["slot_index"])]
         if entry_category:
             updated["menu_category"] = entry_category
-        updated["_monthly_entry_raw_category"] = _normalize_delivery_category_label(entry.get("category"))
+        updated["_monthly_entry_raw_category"] = _menu_entry_category_label(entry)
         updated["_monthly_entry_override_applied"] = True
         updated["_monthly_entry_slot_index"] = entry.get("slot_index")
         updated["_monthly_entry_resolved_category"] = entry_category

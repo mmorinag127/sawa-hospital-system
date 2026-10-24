@@ -199,6 +199,9 @@ def test_build_facility_template_from_master_uses_explicit_header_groups_only(tm
 
 def test_build_facility_template_from_master_applies_configured_two_level_headers(tmp_path: Path, repository_layout_source) -> None:
     resolved = config_service.get_facility_config("FAC00003")
+    quantity_headers = [column["header"] for column in resolved["fax_template"]["columns"]
+                        if column["role"] == "quantity"]
+    assert len(quantity_headers) >= 12
 
     output = service.build_facility_template_xlsx(
         facility_config=resolved,
@@ -217,18 +220,18 @@ def test_build_facility_template_from_master_applies_configured_two_level_header
     assert "M8:N8" in merged_ranges
     assert "O8:P8" in merged_ranges
     assert worksheet["E7"].value == "常食"
-    assert worksheet["E9"].value == "花"
-    assert worksheet["F9"].value == "月"
+    assert worksheet["E9"].value == quantity_headers[0]
+    assert worksheet["F9"].value == quantity_headers[1]
     assert worksheet["G7"].value == "軟菜"
-    assert worksheet["G9"].value == "花"
-    assert worksheet["H9"].value == "月"
+    assert worksheet["G9"].value == quantity_headers[2]
+    assert worksheet["H9"].value == quantity_headers[3]
     assert worksheet["I7"].value == "ミキサー"
-    assert worksheet["I9"].value == "花"
-    assert worksheet["J9"].value == "月"
+    assert worksheet["I9"].value == quantity_headers[4]
+    assert worksheet["J9"].value == quantity_headers[5]
     assert worksheet["K7"].value == "禁食、魚"
     assert worksheet["K8"].value == "常食"
-    assert worksheet["K9"].value == "花"
-    assert worksheet["L9"].value == "月"
+    assert worksheet["K9"].value == quantity_headers[6]
+    assert worksheet["L9"].value == quantity_headers[7]
     assert worksheet["M8"].value == "軟菜"
     assert worksheet["O8"].value == "ミキサー"
     assert _generated_render_width(worksheet, workbook["generated_template_schema"]["B8"].value) == service.SOURCE_GENERATED_PIXEL_WIDTH

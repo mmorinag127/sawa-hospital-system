@@ -320,7 +320,7 @@ def _add_ocr_job(order_id: str, job_id: str = "OCR-job", *, job_order_id: str | 
     return job_id
 
 
-def test_cache_and_evidence_write_use_the_real_captured_workflow_job_and_reject_a_superseded_token(repair_order) -> None:
+def test_captured_workflow_cannot_publish_legacy_table_as_cache_or_evidence(repair_order) -> None:
     order_id, _, _ = repair_order
     job_id = _id("OCR")
     workflow_attempt_id = _id("attempt")
@@ -335,6 +335,7 @@ def test_cache_and_evidence_write_use_the_real_captured_workflow_job_and_reject_
         "output_reference": f"file:///{order_id}.json",
         "table_raw": "|day|quantity|\n|-|-|\n|1|2|",
     }
+    before = database_snapshot()
     with (order_service.workflow_ocr_write_context(workflow_attempt_id, expected_revision),
           guard.workflow_execution_context(job_id, order_id, workflow_attempt_id, expected_revision)):
         persisted = order_service._save_order_ocr_cache(
@@ -345,20 +346,15 @@ def test_cache_and_evidence_write_use_the_real_captured_workflow_job_and_reject_
             refresh_workflow=False,
         )
 
-    assert isinstance(persisted, dict)
-    evidence_id = str(persisted.get("id") or "")
-    assert evidence_id
+    assert persisted is None
+    assert database_snapshot() == before
     with session_scope() as session:
-        cache = session.get(OrderOcrCache, order_id)
-        evidence = session.get(OrderOcrEvidenceRun, evidence_id)
         job = session.get(OcrJob, job_id)
         assert job is not None
-        assert cache is not None
-        assert cache.payload["table_raw"] == payload["table_raw"]
-        assert evidence is not None
         workflow = session.get(OrderWorkflowState, order_id)
         assert workflow is not None
         workflow.revision = expected_revision + 1
+    before_stale = database_snapshot()
 
     with (order_service.workflow_ocr_write_context(workflow_attempt_id, expected_revision),
           guard.workflow_execution_context(job_id, order_id, workflow_attempt_id, expected_revision)):
@@ -371,14 +367,10 @@ def test_cache_and_evidence_write_use_the_real_captured_workflow_job_and_reject_
                 refresh_workflow=False,
             )
 
-    # The actual stale execution context rejects before adopting the 999 payload.
-    with session_scope() as session:
-        cache = session.get(OrderOcrCache, order_id)
-        assert cache is not None
-        assert cache.payload["table_raw"] == payload["table_raw"]
+    assert database_snapshot() == before_stale
 
 
-def test_synchronous_cache_repair_requires_its_operator_read_snapshot(repair_order) -> None:
+def test_synchronous_cache_cannot_replace_canonical_source_with_legacy_table(repair_order) -> None:
     order_id, _, _ = repair_order
     with session_scope() as session:
         workflow = session.get(OrderWorkflowState, order_id)
@@ -402,7 +394,7 @@ def test_synchronous_cache_repair_requires_its_operator_read_snapshot(repair_ord
         persist_evidence=False,
         refresh_workflow=False,
     )
-    assert saved == {}
+    assert saved is None
 
     with session_scope() as session:
         workflow = session.get(OrderWorkflowState, order_id)
@@ -421,7 +413,7 @@ def test_synchronous_cache_repair_requires_its_operator_read_snapshot(repair_ord
     with session_scope() as session:
         cache = session.get(OrderOcrCache, order_id)
         assert cache is not None
-        assert cache.payload["table_raw"] == "|day|quantity|\n|-|-|\n|1|3|"
+        assert cache.payload["table_raw"] == "|day|quantity|\n|-|-|\n|1|2|"
 
 
 @pytest.fixture(autouse=True)
@@ -634,15 +626,66 @@ def _claim_april_job(queued):
     return claim
 
 
-def _complete_owned_april_job(order_id, job_id, queued, payload):
+def _complete_owned_april_job(order_id, job_id, queued, payload, monkeypatch):
+    from src.services import hakodate_cell_ocr_batch_service as batch
+    from src.services.storage_service import load_selected_pdf_bytes
+    from tests.helpers.authored_cell_values import declared_field
+    from test_h2_operator_repair_revision import _provider_output_files
+
     job = queued["ocr_job"]
     revision, attempt = queued["workflow"]["revision"], job["workflow_attempt_id"]
     claim = _claim_april_job(queued)
     with (delivery.claim_context(claim),
           order_service.workflow_ocr_write_context(attempt, revision, job_id, order_id),
           guard.workflow_execution_context(job_id, order_id, attempt, revision)):
-        evidence, error = order_service._persist_ocr_rerun_completion(order_id, job_id, payload)
+        start = guard.processing_start_read_input()
+        pdf = guard.processing_start_pdf_receipt()
+        sheet, = payload["tables"]
+        fields = sheet["fields"]
+        declared = {}
+        for row in sheet["rows"]:
+            day = order_service.parse_date_string(row[fields.index("date")], datetime(2026, 4, 26),
+                explicit_week=start["order"]["week_code"])
+            identity = (day.isoformat(), order_service._normalize_daypart_key(row[fields.index("daypart")]),
+                        order_service._normalize_menu_text(row[fields.index("menu")]))
+            assert identity not in declared
+            declared[identity] = row
+
+        def manifest(**_kwargs):
+            return {"configured_input": deepcopy(start["configured_input"]),
+                    "selected_pdf_receipt": deepcopy(pdf),
+                    "_verified_pdf_bytes": load_selected_pdf_bytes(pdf["storage_uri"], pdf)}
+
+        calls = []
+
+        def recognize(*, item, output_dir, **_kwargs):
+            regions = [{**deepcopy(region), "bbox": [index * 20, 0, index * 20 + 10, 10]}
+                       for index, region in enumerate(item["original_target_semantics"])]
+            values = {}
+            for region in regions:
+                assigned = set()
+                for target in region["logical_targets"]:
+                    identity = (target["date"], order_service._normalize_daypart_key(target["daypart"]),
+                                order_service._normalize_menu_text(target["menu_name"]))
+                    assert identity in declared
+                    assigned.add(str(declared[identity][fields.index(declared_field(target, fields))]))
+                assert len(assigned) == 1
+                values[region["sheet_cell"]] = assigned.pop()
+            records = [{**region, "ocr_text": values[region["sheet_cell"]], "recognizer_score": 1.0,
+                        "recognizer_accepted_candidate": {"normalized_digits": values[region["sheet_cell"]]}}
+                       for region in regions]
+            calls.append(regions)
+            return SimpleNamespace(metrics={"expected_sheet_cells": item["original_expected_sheet_cells"]},
+                expected_sheet_cells=tuple(item["original_expected_sheet_cells"]),
+                outputs=_provider_output_files(output_dir, records=records, regions=regions, sheet_values=values),
+                ocr_engine="component-external-recognizer"), None
+
+        monkeypatch.setattr(order_service, "_build_live_hakodate_manifest_item", manifest)
+        monkeypatch.setattr(batch, "build_hakodate_best_method_for_manifest_item", recognize)
+        evidence, error = order_service.rerun_ocr_evidence_only(
+            order_id, job_id=job_id, project_sheet=False, refresh_workflow=False)
     assert error is None, error
+    assert len(calls) == 1
     return evidence, order_workflow_v2_service.get_workflow(order_id)[0]
 
 
@@ -1204,7 +1247,7 @@ def test_template_version_lineage_flows_to_job_evidence_draft_and_snapshot(monke
     queued = reservation["workflow"]
     assert queued["template_version_id"] == template_version_id
 
-    evidence, completed = _complete_owned_april_job(order_id, job_id, reservation, {"tables": [sheet]})
+    evidence, completed = _complete_owned_april_job(order_id, job_id, reservation, {"tables": [sheet]}, monkeypatch)
     evidence_id_1 = evidence["id"]
     assert completed["state"] == "ocr_completed"
 
@@ -1707,7 +1750,7 @@ def test_mark_ocr_run_completed_preserves_context_and_does_not_select_result(mon
     })
     queued = _queue_owned_april_job(order_id, "OCR-job", tmp_path, monkeypatch)
     evidence, completed = _complete_owned_april_job(order_id, "OCR-job", queued,
-                                                   {"pipeline_version": "test-pipeline", "tables": [original_base]})
+                                                   {"pipeline_version": "test-pipeline", "tables": [original_base]}, monkeypatch)
     evidence_id_1 = evidence["id"]
     assert error is None
     assert completed["state"] == "ocr_completed"
@@ -2234,7 +2277,7 @@ def test_changing_selected_ocr_deletes_confirmed_snapshot_too(monkeypatch, april
         assert session.get(OrderConfirmedSnapshot, snapshot_id) is None
 
 
-def test_reconfirming_step1_deletes_existing_ocr_and_downstream(monkeypatch, april_output_context) -> None:
+def test_reconfirming_step1_invalidates_current_selection_without_deleting_saved_history(monkeypatch, april_output_context) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -2260,6 +2303,9 @@ def test_reconfirming_step1_deletes_existing_ocr_and_downstream(monkeypatch, apr
     confirmed, error = order_workflow_v2_service.final_confirm(order_id, confirmed_by="tester", expected_revision=_current_workflow_revision(order_id))
     assert error is None
     snapshot_id = confirmed["confirmed_snapshot_id"]
+    history_tables = {"order_ocr_evidence_runs", "order_sheet_drafts", "order_sheet_patch_candidates",
+                      "order_confirmed_snapshots", "order_bagging_results", "order_output_bundles", "order_ocr_revisions"}
+    before_reconfirm = database_snapshot()
 
     workflow, error = order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -2275,10 +2321,14 @@ def test_reconfirming_step1_deletes_existing_ocr_and_downstream(monkeypatch, apr
     assert workflow["selected_ocr_result_id"] is None
     assert workflow["saved_sheet_id"] is None
     assert workflow["confirmed_snapshot_id"] is None
+    after_reconfirm = database_snapshot()
+    assert {name: after_reconfirm[name] for name in history_tables} == {
+        name: before_reconfirm[name] for name in history_tables
+    }
     with session_scope() as session:
-        assert session.get(OrderOcrEvidenceRun, evidence_id_1) is None
-        assert session.get(OrderSheetDraft, saved_sheet_id) is None
-        assert session.get(OrderConfirmedSnapshot, snapshot_id) is None
+        assert session.get(OrderOcrEvidenceRun, evidence_id_1) is not None
+        assert session.get(OrderSheetDraft, saved_sheet_id) is not None
+        assert session.get(OrderConfirmedSnapshot, snapshot_id) is not None
         assert session.query(OrderLine).filter(OrderLine.order_id == order_id).count() == 0
         assert session.get(Order, order_id).status == "要確認"
 

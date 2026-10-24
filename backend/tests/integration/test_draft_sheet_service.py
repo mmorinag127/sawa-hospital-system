@@ -981,7 +981,7 @@ def test_unowned_rerun_cannot_publish_partial_pipeline_output(authored_sheet_cas
         assert retained.base_evidence_run_id == case.evidence
 
 
-def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch, authored_sheet_case) -> None:
+def test_rerun_ocr_evidence_only_completes_actual_generated_job_identity(monkeypatch, authored_sheet_case) -> None:
     case = authored_sheet_case(quantity=3, produce=False)
     prepare_rerun(case, cell_values="9")
     order = {"id": case.id}
@@ -991,8 +991,9 @@ def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch, autho
 
     assert error is None
     assert isinstance(rerun, dict)
-    job = order_service.get_ocr_job(f"OCR-{order['id']}")
+    job = order_service.get_ocr_job(case.job)
     assert isinstance(job, dict)
+    assert job["id"] == case.job
     assert job["status"] == "done"
     metrics = job.get("metrics") or {}
     assert metrics.get("result_state") == "evidence_ready"
@@ -1001,9 +1002,9 @@ def test_rerun_ocr_evidence_only_marks_output_wait_as_running(monkeypatch, autho
     assert latest_evidence["producer_version"] == "hakodate_best_method_pipeline"
 
 
-def test_rerun_ocr_evidence_only_async_trigger_marks_job_awaiting_output(monkeypatch, authored_sheet_case) -> None:
+def test_rerun_ocr_evidence_only_completes_actual_explicit_job_identity(monkeypatch, authored_sheet_case) -> None:
     case = authored_sheet_case(quantity=3, produce=False)
-    prepare_rerun(case, cell_values="9")
+    case.prepare_provider(cell_values="9", job_id="explicit-owned-native-job")
     order = {"id": case.id}
 
     with case.execution():
@@ -1011,8 +1012,9 @@ def test_rerun_ocr_evidence_only_async_trigger_marks_job_awaiting_output(monkeyp
 
     assert error is None
     assert isinstance(rerun, dict)
-    job = order_service.get_ocr_job(f"OCR-{order['id']}")
+    job = order_service.get_ocr_job(case.job)
     assert isinstance(job, dict)
+    assert job["id"] == case.job == "explicit-owned-native-job"
     assert job["status"] == "done"
     metrics = job.get("metrics") or {}
     assert metrics.get("result_state") == "evidence_ready"

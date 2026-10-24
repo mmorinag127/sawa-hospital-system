@@ -21,6 +21,7 @@ from src.services import ocr_job_service, order_service
 from src.services import order_workflow_v2_service as workflow
 from src.services import recorded_hospital_job_status as adapter
 from test_modernization_explicit_ocr_quantity_contract import PublicSavedCandidate
+from tests.helpers.authored_sheet_case import authored_sheet_case  # noqa: F401
 
 BASE = "4d0e6319d3e84e392389755041a89a872ff97d29"
 ROOT = Path(__file__).resolve().parents[3]
@@ -30,8 +31,8 @@ def functions(text):
     return {node.name: node for node in ast.parse(text).body if isinstance(node, ast.FunctionDef)}
 
 
-def original_functions(path):
-    return functions(subprocess.check_output(["git", "show", f"{BASE}:{path}"], cwd=ROOT).decode())
+def original_functions(path, *, source=BASE):
+    return functions(subprocess.check_output(["git", "show", f"{source}:{path}"], cwd=ROOT).decode())
 
 
 def test_single_adapter_is_exact_original_and_both_consumers_share_it():
@@ -43,11 +44,11 @@ def test_single_adapter_is_exact_original_and_both_consumers_share_it():
     assert workflow._recorded_hospital_job_status is adapter._recorded_hospital_job_status
 
 
-def test_existing_backend_functions_are_unchanged_except_additive_workflow_projection():
+def test_workflow_serializer_preserves_approved_receipt_and_recorded_job_projection():
     # Scope this extraction contract to the adapter addition. Approved workflow,
     # receipt, saved-source and CAS fixes have their own behavioral regressions.
     path = "backend/src/services/order_workflow_v2_service.py"
-    original = original_functions(path)["_serialize_workflow"]
+    original = original_functions(path, source="9d046f3be08ed895ca5cc791a3576812a2de9412")["_serialize_workflow"]
     current = functions((ROOT / path).read_text())["_serialize_workflow"]
     original_result = next(node for node in original.body if isinstance(node, ast.Return)).value
     result = next(node for node in current.body if isinstance(node, ast.Return)).value
@@ -58,8 +59,6 @@ def test_existing_backend_functions_are_unchanged_except_additive_workflow_proje
     index = next(i for i, key in enumerate(result.keys)
                  if isinstance(key, ast.Constant) and key.value == "common_job_status")
     assert ast.unparse(result.values[index]) == "_recorded_workflow_job_status(row, meta, ocr_job)"
-    del result.keys[index]
-    del result.values[index]
     assert ast.dump(current) == ast.dump(original)
     assert callable(workflow._recorded_workflow_job_status)
     assert order_service._recorded_hospital_job_status is workflow._recorded_hospital_job_status
@@ -139,13 +138,13 @@ def test_owned_record_without_optional_references_remains_missing():
 
 
 def snapshot(fixture):
-    with fixture.session_scope() as session:
-        return {table.name: deepcopy([dict(row) for row in session.execute(
+    with fixture.engine.connect() as connection:
+        return {table.name: deepcopy([dict(row) for row in connection.execute(
             select(table).order_by(*table.primary_key.columns)).mappings()])
             for table in db.Base.metadata.sorted_tables}
 
 
-def test_real_readonly_workflow_uses_selected_job_not_newer_record_and_never_writes(tmp_path, monkeypatch):
+def test_readonly_workflow_refuses_unowned_job_pointer_without_borrowing_newer_record(tmp_path, monkeypatch):
     fixture = PublicSavedCandidate(tmp_path, monkeypatch)
     try:
         fixture.save(["7", "", "", "0"], enabled=True)
@@ -186,13 +185,44 @@ def test_real_readonly_workflow_uses_selected_job_not_newer_record_and_never_wri
         assert response.status_code == 200, response.text
         assert response.json()["common_job_status"] == result["common_job_status"]
         assert response.json()["ocr_job"] == result["ocr_job"]
-        assert result["ocr_job"]["ocr_job_id"] == "selected-A"
-        assert result["common_job_status"]["jobId"] == "selected-A"
-        assert result["common_job_status"]["attemptIdentity"] == "attempt-A"
-        assert result["common_job_status"]["state"] == "failed"
-        assert result["common_job_status"]["failure"]["message"] == "selected failure"
+        assert result["ocr_job"] is None
+        assert result["common_job_status"] is None
         assert not set(statements) & {"INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "REPLACE"}
         assert snapshot(fixture) == before
         assert [row[4] for row in fixture.saved()["rows"]] == ["7", "", "", "0"]
     finally:
         fixture.engine.dispose()
+
+
+def test_real_owned_failed_job_read_does_not_borrow_newer_unowned_record(authored_sheet_case):
+    fixture = authored_sheet_case(quantity=0, include_remarks=True,
+        cell_values=lambda region: "" if region["role"] == "note" else "0")
+    fixture.save(fixture.selected_sheet)
+    saved = order_service.get_current_sheet_context(fixture.id)
+    fixture.prepare_provider()
+    selected_job = fixture.job
+    attempt = fixture.queued["ocr_job"]["workflow_attempt_id"]
+    with fixture.execution():
+        _result, error = order_service._persist_ocr_rerun_completion(
+            fixture.id, selected_job, None, error="selected failure")
+    assert error == "selected failure"
+    now = datetime.utcnow() + timedelta(minutes=1)
+    with db.session_scope() as session:
+        session.add(OcrJob(id="newer-unowned", order_id=fixture.id, status="done",
+            metrics={"workflow_attempt_id": "unowned-attempt"}, created_at=now, updated_at=now))
+    before = snapshot(fixture)
+    with fixture.readonly():
+        result, error = workflow.get_workflow_readonly(fixture.id)
+        response = fixture.get("workflow-v2")
+        assert error is None
+        assert response["common_job_status"] == result["common_job_status"]
+        assert response["ocr_job"] == result["ocr_job"]
+        assert result["ocr_job"]["ocr_job_id"] == selected_job
+        assert result["common_job_status"]["jobId"] == selected_job
+        assert result["common_job_status"]["attemptIdentity"] == attempt
+        assert result["common_job_status"]["state"] == "failed"
+        assert result["common_job_status"]["failure"]["message"] == "selected failure"
+        current = order_service.get_current_sheet_context(fixture.id)
+        assert current["draft_id"] == saved["draft_id"]
+        assert current["rows"] == saved["rows"] == [["03/22", "朝", "Menu A", "0", ""]]
+    assert snapshot(fixture) == before

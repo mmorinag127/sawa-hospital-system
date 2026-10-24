@@ -399,6 +399,7 @@ def test_best_method_entrypoint_uses_accepted_best_method_runtime(monkeypatch, t
 def _component_captured_config(template_id):
     """Authored helper input only, not evidence of the production capture path."""
     return {"policy": {}, "facility": {
+        "facility_id": "FAC00010",
         "fax_template_id": template_id,
         "fax_template": {"template_id": template_id, "page": 1, "columns": [
             {"index": 4, "source_index": 4, "role": "quantity", "diet_type": "regular"},

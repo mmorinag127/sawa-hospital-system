@@ -66,6 +66,7 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     if (!/^Bearer menu-test-[AB]$/.test(bearer)) return respond(401, { detail: "Synthetic Bearer required" });
     if (path === "/auth/me") return respond(200, { role: "admin", auth_disabled: false });
     if (path === "/portal/auth/me") return respond(200, { role: "admin", systems: ["hospital"], auth_disabled: false });
+    if (path === "/staging-datasets" && method === "GET") return respond(200, { enabled: false });
     if (path === "/menu-rules") return respond(200, { items: [] });
     if (path === "/menu-masters" && method === "GET") {
       if (state.listStatus !== 200) return respond(state.listStatus, { detail: "synthetic list failure" });
@@ -159,7 +160,7 @@ for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
     await edit.getByRole("spinbutton", { name: "袋上限数量", exact: true }).fill("");
     await option(page, edit, "温冷", "温");
     await field(edit, "食事帯").fill("夕"); await field(edit, "分類").fill("魚"); await field(edit, "付属品").fill("ソース");
-    const update = { name: "白身魚の保存値", unit_type: "count", bag_max_unit: "cut", qty_per_serving: 2, bag_max_qty: null, temp_type: "hot", daypart: "夕", category: "魚", condiments: ["ソース"], revision: 1 };
+    const update = { name: "白身魚の保存値", unit_type: "count", bag_max_unit: "cut", qty_per_serving: 2, bag_max_qty: null, daypart: "夕", category: "魚", condiments: ["ソース"], revision: 1 };
     await save(edit); await saved(edit); expect(s.requests.find(r => r.method === "PUT")?.body).toEqual(update);
     const before = await page.evaluate(() => performance.timeOrigin);
     expect((await page.reload())?.status()).toBe(200);
@@ -175,7 +176,7 @@ for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
     await expect(field(editForm(page), "食事帯")).toHaveValue("夕");
     await expect(field(editForm(page), "分類")).toHaveValue("魚");
     await expect(field(editForm(page), "付属品")).toHaveValue("ソース");
-    expect(s.items[0]).toMatchObject({ ...update, revision: 2 });
+    expect(s.items[0]).toMatchObject({ ...update, temp_type: "hot", revision: 2 });
     const savedRow = page.getByRole("row").filter({ has: page.getByRole("cell", { name: update.name, exact: true }) });
     await expect(savedRow.getByRole("cell")).toHaveText([update.name, "個", "2", "—", "切れ", "温", "夕", "魚", "ソース", "編集"]);
     const createdRow = page.getByRole("row").filter({ has: page.getByRole("cell", { name: payload.name, exact: true }) });

@@ -6,23 +6,6 @@ from PIL import Image
 import pytest
 
 
-_REAL_PDF_FIELDS = [
-    "date",
-    "daypart",
-    "aux",
-    "menu_name",
-    "qty.regular_x",
-    "qty.staff_x",
-    "qty.no_meat_x",
-    "qty.no_fish_x",
-    "qty.change_1_x",
-    "qty.change_2_x",
-    "note",
-    "spacer",
-]
-_REAL_PDF_WEEK = "4月26日～4月30日"
-
-
 def _template() -> dict:
     template = {
         "quantity_assignment_strategy": "hakodate",
@@ -81,27 +64,30 @@ def _structure_slot_template(skeleton_rows: list[dict] | None = None) -> dict:
     return template
 
 
-def _structure_slot_worksheet():
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet.cell(row=7, column=1, value="日付")
-    worksheet.cell(row=7, column=2, value="区分")
-    worksheet.cell(row=7, column=3, value="補助")
-    worksheet.cell(row=7, column=4, value="献立")
-    worksheet.cell(row=7, column=5, value="常食")
-    worksheet.cell(row=11, column=1, value="4/26")
-    worksheet.cell(row=11, column=2, value="朝")
-    worksheet.cell(row=11, column=4, value="献立A")
-    return worksheet
+def _structure_slot_worksheet(*, names=("献立A",), merged=False):
+    from datetime import date
+    from src.services import master_order_form_template_service as master
+
+    template = {"columns": [
+        {"index": 0, "role": "date"}, {"index": 1, "role": "daypart"},
+        {"index": 3, "role": "menu_name", "header": "献立"},
+        {"index": 4, "role": "quantity", "diet_type": "regular", "area_id": "X",
+         "header": "常食", "name": "qty.regular_x"},
+    ]}
+    if merged:
+        template["body_merge_policy"] = {"mode": "daypart", "columns": ["qty.regular_x"], "required": True}
+    workbook = master.build_facility_template_workbook(
+        facility_config={"facility_id": "FAC_TEST", "fax_template": template},
+        week_value="2026-04@2026-04-26~2026-04-26",
+        week_menu_entries=[{"menu_date": date(2026, 4, 26), "daypart": "朝", "name": name,
+                            "slot_index": index, "diet_type": "regular"}
+                           for index, name in enumerate(names)],
+    )
+    return workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
 
 
 def _merged_structure_slot_worksheet():
-    worksheet = _structure_slot_worksheet()
-    worksheet.cell(row=12, column=1, value="4/26")
-    worksheet.cell(row=12, column=2, value="朝")
-    worksheet.cell(row=12, column=4, value="献立B")
-    worksheet.merge_cells("E11:E12")
-    return worksheet
+    return _structure_slot_worksheet(names=("献立A", "献立B"), merged=True)
 
 
 def test_template_slot_label_includes_header_super_group_for_area_quantity_columns() -> None:
@@ -119,56 +105,40 @@ def test_template_slot_label_includes_header_super_group_for_area_quantity_colum
     assert label == "禁食、魚 常食花"
 
 
-def _real_pdf_skeleton_rows(facility_id: str) -> list[dict]:
-    worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
-        facility_id=facility_id,
-        week_sheet_name=_REAL_PDF_WEEK,
-    )
-    rows = hakodate_assignment_service._workbook_physical_row_map(  # noqa: SLF001
-        worksheet,
-        row_count=59,
-    )
-    return [
-        {
-            "row_id": f"{facility_id}-r{row_index}",
-            "date": row.get("effective_date") or row.get("date") or "",
-            "daypart": row.get("daypart") or "",
-            "menu_name": row.get("menu_name") or "",
-        }
-        for row_index, row in sorted(rows.items())
-    ]
+def test_structure_source_cannot_recapture_current_facility_when_captured_workbook_is_missing(monkeypatch) -> None:
+    from src.services import config_service
+
+    monkeypatch.setattr(config_service, "get_facility_config",
+        lambda *_args, **_kwargs: pytest.fail("current facility must not replace the captured workbook"))
+    with pytest.raises(ValueError, match="^hakodate_captured_structure_required$"):
+        hakodate_assignment_service._source_worksheet_for_structure_template(
+            facility_id="FAC00007", week_sheet_name="4月26日～4月30日")
+    with pytest.raises(ValueError, match="^hakodate_captured_structure_required$"):
+        hakodate_assignment_service._worksheet_for_manifest_structure_template(
+            item={}, facility_id="FAC00007", week_sheet_name="4月26日～4月30日")
 
 
-def _real_pdf_template(facility_id: str, debug_dir: Path) -> tuple[dict, list[dict]]:
-    skeleton_rows = _real_pdf_skeleton_rows(facility_id)
-    template = {
-        "facility_id": facility_id,
-        "quantity_assignment_strategy": "hakodate",
-        "hakodate_alignment_mode": "structure_slot",
-        "hakodate_week_sheet_name": _REAL_PDF_WEEK,
-        "hakodate_header_rows": 2,
-        "hakodate_data_row_count": len(skeleton_rows),
-        "hakodate_structure_dpi": 200,
-        "hakodate_debug_output_dir": str(debug_dir),
-        "main_ocr_row_fields": list(_REAL_PDF_FIELDS),
-    }
-    signature = hakodate_assignment_service.build_facility_template_signature(
-        template,
-        facility_id=facility_id,
-        skeleton_rows=skeleton_rows,
-    )
-    template["hakodate_template_signature"] = signature["hash"]
-    template["hakodate_template_signature_components"] = signature["components"]
-    return template, skeleton_rows
+def test_manifest_uses_declared_generated_workbook_without_recapturing_facility(monkeypatch, tmp_path):
+    from copy import deepcopy
+    from src.services import config_service, master_order_form_template_service as master
 
-
-def test_structure_template_source_worksheet_uses_explicit_facility_merged_template(repository_layout_source) -> None:
-    worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
-        facility_id="FAC00007",
-        week_sheet_name="4月26日～4月30日",
-    )
-
-    assert "E11:E12" in {str(item) for item in worksheet.merged_cells.ranges}
+    worksheet = _merged_structure_slot_worksheet()
+    path = tmp_path / "captured-structure.xlsx"
+    worksheet.parent.save(path)
+    item = {"template_xlsx": str(path), "template_sheet_name": worksheet.title}
+    before = deepcopy(item)
+    original = path.read_bytes()
+    monkeypatch.setattr(config_service, "get_facility_config",
+        lambda *_args, **_kwargs: pytest.fail("captured workbook must not recapture current facility"))
+    selected = hakodate_assignment_service._worksheet_for_manifest_structure_template(
+        item=item, facility_id="FAC_TEST", week_sheet_name="not-a-selected-sheet")
+    assert selected["D11"].value == "献立A"
+    assert selected["D12"].value == "献立B"
+    assert "E11:E12" in {str(region) for region in selected.merged_cells.ranges}
+    assert len(master.validated_body_row_plan(selected)) == 2
+    assert item == before and path.read_bytes() == original
+    selected.parent.close()
+    worksheet.parent.close()
 
 
 def test_merge_aware_grid_segments_suppress_internal_merged_quantity_edge() -> None:
@@ -182,6 +152,7 @@ def test_merge_aware_grid_segments_suppress_internal_merged_quantity_edge() -> N
         column_edges=column_edges,
         quantity_columns={5},
     )
+    regions = [region for region in regions if region["is_quantity"] and region["min_row"] >= 11]
     segments = hakodate_assignment_service._merge_aware_grid_line_segments(  # noqa: SLF001
         row_edges=row_edges,
         column_edges=column_edges,
@@ -566,8 +537,11 @@ def test_structure_slot_assignment_uses_merged_quantity_bbox_for_each_spanned_ro
 
 
 def test_column_slots_detect_diabetes_quantity_from_template_header() -> None:
+    from src.services.master_order_form_template_service import MASTER_SHEET_NAME
+
     workbook = Workbook()
     worksheet = workbook.active
+    worksheet.title = MASTER_SHEET_NAME
     worksheet.cell(row=7, column=1, value="日付")
     worksheet.cell(row=7, column=2, value="区分")
     worksheet.cell(row=7, column=4, value="献立")
@@ -586,8 +560,11 @@ def test_column_slots_detect_diabetes_quantity_from_template_header() -> None:
 
 
 def test_column_slots_do_not_treat_logical_template_index_as_physical_column() -> None:
+    from src.services.master_order_form_template_service import MASTER_SHEET_NAME
+
     workbook = Workbook()
     worksheet = workbook.active
+    worksheet.title = MASTER_SHEET_NAME
     worksheet.cell(row=7, column=1, value="日付")
     worksheet.cell(row=7, column=2, value="区分")
     worksheet.cell(row=7, column=3, value="区分")
@@ -683,91 +660,43 @@ def test_structure_slot_assignment_blocks_when_detected_table_box_is_invalid(mon
     assert "structure_alignment_box_missing" in result["blockers"]
 
 
-@pytest.mark.parametrize(
-    ("case_name", "facility_id", "pdf_path", "expected_col_source", "expected_status"),
-    [
-        (
-            "fac14_stg_corrected",
-            "FAC00014",
-            Path("/Users/mmorinag/Sawa/2025.12/workspace/tmp/stg_fac14_compare/stg_corrected.pdf"),
-            "detected_template_matched",
-            "auto_assignable",
-        ),
-        (
-            "fac14_fax000364233",
-            "FAC00014",
-            Path("/Users/mmorinag/Sawa/2025.12/tmp/reupload_legacy_split/19.fax000364233_0426_0501_.pdf"),
-            "detected_template_matched",
-            "auto_assignable",
-        ),
-        (
-            "fac01_degraded_document2",
-            "FAC00001",
-            Path("/Users/mmorinag/Downloads/Document (2).pdf"),
-            "structure_table_box_projection",
-            "blocked",
-        ),
-        (
-            "fac02_sibling_stg_corrected",
-            "FAC00002",
-            Path("/Users/mmorinag/Sawa/2025.12/workspace/tmp/stg_fac14_compare/stg_corrected.pdf"),
-            "detected_template_matched",
-            "auto_assignable",
-        ),
-        (
-            "fac07_sibling_stg_corrected",
-            "FAC00007",
-            Path("/Users/mmorinag/Sawa/2025.12/workspace/tmp/stg_fac14_compare/stg_corrected.pdf"),
-            "detected_template_matched",
-            "auto_assignable",
-        ),
-    ],
-)
-def test_structure_slot_real_pdfs_cover_representative_degraded_and_sibling_cases(
-    monkeypatch,
-    tmp_path,
-    repository_layout_source,
-    case_name: str,
-    facility_id: str,
-    pdf_path: Path,
-    expected_col_source: str,
-    expected_status: str,
-) -> None:
-    if not pdf_path.exists():
-        pytest.skip(f"local verification PDF not found: {pdf_path}")
+@pytest.mark.parametrize("case_name,facility_id", [
+    ("fac14_stg_corrected", "FAC00014"),
+    ("fac14_fax000364233", "FAC00014"),
+    ("fac01_degraded_document2", "FAC00001"),
+    ("fac02_sibling_stg_corrected", "FAC00002"),
+    ("fac07_sibling_stg_corrected", "FAC00007"),
+])
+def test_legacy_structure_cases_require_captured_workbook_before_reading_or_recognizing_pdf(
+    monkeypatch, case_name, facility_id,
+):
+    from copy import deepcopy
+    from src.services import config_service
 
-    def fake_cell_ocr(**_kwargs):
-        return hakodate_assignment_service.HakodateCellOcrResult(text="1", normalized="1")
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("unowned legacy structure must stop before source reread or recognition")
 
-    monkeypatch.setattr(hakodate_assignment_service, "_ocr_quantity_cell", fake_cell_ocr)
-    template, skeleton_rows = _real_pdf_template(facility_id, tmp_path / case_name)
+    monkeypatch.setattr(config_service, "get_facility_config", forbidden)
+    monkeypatch.setattr(hakodate_assignment_service, "detect_table_grid", forbidden)
+    monkeypatch.setattr(hakodate_assignment_service, "_ocr_quantity_cell", forbidden)
+    monkeypatch.setattr(hakodate_assignment_service, "_render_pdf_page_image", forbidden)
+    skeleton_rows = [{"row_id": case_name, "date": "2026-04-26", "daypart": "朝", "menu_name": "Synthetic menu"}]
+    template = _structure_slot_template(skeleton_rows)
+    template["facility_id"] = facility_id
+    signature = hakodate_assignment_service.build_facility_template_signature(
+        template, facility_id=facility_id, skeleton_rows=skeleton_rows)
+    template["hakodate_template_signature"] = signature["hash"]
+    template["hakodate_template_signature_components"] = signature["components"]
+    before = deepcopy((template, skeleton_rows))
 
     result = hakodate_assignment_service.build_structure_slot_assignment_from_pdf(
-        pdf_bytes=pdf_path.read_bytes(),
-        template=template,
-        strategy="hakodate",
-        skeleton_rows=skeleton_rows,
-    )
+        pdf_bytes=b"", template=template, strategy="hakodate", skeleton_rows=skeleton_rows)
 
-    slot_grid = result["grid"]["actual_structure_slot_grid"]
-    assert result["status"] == expected_status
-    if expected_status == "blocked":
-        assert result["blockers"] == ["structure_slot_alignment_unverified_by_actual_cell_grid"]
-    else:
-        assert result["blockers"] == []
-        assert result["metrics"]["structure_grid_row_count"] == 59
-        assert result["metrics"]["structure_grid_column_count"] == 12
-    assert len(slot_grid["row_edges"]) == 60
-    assert len(slot_grid["column_edges"]) == 13
-    assert slot_grid["row_edges_source"] == "dense_horizontal_lines"
-    assert slot_grid["column_edges_source"] == expected_col_source
-    if expected_status == "auto_assignable":
-        assert result["metrics"]["assigned_count"] > 0
-        assert result["metrics"]["review_count"] == 0
-    else:
-        assert result["metrics"]["assigned_count"] == 0
-        assert result["metrics"]["review_count"] == 0
-        assert "structure_slot_alignment_blocked" in result["warnings"]
-        assert "artifacts" not in result
-        return
-    assert Path(result["artifacts"]["overlay_image_path"]).exists()
+    assert result["status"] == "blocked"
+    assert result["blockers"] == ["hakodate_captured_structure_required"]
+    assert "structure_template_unavailable" in result["warnings"]
+    assert result["grid"] is None
+    assert result["assignments"] == []
+    assert result["metrics"]["assigned_count"] == result["metrics"]["review_count"] == 0
+    assert "artifacts" not in result
+    assert (template, skeleton_rows) == before

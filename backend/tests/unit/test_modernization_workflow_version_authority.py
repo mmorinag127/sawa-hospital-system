@@ -364,7 +364,11 @@ def test_evidence_and_saved_sheet_cannot_supply_a_different_version(selected_own
     assert {key: value for key, value in after.items() if key != "order_workflow_states"} == {
         key: value for key, value in before.items() if key != "order_workflow_states"
     }
-    if name not in {"select", "save"}:
+    if name == "select":
+        assert after == before
+        assert result["selected_ocr_result_id"] == fixture.evidence_id
+        assert result["saved_sheet_id"] == fixture.draft_id
+    elif name != "save":
         assert result is None and after == before
     else:
         assert result["blockers"] == [reason]
@@ -449,6 +453,10 @@ def test_failed_explicit_context_keeps_old_order_selection_until_operator_reconf
             assert state.template_version_id == fixture.projection_id
             assert state.secondary_actions_json["workflow_v2"]["template_version_id"] == fixture.projection_id
             assert session.get(Order, fixture.order_id).template_version_id == fixture.projection_id
+    history_tables = ("order_ocr_evidence_runs", "order_sheet_drafts", "order_sheet_patch_candidates",
+                      "order_confirmed_snapshots", "order_bagging_results", "order_output_bundles", "order_ocr_revisions")
+    before_reconfirm = database_snapshot()
+    history_before = {name: before_reconfirm[name] for name in history_tables}
     result, error = workflow.confirm_context(
         order_id=fixture.order_id, facility_id="F", week_start="2026-03-01", week_end="2026-03-07",
         template_id=fixture.authored["fax_template"]["template_id"],
@@ -456,7 +464,14 @@ def test_failed_explicit_context_keeps_old_order_selection_until_operator_reconf
     )
     assert error is None
     assert (result["state"], result["template_version_id"]) == ("context_confirmed", fixture.projection_id)
+    assert result["selected_ocr_result_id"] is None
+    assert result["saved_sheet_id"] is None
+    after_reconfirm = database_snapshot()
+    assert {name: after_reconfirm[name] for name in history_tables} == history_before
     with unchanged_read(fixture):
+        from src.services import draft_sheet_service, order_service
+        assert draft_sheet_service.get_selected_sheet_draft(fixture.order_id) is None
+        assert order_service.get_ocr_sheet(fixture.order_id) == (None, "selected_ocr_required")
         assert guard(fixture) == (fixture.projection_id, None)
         with fixture.session_scope() as session:
             state = session.get(OrderWorkflowState, fixture.order_id)

@@ -202,6 +202,7 @@ def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
                         qty_per_serving=menu_qty_per_serving, unit_type=menu_unit_type, category=menu_category,
                         temp_type=menu_temp_type,
                         condiments=["ソース"] if group[0]["bag_type"] == "condiment" else []))
+                    session.flush()
                 # Physical regular identity is authored separately from requested
                 # logical quantities. It never adds a regular order column/value.
                 for diet in dict.fromkeys(["regular", *[diet for diet, _area in quantities]]):

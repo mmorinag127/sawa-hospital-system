@@ -647,13 +647,9 @@ def test_snap_regions_clusters_duplicate_row_boundaries_before_curve_fit() -> No
     assert len(snapped) == len(regions)
 
 
-def test_step_review_body_rows_start_after_preserved_two_stage_header_boundary() -> None:
-    workbook = Workbook()
-    worksheet = workbook.active
-    worksheet.cell(row=11, column=4, value="先頭メニュー")
-    worksheet.cell(row=66, column=4, value="56行目メニュー")
-    worksheet.cell(row=67, column=4, value="57行目メニュー")
-    worksheet.cell(row=68, column=4, value="")
+def test_step_review_body_rows_start_after_preserved_two_stage_header_boundary(authored_geometry) -> None:
+    names = ["先頭メニュー", *[f"{index}行目メニュー" for index in range(2, 58)]]
+    worksheet, _template, _sheet = authored_geometry(names)
 
     rows = _step_review_physical_row_map(worksheet, row_count=59)
 
@@ -702,8 +698,11 @@ def test_row_height_outlier_evidence_requires_manual_review() -> None:
 
 
 def test_step_review_header_merge_regions_use_grid_band_span() -> None:
+    from src.services.master_order_form_template_service import MASTER_SHEET_NAME
+
     workbook = Workbook()
     worksheet = workbook.active
+    worksheet.title = MASTER_SHEET_NAME
     worksheet.merge_cells("G7:H8")
     worksheet["G7"] = "禁食"
     worksheet.merge_cells("G9:G10")
@@ -735,8 +734,11 @@ def test_step_review_header_merge_regions_use_grid_band_span() -> None:
 
 
 def test_step_review_grid_keeps_template_merge_when_fax_has_internal_line() -> None:
+    from src.services.master_order_form_template_service import MASTER_SHEET_NAME
+
     workbook = Workbook()
     worksheet = workbook.active
+    worksheet.title = MASTER_SHEET_NAME
     worksheet.merge_cells("E11:E12")
     row_edges = [float(index * 10) for index in range(59)]
     column_edges = [float(index * 10) for index in range(6)]

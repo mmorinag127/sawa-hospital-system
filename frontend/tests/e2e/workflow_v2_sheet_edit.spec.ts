@@ -39,6 +39,10 @@ async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMountOption
     week_start: "2026-05-17",
     week_end: "2026-05-23",
     template_version_id: "TEMPLATE-E2E-001",
+    ocr_job: options.workflowState === "ocr_running" ? {
+      ocr_job_id: "OCR-E2E-RECORDED", order_id: orderId,
+      workflow_attempt_id: "ATTEMPT-E2E-RECORDED", status: "running",
+    } : null,
     context_suggestion: options.contextSuggestion,
     pre_save_checks: {
       anomaly_review: { confirmed: true },
@@ -49,6 +53,9 @@ async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMountOption
   let nextWorkflowRevision = 7;
   const requestCounts: Record<string, number> = {};
   const workflowMutationHeaders: Array<{ path: string; ifMatch: string | undefined }> = [];
+  let progressRead = false;
+  const currentWorkflow = () => progressRead && options.polledWorkflow
+    ? { ...workflowPayload, ...options.polledWorkflow } : workflowPayload;
 
   await page.addInitScript(() => {
     window.localStorage.setItem("auth_header", "Bearer e2e-token");
@@ -61,14 +68,17 @@ async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMountOption
     const method = route.request().method().toUpperCase();
     requestCounts[`${method} ${path}`] = (requestCounts[`${method} ${path}`] ?? 0) + 1;
 
-    if (path.endsWith(`/orders/${orderId}/workflow-v2`) && method === "GET") {
-      const pollUpdate = requestCounts[`${method} ${path}`] > 1 ? options.polledWorkflow : null;
-      await route.fulfill({ status: 200, json: pollUpdate ? { ...workflowPayload, ...pollUpdate } : workflowPayload });
+    if (path.endsWith(`/orders/${orderId}/workflow-v2/ocr-progress`) && method === "GET") {
+      progressRead = true;
+      const current = currentWorkflow();
+      await route.fulfill({ status: 200, json: {
+        order_id: orderId, workflow_revision: current.revision, state: current.state,
+        ocr_job: current.ocr_job, common_job_status: null,
+      } });
       return;
     }
     if (path.endsWith(`/orders/${orderId}/workflow-v2/facility-config`) && method === "GET") {
-      const current = requestCounts[`GET /api/orders/${orderId}/workflow-v2`] > 1
-        ? { ...workflowPayload, ...options.polledWorkflow } : workflowPayload;
+      const current = currentWorkflow();
       await route.fulfill({ status: 200, json: {
         source: "canonical_json", order_id: orderId, facility_id: current.facility_id,
         week_start: current.week_start, week_end: current.week_end,
@@ -96,7 +106,14 @@ async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMountOption
       await route.fulfill({
         status: 200,
         json: {
-          workflow: workflowPayload,
+          workflow: currentWorkflow(),
+          ocr_candidates: {
+            order_id: orderId, workflow_state: currentWorkflow().state,
+            blockers: [], selected_ocr_result_id: "OCR-E2E-001",
+            candidate_template_version_id: "TEMPLATE-E2E-001", hidden_template_mismatch_result_count: 0,
+            results: [{ ocr_result_id: "OCR-E2E-001", selected: true,
+              overlay_url: "", sheet_review_base_url: "" }],
+          },
           saved_sheet: {
             saved_sheet_id: "SHEET-E2E-001",
             source_ocr_result_id: "OCR-E2E-001",

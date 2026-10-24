@@ -2529,7 +2529,12 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         </div>
         <div className="sheet-workspace">
           <div className="table-wrap menu-sheet-wrap">
-            <table className="menu-sheet-table" data-testid="monthly-menu-sheet">
+            <table className="menu-sheet-table" data-testid="monthly-menu-sheet"
+              style={{ minWidth: 96 + Math.max(1, sheetColumns.length) * 170 }}>
+              <colgroup>
+                <col className="menu-date-column" />
+                <col span={Math.max(1, sheetColumns.length)} />
+              </colgroup>
               <thead>
                 <tr>
                   <th>日付</th>
@@ -3399,8 +3404,10 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         }
 
         .menu-sheet-table {
-          min-width: 1240px;
+          table-layout: fixed;
         }
+
+        .menu-date-column { width: 96px; }
 
         table {
           width: 100%;
@@ -3446,6 +3453,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           display: flex;
           flex-direction: column;
           gap: 6px;
+          min-width: 0;
         }
 
         .sheet-column-head {
@@ -3459,7 +3467,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           line-height: 1.35;
         }
 
-        .sheet-chip {
+        .page :global(.sheet-chip) {
           display: inline-flex;
           align-items: center;
           min-height: 36px;
@@ -3472,9 +3480,13 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
           font: inherit;
           color: inherit;
           text-align: left;
+          min-width: 0;
+          max-width: 100%;
+          white-space: normal;
+          overflow-wrap: anywhere;
         }
 
-        .sheet-chip.active {
+        .page :global(.sheet-chip.active) {
           border-color: rgba(20, 82, 67, 0.34);
           background: #ecf5f2;
           box-shadow: 0 0 0 1px rgba(20, 82, 67, 0.12);

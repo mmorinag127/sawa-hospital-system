@@ -3245,6 +3245,7 @@ def _align_axes(
             adjusted_ys, row_y_match = recovery.manual_match(
                 row_axis_override,
                 physical_plan=master_order_form_template_service.validated_body_row_plan(worksheet),
+                week_value=master_order_form_template_service.validated_body_week_value(worksheet),
                 header_bands=STEP_REVIEW_HEADER_BANDS,
                 canvas_height=rectified_fax.shape[0], canvas_width=rectified_fax.shape[1],
             )

@@ -163,7 +163,7 @@ def _assert_unowned_input_cannot_replace_selected(case, original, expected_sheet
     evidence = order_service.get_ocr_evidence_run(case.evidence)
     revision = case.revision()
     with unchanged_after_refusal(case, revision):
-        with pytest.raises(ValueError, match="^original_template_capture_missing_or_mismatched$"):
+        with pytest.raises(ValueError, match="^configured_execution_input_changed$"):
             order_service.persist_ocr_evidence_run(case.id, original)
     assert original == before_input
     _store_unowned_workflow_payload(case, original)
@@ -178,6 +178,31 @@ def _assert_unowned_input_cannot_replace_selected(case, original, expected_sheet
         assert payload["hakodate_ocr_evidence_records"] == evidence["payload_json"]["hakodate_ocr_evidence_records"]
         with session_scope() as session:
             assert session.get(OrderOcrCache, case.id).payload == original
+
+
+@pytest.mark.parametrize("fault", [None, "missing", "foreign-job", "foreign-order", "foreign-attempt", "failed"])
+def test_candidate_identity_comes_from_matching_terminal_receipt_not_stale_diagnostics(fault):
+    from copy import deepcopy
+
+    receipt = {"job_id": "owned-job", "order_id": "owned-order", "workflow_attempt_id": "owned-attempt",
+               "status": "done", "error": None, "evidence_run_id": "completed-evidence"}
+    job = {"id": "owned-job", "order_id": "owned-order", "status": "done", "metrics": {
+        "workflow_attempt_id": "owned-attempt", "new_evidence_available": True,
+        "evidence_run_id": "stale-diagnostic-evidence", "rerun_terminal_receipt": receipt,
+    }}
+    if fault == "missing":
+        job["metrics"].pop("rerun_terminal_receipt")
+    elif fault in {"foreign-job", "foreign-order", "foreign-attempt"}:
+        receipt[{"foreign-job": "job_id", "foreign-order": "order_id",
+                 "foreign-attempt": "workflow_attempt_id"}[fault]] = "foreign"
+    elif fault == "failed":
+        job["status"] = receipt["status"] = "failed"
+        receipt["error"] = "recognition_failed"
+    before = deepcopy(job)
+    assert workflow_state_service._job_candidate_evidence_run_id(job) == (
+        "completed-evidence" if fault is None else None
+    )
+    assert job == before
 
 
 def _semantic_initial_draft(
@@ -1430,12 +1455,13 @@ def test_refresh_workflow_state_suppresses_older_pending_candidate_ids_after_ack
         case.id, visible["id"], selected_by="tester",
     )
     assert decision is not None
-    with session_scope() as session:
-        job = session.get(OcrJob, case.job)
-        receipt = deepcopy(job.metrics["rerun_terminal_receipt"])
-        # A stale diagnostic pointer is not a new terminal result or a new source.
-        job.metrics = {**job.metrics, "evidence_run_id": older["id"], "new_evidence_available": True}
-        assert job.metrics["rerun_terminal_receipt"] == receipt
+    job = get_ocr_job(case.job)
+    receipt = deepcopy(job.metrics["rerun_terminal_receipt"])
+    # Deliberate out-of-band corruption must not impersonate an authorized writer.
+    inject_stale_job_diagnostics(case, metrics={
+        **job.metrics, "evidence_run_id": older["id"], "new_evidence_available": True,
+    })
+    assert get_ocr_job(case.job).metrics["rerun_terminal_receipt"] == receipt
     job_before = get_ocr_job(case.job)
     refreshed = workflow_state_service.refresh_workflow_state(case.id)
 
@@ -1897,7 +1923,7 @@ def test_owned_native_nine_requires_real_completion_selection_and_save(authored_
     first = case.evidence
     source = case.produce(cell_values="9")
     assert case.evidence != first
-    receipt = order_service.get_ocr_evidence_run(case.evidence)["terminal_receipt"]
+    receipt = get_ocr_job(case.job)["metrics"]["rerun_terminal_receipt"]
     assert receipt["status"] == "done"
     assert receipt["evidence_run_id"] == case.evidence
     assert source["sheet"]["rows"] == [["03/22", "朝", "Menu A", "9"]]
@@ -2207,8 +2233,9 @@ def test_owned_semantic_twenty_six_and_manual_five_are_not_blocked_by_stale_low_
     assert case.selected_sheet["rows"] == expected
     with case.readonly():
         state = workflow_state_service.project_workflow_state(case.id)
-        assert state["state"] == "evidence_ready"
-        assert state["primary_action"] == "open_draft"
+        assert state["state"] == "apply_ready"
+        assert state["primary_action"] == "apply_draft"
+        assert order_service.get_current_sheet_context(case.id)["rows"] == expected
     _assert_unowned_input_cannot_replace_selected(case, original, case.selected_sheet)
     sheet = {**case.selected_sheet, "rows": [["04/26", "朝", "Menu A", "5", "operator"]]}
     saved = save_draft(case, sheet)
@@ -2273,7 +2300,7 @@ def _assert_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing(au
     with case.readonly():
         workflow = workflow_state_service.project_workflow_state(case.id)
         current = order_service.get_current_sheet_context(case.id)
-        assert current["menu_diagnostics"]["order_codes"] == ["monthly_menu_object_missing"]
+        assert current["blockers"] == ["monthly_menu_object_missing"]
         assert current["rows"] == []
         assert current["draft_payload"] is None
         assert order_service.get_ocr_evidence_run(case.evidence) == evidence
@@ -2318,7 +2345,7 @@ def test_formal_saved_five_preserves_weekly_warning_but_missing_physical_menu_bl
     revision = case.revision()
     with unchanged_after_refusal(case, revision):
         result, error = workflow.run_bagging(case.id, expected_revision=revision)
-        assert result is None and error == "current_sheet_source_unavailable"
+        assert result is None and error == "menu_entries_missing"
 
 
 def test_actual_initial_blank_semantic_sheet_is_editable_but_missing_menu_has_no_guessed_shell(authored_sheet_case):
@@ -2369,7 +2396,7 @@ def test_project_workflow_state_blocks_on_menu_entries_missing_without_monthly_m
     with case.readonly():
         workflow = workflow_state_service.project_workflow_state(case.id)
         current = order_service.get_current_sheet_context(case.id)
-        assert current["menu_diagnostics"]["order_codes"] == ["menu_entries_missing"]
+        assert current["blockers"] == ["menu_entries_missing"]
         assert current["rows"] == []
         assert current["draft_payload"] is None
         assert order_service.get_ocr_evidence_run(case.evidence) == evidence

@@ -157,6 +157,7 @@ def record_own_pipeline_delivery(job_id, *, selected_input_reference, input_refe
             "pipeline_job_id": f"{input_source.bucket}:{input_source.object_name}:{generation}",
         }
         job.metrics = {**(job.metrics or {}), "pipeline_delivery_receipt": receipt}
+        job.output_reference = output_reference
         return True
 
 

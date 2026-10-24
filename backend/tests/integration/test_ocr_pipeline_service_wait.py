@@ -20,17 +20,22 @@ from src.services import workflow_attempt_guard_service as guard
 from src.services import workflow_ocr_delivery_service as delivery
 from src.services.ocr_pipeline_state_store import load_pipeline_state
 from src.services.storage_service import load_selected_pdf_bytes
-from tests.helpers.ingest_original import configure_delivery
+from tests.helpers.ingest_original import configure_delivery, configure_workflow_delivery
 from tests.unit.test_h2_operator_repair_revision import repair_order  # noqa: F401
 
 
 @pytest.fixture
 def owned_pipeline(repair_order, monkeypatch, tmp_path, pipeline_transport):
     configure_delivery(monkeypatch)
+    configure_workflow_delivery(monkeypatch)
     order_id, revision, _ = repair_order
     from src.models.order import Order
     with session_scope() as session:
         original_uri = session.get(Order, order_id).document_uri
+    confirmed, error = workflow.confirm_context(order_id=order_id, facility_id="fixture",
+        week_start="2026-10-05", week_end="2026-10-11", expected_revision=revision)
+    assert error is None, error
+    revision = confirmed["revision"]
     job_id = "owned-pipeline-request"
     queued, error = workflow.mark_ocr_run_queued(order_id, job_id,
         input_reference=original_uri, request_mode="ocr_rerun", expected_revision=revision,

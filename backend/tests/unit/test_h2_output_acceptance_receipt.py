@@ -256,6 +256,7 @@ def test_actual_delivery_consumers_empty_quantity_mapping_stop_before_output_wri
     order = accepted_bagging_order(monkeypatch, tmp_path, [{"line_id": "1", "date": "2026-10-07", "daypart": "昼", "menu_name": "own", "diet_type": "regular", "area_id": "2F", "bag_type": "standard", "quantity_original": 7}], invoice_template={"columns": [{"name": "menu_name", "source": "menu_name"}]}, confirm=True)
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path / "outputs")
     monkeypatch.setattr(output_builder, "_write_label_csv", lambda *args: pytest.fail("output before quantity gate"))
+    output_before = {path: path.read_bytes() for path in (tmp_path / "outputs").rglob("*") if path.is_file()}
     before = _snapshot(get_engine())
     try:
         with session_scope() as session:
@@ -274,7 +275,7 @@ def test_actual_delivery_consumers_empty_quantity_mapping_stop_before_output_wri
                     output_builder.build_outputs(order["id"], write_session=session, original_adoption=original)
     finally:
         assert _snapshot(get_engine()) == before
-    assert not (tmp_path / "outputs").exists()
+    assert {path: path.read_bytes() for path in (tmp_path / "outputs").rglob("*") if path.is_file()} == output_before
 
 def test_actual_delivery_header_and_reference_mapper_never_pick_name_alias():
     from openpyxl import Workbook

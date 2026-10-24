@@ -163,14 +163,14 @@ def test_persist_evidence_run_blocks_changed_captured_template_version(history_c
     from tests.unit.test_disabled_facility_columns import _snapshot
 
     before = _snapshot(get_engine())
-    with pytest.raises(ValueError, match="^configured_execution_input_changed$"):
-        with case.execution():
-            ocr_evidence_service.persist_evidence_run(order_id=case.id, payload=_sample_payload("3"),
-                schema_version="v2_hakodate_evidence_rerun", producer_version="test", source="test",
-                template_version_id=case.queued["ocr_job"]["template_version_id"],
-                workflow_job_id=case.job,
-                workflow_attempt_id=case.queued["ocr_job"]["workflow_attempt_id"],
-                expected_workflow_revision=case.queued["workflow"]["revision"])
+    with case.execution():
+        result = ocr_evidence_service.persist_evidence_run(order_id=case.id, payload=_sample_payload("3"),
+            schema_version="v2_hakodate_evidence_rerun", producer_version="test", source="test",
+            template_version_id=case.queued["ocr_job"]["template_version_id"],
+            workflow_job_id=case.job,
+            workflow_attempt_id=case.queued["ocr_job"]["workflow_attempt_id"],
+            expected_workflow_revision=case.queued["workflow"]["revision"])
+    assert result is None
     assert ocr_evidence_service.get_latest_evidence_run(case.id) is None
     assert _snapshot(get_engine()) == before
 

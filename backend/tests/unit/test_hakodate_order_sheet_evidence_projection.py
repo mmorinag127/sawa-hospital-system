@@ -366,8 +366,7 @@ def projection_case(isolated_formal_schema, tmp_path, monkeypatch):
             columns=columns,
             menu_entries=[{"id": "projection-april-a", "monthly_menu_id": "2026-04",
                 "menu_date": date(2026, 4, 26), "daypart": "朝", "name": "献立A",
-                "slot_index": 0, "diet_type": "regular", "category": "副菜",
-                "qty_per_serving": 1, "unit_type": "g"}],
+                "slot_index": 0, "diet_type": "regular", "category": "副菜"}],
         )
 
 
@@ -431,9 +430,22 @@ def _canonical_component_records(case, monkeypatch, *, raw, predicted, accepted_
     return payload, observed
 
 
+def _component_assignment(*, payload, **identity):
+    from copy import deepcopy
+    from src.services.hakodate_ocr_evidence_service import evidence_from_records
+    assert "hakodate_ocr_evidence" not in payload
+    source = deepcopy(payload)
+    records = evidence_from_records(source["hakodate_ocr_evidence_records"],
+        run_id="declared-projection-component", engine="component-external-recognizer",
+        source_scope="hakodate_cell_crop_batch", retain_empty_records=True)
+    source["hakodate_ocr_evidence"] = {"records": records}
+    source["hakodate_ocr_evidence_records"] = deepcopy(records)
+    return order_service._build_hakodate_evidence_assignment_from_payload(payload=source, **identity)
+
+
 def _declared_projection_assignment(regions, records, config):
     # Authored component inputs, not selected evidence or an owned artifact receipt.
-    return order_service._build_hakodate_evidence_assignment_from_payload(
+    return _component_assignment(
         order_id="ORD_TEST", facility_id="FAC_TEST", template_id="tpl-1",
         facility_config=config, payload={"hakodate_preprocessing": {"target_cell_map": regions},
                                         "hakodate_ocr_evidence_records": records},
@@ -599,7 +611,7 @@ def test_hakodate_evidence_assignment_rejects_generic_legacy_payload_keys() -> N
 
 
 def test_hakodate_evidence_projection_applies_assigned_cells_to_sheet_rows() -> None:
-    assignment = order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
+    assignment = _component_assignment(
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",
@@ -819,7 +831,7 @@ def test_hakodate_projection_preserves_low_confidence_ocr_for_manual_editing() -
         "name": "qty.soft_x", "role": "quantity", "index": 4, "source_index": 4,
         "diet_type": "soft", "area_id": "X",
     })
-    assignment = order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
+    assignment = _component_assignment(
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",
@@ -963,7 +975,7 @@ def test_hakodate_component_raw_quantity_and_explicit_manual_value_survive_proje
 
 
 def test_hakodate_evidence_projection_blocks_stale_row_identity_instead_of_sheet_cell_fallback() -> None:
-    assignment = order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
+    assignment = _component_assignment(
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",
@@ -1009,7 +1021,7 @@ def test_hakodate_evidence_projection_blocks_stale_row_identity_instead_of_sheet
 
 
 def test_hakodate_evidence_projection_uses_logical_identity_when_physical_rows_have_extra_line() -> None:
-    assignment = order_service._build_hakodate_evidence_assignment_from_payload(  # noqa: SLF001
+    assignment = _component_assignment(
         order_id="ORD_TEST",
         facility_id="FAC_TEST",
         template_id="tpl-1",

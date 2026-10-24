@@ -82,11 +82,16 @@ def test_output_consumers_and_explicit_output_dir_priority_unchanged(tmp_path):
     assert consumers(after)
     expressions = [node for node in ast.walk(ast.parse(after)) if isinstance(node, ast.IfExp)
                    and ast.dump(node, include_attributes=False) == ast.dump(
-                       ast.parse("output_dir if output_dir is not None else OUTPUT_DIR", mode="eval").body,
+                       ast.parse("output_dir if output_dir is not None else local_directory(OUTPUT_DIR)", mode="eval").body,
                        include_attributes=False)]
     assert len(expressions) == 1
     for explicit, expected in [(tmp_path / "explicit", tmp_path / "explicit"), (None, tmp_path / "default")]:
+        routed = []
+        def local_directory(directory):
+            routed.append(directory)
+            return directory
         assert eval(compile(ast.Expression(expressions[0]), SOURCE, "eval"),
-                    {"output_dir": explicit, "OUTPUT_DIR": tmp_path / "default"}) == expected
+                    {"output_dir": explicit, "OUTPUT_DIR": tmp_path / "default", "local_directory": local_directory}) == expected
+        assert routed == ([] if explicit is not None else [tmp_path / "default"])
     assert not (tmp_path / "explicit").exists()
     assert not (tmp_path / "default").exists()
