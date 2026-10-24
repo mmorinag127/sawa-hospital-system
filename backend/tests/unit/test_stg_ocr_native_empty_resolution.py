@@ -222,7 +222,7 @@ class StagingObjects:
 def staging(monkeypatch):
     from src.services import storage_service
     store = StagingObjects()
-    monkeypatch.setattr(storage_service._GCS_CLIENT_LOCAL,'client',store,raising=False)
+    monkeypatch.setattr(storage_service,'_get_thread_gcs_client',lambda: store)
     monkeypatch.setattr(mod.subprocess,'run',store.cli)
     monkeypatch.delenv('OCR_ARTIFACT_DIR',raising=False)
     monkeypatch.setenv('OCR_OUTPUT_BUCKET','sawahospitalsystem-stg-raw')
