@@ -246,6 +246,10 @@ def test_partial_period_same_plan_all_consumers(isolated_formal_schema, monkeypa
         days = row_recovery.calendar_contract([
             {"date": row["menu_date"]} for row in start["physical_menu_entries"]],
             week_value=start["order"]["week_code"])
+        assert [day["date"] for day in days] == [
+            "2026-09-27", "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-03"]
+        assert [day["expected_band_count"] for day in days] == [None, None, None, None, 1, 1, 1]
+        assert [row["menu_date"] for row in start["physical_menu_entries"]] == ["2026-10-01", "2026-10-02", "2026-10-03"]
         space = {"mode": "template_canvas", "width": image.shape[1], "height": image.shape[0]}
         _, ys, _, _ = batch._align_axes()
         for module in (batch, collector):

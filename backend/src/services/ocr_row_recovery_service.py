@@ -4,6 +4,7 @@ from datetime import date, timedelta
 import math
 
 from src.services import sheet_week_service
+from src.services.hakodate_physical_menu_row_service import full_week_fax_period
 
 
 def failure_details(message):
@@ -69,9 +70,10 @@ def calendar_contract(physical_plan, *, week_value):
     if start is None or end is None or dates[0] < start or dates[-1] > end:
         raise ValueError("fax_calendar_week_unresolved")
     counts = Counter(dates)
-    return [{"date": (start + timedelta(days=i)).isoformat(),
-             "expected_band_count": counts.get(start + timedelta(days=i))}
-            for i in range((end - start).days + 1)]
+    fax_start, fax_end = full_week_fax_period(start, end)
+    return [{"date": (fax_start + timedelta(days=i)).isoformat(),
+             "expected_band_count": counts.get(fax_start + timedelta(days=i))}
+            for i in range((fax_end - fax_start).days + 1)]
 
 
 def manual_match(value, *, physical_plan, week_value, header_bands, canvas_height, canvas_width):

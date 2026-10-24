@@ -61,7 +61,7 @@ test("admin sees the shared template and an explicit successful save result", as
   await page.getByLabel("メールアドレス").fill("operator@example.com");
   await page.getByRole("button", { name: "保存", exact: true }).click();
 
-  await expect(page.getByRole("status")).toHaveText("operator@example.com を保存しました。");
+  await expect(page.getByRole("status").filter({ hasText: "operator@example.com を保存しました。" })).toHaveText("operator@example.com を保存しました。");
   await expect(page.getByText("operator@example.com", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "保存中…" })).toHaveCount(0);
 });

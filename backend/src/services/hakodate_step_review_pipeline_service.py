@@ -2323,9 +2323,8 @@ def _row_intersection_correct_ys(
     row_edges = master_order_form_template_service.validated_template_row_edges(worksheet)
     physical_plan = master_order_form_template_service.validated_body_row_plan(worksheet)
     dates = [entry["date"] for entry in physical_plan]
-    _, calendar_start, calendar_end = sheet_week_service.parse_sheet_week_value(
-        sheet_week_service.build_calendar_week_value(date.fromisoformat(dates[0])),
-    )
+    calendar_start, calendar_end = hakodate_physical_menu_row_service.full_week_fax_period(
+        date.fromisoformat(dates[0]), date.fromisoformat(dates[-1]))
     partial_period = dates[0] != calendar_start.isoformat() or dates[-1] != calendar_end.isoformat()
     if len(template_ys) != len(row_edges) or len(corrected_xs) != worksheet.max_column + 1:
         return None, {"used": False, "reason": "fax_row_canonical_axes_mismatch"}

@@ -118,7 +118,7 @@ async function applyDaily(h, probe, date = '2026-02-15') {
   assert.equal(probe.current.date, date);
 }
 
-test('daily actual three sections adopt atomically; draft edit/primary failure preserves prior applied set', async () => {
+test('daily primary becomes visible independently; secondary sections never mix targets and primary failure preserves the prior set', async () => {
   const t = dailyTransport(), probe = dailyProbe(), h = await mount('src/pages/daily-delivery-notes.tsx', { api: t.api, probe });
   try {
     await applyDaily(h, probe);
@@ -130,17 +130,60 @@ test('daily actual three sections adopt atomically; draft edit/primary failure p
     const op = await start(h, () => probe.current.loadOrders(probe.current.conditionForm.getValues()));
     const captured = { ...probe.current.conditionForm.getValues() };
     await h.settle(() => sections.primary.resolve(context('primary', 'B', captured)));
-    assert.equal(probe.current.date, '2026-02-15'); assert.equal(probe.current.orders[0].id, 'applied-A');
+    assert.equal(probe.current.date, '2026-02-16'); assert.equal(probe.current.orders[0].id, 'B');
+    assert.deepEqual(probe.current.totalsRows, []);
+    assert.deepEqual(probe.current.dailyBagSummary, {});
+    assert.equal(probe.current.loading, true);
     await h.settle(() => sections.totals.resolve(context('totals', 'B', captured)));
-    assert.equal(probe.current.totalsRows[0].menu_name, 'applied-A');
+    assert.equal(probe.current.totalsRows[0].menu_name, 'B');
+    assert.deepEqual(probe.current.totalsRows.map(row => row.quantity), [0, 6, 9]);
+    assert.deepEqual(probe.current.dailyBagSummary, {});
+    assert.equal(probe.current.loading, true);
     await h.settle(() => sections.bags.resolve(context('bags', 'B', captured))); await op.promise;
     assert.equal(probe.current.date, '2026-02-16'); assert.equal(probe.current.orders[0].id, 'B');
     assert.equal(probe.current.dailyBagSummary.test_marker, 'B'); assert.equal(probe.current.totalsRows[0].menu_name, 'B');
+    assert.equal(probe.current.loading, false);
     t.on('get', '/orders/daily-output-context', call => call.config.params.section === 'primary'
       ? Promise.reject(new Error('primary-stop')) : context(call.config.params.section, 'must-not-adopt', call.config.params));
     await h.change(h.document.querySelector('input[name="date"]'), '2026-02-17'); await h.click(h.button('表示・集計'));
     assert.equal(probe.current.date, '2026-02-16'); assert.equal(probe.current.dailyBagSummary.test_marker, 'B');
     assert.equal(probe.current.totalsRows[0].menu_name, 'B'); assert.match(h.document.body.textContent, /primary-stop/);
+  } finally { await h.close(); }
+});
+
+for (const primaryOutcome of ['success', 'failure']) test(`daily secondary results wait for the matching primary: ${primaryOutcome}`, async () => {
+  const t = dailyTransport(), probe = dailyProbe();
+  const h = await mount('src/pages/daily-delivery-notes.tsx', { api: t.api, probe });
+  try {
+    await applyDaily(h, probe);
+    const previous = { orders: probe.current.orders, bags: probe.current.dailyBagSummary, totals: probe.current.totalsRows };
+    const primary = deferred();
+    t.on('get', '/orders/daily-output-context', call => call.config.params.section === 'primary'
+      ? primary.promise : context(call.config.params.section, 'secondary-B', call.config.params));
+    await h.change(h.document.querySelector('input[name="date"]'), '2026-02-16');
+    const conditions = { ...probe.current.conditionForm.getValues() };
+    const operation = await start(h, () => probe.current.loadOrders(conditions));
+    await h.settle();
+    assert.equal(probe.current.orders, previous.orders);
+    assert.equal(probe.current.dailyBagSummary, previous.bags);
+    assert.equal(probe.current.totalsRows, previous.totals);
+    assert.equal(probe.current.loading, true);
+    await h.settle(() => primaryOutcome === 'success'
+      ? primary.resolve(context('primary', 'primary-B', conditions))
+      : primary.reject(new Error('owned-primary-failed')));
+    await operation.promise.catch(() => {});
+    if (primaryOutcome === 'success') {
+      assert.equal(probe.current.orders[0].id, 'primary-B');
+      assert.equal(probe.current.dailyBagSummary.test_marker, 'secondary-B');
+      assert.deepEqual(probe.current.totalsRows.map(row => row.quantity), [0, 6, 9]);
+      assert.equal(probe.current.date, conditions.date);
+    } else {
+      assert.equal(probe.current.orders, previous.orders);
+      assert.equal(probe.current.dailyBagSummary, previous.bags);
+      assert.equal(probe.current.totalsRows, previous.totals);
+      assert.match(h.document.body.textContent, /owned-primary-failed/);
+    }
+    assert.equal(probe.current.loading, false);
   } finally { await h.close(); }
 });
 

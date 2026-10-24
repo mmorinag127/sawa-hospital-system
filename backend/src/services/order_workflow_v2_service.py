@@ -29,6 +29,8 @@ from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_sheet_patch_candidate import OrderSheetPatchCandidate
+from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import workflow_ocr_delivery_service
 from src.services.ocr_history_read import read_history, read_history_detail, read_history_summary
@@ -3379,12 +3381,18 @@ def delete_ocr_result(order_id: str, ocr_result_id: str) -> tuple[dict[str, Any]
         ocr_result = session.get(OrderOcrEvidenceRun, normalized_ocr_result_id)
         if ocr_result is None or ocr_result.order_id != order.id:
             return None, "ocr_result_not_found"
-        workflow = _get_or_create_workflow(session, order.id)
-        if workflow.evidence_run_id != normalized_ocr_result_id and session.query(OrderSheetDraft.id).filter(
-            OrderSheetDraft.order_id == order.id,
-            OrderSheetDraft.base_evidence_run_id == normalized_ocr_result_id,
-        ).first() is not None:
+        has_history = session.query(or_(*(
+            session.query(model.id).filter(source == normalized_ocr_result_id).exists()
+            for model, source in (
+                (OrderSheetDraft, OrderSheetDraft.base_evidence_run_id),
+                (OrderSheetPatchCandidate, OrderSheetPatchCandidate.base_evidence_run_id),
+                (OrderBaggingResult, OrderBaggingResult.source_ocr_result_id),
+                (OrderOutputBundle, OrderOutputBundle.source_ocr_result_id),
+            )
+        ))).scalar()
+        if has_history:
             return None, "ocr_result_saved_history_conflict"
+        workflow = _get_or_create_workflow(session, order.id)
         if workflow.evidence_run_id == normalized_ocr_result_id:
             workflow.draft_id = None
             workflow.confirmed_snapshot_id = None

@@ -109,7 +109,7 @@ for (const outcome of ["resolved", "retained", "failure"] as const) {
   test(`delayed other item save ${outcome} preserves dirty master input and captured base`, async ({ page }) => {
     await setup(page);
     const issue = { item_id: "item-A", source_name: "Fish", issue_type: "diff", normalized_name: "Fish",
-      suggested_patch: { name: "Fish", unit_type: "cut", qty_per_serving: 0, daypart: "朝食", category: "主菜" },
+      suggested_patch: { name: "Fish", unit_type: "cut", qty_per_serving: 0, bag_max_qty: 5, bag_max_unit: "count", daypart: "朝食", category: "主菜" },
       current_master: { id: "master-A", name: "Fish", unit_type: "g", qty_per_serving: 100, daypart: "朝食", category: "主菜" },
       candidates: [], field_diffs: [{ field: "unit_type", label: "単位", monthly_value: "cut", master_value: "g" }] };
     const read = { ...snapshot,

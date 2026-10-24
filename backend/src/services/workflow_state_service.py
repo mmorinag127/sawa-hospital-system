@@ -1167,8 +1167,15 @@ def _build_locked_workflow_state_projection(
                     last_transition_at=last_transition_at,
                 )
                 secondary["legacy_actions"] = list(secondary_actions)
-                row.secondary_actions_json = secondary
-                session.flush()
+                updated = session.execute(
+                    update(OrderWorkflowState)
+                    .where(OrderWorkflowState.order_id == normalized_order_id,
+                           OrderWorkflowState.revision == row.revision)
+                    .values(secondary_actions_json=secondary)
+                    .execution_options(synchronize_session="fetch")
+                ).rowcount
+                if updated != 1:
+                    raise CurrentSheetInputChanged("workflow_projection_input_changed")
                 serialized = _serialize(row)
                 serialized[_LEGACY_WORKFLOW_STATE_KEY] = secondary[_LEGACY_WORKFLOW_STATE_KEY]
             else:

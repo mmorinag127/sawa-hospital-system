@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import NextApp, { type AppContext, type AppProps } from "next/app";
 import { datasetFromCookie, initializeDocumentDataset, type DocumentDataset } from "../services/stagingDataset";
 import { useRouter } from "next/router";
@@ -17,6 +17,8 @@ const portalUrl = (process.env.NEXT_PUBLIC_PORTAL_URL || "").replace(/\/$/, "");
 export default function App({ Component, pageProps, initialDataset }: AppProps & { initialDataset?: DocumentDataset }) {
   initializeDocumentDataset(initialDataset);
   const router = useRouter();
+  const destination = useRef(router.asPath);
+  destination.current = router.asPath;
   const gitSha = process.env.NEXT_PUBLIC_GIT_SHA || "unknown";
   const deployedAt = process.env.NEXT_PUBLIC_DEPLOYED_AT || "unknown";
   const publicPage = PUBLIC_ROUTES.has(router.pathname);
@@ -32,28 +34,28 @@ export default function App({ Component, pageProps, initialDataset }: AppProps &
     setAuthError("");
     const controller = new AbortController();
     if (getStoredAuthHeader()) {
-      setVerifiedPath(router.asPath);
+      setVerifiedPath(router.pathname);
     } else {
       void establishServerSession(controller.signal).then(() => {
-        if (!controller.signal.aborted) setVerifiedPath(router.asPath);
+        if (!controller.signal.aborted) setVerifiedPath(router.pathname);
       }).catch((error) => {
         if (controller.signal.aborted) return;
         if (error.status !== 401) {
           setAuthError(error.status === 403 ? "利用権限を確認できませんでした。" : "認証サービスを確認できませんでした。再読み込みして再試行してください。");
           return;
         }
-        const nextPath = router.asPath || "/";
+        const nextPath = destination.current || "/";
         window.sessionStorage.setItem("auth_next", nextPath);
         window.location.href = portalUrl ? new URL(loginUrlFor(nextPath), portalUrl).toString() : loginUrlFor(nextPath);
       });
     }
     return () => controller.abort();
-  }, [router.isReady, router.pathname, router.asPath]);
+  }, [router.isReady, router.pathname]);
 
   return (
     <NavigationBoundary><UnifiedShell gitSha={gitSha} deployedAt={deployedAt} publicPage={publicPage}>
       <PageTemplate publicPage={publicPage}>
-        {publicPage || (router.isReady && verifiedPath === router.asPath)
+        {publicPage || (router.isReady && verifiedPath === router.pathname)
           ? <Component {...pageProps} />
           : <p role={authError ? "alert" : "status"}>{authError || "ログインを確認しています。"}</p>}
       </PageTemplate>

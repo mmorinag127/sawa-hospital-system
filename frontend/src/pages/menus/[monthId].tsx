@@ -264,6 +264,11 @@ const daypartChoices = [
   { value: "夕食", label: "夕食" },
 ];
 
+const editableDaypartChoices = (value: string) =>
+  ["朝", "昼", "夕"].includes(value)
+    ? [...daypartChoices, { value, label: value }]
+    : daypartChoices;
+
 const daypartSortOrder: Record<string, number> = {
   朝食: 0,
   朝: 0,
@@ -2671,7 +2676,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
                     <FormTextField<MenuItemDraft> name="qty_per_serving" label="1人前の量" type="number" /><FormTextField<MenuItemDraft> name="bag_max_qty" label="袋最大量" type="number" />
                     <FormTextField<MenuItemDraft> name="bag_max_unit" label="袋単位" select><MuiMenuItem value="">未選択</MuiMenuItem>{unitChoices.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField>
                     <FormTextField<MenuItemDraft> name="temp_type" label="温冷" select>{tempTypeChoices.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField>
-                    <FormTextField<MenuItemDraft> name="daypart" label="朝昼夕" select>{daypartChoices.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField><FormTextField<MenuItemDraft> name="category" label="メニュー区分" /><FormTextField<MenuItemDraft> name="diet_type" label="食種" select>{DIET_TYPE_OPTIONS.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField><FormTextField<MenuItemDraft> name="facility_override" label="適用scope" />
+                    <FormTextField<MenuItemDraft> name="daypart" label="朝昼夕" select>{editableDaypartChoices(selectedItem.daypart || "").map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField><FormTextField<MenuItemDraft> name="category" label="メニュー区分" /><FormTextField<MenuItemDraft> name="diet_type" label="食種" select>{DIET_TYPE_OPTIONS.map((choice) => <MuiMenuItem key={choice.value} value={choice.value}>{choice.label}</MuiMenuItem>)}</FormTextField><FormTextField<MenuItemDraft> name="facility_override" label="適用scope" />
                   </EditForm>
                 ) : (
                   <p className="subtle">対応するメニュー設定がまだありません。必要なら下の補助一覧を開いて確認してください。</p>

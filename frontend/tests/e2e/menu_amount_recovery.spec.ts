@@ -30,7 +30,7 @@ for (const latestResolved of [false, true]) {
       } else if (path.endsWith("/ocr-results")) {
         json = { results: [] };
       } else if (path.endsWith("/facilities")) {
-        json = { facilities: [] };
+        json = { source: "canonical_json", revision: "amount-facilities-1", facilities: [] };
       }
       await route.fulfill({ status: 200, json });
     });

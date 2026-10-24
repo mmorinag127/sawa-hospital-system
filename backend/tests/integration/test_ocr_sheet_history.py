@@ -6716,7 +6716,7 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     ):
         current, error = order_workflow_v2_service.get_workflow_readonly(order["id"])
         assert error is None
-        reviewed, error = operation(order["id"], sheet=applied_draft["draft_sheet_json"],
+        reviewed, error = operation(order_id=order["id"], sheet=applied_draft["draft_sheet_json"],
             expected_revision=current["revision"], **options)
         assert error is None and reviewed is not None
     saved_patch, error = _save_formal_sheet(order_id=order["id"],

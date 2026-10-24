@@ -1,5 +1,59 @@
 # Fixed-source full batch remediation
 
+## Diagnostic At b30bb8ad And Remaining Repairs
+
+Related backend:172 passed,3 failed,10013 deselected in326.94seconds.
+Changed frontend contracts:34 passed. Browser:52 passed,32 failed,1 interrupted,
+53 did not run in10minutes. The dedicated Playwright PID2815 was interrupted
+after its isolated source cwd was verified. The tracked source remained clean.
+Evidence: `/private/tmp/sawa-followup-b30bb8ad-20261024/diagnostic-result.json`.
+These results do not verify the subsequent uncommitted repairs or live stg.
+
+Known production repairs are batched before further verification:
+
+- Legacy projection metadata updates must not increment canonical workflow CAS
+  revision. Update only metadata under the existing order/revision fence and
+  synchronize the loaded ORM row; reject a lost fence instead of overwriting it.
+- Daily primary orders must become visible without waiting for independent bag
+  and totals requests. Secondary results require primary success and the same
+  request owner. Same-target mutation refresh may supersede a pending aggregate;
+  changed form, applied target, session or operation owner may not.
+- The app authentication gate used the entire URL as a render prerequisite.
+  Query changes therefore unmounted editors before re-verification, losing drafts
+  and history guards. Verify at pathname boundaries, preserving same-page query
+  state, while retaining logout and API authentication failure handling.
+- Monthly entry sorting accepts the stored short dayparts 朝/昼/夕, but its
+  editor Select did not. Add only the selected stored short value to the editor
+  options, retaining its raw value rather than rewriting stored business data.
+  A pending authentication failure also retains the latest same-page destination.
+
+Fixture repairs are not product failures by themselves: canonical facility
+list mocks omit source/revision; logout mocks omit the actual POST; several
+monthly controls are MUI Selects but tests query native options; cut-unit master
+fixtures omit required bag settings. Preserve these validations rather than
+loosening production code to accept incomplete test responses. The bulk override
+check selects an actual facility before inspecting its updated row. The saved
+import response declares its source_month_id instead of bypassing that guard.
+New real-React regression cases retain a dirty editor across query/history changes
+and require authentication again at a different pathname, for both bearer and
+server-session modes. These additions have not yet been executed.
+
+The legacy order_confirm browser suite targets a redirected retired screen.
+Its40 scenarios require mapping to current workflow-v2 controls and API contracts,
+including unique archive, candidate, overlay, period, save and confirm behavior.
+Do not skip the file or re-enable the retired screen to obtain a green run.
+The user subsequently confirmed: use the full seven-day FAX and take only the
+target-month order rows. The automatic matcher, physical row indexes and manual
+row recovery now share full_week_fax_period. Manual recovery exposes seven FAX
+days, with no invented target-menu count on days outside the selected period.
+The original target row plan is not expanded. Tests cover September27-October3
+FAX versus October1-3 target rows and the neighboring October partial interval.
+The user also confirmed that OCR with saved history must refuse deletion.
+The deletion guard now applies to selected and unselected OCR alike, before
+creating workflow state. Whole-database invariance is checked for refusal;
+deleting an unused history-free OCR must retain another OCR's saved sheet.
+These subsequent implementation and test changes have not been executed yet.
+
 ## Diagnostic At 2773a58d
 
 Related backend:168 passed,7 failed,10013 deselected in337.67seconds, clean source.

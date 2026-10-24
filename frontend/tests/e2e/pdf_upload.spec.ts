@@ -109,7 +109,7 @@ test("pdf upload form sends the explicitly selected MUI facility and week", asyn
       return;
     }
     if (url.pathname.endsWith("/facilities")) {
-      await route.fulfill({ status: 200, json: { facilities: [{ id: "FAC-E2E", name: "E2E施設" }] } });
+      await route.fulfill({ status: 200, json: { source: "canonical_json", revision: "upload-facilities-1", facilities: [{ id: "FAC-E2E", name: "E2E施設" }] } });
       return;
     }
     if (url.pathname.endsWith("/ingest/upload") && method === "POST") {

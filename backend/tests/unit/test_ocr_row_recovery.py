@@ -45,17 +45,18 @@ def test_partial_week_keeps_blank_physical_bands():
     assert recovery.calendar_contract(plan(2, 4), week_value=WEEK)[0]["expected_band_count"] is None
 
 
-@pytest.mark.parametrize("period,dates", [
-    ("2026-10@2026-10-26~2026-11-01", ["2026-10-26", "2026-11-01"]),
-    ("2026-10@2026-10-28~2026-10-30", ["2026-10-28", "2026-10-30"]),
+@pytest.mark.parametrize("period,dates,fax_dates", [
+    ("2026-10@2026-10-01~2026-10-03", ["2026-10-01", "2026-10-03"], ["2026-09-27", "2026-10-03"]),
+    ("2026-10@2026-10-28~2026-10-30", ["2026-10-28", "2026-10-30"], ["2026-10-25", "2026-10-31"]),
 ])
-def test_calendar_uses_exact_authored_period_without_sunday_replacement(period, dates):
+def test_full_week_fax_calendar_keeps_target_month_menu_rows_separate(period, dates, fax_dates):
     rows = [{"date": day} for day in dates]
     before = deepcopy(rows)
     days = recovery.calendar_contract(rows, week_value=period)
-    assert days[0]["date"] == dates[0] and days[-1]["date"] == dates[-1]
-    count = (date.fromisoformat(dates[-1]) - date.fromisoformat(dates[0])).days + 1
+    assert days[0]["date"] == fax_dates[0] and days[-1]["date"] == fax_dates[-1]
+    count = 7
     assert len(days) == count
+    assert {day["date"]: day["expected_band_count"] for day in days if day["expected_band_count"] is not None} == dict.fromkeys(dates, 1)
     assert rows == before
     body_count = count
     value = {"corrected_ys": list(range(body_count + 2)),
@@ -72,6 +73,12 @@ def test_calendar_uses_exact_authored_period_without_sunday_replacement(period, 
 def test_calendar_cannot_guess_a_period_or_accept_rows_outside_it(period):
     with pytest.raises(ValueError, match="fax_calendar_week_unresolved"):
         recovery.calendar_contract(plan(), week_value=period)
+
+
+def test_target_period_cannot_span_two_full_week_faxes():
+    with pytest.raises(ValueError, match="fax_calendar_week_unresolved"):
+        recovery.calendar_contract([{"date": "2026-10-26"}, {"date": "2026-11-01"}],
+            week_value="2026-10@2026-10-26~2026-11-01")
 
 
 @pytest.mark.parametrize("boundaries", [None, [0, 8, 16, 32, 40, 48, 56], [0, 8, 16, 24, 32, 40, 48, 55],

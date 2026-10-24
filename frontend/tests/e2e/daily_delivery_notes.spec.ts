@@ -40,7 +40,7 @@ for (const bagOutcome of ["success", "failure"] as const) {
       if (url.pathname.endsWith("/auth/me")) {
         await route.fulfill({ status: 200, json: { role: "admin" } });
       } else if (url.pathname.endsWith("/facilities")) {
-        await route.fulfill({ status: 200, json: { facilities: [{ id: "FAC-001", name: "施設A" }] } });
+        await route.fulfill({ status: 200, json: { source: "canonical_json", revision: "daily-facilities-1", facilities: [{ id: "FAC-001", name: "施設A" }] } });
       } else if (url.pathname.endsWith("/orders/daily-output-context")) {
         const section = url.searchParams.get("section")!;
         requests.push(section);
@@ -111,7 +111,7 @@ test("daily delivery notes shows meal counts by daypart and warns about unconfir
     if (path.endsWith("/facilities")) {
       await route.fulfill({
         status: 200,
-        json: { facilities: [{ id: "FAC-001", name: "施設A" }, { id: "FAC-002", name: "施設B" }] },
+        json: { source: "canonical_json", revision: "daily-facilities-1", facilities: [{ id: "FAC-001", name: "施設A" }, { id: "FAC-002", name: "施設B" }] },
       });
       return;
     }
@@ -190,6 +190,7 @@ test("daily delivery notes shows menu category and calculation basis in daily ba
       await route.fulfill({
         status: 200,
         json: {
+          source: "canonical_json", revision: "daily-facilities-1",
           facilities: [{ id: "FAC-001", name: "施設A" }],
         },
       });
@@ -353,6 +354,7 @@ for (const mutation of ["save", "remove"] as const) {
       await route.fulfill({
         status: 200,
         json: {
+          source: "canonical_json", revision: "daily-facilities-1",
           facilities: [{ id: "FAC-001", name: "施設A" }],
         },
       });
@@ -645,7 +647,7 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
     if (path.endsWith("/facilities") && method === "GET") {
       await route.fulfill({
         status: 200,
-        json: { facilities: [{ id: "FAC-001", name: "施設A" }, { id: "FAC-002", name: "施設B" }] },
+        json: { source: "canonical_json", revision: "daily-facilities-1", facilities: [{ id: "FAC-001", name: "施設A" }, { id: "FAC-002", name: "施設B" }] },
       });
       return;
     }
@@ -783,6 +785,7 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
   await page.getByRole("button", { name: "全施設に保存" }).click();
 
   await expect(page.getByText("全施設の単位設定を保存しました。")).toBeVisible();
+  await page.getByRole("dialog").getByLabel("施設を選ぶ").selectOption("FAC-001");
   await expect(page.getByRole("dialog").getByText("3個/人")).toBeVisible();
 });
 
@@ -805,7 +808,7 @@ test("daily delivery notes shows blocker text when bag data truly does not exist
     }
 
     if (path.endsWith("/facilities") && method === "GET") {
-      await route.fulfill({ status: 200, json: { facilities: [{ id: "FAC-001", name: "施設A" }] } });
+      await route.fulfill({ status: 200, json: { source: "canonical_json", revision: "daily-facilities-1", facilities: [{ id: "FAC-001", name: "施設A" }] } });
       return;
     }
 
@@ -860,7 +863,7 @@ test("daily delivery notes bundle download survives responses longer than the ol
     }
 
     if (path.endsWith("/facilities") && method === "GET") {
-      await route.fulfill({ status: 200, json: { facilities: [] } });
+      await route.fulfill({ status: 200, json: { source: "canonical_json", revision: "daily-facilities-1", facilities: [] } });
       return;
     }
 

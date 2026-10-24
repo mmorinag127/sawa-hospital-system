@@ -18,6 +18,7 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     items: [record("MNU001", "白身魚のフライ"), record("MNU002", "日本語の白飯")],
     requests: [] as { method: string; path: string; query: string; body: any; bearer: string }[],
     unexpected: [] as string[], errors: [] as string[], console: [] as string[], blocked: [] as string[],
+    cancelledSessionReads: [] as string[],
     putStatus: 200, getStatus: 200, listStatus: 200, postStatus: 200,
     putGate: undefined as ReturnType<typeof gate> | undefined,
     postGate: undefined as ReturnType<typeof gate> | undefined,
@@ -52,7 +53,12 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
   page.on("request", request => { if (new URL(request.url()).origin === origin) pending.add(request); });
   page.on("requestfinished", request => { if (pending.delete(request)) finished++; });
   page.on("requestfailed", request => {
-    if (pending.delete(request)) failures.push(`${request.url()}: ${request.failure()?.errorText}`);
+    if (!pending.delete(request)) return;
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && request.failure()?.errorText === "net::ERR_ABORTED"
+      && ["/api/staging-datasets", "/api/portal/auth/me"].includes(path)) {
+      state.cancelledSessionReads.push(path);
+    } else failures.push(`${request.url()}: ${request.failure()?.errorText}`);
   });
   await page.route("**/*", async route => {
     const req = route.request(), url = new URL(req.url());
@@ -63,6 +69,11 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     state.requests.push({ method, path, query: url.search, body, bearer });
     const respond = (status: number, json: any) => route.fulfill({ status, json });
     if (path === "/auth/config") return respond(200, { google_client_id: "" });
+    if (path === "/portal/auth/logout") {
+      expect(method).toBe("POST");
+      expect(body).toBeNull();
+      return respond(200, { logged_out: true });
+    }
     if (!/^Bearer menu-test-[AB]$/.test(bearer)) return respond(401, { detail: "Synthetic Bearer required" });
     if (path === "/auth/me") return respond(200, { role: "admin", auth_disabled: false });
     if (path === "/portal/auth/me") return respond(200, { role: "admin", systems: ["hospital"], auth_disabled: false });
@@ -99,6 +110,7 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     await page.waitForLoadState("networkidle");
     expect([...pending].map(request => request.url())).toEqual([]);
     expect(failures).toEqual([]);
+    if (state.cancelledSessionReads.length) expect(new URL(page.url()).pathname).toMatch(/^\/(login|about)$/);
     return finished;
   } });
 }
@@ -108,7 +120,10 @@ async function finish(page: Page, info: TestInfo, state: Awaited<ReturnType<type
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
   expect(state.console.filter(s => /hydration|did not match|Minified React error|Failed prop type|out of range/i.test(s))).toEqual([]);
-  expect(state.requests.filter(r => r.path !== "/auth/config").every(r => /^Bearer menu-test-[AB]$/.test(r.bearer))).toBe(true);
+  const sessionEndpoints = new Set(["/auth/config", "/portal/auth/me", "/portal/auth/logout", "/staging-datasets"]);
+  expect(state.requests.filter(r => !sessionEndpoints.has(r.path)).every(r => /^Bearer menu-test-[AB]$/.test(r.bearer))).toBe(true);
+  expect(state.requests.filter(r => sessionEndpoints.has(r.path)).every(r => r.bearer === "" || /^Bearer menu-test-[AB]$/.test(r.bearer))).toBe(true);
+  expect(state.requests.filter(r => r.path === "/staging-datasets").every(r => r.method === "GET")).toBe(true);
 }
 async function open(page: Page, path = "/hospital/menu-masters") {
   const response = await page.goto(path);

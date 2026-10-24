@@ -1,255 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
-
-const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
-
-type WorkflowMountOptions = {
-  contextSuggestion?: Record<string, unknown>;
-  facilitiesStatus?: number;
-  facilities?: Array<{ id: string; name: string }>;
-  workflowFacilityId?: string;
-  workflowRevision?: number;
-  workflowSource?: string;
-  workflowState?: string;
-  polledWorkflow?: Partial<Record<string, unknown>>;
-  contextSaveStatus?: number;
-};
-
-async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMountOptions = {}) {
-  const orderId = "ORD-E2E-WORKFLOW-SHEET";
-  const sheetPayload = {
-    fields: ["date_mmdd", "daypart", "menu", "qty.regular", "qty.soft"],
-    header: ["日付", "区分", "メニュー", "常食", "軟菜"],
-    rows: [
-      ["05/22", "朝", "Menu A", "1", "2"],
-      ["05/22", "昼", "Menu B", "3", "4"],
-      ["05/22", "夕", "Menu C", "5", "6"],
-    ],
-    row_ids: ["row-1", "row-2", "row-3"],
-    target_cell_map: [],
-    ocr_numeric_cell_summary: {},
-  };
-  const workflowPayload = {
-    order_id: orderId,
-    revision: options.workflowRevision ?? 7,
-    source: options.workflowSource ?? "workflow_v2",
-    state: options.workflowState ?? "ocr_selected",
-    headline: "正解OCRを選択済みです。シートを編集してください。",
-    selected_ocr_result_id: "OCR-E2E-001",
-    facility_id: options.workflowFacilityId ?? "FAC-E2E-001",
-    week_start: "2026-05-17",
-    week_end: "2026-05-23",
-    template_version_id: "TEMPLATE-E2E-001",
-    ocr_job: options.workflowState === "ocr_running" ? {
-      ocr_job_id: "OCR-E2E-RECORDED", order_id: orderId,
-      workflow_attempt_id: "ATTEMPT-E2E-RECORDED", status: "running",
-    } : null,
-    context_suggestion: options.contextSuggestion,
-    pre_save_checks: {
-      anomaly_review: { confirmed: true },
-      sheet_review: { confirmed: true },
-    },
-  };
-  let savePayload: any = null;
-  let nextWorkflowRevision = 7;
-  const requestCounts: Record<string, number> = {};
-  const workflowMutationHeaders: Array<{ path: string; ifMatch: string | undefined }> = [];
-  let progressRead = false;
-  const currentWorkflow = () => progressRead && options.polledWorkflow
-    ? { ...workflowPayload, ...options.polledWorkflow } : workflowPayload;
-
-  await page.addInitScript(() => {
-    window.localStorage.setItem("auth_header", "Bearer e2e-token");
-    window.sessionStorage.setItem("auth_header", "Bearer e2e-token");
-  });
-
-  await page.route("**/api/**", async (route) => {
-    const url = new URL(route.request().url());
-    const path = url.pathname;
-    const method = route.request().method().toUpperCase();
-    requestCounts[`${method} ${path}`] = (requestCounts[`${method} ${path}`] ?? 0) + 1;
-
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/ocr-progress`) && method === "GET") {
-      progressRead = true;
-      const current = currentWorkflow();
-      await route.fulfill({ status: 200, json: {
-        order_id: orderId, workflow_revision: current.revision, state: current.state,
-        ocr_job: current.ocr_job, common_job_status: null,
-      } });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/facility-config`) && method === "GET") {
-      const current = currentWorkflow();
-      await route.fulfill({ status: 200, json: {
-        source: "canonical_json", order_id: orderId, facility_id: current.facility_id,
-        week_start: current.week_start, week_end: current.week_end,
-        template_version_id: current.template_version_id, config: { fax_template: { columns: [] } },
-      } });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/ocr-results`) && method === "GET") {
-      await route.fulfill({
-        status: 200,
-        json: {
-          results: [
-            {
-              ocr_result_id: "OCR-E2E-001",
-              selected: true,
-              overlay_url: "",
-              sheet_review_base_url: "",
-            },
-          ],
-        },
-      });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/inspection`) && method === "GET") {
-      await route.fulfill({
-        status: 200,
-        json: {
-          workflow: currentWorkflow(),
-          ocr_candidates: {
-            order_id: orderId, workflow_state: currentWorkflow().state,
-            blockers: [], selected_ocr_result_id: "OCR-E2E-001",
-            candidate_template_version_id: "TEMPLATE-E2E-001", hidden_template_mismatch_result_count: 0,
-            results: [{ ocr_result_id: "OCR-E2E-001", selected: true,
-              overlay_url: "", sheet_review_base_url: "" }],
-          },
-          saved_sheet: {
-            saved_sheet_id: "SHEET-E2E-001",
-            source_ocr_result_id: "OCR-E2E-001",
-            sheet: sheetPayload,
-            edited_at: "2026-05-22T00:00:00Z",
-          },
-          pre_save_status: {
-            anomaly_review_confirmed: true,
-            sheet_review_confirmed: true,
-          },
-        },
-      });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/sheet`) && method === "PUT") {
-      savePayload = route.request().postDataJSON();
-      workflowMutationHeaders.push({ path, ifMatch: route.request().headers()["if-match"] });
-      nextWorkflowRevision += 1;
-      await route.fulfill({ status: 200, json: { workflow: { ...workflowPayload, revision: nextWorkflowRevision }, saved_sheet_id: "SHEET-E2E-002" } });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/context`) && method === "POST") {
-      workflowMutationHeaders.push({ path, ifMatch: route.request().headers()["if-match"] });
-      if (options.contextSaveStatus === 409) {
-        await route.fulfill({ status: 409, json: { detail: "workflow revision conflict" } });
-        return;
-      }
-      nextWorkflowRevision += 1;
-      await route.fulfill({ status: 200, json: { workflow: { ...workflowPayload, revision: nextWorkflowRevision } } });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/sheet/anomaly-review`) && method === "POST") {
-      workflowMutationHeaders.push({ path, ifMatch: route.request().headers()["if-match"] });
-      nextWorkflowRevision += 1;
-      await route.fulfill({ status: 200, json: { workflow: { ...workflowPayload, revision: nextWorkflowRevision }, anomaly_review: {}, pre_save_checks: {}, pre_save_status: {} } });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/sheet/review-confirm`) && method === "POST") {
-      workflowMutationHeaders.push({ path, ifMatch: route.request().headers()["if-match"] });
-      nextWorkflowRevision += 1;
-      await route.fulfill({ status: 200, json: { workflow: { ...workflowPayload, revision: nextWorkflowRevision }, pre_save_checks: {}, pre_save_status: {} } });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/sheet/auto-edit`) && method === "POST") {
-      workflowMutationHeaders.push({ path, ifMatch: route.request().headers()["if-match"] });
-      nextWorkflowRevision += 1;
-      await route.fulfill({ status: 200, json: { workflow: { ...workflowPayload, revision: nextWorkflowRevision }, job: { job_id: "AUTO-E2E-001", status: "running" } } });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/sheet/auto-edit/AUTO-E2E-001`) && method === "GET") {
-      await route.fulfill({ status: 200, json: { job: { job_id: "AUTO-E2E-001", status: "done", workflow_result_revision: 9 }, result: { status: "done", patches: [] } } });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/quad-review`) && method === "GET") {
-      await route.fulfill({
-        status: 200,
-        json: {
-          suggested_quad_px: [[1, 1], [20, 1], [20, 30], [1, 30]],
-          estimate: { status: "ok", refined_quad_px: [[1, 1], [20, 1], [20, 30], [1, 30]] },
-        },
-      });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/quad-review`) && method === "PUT") {
-      workflowMutationHeaders.push({ path, ifMatch: route.request().headers()["if-match"] });
-      await route.fulfill({ status: 200, json: { workflow: { ...workflowPayload, revision: 8 } } });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/ocr-runs`) && method === "POST") {
-      workflowMutationHeaders.push({ path, ifMatch: route.request().headers()["if-match"] });
-      await route.fulfill({ status: 200, json: { workflow: { ...workflowPayload, revision: 9 } } });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}`) && method === "GET") {
-      await route.fulfill({
-        status: 200,
-        json: {
-          id: orderId,
-          version_count: 1,
-          current_version: { document_id: "DOC-E2E-001", is_current: true },
-          versions: [{ document_id: "DOC-E2E-001", is_current: true }],
-        },
-      });
-      return;
-    }
-    if (path.endsWith(`/orders/${orderId}/week-options`) && method === "GET") {
-      await route.fulfill({
-        status: 200,
-        json: {
-          options: [
-            {
-              week_id: "2026-05@2026-05-17~2026-05-23",
-              label: "05/17 - 05/23",
-              selected: true,
-            },
-          ],
-        },
-      });
-      return;
-    }
-    if (path.startsWith("/api/facilities/") && path.endsWith("/resolved") && method === "GET") {
-      await route.fulfill({
-        status: 200,
-        json: {
-          source: "canonical_json",
-          facility_id: path.split("/").at(-2),
-          effective_date: url.searchParams.get("effective_date"),
-          version: { version_id: "authored-e2e-version" },
-          config: { fax_template: { columns: [] } },
-        },
-      });
-      return;
-    }
-    if (path.endsWith("/facilities") && method === "GET") {
-      if (options.facilitiesStatus && options.facilitiesStatus !== 200) {
-        await route.fulfill({ status: options.facilitiesStatus, json: { detail: "facility source unavailable" } });
-        return;
-      }
-      await route.fulfill({
-        status: 200,
-        json: { facilities: options.facilities ?? [{ id: "FAC-E2E-001", name: "Workflow Sheet E2E Facility" }] },
-      });
-      return;
-    }
-
-    await route.fulfill({ status: 200, json: {} });
-  });
-
-  await page.goto(`${baseUrl}/orders/${orderId}/workflow-v2`);
-  return {
-    orderId,
-    requestCounts,
-    getSavePayload: () => savePayload,
-    getWorkflowMutationHeaders: () => workflowMutationHeaders,
-  };
-}
+import { expect, test } from "@playwright/test";
+import { mountWorkflowV2SheetPage } from "../helpers/workflow-v2-browser";
 
 test("workflow-v2 reflects an OCR facility suggestion only after a canonical facility match", async ({ page }) => {
   await mountWorkflowV2SheetPage(page, {
@@ -407,13 +157,14 @@ test("workflow-v2 resets the context input base from its own successful save", a
 });
 
 test("workflow-v2 sheet helper displays use the latest blurred cell edits", async ({ page }) => {
-  await mountWorkflowV2SheetPage(page);
+  const mounted = await mountWorkflowV2SheetPage(page);
 
   await expect(page.getByRole("heading", { name: "選択 OCR からシート作成 / 編集 / 保存" })).toBeVisible();
   const firstQuantity = page.locator('[data-sheet-row="0"][data-sheet-col="3"]');
   await firstQuantity.fill("789");
-  await page.getByRole("button", { name: "シート確認", exact: true }).click();
+  await page.locator('[aria-label="Step3 preview display mode"]').getByRole("button", { name: "シート確認", exact: true }).click();
   await expect(firstQuantity).toHaveValue("789");
+  expect(mounted.getWorkflowMutationHeaders()).toEqual([]);
 
   await firstQuantity.fill("987");
   const sheetJsonDetails = page.locator(".json-details").filter({ hasText: "保存予定JSONを確認" });
@@ -425,7 +176,7 @@ test("workflow-v2 sheet helper displays use the latest blurred cell edits", asyn
 test("workflow-v2 quad rerun inherits the revision returned by its own save", async ({ page }) => {
   const mounted = await mountWorkflowV2SheetPage(page);
 
-  await page.getByRole("button", { name: "4点確認/補正", exact: true }).click();
+  await page.getByRole("button", { name: /Step1\.5.*4点確認\/補正/ }).click();
   await expect(page.getByRole("button", { name: "推定4点をOKにしてOCR再実行" })).toBeVisible();
   await page.getByRole("button", { name: "推定4点をOKにしてOCR再実行" }).click();
 
@@ -443,7 +194,7 @@ test("workflow-v2 sheet checks advance the edited sheet revision before save", a
 
   await page.getByRole("button", { name: "異常チェック" }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(1);
-  await page.getByRole("button", { name: "シート確認", exact: true }).click();
+  await page.locator(".step3-top-actions-left").getByRole("button", { name: "シート確認", exact: true }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(2);
   await page.getByRole("button", { name: "シートを保存" }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(3);
@@ -462,7 +213,7 @@ test("workflow-v2 auto-edit completion advances only the matching sheet input re
   await page.getByRole("button", { name: "AI自動補正を提案" }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(1);
   await page.waitForTimeout(1300);
-  await page.getByRole("button", { name: "シート確認", exact: true }).click();
+  await page.locator(".step3-top-actions-left").getByRole("button", { name: /シート確認(?:済み)?$/, exact: true }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(2);
   expect(mounted.getWorkflowMutationHeaders()).toEqual([
     { path: `/api/orders/${mounted.orderId}/workflow-v2/sheet/auto-edit`, ifMatch: '"7"' },

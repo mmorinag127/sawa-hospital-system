@@ -17,6 +17,7 @@ from src.models.order_current_state import OrderCurrentState
 from src.models.order_ocr_cache import OrderOcrCache
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_sheet_patch_candidate import OrderSheetPatchCandidate
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
 from src.models.facility_template_version import FacilityTemplateVersion
@@ -2215,7 +2216,7 @@ def test_selecting_ocr_result_clears_active_sheet_but_retains_history(authored_a
     assert database_snapshot() == before
 
 
-def test_deleting_selected_ocr_result_deletes_derived_sheet_and_returns_to_step1_context(authored_april_context) -> None:
+def test_deleting_selected_ocr_with_saved_history_is_refused_without_changes(authored_april_context) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     order_workflow_v2_service.confirm_context(
         order_id=order_id,
@@ -2236,15 +2237,69 @@ def test_deleting_selected_ocr_result_deletes_derived_sheet_and_returns_to_step1
     assert error is None
     saved_sheet_id = saved["saved_sheet"]["saved_sheet_id"]
 
-    workflow, error = order_workflow_v2_service.delete_ocr_result(order_id, evidence_id_1, expected_revision=_current_workflow_revision(order_id))
+    revision = _current_workflow_revision(order_id)
+    before = database_snapshot()
+    workflow, error = order_workflow_v2_service.delete_ocr_result(order_id, evidence_id_1, expected_revision=revision)
 
-    assert error is None
-    assert workflow["selected_ocr_result_id"] is None
-    assert workflow["saved_sheet_id"] is None
-    assert workflow["state"] == "context_confirmed"
+    assert workflow is None
+    assert error == "ocr_result_saved_history_conflict"
+    assert database_snapshot() == before
     with session_scope() as session:
-        assert session.get(OrderOcrEvidenceRun, evidence_id_1) is None
-        assert session.get(OrderSheetDraft, saved_sheet_id) is None
+        assert session.get(OrderOcrEvidenceRun, evidence_id_1) is not None
+        draft = session.get(OrderSheetDraft, saved_sheet_id)
+        assert draft.base_evidence_run_id == evidence_id_1
+        assert draft.draft_sheet_json == {"rows": [{"menu": "A", "qty": "1"}]}
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_ocr_with_patch_candidate_only_history_cannot_be_deleted(authored_april_context, selected) -> None:
+    order_id, evidence_id, _ = _create_order_with_evidence()
+    context, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id, facility_id="FAC00001", week_start="2026-04-26", week_end="2026-04-30",
+        template_id="template-fac00001", expected_revision=_current_workflow_revision(order_id))
+    assert error is None
+    _stamp_evidence_with_workflow_template(order_id, evidence_id)
+    if selected:
+        context, error = order_workflow_v2_service.select_ocr_result(
+            order_id, evidence_id, expected_revision=context["revision"])
+        assert error is None
+    with session_scope() as session:
+        assert session.query(OrderSheetDraft.id).filter(OrderSheetDraft.base_evidence_run_id == evidence_id).first() is None
+        session.add(OrderSheetPatchCandidate(id=f"OPC{uuid4().hex[:12]}", order_id=order_id,
+            base_evidence_run_id=evidence_id, base_draft_id=None, draft_id=None,
+            candidate_state="ready", patches_json={"raw": "7"}, proposed_draft_sheet_json={"rows": [["7"]]}))
+    before = database_snapshot()
+    removed, error = order_workflow_v2_service.delete_ocr_result(
+        order_id, evidence_id, expected_revision=context["revision"])
+    assert removed is None and error == "ocr_result_saved_history_conflict"
+    assert database_snapshot() == before
+
+
+def test_deleting_unselected_ocr_without_history_preserves_the_active_saved_sheet(authored_april_context) -> None:
+    order_id, selected_id, unused_id = _create_order_with_evidence()
+    context, error = order_workflow_v2_service.confirm_context(
+        order_id=order_id, facility_id="FAC00001", week_start="2026-04-26", week_end="2026-04-30",
+        template_id="template-fac00001", expected_revision=_current_workflow_revision(order_id))
+    assert error is None
+    _stamp_evidence_with_workflow_template(order_id, selected_id, unused_id)
+    selected, error = order_workflow_v2_service.select_ocr_result(
+        order_id, selected_id, expected_revision=context["revision"])
+    assert error is None
+    saved, error = order_workflow_v2_service.save_sheet(order_id=order_id,
+        sheet={"rows": [{"menu": "A", "qty": "1"}]}, edited_by="test",
+        expected_revision=selected["revision"])
+    assert error is None
+    with session_scope() as session:
+        before = deepcopy(session.get(OrderSheetDraft, saved["saved_sheet"]["saved_sheet_id"]).draft_sheet_json)
+    removed, error = order_workflow_v2_service.delete_ocr_result(
+        order_id, unused_id, expected_revision=saved["workflow"]["revision"])
+    assert error is None
+    assert removed["selected_ocr_result_id"] == selected_id
+    assert removed["saved_sheet_id"] == saved["saved_sheet"]["saved_sheet_id"]
+    with session_scope() as session:
+        assert session.get(OrderOcrEvidenceRun, unused_id) is None
+        assert session.get(OrderOcrEvidenceRun, selected_id) is not None
+        assert session.get(OrderSheetDraft, removed["saved_sheet_id"]).draft_sheet_json == before
 
 
 def test_changing_selected_ocr_deletes_confirmed_snapshot_too(monkeypatch, april_output_context) -> None:
