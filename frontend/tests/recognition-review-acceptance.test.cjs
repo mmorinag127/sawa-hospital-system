@@ -7,11 +7,11 @@ const ORDER = 'synthetic-review', BASE = `/orders/${ORDER}/workflow-v2`;
 const cells = ['H17', 'G20', 'G21', 'G29', 'J38', 'G45', 'I49', 'I50', 'I60', 'J60'];
 const flags = cells.map(sheet_cell => ({sheet_cell, raw_text: ['J38', 'I50'].includes(sheet_cell) ? '--' : '-', reason: 'hakodate_ocr_quantity_non_numeric'}));
 const copy = value => JSON.parse(JSON.stringify(value));
-async function setup({ normal = false, job = null, initialStep = 2 } = {}) {
+async function setup({ normal = false, quantityEditable = false, job = null, initialStep = 2 } = {}) {
   const t = transport(), state = { revision: 7, selected: null, accepted: false };
   const current = () => ({order_id: ORDER, revision: state.revision, state: state.selected ? 'ocr_selected' : 'ocr_failed', selected_ocr_result_id: state.selected, blockers: [], warnings: [],
     headline: 'Step1要対応: OCR失敗', ocr_job: job});
-  const result = () => ({ocr_result_id: 'ocr-A', order_id: ORDER, status: 'diagnostic_only', selectable: normal || state.accepted,
+  const result = () => ({ocr_result_id: 'ocr-A', order_id: ORDER, status: 'diagnostic_only', selectable: normal || quantityEditable || state.accepted,
     recognition_review: normal ? null : {count: flags.length, cells: copy(flags)}, recognition_acceptance: state.accepted ? {values: copy(state.values)} : null});
   t.on('get', '/auth/me', () => ({data: {role: 'operator'}}));
   t.on('get', '/facilities', () => ({data: {source: 'canonical_json', revision: 'synthetic', facilities: []}}));
@@ -52,6 +52,23 @@ async function setup({ normal = false, job = null, initialStep = 2 } = {}) {
 }
 const mutations = f => f.t.calls.filter(call => ['put', 'post', 'delete'].includes(call.method));
 async function open(f) {await f.h.click(f.h.button('確認して正解にする')); await f.h.waitFor(() => f.probe.current.recognitionReview !== null && !f.probe.current.busy);}
+
+test('selectable raw symbols use ordinary selection without legacy acknowledgement or numeric replacement', async () => {
+  const f = await setup({quantityEditable: true});
+  try {
+    assert.match(f.h.document.body.textContent, /読取注記: 10セル/);
+    assert.doesNotMatch(f.h.document.body.textContent, /原文を確認して空欄または数値を指定/);
+    await f.h.click(f.h.button('原文のまま採用'));
+    await f.h.waitFor(() => f.state.selected === 'ocr-A' && !f.probe.current.busy);
+    assert.equal(f.probe.current.visibleStep, 3);
+    assert.equal(f.state.accepted, false);
+    assert.deepEqual(mutations(f).map(call => [call.method, call.url]), [
+      ['post', `${BASE}/ocr-results/ocr-A/select`],
+    ]);
+    assert.equal(f.t.calls.filter(call => call.url === `${BASE}/recognition-review`).length, 0);
+    assert.deepEqual(flags.map(cell => cell.raw_text), ['-', '-', '-', '-', '--', '-', '-', '--', '-', '-']);
+  } finally {await f.h.close();}
+});
 
 test('quantity-only historical rejection offers sheet creation without a content-error gate', async () => {
   const f = await setup({initialStep: 1, job: {status: 'failed', result_state: 'review_required',

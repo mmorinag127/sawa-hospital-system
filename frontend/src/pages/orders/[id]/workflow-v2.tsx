@@ -562,8 +562,11 @@ const workflowRevisionTokenFromRead = (workflow: WorkflowV2): WorkflowRevisionTo
   return null;
 };
 
+const CANONICAL_SOURCE_READ_TIMEOUT_MS = 180000;
+
 const formatApiError = (err: any, fallback: string) => {
   const reviewError = err?.response?.data?.detail;
+  if (reviewError === "recognition_review_result_changed") return "確認対象と最新のOCRジョブが一致しません。Step2で最新の読み取り結果を選択してください。原文と保存履歴は変更していません。";
   if (reviewError === "ocr_result_saved_history_conflict") return describeWorkflowBlocker(reviewError);
   if (reviewError === "recognition_acceptance_saved_draft_conflict") return "別のOCR結果に紐づく保存済みシートがあります。編集内容を保持して採用を停止しました。使用するOCRと保存済みシートを確認してください。";
   if (reviewError === "recognition_acceptance_explicit_values_required") return "要確認の全セルについて、空欄または数値を明示指定してください。文字・記号のままでは採用できません。";
@@ -2404,8 +2407,8 @@ export default function OrderWorkflowV2Page() {
     rawInspectionRequestRef.current += 1;
     rawInspectionAbortRef.current?.abort();
     const responses = await Promise.all([
-      apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?include_ocr_results=true&history_details=false`),
-      apiClient.get<OrderDetail>(`/orders/${orderId}`),
+      apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?include_ocr_results=true&history_details=false`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}),
+      apiClient.get<OrderDetail>(`/orders/${orderId}`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}),
     ]).catch(err=>{
       if (refreshGeneration===refreshGenerationRef.current && requestedOrderId===activeOrderIdRef.current
         && ownsPageInput(own) && callerCurrent()) throw err;
@@ -2540,7 +2543,7 @@ export default function OrderWorkflowV2Page() {
     const controller = new AbortController();
     rawInspectionAbortRef.current = controller;
     try {
-      const response = await apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?history_details=true`, {signal: controller.signal});
+      const response = await apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?history_details=true`, {signal: controller.signal, timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS});
       if (!ownsPageInput(own) || request !== rawInspectionRequestRef.current
         || !rawInspectionOpenRef.current) return;
       if (refreshGeneration !== refreshGenerationRef.current || response.data.order_id !== orderId
@@ -3794,7 +3797,7 @@ export default function OrderWorkflowV2Page() {
         order_id: string;
         selected_ocr_result_id: string;
         sheet?: Record<string, unknown>;
-      }>(`/orders/${orderId}/workflow-v2/sheet-source`);
+      }>(`/orders/${orderId}/workflow-v2/sheet-source`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS});
       adopt(() => {
         if (response.data.order_id !== orderId
           || response.data.selected_ocr_result_id !== selectedOcrResultRef.current) {
@@ -5731,9 +5734,9 @@ export default function OrderWorkflowV2Page() {
                       <p className="digest">{item.artifact_digest || ""}</p>
                       {item.recognition_review && item.recognition_review.count > 0 ? (
                         <div className="notice warning" role="alert">
-                          <strong>{item.recognition_acceptance ? "確認済み" : "要確認"}: {item.recognition_review.count}セル</strong>
-                          <p>{item.recognition_acceptance ? "確認した値を採用済みです。読み取り原文と理由は履歴として保持しています。" : "以下の理由で数量の確認が必要です。原文を確認して空欄または数値を指定してください。"}</p>
-                          {!item.recognition_acceptance ? <Button disabled={Boolean(busy)} onClick={() => loadRecognitionAcceptance(item.ocr_result_id)}>読み取り結果を確認して採用</Button> : null}
+                          <strong>{item.recognition_acceptance ? "確認済み" : item.selectable ? "読取注記" : "要確認"}: {item.recognition_review.count}セル</strong>
+                          <p>{item.recognition_acceptance ? "確認した値を採用済みです。読み取り原文と理由は履歴として保持しています。" : item.selectable ? "記号・空欄などの認識原文を保持しています。数量内容による採用制限はありません。" : "原本・セル位置・認識ジョブの整合性を確認してください。数量の書換えでは解除できません。"}</p>
+                          {!item.recognition_acceptance ? <Button disabled={Boolean(busy)} onClick={() => item.selectable ? selectOcr(item.ocr_result_id) : loadRecognitionAcceptance(item.ocr_result_id)}>{item.selectable ? "原文のまま採用" : "読み取り結果を確認して採用"}</Button> : null}
                           <Button disabled={Boolean(busy)} onClick={() => openRecognitionResume(item.ocr_result_id)}>
                             セル画像を確認・訂正
                           </Button>
@@ -5848,7 +5851,7 @@ export default function OrderWorkflowV2Page() {
                 onClick={generateSheetFromSelectedOcr}
                 disabled={Boolean(busy || !workflow?.selected_ocr_result_id)}
               >
-                選択OCRからシート生成
+                {busy === "Step3 sheet source" ? "原本を検証してシート生成中..." : "選択OCRからシート生成"}
               </Button>
               <Button className="btn ghost workflow-ordinary-control" type="button" onClick={proposeSheetAutoEdit} disabled={Boolean(busy || !sheetPayload)}>
                 AI自動補正を提案

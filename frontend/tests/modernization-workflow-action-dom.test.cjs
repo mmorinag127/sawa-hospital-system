@@ -146,6 +146,24 @@ async function start(h, action) {
 }
 const calls = (f, method, path) => f.t.calls.filter(c => c.method === method && c.url === path);
 
+test('canonical source reads retain validation budget and show pending generation without publishing early', async () => {
+  const f = await setup(), pending = deferred();
+  try {
+    for (const call of f.t.calls.filter(call => call.url === `${BASE}/inspection?include_ocr_results=true&history_details=false`
+      || call.url === `/orders/${ORDER}`)) assert.equal(call.config.timeout, 180000);
+    f.t.on('get', `${BASE}/sheet-source`, () => pending.promise);
+    const before = clone(f.probe.current.sheetPayload);
+    await f.h.click(f.h.button('選択OCRからシート生成'));
+    assert.ok(f.h.button('原本を検証してシート生成中...').disabled);
+    assert.deepEqual(f.probe.current.sheetPayload, before);
+    assert.equal(calls(f, 'get', `${BASE}/sheet-source`).at(-1).config.timeout, 180000);
+    await f.h.settle(() => pending.resolve(f.source()));
+    await f.h.waitFor(() => !f.probe.current.busy);
+    assert.deepEqual(f.probe.current.sheetPayload.rows[0].slice(4), RAW);
+    assert.equal(calls(f, 'put', `${BASE}/sheet`).length, 0);
+  } finally {await f.h.close();}
+});
+
 test('combined read preserves dirty quantities and excludes sidecar from displayed inspection', async () => {
   const f = await setup();
   try {
