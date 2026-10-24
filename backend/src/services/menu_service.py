@@ -188,7 +188,7 @@ def _monthly_item_identity_key(
         str(name or "").strip(),
         str(_coerce_master_field_value("daypart", daypart) or "").strip(),
         str(category or "").strip(),
-        str(_monthly_entry_diet_identity(diet_type) or "").strip(),
+        str(normalize_diet_type(diet_type) or "").strip(),
         str(facility_override or "").strip(),
     )
 
@@ -250,7 +250,7 @@ def _monthly_item_identity_key_from_entry(entry: MonthlyMenuEntry) -> tuple[str,
         name=entry.name,
         daypart=entry.daypart,
         category=entry.category,
-        diet_type=entry.diet_type,
+        diet_type=_monthly_entry_diet_identity(entry.diet_type),
         facility_override=entry.facility_override,
     )
 
@@ -278,6 +278,11 @@ def _monthly_entry_diet_filter(column, diet_type: object):
     if normalized == "regular":
         return or_(column.is_(None), column == "", column == "regular")
     return column == normalized
+
+
+def _monthly_item_diet_filter(column, diet_type: object):
+    normalized = normalize_diet_type(diet_type)
+    return column == normalized if normalized else column.in_([])
 
 
 def _menu_schema_missing_items(connection=None) -> list[str]:
@@ -2956,7 +2961,7 @@ def _find_existing_monthly_item(
     if normalized_diet is None:
         query = query.where(or_(MonthlyMenuItem.diet_type.is_(None), MonthlyMenuItem.diet_type == ""))
     else:
-        query = query.where(MonthlyMenuItem.diet_type == normalized_diet)
+        query = query.where(_monthly_item_diet_filter(MonthlyMenuItem.diet_type, normalized_diet))
     if exclude_id:
         query = query.where(MonthlyMenuItem.id != exclude_id)
     matches = session.execute(query).scalars().all()
@@ -3035,7 +3040,7 @@ def _find_existing_monthly_entry(
     facility_override: str | None,
     diet_type: str | None,
 ) -> MonthlyMenuEntry | None:
-    if not _monthly_entry_diet_identity(diet_type):
+    if not normalize_diet_type(diet_type):
         return None
     query = (
         select(MonthlyMenuEntry)

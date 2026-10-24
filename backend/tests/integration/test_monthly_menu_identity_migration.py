@@ -9,6 +9,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 import pytest
 import sqlalchemy as sa
+from c1_pg_ownership import additional_profile, require_server
 
 from src.models.menu import MenuMaster, MonthlyMenu, MonthlyMenuItem
 from src.services.monthly_menu_identity_schema import (
@@ -63,10 +64,14 @@ def database(request, tmp_path):
     if not raw:
         pytest.skip("C2_MENU_PG_URI required for owned PostgreSQL proof")
     url = sa.make_url(raw)
-    assert url.drivername == "postgresql+psycopg2" and url.host is None
-    assert url.database == "postgres" and url.query["port"] == "55463"
-    assert Path(url.query["host"]).resolve() == Path("/private/tmp/sawa-c2-menu-migration-20261006/socket")
+    profile = additional_profile(url, "identity")
     owner = sa.create_engine(url)
+    try:
+        with owner.connect() as connection:
+            require_server(connection, profile)
+    except BaseException:
+        owner.dispose()
+        raise
     schema = "c23_" + uuid4().hex
     with owner.begin() as connection:
         connection.execute(sa.schema.CreateSchema(schema))

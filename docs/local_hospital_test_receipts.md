@@ -4,19 +4,18 @@ Run sequentially on the exact clean commit that will be deployed:
 
 Prepare dependencies once before starting the runner. Keep the hospital backend
 environment and the gateway lock separate; they do not share a FastAPI pin.
-Set `DB_URI` to an owned disposable database and set these explicit agent inputs:
-
-- `SAWA_AGENT_TEST_POSTGRES_DSN`: owned PostgreSQL database named `agent_trial*`.
-- `SAWA_AGENT_GATEWAY_PYTHON`: prepared gateway interpreter using the gateway lock
-  and SQL/Alembic/openpyxl==3.1.5 test-support dependencies.
-- `SAWA_AGENT_NATIVE_SHIFT_PYTHON`: prepared interpreter for the packaged shift API.
-- `SAWA_AGENT_NATIVE_SCHOOL_LUNCH_PYTHON`: prepared interpreter for the packaged
-  school-lunch API and worker requirements.
+Set `SAWA_LOCAL_TEST_IMAGE_AGENT_RUNTIME` to the prepared Linux/amd64 serving
+agent image labelled with this exact clean commit. The native test runner checks
+the image source, derives an explicitly recorded test-only gateway image, and
+creates an owned local PostgreSQL16 container named for this run. The database
+has no host port and no external network; the test container alone joins its
+network namespace. Native interpreters remain those packaged in the serving image.
 
 The manifest enables native subprocess tests and includes all agent tests,
 including packaged baseline migration. Missing PostgreSQL/native preparation is
-not a successful skipped verification. Commands run serially and do not rebuild
-or reinstall their environments for each test invocation.
+not a successful skipped verification. Commands run serially. The test-only image
+is prepared once per command, not rebuilt per case; its explicit test dependencies
+do not change the serving image or isolated native application environments.
 
 Ordinary command failures are collected across the independent command groups
 in the same serial batch, so one failure does not hide the other results.
@@ -60,20 +59,23 @@ by creating that receipt.
 The native sibling harness is absent from approved develop and is inventory
 only, not a release prerequisite. No whole-suite receipt is claimed.
 
-Backend tests use the pre-provisioned `python3` selected by `PATH`, directly
-running all of `backend/tests` with this checkout's `backend` and
+Backend tests use the pre-provisioned `python3` selected by `PATH`,
+running general `backend/tests` cases with this checkout's `backend` and
 `backend/tests/unit` on `PYTHONPATH`. Provision the runtime and install its
 dependencies in a separate preparation step; the test command never recreates
 a venv or installs packages. Missing dependencies are failures, not skips.
-Before running, explicitly set `DB_URI` to an owned, isolated local test database.
-Do not select an external/shared database or rely on an implicit database default.
-The command requires the supplied setting and does not choose a database for you.
+The runner creates a new SQLite database in the run's evidence directory and
+removes inherited database connection settings. Dedicated PG/adoption modules
+are collected only by their explicitly mapped full-module commands, not again
+without their owned PG context. All modules remain required by the full receipt.
 
 The assistant command runs the complete packaged assistant suite once, including
-the baseline migration checks previously run separately. Set
-`SAWA_AGENT_TEST_POSTGRES_DSN` to an explicitly owned disposable PostgreSQL
-database whose name starts with `agent_trial`. Its persistence fixture replaces
-the `sawa_agent_trial` schema, so never supply a shared or business database.
+the baseline migration checks previously run separately. It supplies only its
+own disposable `agent_trial_<run>` PostgreSQL database, never a host-supplied
+shared/business DSN. Its persistence fixture replaces the `sawa_agent_trial` schema.
 The command enables `SAWA_AGENT_NATIVE_TESTS=1`; missing native dependencies or
 an unavailable local database are not a complete release verification.
 Node contract files and Playwright workers run one at a time on the local PC.
+Playwright copies tracked frontend source and installed dependencies into an
+independent evidence workspace. Private ignored `.env.local` files and inherited
+cloud credentials are excluded; Next-generated source stays in that workspace.

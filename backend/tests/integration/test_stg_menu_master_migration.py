@@ -64,21 +64,10 @@ def pg():
         pytest.skip("C1_STG_PG_URI required; no PostgreSQL proof without a dedicated cluster")
     url = sa.make_url(raw)
     profile = additional_profile(url, "migration")
-    if profile is None:
-        assert url.drivername == "postgresql+psycopg2" and url.host is None
-        assert url.database == "c1_stg_migration" and url.query["port"] == "55447"
-        socket = Path(url.query["host"]).resolve()
-        assert socket.parent == Path("/private/tmp") and socket.name.startswith("sawa-c1stg-pg.")
-        assert (socket / "OWNER").read_text().strip() == str(ROOT)
-        assert not url.query.get("options")
     owner = sa.create_engine(url)
     try:
         with owner.connect() as connection:
-            if profile is not None:
-                require_server(connection, profile)
-            else:
-                assert Path(connection.execute(sa.text("SHOW data_directory")).scalar_one()).resolve() == ROOT / "tmp/stg-migration/pgdata"
-                assert connection.execute(sa.text("SHOW listen_addresses")).scalar_one() == ""
+            require_server(connection, profile)
     except BaseException:
         owner.dispose()
         raise

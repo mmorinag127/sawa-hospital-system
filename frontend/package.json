@@ -17,8 +17,8 @@
     "lint": "eslint .",
     "test": "npm run lint && npm run test:config",
     "test:config": "node --test --test-concurrency=1 tests/config/*.test.js tests/config/*.test.mjs tests/*.test.cjs",
-    "test:e2e": "playwright test --workers=1",
-    "test:e2e:ui": "playwright test --ui",
+    "test:e2e": "python3 ../scripts/run_local_frontend_e2e.py",
+    "test:e2e:ui": "python3 ../scripts/run_local_frontend_e2e.py --ui",
     "generate:menu-master-api": "python3 ../scripts/export_menu_master_openapi.py --output src/generated/menu-master-openapi.json && openapi-typescript src/generated/menu-master-openapi.json -o src/generated/menu-master-api.ts",
     "check:menu-master-api": "python3 ../scripts/export_menu_master_openapi.py --check --output src/generated/menu-master-openapi.json && openapi-typescript src/generated/menu-master-openapi.json -o src/generated/menu-master-api.ts --check"
   },

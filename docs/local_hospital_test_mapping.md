@@ -1,7 +1,7 @@
 # Hospital Local Test Migration
 
-Latest diagnostic source: `f50d8118fcccec8a674428beb167191f4b3a78da`.
-That source is integrated into develop. Its diagnostic batch failed; no signed
+Latest diagnostic source: `7be11d7b67945b7873484307ee162acefcc2853b`.
+That source is local, not integrated into develop. Its diagnostic batch failed; no signed
 receipt or successful staging acceptance is claimed. The current 30-command
 definition and failure-class repairs still need a clean integrated-source run.
 
@@ -17,11 +17,27 @@ contracts, not an executable GitHub workflow.
 
 ## Command Mapping
 
-Each regular backend pytest file is collected by the backend command once.
+Each general backend pytest file is collected by the backend command once.
+The complete PG/read-only/adoption modules listed in
+`scripts/run_local_backend_tests.py:DEDICATED_MODULES` run only in their named
+dedicated commands, including their SQLite and negative ownership cases. They
+are not collected a second time without their required database profile.
+The runner partition contract verifies every excluded file's dedicated mapping.
 Frontend `test:config` already includes root `tests/*.test.cjs`, including dataset,
 shell-controls and API-session contracts; those are not run again individually.
 Frontend lint, config, inspection-demand-read, typecheck and E2E each run once.
 Dedicated PG, image and live-UI commands retain their distinct checks.
+PG runners create a fresh physical PG16 cluster/socket for each local run,
+validate source OWNER, postmaster PID, server and database identities, and verify
+shutdown. Historical fixed paths and unverified server profiles are not used.
+Frontend E2E uses a hash-checked tracked-source copy and independent installed
+dependencies; ignored private environment files are not copied. Next-generated
+files cannot modify the source checkout, whose clean-source guard is unchanged.
+Native workflow cases run serially inside the matching Linux agent runtime with
+a separately owned local PostgreSQL network namespace. The test-only image adds
+explicit gateway test dependencies, not changes to the serving image/native
+environments. Both containers receive cleanup attempts even if one fails;
+cleanup failures prevent a successful receipt.
 `runtime-image-audits` additionally inventories and audits six actual isolated
 image environments: backend, producer and agent hospital/gateway/shift/school.
 `runtime-audit-contracts` verifies source refusal and unsuccessful-audit behavior.

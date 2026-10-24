@@ -21,7 +21,7 @@
   "commands": [
     {
       "name": "backend-tests",
-      "command": ": \"${DB_URI:?Set an explicitly owned local test DB_URI before running}\" && PYTHONPATH=\"$PWD/backend:$PWD/backend/tests/unit${PYTHONPATH:+:$PYTHONPATH}\" python3 -m pytest backend/tests",
+      "command": "python3 scripts/run_local_backend_tests.py",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
@@ -225,7 +225,7 @@
     },
     {
       "name": "agent-assistant-tests",
-      "command": ": \"${SAWA_AGENT_TEST_POSTGRES_DSN:?Set an explicitly owned disposable agent_trial PostgreSQL DB}\" \"${SAWA_AGENT_GATEWAY_PYTHON:?Set a prepared gateway interpreter}\" \"${SAWA_AGENT_NATIVE_SHIFT_PYTHON:?Set a prepared native shift interpreter}\" \"${SAWA_AGENT_NATIVE_SCHOOL_LUNCH_PYTHON:?Set a prepared native school-lunch interpreter}\" && SAWA_AGENT_NATIVE_TESTS=1 PYTHONPATH=\"$PWD:$PWD/backend\" \"$SAWA_AGENT_GATEWAY_PYTHON\" -m pytest experiments/agent_assistant/tests -q",
+      "command": "python3 scripts/run_local_agent_tests.py",
       "legacy_steps": [
         {
           "workflow": "ci.yml",

@@ -9,6 +9,10 @@ import tempfile
 from unittest.mock import patch
 from local_receipt_signing import sign, verify_signed
 import yaml
+import run_local_agent_tests as AGENT_RUNNER
+import run_local_backend_tests as BACKEND_RUNNER
+import run_local_frontend_e2e as E2E_RUNNER
+import local_hospital_legacy_step as LEGACY_RUNNER
 
 
 MODULE = Path(__file__).with_name("local_hospital_test_runner.py")
@@ -20,20 +24,141 @@ SPEC.loader.exec_module(RUNNER)
 class ReceiptContractTest(unittest.TestCase):
     def test_agent_preflight_requires_each_owned_environment_without_starting_tests(self):
         commands = {item['name']: item['command'] for item in json.loads(RUNNER.MANIFEST.read_text())['commands']}
-        command = commands['agent-assistant-tests']
-        required = ('SAWA_AGENT_TEST_POSTGRES_DSN', 'SAWA_AGENT_GATEWAY_PYTHON',
-                    'SAWA_AGENT_NATIVE_SHIFT_PYTHON', 'SAWA_AGENT_NATIVE_SCHOOL_LUNCH_PYTHON')
-        prepared = {name: 'synthetic-owned-prepared-value' for name in required}
-        prefix, execution = command.split(' && ', 1)
-        self.assertIn('"$SAWA_AGENT_GATEWAY_PYTHON" -m pytest experiments/agent_assistant/tests', execution)
-        self.assertIn('SAWA_AGENT_NATIVE_TESTS=1', execution)
+        self.assertEqual(commands['agent-assistant-tests'], 'python3 scripts/run_local_agent_tests.py')
         self.assertNotIn('packaged-baseline', commands)
-        for missing in (*required, None):
-            environment = {key: value for key, value in prepared.items() if key != missing}
-            result = subprocess.run(['bash', '-euo', 'pipefail', '-c', prefix],
-                                    env=environment, capture_output=True)
-            with self.subTest(missing=missing):
-                self.assertEqual(result.returncode == 0, missing is None)
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(AGENT_RUNNER, 'clean_tree', return_value=True), \
+             patch.object(AGENT_RUNNER, 'git', return_value='a' * 40), \
+             patch.object(AGENT_RUNNER, 'docker') as execute:
+            with self.assertRaises(KeyError):
+                AGENT_RUNNER.main()
+            execute.assert_not_called()
+        for source, platform in (('b' * 40, 'amd64'), ('a' * 40, 'arm64')):
+            with patch.dict(os.environ, {'SAWA_LOCAL_TEST_IMAGE_AGENT_RUNTIME': 'owned', 'CI': '', 'GITHUB_ACTIONS': ''}), \
+                 patch.object(AGENT_RUNNER, 'clean_tree', return_value=True), \
+                 patch.object(AGENT_RUNNER, 'git', return_value='a' * 40), \
+                 patch.object(AGENT_RUNNER, 'inspect', return_value={
+                     'Os': 'linux', 'Architecture': platform, 'Config': {'Labels': {'sawa.git_sha': source}}}), \
+                 patch.object(AGENT_RUNNER, 'docker') as execute:
+                with self.assertRaisesRegex(ValueError, 'source/platform mismatch'):
+                    AGENT_RUNNER.main()
+                execute.assert_not_called()
+
+    def test_general_backend_partition_maps_every_exclusion_to_a_dedicated_full_command(self):
+        commands = {item['name']: item['command'] for item in json.loads(RUNNER.MANIFEST.read_text())['commands']}
+        self.assertEqual(commands['backend-tests'], 'python3 scripts/run_local_backend_tests.py')
+        seen = set()
+        for name, modules in BACKEND_RUNNER.DEDICATED_MODULES.items():
+            self.assertIn(name, commands)
+            self.assertTrue(modules)
+            for module in modules:
+                self.assertTrue((RUNNER.ROOT / module).is_file(), module)
+                self.assertNotIn(module, seen)
+                seen.add(module)
+        for suite, command in {'readonly': 'hospital-readonly-pg', 'c1': 'hospital-c1-pg',
+                               'c1-guards': 'hospital-c1-guard-pg', 'menu-identity': 'hospital-menu-identity-pg'}.items():
+            self.assertEqual(BACKEND_RUNNER.DEDICATED_MODULES[command], BACKEND_RUNNER.MODULES[suite])
+            self.assertIn('--suite ' + suite, commands[command])
+        self.assertIn('test_live_schema_adoption.py', ' '.join(BACKEND_RUNNER.DEDICATED_MODULES['live-schema-adoption']))
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': directory, 'DB_HOST': 'foreign',
+                                    'DB_URI': 'foreign', 'DATABASE_URL': 'foreign', 'ALEMBIC_DB_URI': 'foreign',
+                                    'CI': '', 'GITHUB_ACTIONS': ''}), \
+             patch.object(BACKEND_RUNNER, 'clean_tree', return_value=True), \
+             patch.object(BACKEND_RUNNER, 'git', return_value='a' * 40), \
+             patch.object(BACKEND_RUNNER.sys, 'argv', ['runner']), \
+             patch.object(BACKEND_RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as execute:
+            self.assertEqual(BACKEND_RUNNER.main(), 0)
+            argv = execute.call_args.args[0]
+            self.assertIn('backend/tests', argv)
+            self.assertEqual({item.removeprefix('--ignore=') for item in argv if item.startswith('--ignore=')}, seen)
+            self.assertNotIn('DB_HOST', execute.call_args.kwargs['env'])
+            self.assertNotIn('DATABASE_URL', execute.call_args.kwargs['env'])
+            self.assertNotIn('ALEMBIC_DB_URI', execute.call_args.kwargs['env'])
+            self.assertEqual(execute.call_args.kwargs['env']['DB_URI'], 'sqlite:///' + directory + '/backend-tests/runtime.sqlite')
+
+    def test_agent_cleanup_attempts_database_even_when_test_container_cannot_be_stopped(self):
+        for failure in ('stop', 'owner'):
+            removed, calls = set(), []
+            identities = {'test': '1' * 64, 'pg': '2' * 64}
+
+            def execute(*args, **kwargs):
+                calls.append(args)
+                if args[0] == 'container':
+                    name = args[4].removeprefix('name=^/').removesuffix('$')
+                    return subprocess.CompletedProcess(args, 0, stdout='' if name in removed else identities[name])
+                if args[0] == 'stop' and args[-1] == identities['test'] and failure == 'stop':
+                    raise RuntimeError('controlled stop failure')
+                if args[0] == 'rm':
+                    removed.add(next(name for name, identity in identities.items() if identity == args[-1]))
+                return subprocess.CompletedProcess(args, 0)
+
+            def inspect(identity):
+                name = identity if identity in identities else next(name for name, value in identities.items() if value == identity)
+                return {'Id': identities[name], 'State': {'Running': False},
+                        'Config': {'Labels': {'sawa.local_run': 'foreign' if failure == 'owner' and name == 'test' else 'owned',
+                                              'sawa.git_sha': 'a' * 40}}}
+
+            with patch.object(AGENT_RUNNER, 'docker', side_effect=execute), \
+                 patch.object(AGENT_RUNNER, 'inspect', side_effect=inspect):
+                errors = AGENT_RUNNER.cleanup_owned_containers(('test', 'pg'), 'owned', 'a' * 40)
+            self.assertEqual([name for name, _ in errors], ['test'])
+            self.assertIn(('stop', '--time', '30', identities['pg']), calls)
+            self.assertEqual(removed, {'pg'})
+            if failure == 'owner':
+                self.assertFalse(any(call[0] == 'stop' and call[-1] == identities['test'] for call in calls))
+
+    def test_local_legacy_translation_resolves_only_known_context_without_hosted_identity(self):
+        context = {'SAWA_LOCAL_SOURCE_DIR': '/owned/source', 'SAWA_LOCAL_LEGACY_TEMP_DIR': '/owned/tmp',
+                   'SAWA_LOCAL_SOURCE_SHA': 'a' * 40, 'SAWA_LOCAL_RUN_ID': '123', 'SAWA_LOCAL_RUN_ATTEMPT': '1'}
+        translated = LEGACY_RUNNER.local_text(
+            '${{ runner.temp }}/proof $GITHUB_SHA $GITHUB_WORKSPACE $RUNNER_TEMP', context)
+        self.assertEqual(translated, '/owned/tmp/proof $SAWA_LOCAL_SOURCE_SHA $SAWA_LOCAL_SOURCE_DIR $SAWA_LOCAL_LEGACY_TEMP_DIR')
+        for expression in ('${{ secrets.VALUE }}', '${{ github.actor }}', '${{ matrix.suite }}'):
+            with self.assertRaisesRegex(ValueError, 'unresolved workflow expression'):
+                LEGACY_RUNNER.local_text(expression, context)
+        for workflow, job in (('../ci.yml', 'backend'), ('ci.yml', 'backend'), ('deploy-stg.yml', 'deploy')):
+            with self.assertRaises(ValueError):
+                LEGACY_RUNNER.step(workflow, job, 'not-run')
+
+    def test_e2e_copies_only_tracked_source_and_keeps_next_generated_changes_isolated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'checkout'
+            frontend = root / 'frontend'
+            frontend.mkdir(parents=True)
+            original = frontend / 'next-env.d.ts'
+            original.write_text('original source')
+            (frontend / '.env.local').write_text('PRIVATE_VALUE=secret')
+            dependencies = frontend / 'node_modules'
+            dependencies.mkdir()
+            (dependencies / 'owned.js').write_text('installed dependency')
+            evidence = Path(directory) / 'evidence'
+            evidence.mkdir()
+
+            def next_run(argv, *, cwd, env):
+                self.assertNotEqual(cwd, frontend)
+                self.assertEqual(argv[-1], '--workers=1')
+                self.assertFalse((cwd / '.env.local').exists())
+                self.assertNotIn('PRIVATE_VALUE', env)
+                self.assertNotIn('GOOGLE_APPLICATION_CREDENTIALS', env)
+                self.assertRegex(env['E2E_BASE_URL'], r'^http://127\.0\.0\.1:[1-9][0-9]*$')
+                self.assertEqual(env['NEXT_PUBLIC_GIT_SHA'], 'a' * 40)
+                (cwd / 'next-env.d.ts').write_text('generated by Next')
+                self.assertEqual((cwd / 'node_modules/owned.js').read_text(), 'installed dependency')
+                return subprocess.CompletedProcess(argv, 0)
+
+            with patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': str(evidence), 'PRIVATE_VALUE': 'secret',
+                                        'GOOGLE_APPLICATION_CREDENTIALS': '/foreign/key', 'CI': '', 'GITHUB_ACTIONS': ''}), \
+                 patch.object(E2E_RUNNER, 'ROOT', root), \
+                 patch.object(E2E_RUNNER, 'clean_tree', return_value=True), \
+                 patch.object(E2E_RUNNER, 'git', return_value='a' * 40), \
+                 patch.object(E2E_RUNNER.sys, 'argv', ['runner']), \
+                 patch.object(E2E_RUNNER.subprocess, 'check_output', return_value=b'frontend/next-env.d.ts\0'), \
+                 patch.object(E2E_RUNNER.subprocess, 'run', side_effect=next_run):
+                self.assertEqual(E2E_RUNNER.main(), 0)
+            self.assertEqual(original.read_text(), 'original source')
+            record = json.loads((evidence / 'frontend-e2e/source.json').read_text())
+            self.assertEqual(record['files'], {'frontend/next-env.d.ts': hashlib.sha256(b'original source').hexdigest()})
 
     @classmethod
     def setUpClass(cls):

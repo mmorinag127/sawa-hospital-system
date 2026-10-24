@@ -9,11 +9,14 @@ import re
 import subprocess
 from contextlib import closing
 from urllib.parse import urlparse
+from typing import TYPE_CHECKING
 
 import requests
 from google.cloud import storage
-from google.cloud.sql.connector import Connector
 from verify_stg_monthly_menus import apply_saved_import, authored_selection, review_material, validate_receipt
+
+if TYPE_CHECKING:
+    from google.cloud.sql.connector import Connector
 
 
 PROJECT_ID = "sawahospitalsystem"
@@ -45,6 +48,11 @@ def _load_secret(secret_name: str) -> str:
         text=True,
     )
     return completed.stdout.strip()
+
+
+def _create_connector():
+    from google.cloud.sql.connector import Connector
+    return Connector()
 
 
 def _connect(connector: Connector, instance_connection_name: str, password: str):
@@ -156,7 +164,7 @@ def main() -> int:
         raise SystemExit("GOOGLE_ID_TOKEN is required")
 
     prod_password = _load_secret(PROD_SECRET)
-    connector = Connector()
+    connector = _create_connector()
     storage_client = storage.Client(project=PROJECT_ID)
     try:
         with closing(_connect(connector, PROD_CONN, prod_password)) as prod_conn:

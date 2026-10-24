@@ -107,19 +107,10 @@ def pg():
     raw = os.environ['C1_LIVE_PG_URI']  # Missing real PG is an error, never a passing skip.
     url = sa.make_url(raw)
     profile = additional_profile(url, 'live')
-    if profile is None:
-        assert url.drivername == 'postgresql+psycopg2' and url.host is None and url.database == 'c1_live'
-        socket = Path(url.query['host']).resolve()
-        assert socket.parent == Path('/private/tmp') and socket.name.startswith('sawa-c1stg-pg.')
-        assert (socket / 'OWNER').read_text().strip() == str(ROOT)
     engine = sa.create_engine(url)
     try:
         with engine.connect() as c:
-            if profile is not None:
-                require_server(c, profile)
-            else:
-                assert Path(c.execute(sa.text('SHOW data_directory')).scalar_one()).resolve() == ROOT / 'tmp/stg-migration/pgdata'
-                assert c.execute(sa.text('SHOW listen_addresses')).scalar_one() == ''
+            require_server(c, profile)
     except BaseException:
         engine.dispose()
         raise

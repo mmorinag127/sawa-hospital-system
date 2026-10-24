@@ -40,19 +40,21 @@ def test_explicit_suite_selects_whole_modules_and_distinct_owned_root(suite, pre
     ]
     assert runner.owned_root('123', '2') == runner.owned_root('123', '2', 'readonly')
     assert runner.pytest_command(root) == runner.pytest_command(root, 'readonly')
-    assert runner.PG_BIN == Path('/usr/lib/postgresql/16/bin')
+    assert runner.PG_BIN == Path(os.environ.get('PG_BIN', '/usr/lib/postgresql/16/bin'))
 
 
 def test_fixed_profiles_match_unchanged_fixture_paths_and_databases():
-    assert runner.FIXED_PG == {
-        'c1-guards': (Path('/private/tmp/sawa-c2-hospital-catalog-20261006/pg16'), '55470', {
+    assert runner.DATABASES == {
+        'readonly': {'C2_MENU_READONLY_PG_URI': 'postgres'},
+        'c1': {'C1_POSTGRES_URI': 'c1_menu_master'},
+        'c1-guards': {
             'C1_LIVE_PG_URI': 'c2_hospital_c1_live_pg16',
             'C1_STG_PG_URI': 'c2_hospital_c1_migration_pg16',
             'TEST_BOOTSTRAP_DB_URI': 'c2_hospital_c1_bootstrap_pg16',
-        }),
-        'menu-identity': (Path('/private/tmp/sawa-c2-menu-migration-20261006'), '55463', {
+        },
+        'menu-identity': {
             'C2_MENU_PG_URI': 'postgres',
-        }),
+        },
     }
 
 
@@ -86,12 +88,6 @@ def transport(monkeypatch, tmp_path):
     state = SimpleNamespace(source=source, root=root, commands=[], fail=None, pytest_exit=0,
                             active=False, wrong_identity=False, stale_socket=False,
                             identity_override={}, identity_database=None)
-    fixed_parent = tmp_path.resolve() / 'private/tmp'
-    fixed_parent.mkdir(parents=True)
-    monkeypatch.setattr(runner, 'FIXED_PG', {
-        suite: (fixed_parent / ('catalog/pg16' if suite == 'c1-guards' else 'identity'), port, databases)
-        for suite, (_, port, databases) in runner.FIXED_PG.items()
-    })
     for key in tuple(os.environ):
         if key.startswith(('PG', 'C1_', 'C2_')) or key in ('TEST_BOOTSTRAP_DB_URI', 'PYTEST_ADDOPTS'):
             monkeypatch.delenv(key)
@@ -118,13 +114,8 @@ def transport(monkeypatch, tmp_path):
         assert cwd == source and stderr == subprocess.STDOUT
         state.commands.append((args, dict(env)))
         data = root / 'pg/pgdata'
-        c1 = 'C1_POSTGRES_URI' in env
-        socket = source / 'tmp/pgs' if c1 else root / 'pg/socket'
-        port = '55437' if c1 else '55471'
-        for pg, profile_port, databases in runner.FIXED_PG.values():
-            if set(databases) <= env.keys():
-                data, socket, port = pg / 'pgdata', pg / 'socket', profile_port
-                break
+        socket = root / 'pg/socket'
+        port = '55471'
         tool = Path(args[0]).name
         code = 0
         if args[1:] == ['--version']:
@@ -175,9 +166,9 @@ def transport(monkeypatch, tmp_path):
     return state
 
 
-@pytest.mark.parametrize('platform,actions', [('darwin', ''), ('linux', 'true')])
+@pytest.mark.parametrize('platform,actions', [('darwin', 'true'), ('linux', 'true')])
 @pytest.mark.parametrize('suite', ['c1', 'c1-guards', 'menu-identity'])
-def test_c1_refuses_hosted_or_non_linux_execution_before_creating_owned_root(transport, monkeypatch, platform, actions, suite):
+def test_c1_refuses_hosted_execution_on_each_platform_before_creating_owned_root(transport, monkeypatch, platform, actions, suite):
     monkeypatch.setattr(sys, 'platform', platform)
     monkeypatch.setenv('GITHUB_ACTIONS', actions)
     with pytest.raises(ValueError, match='local'):
@@ -187,8 +178,10 @@ def test_c1_refuses_hosted_or_non_linux_execution_before_creating_owned_root(tra
 
 @pytest.mark.parametrize('suite', ['readonly', 'c1'])
 @pytest.mark.parametrize('exit_code', [0, 1])
-def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeypatch, suite, exit_code):
+@pytest.mark.parametrize('platform', ['linux', 'darwin'])
+def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeypatch, suite, exit_code, platform):
     state = transport
+    monkeypatch.setattr(sys, 'platform', platform)
     state.pytest_exit = exit_code
     if suite == 'c1':
         for key in ('C1_POSTGRES_URI', 'C2_MENU_READONLY_PG_URI', 'PGHOST', 'PGOPTIONS', 'PYTEST_ADDOPTS'):
@@ -196,8 +189,8 @@ def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeyp
     assert runner.run(state.source, '123', '1', suite) == exit_code
     root, source = state.root, state.source
     data = root / 'pg/pgdata'
-    socket = source / 'tmp/pgs' if suite == 'c1' else root / 'pg/socket'
-    port = '55437' if suite == 'c1' else '55471'
+    socket = root / 'pg/socket'
+    port = '55471'
     assert socket.resolve() == socket and not socket.is_symlink()
     assert list(socket.iterdir()) == [] and not (data / 'postmaster.pid').exists()
     assert (root / 'OWNER').read_text() == (root / 'pg/OWNER').read_text() == str(source)
@@ -225,7 +218,8 @@ def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeyp
             '-o', f"-p {port} -k {socket} -c listen_addresses='' -c unix_socket_permissions=0700",
             '-w', 'start'] in commands
     if suite == 'c1':
-        assert not any(name.startswith(('C2_', 'PG')) or name == 'PYTEST_ADDOPTS' for name in env)
+        assert not any((name.startswith(('C2_', 'PG')) and name != 'C2_MENU_READONLY_OWNED_ROOT')
+                       or name == 'PYTEST_ADDOPTS' for name in env)
         assert [str(runner.PG_BIN / 'createdb'), '-h', str(socket), '-p', port,
                 '-U', 'mmorinag', 'c1_menu_master'] in commands
         sql = next(args for args in commands if Path(args[0]).name == 'psql' and args[1] == '-X')
@@ -233,13 +227,14 @@ def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeyp
                            '-U', 'mmorinag', '-d', 'c1_menu_master', '-v', 'ON_ERROR_STOP=1', '-At']
         assert sql[14] == '-c' and 'current_database()' in sql[15]
         metadata = json.loads((root / 'evidence/run.json').read_text())
-        assert metadata['source_sha'] == SOURCE_SHA and metadata['uri'] == env[key]
+        assert metadata['source_sha'] == SOURCE_SHA and metadata['uris'][key] == env[key]
         assert metadata['modules'] == ['backend/tests/integration/test_menu_master_revision.py',
                                        'backend/tests/integration/test_menu_editor_revision_contract.py']
         assert metadata['argv'] == args
     else:
         assert env['C2_MENU_READONLY_OWNED_ROOT'] == str(root)
-        assert not any(Path(args[0]).name in {'createdb', 'psql'} for args in commands)
+        assert not any(Path(args[0]).name == 'createdb' and args[1] != '--version' for args in commands)
+        assert len([args for args in commands if Path(args[0]).name == 'psql' and args[1] == '-X']) == 1
     lifecycle = json.loads((root / 'evidence/lifecycle.json').read_text())
     assert {'pytest_exit': exit_code} in lifecycle
     assert {'shutdown_verified': True, 'socket_alias_used': False} in lifecycle
@@ -273,15 +268,15 @@ def test_c1_startup_or_identity_failure_is_saved_and_never_runs_pytest(transport
 
 @pytest.mark.parametrize('kind', ['root', 'socket', 'socket-link', 'parent-link'])
 def test_c1_refuses_existing_or_aliased_ownership_without_using_tools(transport, kind):
-    socket = transport.source / 'tmp/pgs'
+    socket = transport.root / 'pg/socket'
     if kind == 'root':
         transport.root.mkdir()
     elif kind == 'parent-link':
         target = transport.source / 'foreign'
         target.mkdir()
-        socket.parent.symlink_to(target, target_is_directory=True)
+        transport.root.symlink_to(target, target_is_directory=True)
     else:
-        socket.parent.mkdir()
+        socket.parent.mkdir(parents=True)
         if kind == 'socket-link':
             target = transport.source / 'foreign'
             target.mkdir()
@@ -317,7 +312,7 @@ def test_fixed_profiles_check_every_database_before_whole_modules_and_preserve_f
                 'TEST_BOOTSTRAP_DB_URI', 'PYTEST_ADDOPTS'):
         monkeypatch.setenv(key, 'foreign-input')
     assert runner.run(state.source, '123', '1', suite) == exit_code
-    pg, port, databases = runner.FIXED_PG[suite]
+    pg, port, databases = state.root / 'pg', '55471', runner.DATABASES[suite]
     data, socket, evidence = pg / 'pgdata', pg / 'socket', state.root / 'evidence'
     assert (pg / 'OWNER').read_text() == (state.root / 'OWNER').read_text() == str(state.source)
     calls = [(args, env) for args, env in state.commands if args[:3] == [sys.executable, '-m', 'pytest']]
@@ -325,7 +320,7 @@ def test_fixed_profiles_check_every_database_before_whole_modules_and_preserve_f
     args, env = calls[0]
     assert args == runner.pytest_command(state.root, suite)
     assert {key for key in env if key.startswith(('PG', 'C1_', 'C2_'))
-            or key in ('TEST_BOOTSTRAP_DB_URI', 'PYTEST_ADDOPTS')} == set(databases)
+            or key in ('TEST_BOOTSTRAP_DB_URI', 'PYTEST_ADDOPTS')} == set(databases) | {'C2_MENU_READONLY_OWNED_ROOT'}
     assert {env[key] for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')} == {
         'sqlite:///' + str(state.root / 'bootstrap.sqlite3')}
     for key, database in databases.items():
@@ -367,13 +362,11 @@ def test_fixed_profiles_check_every_database_before_whole_modules_and_preserve_f
 @pytest.mark.parametrize('suite', ['c1-guards', 'menu-identity'])
 @pytest.mark.parametrize('kind', ['root', 'profile', 'profile-link', 'parent-link'])
 def test_fixed_profiles_refuse_existing_or_aliased_paths_before_tools(transport, suite, kind):
-    pg, _, _ = runner.FIXED_PG[suite]
+    pg = transport.root / 'pg'
     if kind == 'root':
         transport.root.mkdir()
     elif kind == 'parent-link':
-        parent = pg.parent.parent if suite == 'c1-guards' else pg.parent
-        parent.rmdir()
-        parent.symlink_to(transport.source, target_is_directory=True)
+        transport.root.symlink_to(transport.source, target_is_directory=True)
     else:
         pg.parent.mkdir(parents=True, exist_ok=True)
         if kind == 'profile-link':
@@ -400,7 +393,7 @@ def test_fixed_profile_sql_identity_mismatch_stops_before_pytest(transport, fiel
 @pytest.mark.parametrize('owner', ['root', 'pg'])
 def test_fixed_profile_requires_actual_owner_source_after_start(transport, monkeypatch, owner):
     original = subprocess.run
-    pg, _, _ = runner.FIXED_PG['c1-guards']
+    pg = transport.root / 'pg'
 
     def corrupt_owner(args, **kwargs):
         result = original(args, **kwargs)

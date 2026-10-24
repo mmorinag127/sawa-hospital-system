@@ -3337,7 +3337,7 @@ def _normalize_delivery_category_label(value: Any) -> str:
         return "副菜2"
     if compact in {"副3", "副③", "副菜3", "副菜③", "副菜三"}:
         return "副菜3"
-    if compact in {"主", "主菜", "主菜1", "主菜①"}:
+    if compact in {"主", "主菜", "主菜1", "主菜①", "主Ａ", "主A"}:
         return "主菜"
     return text
 

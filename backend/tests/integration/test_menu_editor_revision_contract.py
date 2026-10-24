@@ -14,6 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from src import db
 from src.models.menu import MenuFacilityOverride, MenuMaster, MenuRule, MonthlyMenu, MonthlyMenuEntry, MonthlyMenuItem
 from src.services import base_menu_service, menu_edit_revision_service, menu_rule_service
+from c1_pg_ownership import additional_profile, require_server
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -63,7 +64,15 @@ def revision_store(request, tmp_path, monkeypatch):
         uri = os.getenv("C1_POSTGRES_URI")
         if not uri:
             pytest.skip("C1_POSTGRES_URI required for dedicated PostgreSQL revision proof")
-        owner = sa.create_engine(uri)
+        url = sa.make_url(uri)
+        profile = additional_profile(url, "menu")
+        owner = sa.create_engine(url)
+        try:
+            with owner.connect() as connection:
+                require_server(connection, profile)
+        except BaseException:
+            owner.dispose()
+            raise
         schema = f"menu_editor_revision_{uuid4().hex}"
         with owner.begin() as connection:
             connection.execute(sa.text(f'CREATE SCHEMA "{schema}"'))

@@ -1,7 +1,12 @@
 """Retired workflow APIs refuse writes; current positive mapping is documented in
 legacy_workflow_migration.md. These are authored components, not live FAX proof.
 """
+from copy import deepcopy
+import pytest
 from src.db import session_scope
+from src.models.order import Order, OrderLine
+from src.models.output import Bag, DeliveryNote, LabelRow
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from tests.contract.test_orders_ocr_sheet_history_api import history_case, _sheet, LEGACY  # noqa: F401
 
@@ -60,3 +65,33 @@ def test_current_sheet_save_keeps_latest_operator_values_and_rejects_stale_revis
     with session_scope() as session:
         draft = session.get(OrderSheetDraft, second["saved_sheet_id"])
         assert draft.draft_sheet_json == second["sheet"]
+
+
+@pytest.mark.parametrize("valid_template", [False, True])
+def test_explicit_same_evidence_reselect_invalidates_only_mismatched_saved_selection(history_case, valid_template):
+    f = history_case()
+    f.produce()
+    saved = f.save(_sheet("9", "operator-retained", "retained-row"))["saved_sheet"]
+    with session_scope() as session:
+        draft = session.get(OrderSheetDraft, saved["saved_sheet_id"])
+        if not valid_template:
+            draft.template_version_id = None  # Deliberate identity corruption, not an operator edit.
+        archived_sheet = deepcopy(draft.draft_sheet_json)
+        evidence = deepcopy(session.get(OrderOcrEvidenceRun, f.evidence).payload_json)
+        facility = session.get(Order, f.id).facility_code
+        session.add(OrderLine(id="derived-line", order_id=f.id, quantity_original=9, quantity_corrected=9))
+        session.add(Bag(id="derived-bag", order_id=f.id, quantity=9, source_saved_sheet_id=draft.id))
+        session.flush()
+        session.add(LabelRow(id="derived-label", order_id=f.id, bag_id="derived-bag", payload_json={"quantity": 9}))
+        session.add(DeliveryNote(id="derived-delivery", order_id=f.id, facility_code=facility))
+    response = f.client.post(f"/orders/{f.id}/workflow-v2/ocr-results/{f.evidence}/select",
+        headers={**f.actor.headers, "If-Match": str(f.revision())})
+    assert response.status_code == 200, response.text
+    current = response.json()
+    assert current["selected_ocr_result_id"] == f.evidence
+    assert current["saved_sheet_id"] == (saved["saved_sheet_id"] if valid_template else None)
+    with session_scope() as session:
+        assert session.get(OrderSheetDraft, saved["saved_sheet_id"]).draft_sheet_json == archived_sheet
+        assert session.get(OrderOcrEvidenceRun, f.evidence).payload_json == evidence
+        for model in (OrderLine, Bag, LabelRow, DeliveryNote):
+            assert session.query(model).filter_by(order_id=f.id).count() == int(valid_template)
