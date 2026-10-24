@@ -1748,7 +1748,7 @@ export default function OrderWorkflowV2Page() {
       throw new Error("workflow revision を取得できません。再読込してから操作してください。");
     }
     const headers = (config.headers && typeof config.headers === "object") ? config.headers as Record<string, string> : {};
-    return { ...config, headers: { ...headers, "If-Match": `"${revision}"` } };
+    return { timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS, ...config, headers: { ...headers, "If-Match": `"${revision}"` } };
   };
   const workflowFromMutationResponse = (data: unknown): WorkflowV2 | null => {
     if (!data || typeof data !== "object") return null;
@@ -3858,6 +3858,7 @@ export default function OrderWorkflowV2Page() {
   const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
     unsavedSessionRef.current = quadAuth();
     ++workingInputGenerationRef.current;
+    markSheetDirty();
     setLocalAnomalyReview((current) => {
       const sourceReview = current || anomalyReview;
       if (!sourceReview) return current;
@@ -4288,7 +4289,7 @@ export default function OrderWorkflowV2Page() {
 
   const saveSheet = () =>
     runAction("Step3 sheet save", async ({ adopt }) => {
-      const latestWorkflow = await apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`);
+      const latestWorkflow = await apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS});
       adopt(() => {
         if (latestWorkflow.data.order_id !== orderId
           || latestWorkflow.data.selected_ocr_result_id !== selectedOcrResultRef.current) {

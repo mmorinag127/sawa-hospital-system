@@ -152,7 +152,7 @@ test('canonical source reads retain validation budget and show pending generatio
     for (const call of f.t.calls.filter(call => call.url === `${BASE}/inspection?include_ocr_results=true&history_details=false`
       || call.url === `/orders/${ORDER}`)) assert.equal(call.config.timeout, 180000);
     f.t.on('get', `${BASE}/sheet-source`, () => pending.promise);
-    const before = clone(f.probe.current.sheetPayload);
+    const before = structuredClone(f.probe.current.sheetPayload);
     await f.h.click(f.h.button('選択OCRからシート生成'));
     assert.ok(f.h.button('原本を検証してシート生成中...').disabled);
     assert.deepEqual(f.probe.current.sheetPayload, before);
@@ -161,6 +161,19 @@ test('canonical source reads retain validation budget and show pending generatio
     await f.h.waitFor(() => !f.probe.current.busy);
     assert.deepEqual(f.probe.current.sheetPayload.rows[0].slice(4), RAW);
     assert.equal(calls(f, 'put', `${BASE}/sheet`).length, 0);
+  } finally {await f.h.close();}
+});
+
+test('canonical save preserves the original If-Match and shares the finite source validation budget', async () => {
+  const f = await setup();
+  try {
+    await f.h.click(f.h.button('シートを保存'));
+    await f.h.waitFor(() => calls(f, 'put', `${BASE}/sheet`).length === 1 && !f.probe.current.busy);
+    const saved = calls(f, 'put', `${BASE}/sheet`)[0];
+    assert.equal(saved.config.timeout, 180000);
+    assert.equal(saved.config.headers['If-Match'], '"7"');
+    assert.equal(calls(f, 'get', BASE).at(-1).config.timeout, 180000);
+    assert.deepEqual(saved.body.sheet.rows[0].slice(4), ['2', '0', '', '']);
   } finally {await f.h.close();}
 });
 
