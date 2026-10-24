@@ -1,5 +1,38 @@
 # Fixed-source full batch remediation
 
+## Host Batch At b8efa378
+
+Evidence: `/private/tmp/sawa-host-batch-b8efa3788bd2-20261024/results.json`.
+Docker remained stopped. The source was fixed in the clean r3 verification tree.
+Backend:9991 passed,17 failed,184 skipped in4296.79seconds. Frontend config:
+1792 passed,2 failed in172.69seconds. Browser:86 passed,25 failed in9.6minutes.
+Types,lint,inspection-read and the remaining host contracts passed except the
+receipt shell test's three missing-host-tool cases. These are not a deployment
+receipt or live verification. Container-dependent checks remain unexecuted.
+
+Follow-up repairs are batched before related serial verification:
+
+- Publication race injection targets the committed projection boundary, not an
+  obsolete compat-only canonical revision increment.
+- History fixtures construct independent authored OrderLines after formal save,
+  which correctly invalidates the derived lines. Original quantities stay exact.
+- Successful row-repair fixtures explicitly use Sunday-Saturday. Monday-Sunday
+  remains a rejected cross-FAX negative case.
+- Configuration fixtures distinguish omitted comparison settings from an empty
+  list. Explicit None removes the field; default component settings remain empty.
+- Browser workflow fixtures return the actual selected workflow on direct GET,
+  include explicit resolved menu amounts and field-bound overlay cells, and
+  navigate to Step1 before operating its controls. Hidden MUI sizing textareas
+  are not editing controls.
+- Current approved source comparisons move to b8efa378 while preserving the
+  historical migration, ancestry and ownership checks.
+
+The full backend run consumed about72minutes and must not be repeated after
+each fixture edit. Collect the failures, finish all known repairs, and run their
+related modules and adjacent cases serially before deciding the final source's
+remaining validation requirements. Never treat old-SHA evidence as a new-SHA
+successful signed receipt.
+
 ## Diagnostic At b30bb8ad And Remaining Repairs
 
 Related backend:172 passed,3 failed,10013 deselected in326.94seconds.

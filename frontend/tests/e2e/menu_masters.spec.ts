@@ -27,6 +27,10 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
   page.on("pageerror", e => state.errors.push(e.message));
   page.on("console", m => { if (["error", "warning"].includes(m.type())) state.console.push(m.text()); });
   await page.addInitScript(() => {
+    (window as any).menuPopEvents = 0;
+    window.addEventListener("popstate", () => {
+      queueMicrotask(() => { (window as any).menuPopEvents++; });
+    }, true);
     const replace = history.replaceState;
     (window as any).removeOwnedMenuPosition = () => {
       const { sawa_navigation, ...unchangedNextState } = history.state;
@@ -68,6 +72,12 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     const body = req.postData() ? req.postDataJSON() : null, bearer = req.headers().authorization || "";
     state.requests.push({ method, path, query: url.search, body, bearer });
     const respond = (status: number, json: any) => route.fulfill({ status, json });
+    if (path === "/portal/auth/start") {
+      expect(method).toBe("GET");
+      expect(url.searchParams.get("next")).toMatch(/^\//);
+      expect(bearer).toBe("");
+      return respond(503, { detail: "Synthetic Google configuration unavailable" });
+    }
     if (path === "/auth/config") return respond(200, { google_client_id: "" });
     if (path === "/portal/auth/logout") {
       expect(method).toBe("POST");
@@ -120,7 +130,7 @@ async function finish(page: Page, info: TestInfo, state: Awaited<ReturnType<type
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
   expect(state.console.filter(s => /hydration|did not match|Minified React error|Failed prop type|out of range/i.test(s))).toEqual([]);
-  const sessionEndpoints = new Set(["/auth/config", "/portal/auth/me", "/portal/auth/logout", "/staging-datasets"]);
+  const sessionEndpoints = new Set(["/auth/config", "/portal/auth/start", "/portal/auth/me", "/portal/auth/logout", "/staging-datasets"]);
   expect(state.requests.filter(r => !sessionEndpoints.has(r.path)).every(r => /^Bearer menu-test-[AB]$/.test(r.bearer))).toBe(true);
   expect(state.requests.filter(r => sessionEndpoints.has(r.path)).every(r => r.bearer === "" || /^Bearer menu-test-[AB]$/.test(r.bearer))).toBe(true);
   expect(state.requests.filter(r => r.path === "/staging-datasets").every(r => r.method === "GET")).toBe(true);
@@ -149,6 +159,13 @@ async function search(page: Page, value: string) {
 }
 async function position(page: Page) { return page.evaluate(() => ({ url: location.href, position: history.state.sawa_navigation, nextStatePresent: !!history.state.__N })); }
 async function historyGo(page: Page, delta: number) { await page.evaluate(n => history.go(n), delta); }
+async function cancelOwnedHistory(page: Page, delta: number) {
+  const before = await page.evaluate(() => (window as any).menuPopEvents);
+  const dialog = page.waitForEvent("dialog");
+  await historyGo(page, delta);
+  await (await dialog).dismiss();
+  await expect.poll(() => page.evaluate(() => (window as any).menuPopEvents)).toBe(before + 2);
+}
 
 for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
   test(`both entry, nine-field POST/PUT and fresh document saved values: ${path}`, async ({ page }, info) => {
@@ -440,7 +457,7 @@ test("unknown dirty history stops without guessed delta and recovers after becom
   const owned = await position(page);
   expect(owned.position).toEqual({ token: recovered.position.token, index: 2 });
   await info.attach("recovered-owned-history", { body: JSON.stringify({ recovered, neighbor, owned }), contentType: "application/json" });
-  const cancel = page.waitForEvent("dialog"); await historyGo(page, -1); await (await cancel).dismiss();
+  await cancelOwnedHistory(page, -1);
   await expect.poll(async () => (await position(page)).position).toEqual(owned.position);
   await expect(page).toHaveURL(owned.url); await expect(field(editForm(page), "分類")).toHaveValue("新しい所有履歴で保護");
   const allow = page.waitForEvent("dialog"); await historyGo(page, -1); await (await allow).accept();
@@ -509,7 +526,7 @@ test("dirty link and history cancellation restores URL/render/history, then acce
   page.once("dialog", d => d.dismiss()); await page.getByRole("link", { name: "メニュールール", exact: true }).click();
   await expect(page).toHaveURL(current.url); await expect(field(editForm(page), "分類")).toHaveValue("取消保護");
   for (let n = 0; n < 2; n++) {
-    const dialog = page.waitForEvent("dialog"); await historyGo(page, -1); await (await dialog).dismiss();
+    await cancelOwnedHistory(page, -1);
     await expect.poll(async () => (await position(page)).position).toEqual(current.position);
     await expect(page).toHaveURL(current.url); await expect(field(editForm(page), "分類")).toHaveValue("取消保護");
   }
@@ -518,7 +535,7 @@ test("dirty link and history cancellation restores URL/render/history, then acce
   await historyGo(page, 1); await expect(page.getByRole("heading", { name: "メニューマスター", exact: true })).toBeVisible();
   await expect(editForm(page)).toHaveCount(0); await select(page); await expect(field(editForm(page), "分類")).toHaveValue("主菜");
   await field(editForm(page), "分類").fill("複数entry取消"); await search(page, "白身魚"); const query = await position(page);
-  const multi = page.waitForEvent("dialog"); await historyGo(page, -2); await (await multi).dismiss();
+  await cancelOwnedHistory(page, -2);
   await expect.poll(async () => (await position(page)).position).toEqual(query.position); await expect(page).toHaveURL(query.url);
   await expect(field(editForm(page), "分類")).toHaveValue("複数entry取消"); await finish(page, info, s);
 });

@@ -40,7 +40,7 @@ def authored_tabular_invoice(root, *, quantity_columns):
             "include_menu_name": True, "columns": columns}
 
 
-def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=None, facility_id=None, facility_name=None, menu_temp_type=None, area_names=None, prepare_only=False, prepared_sources=False, message_id=None, week_start=None, declared_quantity_pairs=None, physical_menu_category=None, physical_slot_indexes=None, week_end=None, label_profile=None, prepared_original=None, prepared_menu_sources=False):
+def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=(), facility_id=None, facility_name=None, menu_temp_type=None, area_names=None, prepare_only=False, prepared_sources=False, message_id=None, week_start=None, declared_quantity_pairs=None, physical_menu_category=None, physical_slot_indexes=None, week_end=None, label_profile=None, prepared_original=None, prepared_menu_sources=False):
     """Prepare sources once, then consume them without changing canonical inputs."""
     assert prepared_original is None or (prepared_sources and not prepare_only), "prepared original requires predeclared sources"
     for key in ("RAW_BUCKET", "OCR_OUTPUT_BUCKET", "K_SERVICE", "FACILITY_MASTER_URI"):
@@ -83,8 +83,10 @@ def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
     if not prepared_sources:
         if facility_name is not None:
             configured["facility_name"] = facility_name
-        if daily_label_comparable_diet_types is not None:
-            configured["daily_label_comparable_diet_types"] = deepcopy(daily_label_comparable_diet_types)
+        if daily_label_comparable_diet_types is None:
+            configured.pop("daily_label_comparable_diet_types", None)
+        else:
+            configured["daily_label_comparable_diet_types"] = list(daily_label_comparable_diet_types)
         authored_areas = {
             "common": {"area_id": "common", "name": "Synthetic component common area"},
             "2F": {"area_id": "2F", "name": "Synthetic component second floor"},
@@ -272,7 +274,7 @@ def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
     return registered, sheet
 
 
-def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", menu_temp_type=None, output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=None, facility_id=None, prepared_sources=False, message_id=None, week_start=None, declared_quantity_pairs=None, physical_menu_category=None, physical_slot_indexes=None, week_end=None, label_profile=None, area_names=None, facility_name=None, prepared_original=None, prepared_menu_sources=False):
+def accepted_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=None, menu_category="主菜", confirm=False, omit_invoice=False, menu_qty_per_serving=1, menu_unit_type="g", menu_temp_type=None, output_diet_types=None, accessory_masters=None, daily_label_comparable_diet_types=(), facility_id=None, prepared_sources=False, message_id=None, week_start=None, declared_quantity_pairs=None, physical_menu_category=None, physical_slot_indexes=None, week_end=None, label_profile=None, area_names=None, facility_name=None, prepared_original=None, prepared_menu_sources=False):
     registered, sheet = selected_bagging_order(
         monkeypatch, tmp_path, lines, invoice_template=invoice_template,
         menu_category=menu_category, omit_invoice=omit_invoice,

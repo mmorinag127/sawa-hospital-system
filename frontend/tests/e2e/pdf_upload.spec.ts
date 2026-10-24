@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 test("pdf upload page shows uploaded PDF rows and allows retry for incomplete rows", async ({ page }) => {
   const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
   let retried = false;
+  let uploadListReads = 0;
   const requests: Array<{ method: string; path: string }> = [];
 
   await page.addInitScript(() => {
@@ -25,6 +26,7 @@ test("pdf upload page shows uploaded PDF rows and allows retry for incomplete ro
     }
 
     if (path.endsWith("/ingest/uploads") && method === "GET") {
+      uploadListReads++;
       await route.fulfill({
         status: 200,
         json: {
@@ -81,6 +83,8 @@ test("pdf upload page shows uploaded PDF rows and allows retry for incomplete ro
   await page.goto(`${baseUrl}/pdf-upload`);
 
   await expect(page.getByRole("heading", { name: "最近の取込PDF" })).toBeVisible();
+  expect(uploadListReads).toBe(0);
+  await page.getByRole("button", { name: "取込済みPDFを表示", exact: true }).click();
   await expect(page.getByText("pending.pdf")).toBeVisible();
   await expect(page.getByText("completed.pdf")).toBeVisible();
   await expect(page.locator(".history-card").filter({ hasText: "pending.pdf" }).getByText("要介入").first()).toBeVisible();
@@ -112,6 +116,12 @@ test("pdf upload form sends the explicitly selected MUI facility and week", asyn
       await route.fulfill({ status: 200, json: { source: "canonical_json", revision: "upload-facilities-1", facilities: [{ id: "FAC-E2E", name: "E2E施設" }] } });
       return;
     }
+    if (url.pathname.endsWith("/facilities/FAC-E2E/resolved")) {
+      await route.fulfill({ status: 200, json: { source: "canonical_json", facility_id: "FAC-E2E",
+        effective_date: url.searchParams.get("effective_date"), revision: "upload-facilities-1",
+        version: { version_id: "upload-version-1" } } });
+      return;
+    }
     if (url.pathname.endsWith("/ingest/upload") && method === "POST") {
       multipartPayload = route.request().postData() || "";
       await route.fulfill({ status: 200, json: { accepted: true, filename: "selected.pdf" } });
@@ -125,8 +135,13 @@ test("pdf upload form sends the explicitly selected MUI facility and week", asyn
   await page.getByLabel("対象月", { exact: true }).fill("2026-05");
   await page.getByLabel("対象週", { exact: true }).click();
   await page.getByRole("option").filter({ hasText: "2026-05" }).first().click();
+  await page.getByLabel("施設版の適用日", { exact: true }).fill("2026-05-01");
+  await page.getByText("この施設版を使用する", { exact: true }).locator("..").getByRole("checkbox").check();
   await page.locator('input[type="file"]').setInputFiles({ name: "selected.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4") });
   await page.getByRole("button", { name: "PDFを登録" }).click();
   expect(multipartPayload).toContain("FAC-E2E");
   expect(multipartPayload).toContain("2026-05@");
+  expect(multipartPayload).toContain("2026-05-01");
+  expect(multipartPayload).toContain("upload-facilities-1");
+  expect(multipartPayload).toContain("upload-version-1");
 });

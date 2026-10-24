@@ -20,7 +20,7 @@ export type WorkflowMountOptions = {
   polledOcrResults?: Array<Record<string, unknown>>;
   entryPath?: "legacy";
   documentStatus?: 404 | 500;
-  targetCells?: Array<{ target_row_index: number; target_col_index: number; bbox: number[] }>;
+  targetCells?: Array<{ target_row_index: number; target_col_index: number; field: string; bbox: number[] }>;
 };
 
 export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMountOptions = {}) {
@@ -61,6 +61,7 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
     week_start: "2026-05-17",
     week_end: "2026-05-23",
     template_version_id: "TEMPLATE-E2E-001",
+    menu_amount_resolution: { status: "resolved", affected_lines: [] },
     ocr_job: options.workflowState === "ocr_running" ? {
       ocr_job_id: "OCR-E2E-RECORDED", order_id: orderId,
       workflow_attempt_id: "ATTEMPT-E2E-RECORDED", status: "running",
@@ -95,6 +96,11 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
     const path = url.pathname;
     const method = route.request().method().toUpperCase();
     requestCounts[`${method} ${path}`] = (requestCounts[`${method} ${path}`] ?? 0) + 1;
+
+    if (path.endsWith(`/orders/${orderId}/workflow-v2`) && method === "GET") {
+      await route.fulfill({ status: 200, json: currentWorkflow() });
+      return;
+    }
 
     if (path.endsWith(`/orders/${orderId}/document`) && method === "GET") {
       expect(url.searchParams.get("document_id")).toBe(documentId);

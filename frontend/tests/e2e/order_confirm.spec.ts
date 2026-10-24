@@ -231,9 +231,9 @@ test("real cell Tab and row focus move only their matching overlay highlights", 
       detail_state: "loaded", sheet_review_base_url: "",
       overlay_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAI0lEQVR4nGP8//8/AymAiSTVDKMaiANMRKqDg1ENxACSQwkAVW0DHeN02ZEAAAAASUVORK5CYII=" }],
     targetCells: [
-      { target_row_index: 0, target_col_index: 3, bbox: [0.2, 0.1, 0.4, 0.3] },
-      { target_row_index: 0, target_col_index: 4, bbox: [0.4, 0.1, 0.6, 0.3] },
-      { target_row_index: 1, target_col_index: 3, bbox: [0.2, 0.4, 0.4, 0.6] },
+      { target_row_index: 0, target_col_index: 3, field: "qty.regular", bbox: [0.2, 0.1, 0.4, 0.3] },
+      { target_row_index: 0, target_col_index: 4, field: "qty.soft", bbox: [0.4, 0.1, 0.6, 0.3] },
+      { target_row_index: 1, target_col_index: 3, field: "qty.regular", bbox: [0.2, 0.4, 0.4, 0.6] },
     ],
   });
   const image = page.locator(".step3-overlay-image");

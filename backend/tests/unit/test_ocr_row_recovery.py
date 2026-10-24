@@ -75,10 +75,13 @@ def test_calendar_cannot_guess_a_period_or_accept_rows_outside_it(period):
         recovery.calendar_contract(plan(), week_value=period)
 
 
-def test_target_period_cannot_span_two_full_week_faxes():
+@pytest.mark.parametrize("first,last,period", [
+    ("2026-10-26", "2026-11-01", "2026-10@2026-10-26~2026-11-01"),
+    ("2026-10-05", "2026-10-11", "2026-10@2026-10-05~2026-10-11"),
+])
+def test_target_period_cannot_span_two_full_week_faxes(first, last, period):
     with pytest.raises(ValueError, match="fax_calendar_week_unresolved"):
-        recovery.calendar_contract([{"date": "2026-10-26"}, {"date": "2026-11-01"}],
-            week_value="2026-10@2026-10-26~2026-11-01")
+        recovery.calendar_contract([{"date": first}, {"date": last}], week_value=period)
 
 
 @pytest.mark.parametrize("boundaries", [None, [0, 8, 16, 32, 40, 48, 56], [0, 8, 16, 24, 32, 40, 48, 55],

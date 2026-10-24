@@ -211,7 +211,7 @@ def _make_repair_order(monkeypatch, tmp_path, *, extra_columns=(), merged=False,
         "fixture", selected_authored_version=authored,
     )
     with session_scope() as session:
-        session.add(Order(id=order_id, facility_code="fixture", week_code="2026-10@2026-10-05~2026-10-11", current_document_id=document_id, document_uri=str(path), message_id=message, received_at=datetime(2026, 10, 7), template_version_id=projection_id))
+        session.add(Order(id=order_id, facility_code="fixture", week_code="2026-10@2026-10-04~2026-10-10", current_document_id=document_id, document_uri=str(path), message_id=message, received_at=datetime(2026, 10, 7), template_version_id=projection_id))
         session.add(OrderDocument(id=document_id, storage_uri=str(path), source_email_id=message))
         session.flush()
         session.add(UploadedPdf(id=str(uuid4()), message_id=message, storage_uri=str(path), original_filename="repair.pdf", content_sha256=sha256(body).hexdigest(), received_at=datetime(2026, 10, 7)))

@@ -389,6 +389,9 @@ class ReceiptContractTest(unittest.TestCase):
             *) return 99 ;;
           esac
         }
+        sha256sum() {
+          python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), sys.argv[1])' "$@"
+        }
         '''
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
                 'SAWA_LOCAL_TEST_SIGNING_KEY': str(self.key)}):

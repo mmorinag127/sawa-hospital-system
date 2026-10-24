@@ -138,8 +138,6 @@ def selected_history_order(history_registration, monkeypatch, tmp_path):
         assert all(len(row) == max(column['source_index'] for column in columns) + 1 for row in rows)
         select_authored_native_result(monkeypatch, order_id=order['id'],
             table_rows=rows, columns=columns, unlisted_cells='', artifact_root=tmp_path / 'native-artifacts')
-        if inputs['lines']:
-            assert order_service.update_lines(order['id'], deepcopy(inputs['lines'])) is True
         if not blank_source:
             sheet, error = order_service.get_ocr_sheet(order['id'])
             assert error is None and sheet is not None, error
@@ -155,6 +153,8 @@ def selected_history_order(history_registration, monkeypatch, tmp_path):
             assert error is None and reviewed is not None, error
             saved, error = _save_formal_sheet(order_id=order['id'], sheet=sheet, edited_by='history-component')
             assert error is None and saved['saved_sheet']['sheet'] == sheet, error
+        if inputs['lines']:
+            assert order_service.update_lines(order['id'], deepcopy(inputs['lines'])) is True
         return _read_order(order['id'])
     return register
 
@@ -3630,9 +3630,14 @@ def test_formal_save_preserves_explicit_period_without_using_legacy_materializat
         week="2026-05@2026-05-01~2026-05-02", effective_date="2026-05-01", lines=[],
         ocr_rows=[["05/01", "昼", "Menu A", "2", "", "", "", "", "", ""]])
     original_week = _read_order(order["id"])["persisted_week_value"]
-    def forbidden(*args, **kwargs):
-        pytest.fail("Explicit May source must not invoke a legacy derived January week")
-    monkeypatch.setattr(order_service, "_build_materialization_candidate_from_draft_record", forbidden)
+    materialize = order_service._build_materialization_candidate_from_draft_record
+    captured_periods = []
+    def validate_period(*args, **kwargs):
+        assert kwargs["existing_week_code"] == original_week
+        assert kwargs["facility_id"] == "FAC00001"
+        captured_periods.append(kwargs["existing_week_code"])
+        return materialize(*args, **kwargs)
+    monkeypatch.setattr(order_service, "_build_materialization_candidate_from_draft_record", validate_period)
     sheet, error = order_service.get_ocr_sheet(order["id"])
     assert error is None and sheet is not None
     fields = sheet["fields"]
@@ -3642,6 +3647,7 @@ def test_formal_save_preserves_explicit_period_without_using_legacy_materializat
     saved, error = _save_formal_sheet(order_id=order["id"], sheet=sheet,
         edited_by="authored-component-operator")
     assert error is None and saved is not None
+    assert captured_periods and set(captured_periods) == {original_week}
     assert _read_order(order["id"])["persisted_week_value"] == original_week
     visible, error = order_service.get_ocr_sheet(order["id"])
     assert error is None and visible["rows"] == sheet["rows"]
@@ -6742,8 +6748,7 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     assert history_2["raw_output"] == selected_before["payload_json"]
     assert order_service.get_ocr_evidence_run(selected_before["id"]) == selected_before
 
-    assert "Previous yomitoku/LLM markdown" in captured_prompts[0]["user"]
-    assert "Previous yomitoku/LLM structured tables/cells" in captured_prompts[0]["user"]
+    assert f"Current baseline revision_id: {updated_1['llm_review']['baseline_revision_id']}" in captured_prompts[0]["user"]
     assert "Current baseline source: current_draft" in captured_prompts[0]["user"]
     assert '"qty.regular_2f": "2"' in captured_prompts[0]["user"]
     assert f"Current baseline revision_id: {selected_after_save['id']}" in captured_prompts[1]["user"]

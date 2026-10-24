@@ -166,6 +166,8 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
 
   await page.goto(`${baseUrl}/shipping-history`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: "日付ごとの出荷状況" })).toBeVisible();
+  await expect(page.locator('input[type="month"]')).toBeEnabled();
+  await page.locator('input[type="month"]').fill("2026-03");
   await expect(page.getByRole("heading", { name: "2026年3月" })).toBeVisible();
   await expect(page.getByTestId("shipping-calendar")).toBeVisible();
   await expect(page.locator(".calendar-weekdays")).toContainText("日月火水木金土");

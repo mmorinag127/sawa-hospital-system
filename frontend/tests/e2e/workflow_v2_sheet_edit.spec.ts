@@ -7,6 +7,7 @@ test("workflow-v2 reflects an OCR facility suggestion only after a canonical fac
     workflowFacilityId: "",
   });
 
+  await page.getByRole("button", { name: /Step1\s.*施設/ }).click();
   await expect(page.getByLabel("施設 (Step1 必須)")).toHaveValue("");
   await page.getByRole("button", { name: "推定を反映" }).click();
   await expect(page.getByLabel("施設 (Step1 必須)")).toHaveValue("FAC-E2E-001");
@@ -25,6 +26,7 @@ test("workflow-v2 blocks an unregistered OCR facility suggestion without adding 
     workflowFacilityId: "",
   });
 
+  await page.getByRole("button", { name: /Step1\s.*施設/ }).click();
   await page.getByRole("button", { name: "推定を反映" }).click();
   await expect(page.getByText("この施設IDは正本の施設一覧に未登録です。内容を確認するまで保存・OCR実行はできません。")).toBeVisible();
   await expect(page.getByLabel("施設 (Step1 必須)").locator("option")).not.toContainText("FAC-NOT-REGISTERED");
@@ -37,8 +39,9 @@ test("workflow-v2 visibly blocks context actions when canonical facility retriev
     workflowFacilityId: "",
   });
 
+  await page.getByRole("button", { name: /Step1\s.*施設/ }).click();
   await expect(page.getByText("正本の施設一覧を取得できません。施設の反映・保存・OCR実行はできません。").first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "設定を保存" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "施設と週を選択" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "OCRを実行" })).toBeDisabled();
 });
 
@@ -119,6 +122,7 @@ test("workflow-v2 adopts a polled context revision before a clean editor starts"
 test("workflow-v2 stops commands when a read workflow revision is zero", async ({ page }) => {
   await mountWorkflowV2SheetPage(page, { workflowRevision: 0 });
 
+  await page.getByRole("button", { name: /Step1\s.*施設/ }).click();
   await expect(page.getByText("workflow revision が不正です。再読込してから操作してください。")).toBeVisible();
   await page.getByRole("button", { name: "設定を保存" }).click();
   await expect(page.getByText("workflow revision を取得できません。再読込してから操作してください。")).toBeVisible();
@@ -146,6 +150,7 @@ test("workflow-v2 resets the context input base from its own successful save", a
     ],
   });
 
+  await page.getByRole("button", { name: /Step1\s.*施設/ }).click();
   await page.getByLabel("施設 (Step1 必須)").selectOption("FAC-E2E-MANUAL");
   await page.getByRole("button", { name: "設定を保存" }).click();
   await page.getByRole("button", { name: "設定を保存" }).click();
@@ -169,8 +174,8 @@ test("workflow-v2 sheet helper displays use the latest blurred cell edits", asyn
   await firstQuantity.fill("987");
   const sheetJsonDetails = page.locator(".json-details").filter({ hasText: "保存予定JSONを確認" });
   await sheetJsonDetails.click();
-  await expect(sheetJsonDetails.locator("textarea")).toHaveValue(/"987"/);
-  await expect(sheetJsonDetails.locator("textarea")).not.toHaveValue(/"789"/);
+  await expect(sheetJsonDetails.locator("textarea:not([aria-hidden])")).toHaveValue(/"987"/);
+  await expect(sheetJsonDetails.locator("textarea:not([aria-hidden])")).not.toHaveValue(/"789"/);
 });
 
 test("workflow-v2 quad rerun inherits the revision returned by its own save", async ({ page }) => {

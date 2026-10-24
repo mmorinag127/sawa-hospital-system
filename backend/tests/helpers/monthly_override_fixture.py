@@ -64,15 +64,17 @@ def publish_sources(entries, *, facility="FAC00009", items=(), accessories=(), p
                 category="添え"))
 
 
-def publish_configuration(monkeypatch, tmp_path, *, day, columns=(), daily_label_comparable_diet_types=None):
+def publish_configuration(monkeypatch, tmp_path, *, day, columns=(), daily_label_comparable_diet_types=()):
     authored_sources(monkeypatch, tmp_path, facility_id="FAC00009", menu_date=date.fromisoformat(day))
     with session_scope() as session:
         session.delete(session.get(MonthlyMenuEntry, "authored-physical-row"))
     path = tmp_path / "authored-facilities.json"
     master = json.loads(path.read_text())
     facility = master["facilities"][0]
-    if daily_label_comparable_diet_types is not None:
-        facility["daily_label_comparable_diet_types"] = deepcopy(daily_label_comparable_diet_types)
+    if daily_label_comparable_diet_types is None:
+        facility.pop("daily_label_comparable_diet_types", None)
+    else:
+        facility["daily_label_comparable_diet_types"] = list(daily_label_comparable_diet_types)
     for index, column in enumerate(columns, 4):
         facility["fax_template"]["columns"].append({
             **deepcopy(column), "index": index, "source_index": index})

@@ -72,8 +72,8 @@ for (const bagOutcome of ["success", "failure"] as const) {
       await expect(page.getByText("12食", { exact: true })).toBeVisible();
       await expect(page.locator('a[href="/orders/ORD-PARTIAL-001"]')).toBeVisible();
       await expect(page.getByRole("button", { name: "集計中...", exact: true })).toBeDisabled();
-      await expect(page.getByLabel("日付", { exact: true })).toBeDisabled();
-      await expect(page.getByLabel("ステータス", { exact: true })).toBeDisabled();
+      await expect(page.getByLabel("日付", { exact: true })).toBeEnabled();
+      await expect(page.getByLabel("ステータス", { exact: true })).toBeEnabled();
       expect(requests.slice().sort()).toEqual(["bags", "primary", "totals"]);
       releaseBags();
       await expect(page.getByRole("button", { name: "表示・集計", exact: true })).toBeEnabled();
@@ -594,6 +594,7 @@ for (const mutation of ["save", "remove"] as const) {
     await page.getByRole("button", { name: "表示・集計", exact: true }).click();
     await page.getByRole("button", { name: "施設別単位設定" }).click();
     await page.getByLabel("施設を選ぶ").selectOption("FAC-001");
+    await page.getByLabel("区分を選ぶ").selectOption("regular");
     const facilityEditor = page.locator(".override-editor-shell .override-editor-card").nth(1);
     await expect(page.getByRole("button", { name: "集計中...", exact: true })).toBeDisabled();
     if (mutation === "save") {
@@ -786,6 +787,7 @@ test("daily delivery notes can save bulk portion overrides for all facilities", 
 
   await expect(page.getByText("全施設の単位設定を保存しました。")).toBeVisible();
   await page.getByRole("dialog").getByLabel("施設を選ぶ").selectOption("FAC-001");
+  await page.getByRole("dialog").getByLabel("区分を選ぶ").selectOption("regular");
   await expect(page.getByRole("dialog").getByText("3個/人")).toBeVisible();
 });
 

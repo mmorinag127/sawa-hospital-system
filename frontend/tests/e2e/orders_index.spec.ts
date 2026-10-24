@@ -218,7 +218,7 @@ test("orders list renders order cards for a resolved week and keeps submitted/mi
   await expect(resolvedGroup.getByRole("heading", { name: "03/22 - 03/28" })).toBeVisible();
   await resolvedGroup.getByRole("button", { name: "開く" }).click();
   await expect(page.getByText("施設A (FAC-001)")).toBeVisible();
-  await expect(page.getByText("推定: 施設B (FAC-002)")).toBeVisible();
+  await expect(page.getByText("未確定候補: 施設B (FAC-002)")).toBeVisible();
   await expect(page.getByText(confirmedOrderId)).toBeVisible();
   await expect(page.getByText(inferredOrderId)).toBeVisible();
 });
