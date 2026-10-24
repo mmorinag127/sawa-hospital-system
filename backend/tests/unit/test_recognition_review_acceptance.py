@@ -104,7 +104,7 @@ def reviewed_order(isolated_formal_schema, monkeypatch, tmp_path, request):
         with session_scope() as session:
             order, state = session.get(Order, identity), session.get(OrderWorkflowState, identity)
             workflow._write_workflow_meta(state, {"facility_id": order.facility_code,
-                "week_start": "2026-10-05", "week_end": "2026-10-11", "template_id": "own",
+                "week_start": "2026-10-04", "week_end": "2026-10-10", "template_id": "own",
                 "template_version_id": state.template_version_id})
         with session_scope() as session:
             order, state = session.get(Order, identity), session.get(OrderWorkflowState, identity)
