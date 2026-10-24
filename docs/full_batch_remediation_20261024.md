@@ -1,5 +1,34 @@
 # Fixed-source full batch remediation
 
+## Diagnostic At 2773a58d
+
+Related backend:168 passed,7 failed,10013 deselected in337.67seconds, clean source.
+Frontend lint, types, inspection-read and production dependency audit passed.
+Frontend config:1787 passed,2 failed in173.58seconds (old period wording and an
+old direct-await source assertion). The real local browser runner passed16,
+failed12, interrupted1 and did not run109. It was interrupted after the shared
+daily-output fixture identity omission was established, rather than repeating
+known invalid responses. Only the dedicated Playwright PID835 was signalled,
+after lsof verified its cwd under this run's isolated source copy. No user
+browser/process was stopped. These browser results are partial, not live proof.
+Evidence: `/private/tmp/sawa-followup-2773a58d-20261024/diagnostic-result.json`.
+
+The next fixture batch preserves current business code:
+
+- Daily-output mocks echo the explicit request date/status and null facility.
+- Menu-master viewport checks first bring the table into view; minimal PUT
+  assertions also check the persisted unchanged units/temperature.
+- Patch proposals are formally reviewed/saved before the next review uses them
+  as the canonical baseline; an unselected candidate is not a selected save.
+- Diagnostic draft checks permit only the real legacy projection refresh time,
+  bound between creation and completion; all other database fields stay exact.
+- Assignment publication-order probes use real augmentation with only the
+  external render/recognizer leaves doubled, not copied old source receipts.
+- Explicit fixture integer cells remain integers; missing deepcopy is imported.
+
+No new production change, Actions run, integration or deployment is included in
+this fixture batch. Partial-month/FAX source semantics remain unresolved.
+
 ## Follow-up Diagnostic At f4e01502
 
 The clean owned verification worktree was fast-forwarded to f4e01502 and its

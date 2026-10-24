@@ -73,7 +73,7 @@ test('missing day boundary keeps editor input and never sends save or rerun', as
   f.context.rowDayBoundaries[3] = '';
   await handler(f.context)('row');
   assert.equal(f.calls.length, 0);
-  assert.match(f.messages[0], /7日分/);
+  assert.equal(f.messages[0], '対象期間の日境界と最終境界を整数で指定してください。');
   assert.equal(f.context.rowDayBoundaries[3], '');
 });
 

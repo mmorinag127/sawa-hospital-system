@@ -565,7 +565,7 @@ def test_owned_forbidden_only_sheet_preserves_raw_without_materializing_excluded
     sheet, error = order_service.get_ocr_sheet(order["id"])
     assert error is None
     assert [sheet["rows"][0][sheet["fields"].index("qty." + diet + "_x")]
-            for diet in ("no_meat", "no_fish", "forbidden_other", "no_fried")] == ["2", "1", "3", "4"]
+            for diet in ("no_meat", "no_fish", "forbidden_other", "no_fried")] == [2, 1, 3, 4]
     current, error = workflow.get_workflow_readonly(order["id"])
     assert error is None
     before = _snapshot(get_engine())

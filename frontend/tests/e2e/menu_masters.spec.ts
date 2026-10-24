@@ -200,6 +200,7 @@ for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
       expect(firstLabel!.y).toBeGreaterThan(heading!.y + heading!.height);
       if (width === 360) {
         const region = page.getByRole("region", { name: "メニューマスター一覧" });
+        await region.scrollIntoViewIfNeeded();
         const tableWidth = await page.getByRole("table", { name: "メニューマスター一覧" }).boundingBox();
         expect(tableWidth!.width).toBeGreaterThan((await region.boundingBox())!.width);
         await region.evaluate(el => { el.scrollLeft = el.scrollWidth; });
@@ -314,7 +315,8 @@ test("pending shared Select cannot change the submitted values", async ({ page }
   } finally { s.putGate.release(); }
   await saved(editForm(page));
   for (const name of ["単位", "袋単位", "温冷"]) await expect(editForm(page).getByRole("combobox", { name, exact: true })).toBeEnabled();
-  expect(s.requests.find(r => r.method === "PUT")?.body).toMatchObject({ unit_type: "cut", bag_max_unit: "count", temp_type: "hot" });
+  expect(s.requests.find(r => r.method === "PUT")?.body).toEqual({ category: "保存中の選択値", revision: 1 });
+  expect(s.items[0]).toMatchObject({ unit_type: "cut", bag_max_unit: "count", temp_type: "hot", category: "保存中の選択値" });
   await finish(page, info, s);
 });
 

@@ -648,6 +648,7 @@ def test_list_workflow_states_serializes_within_session(authored_sheet_case):
 
 
 def test_missing_actual_native_artifact_requires_recovery_without_unowned_cache_substitution(authored_sheet_case):
+    from copy import deepcopy
     from src.models.order_ocr_cache import OrderOcrCache
     from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
     from src.services import canonical_ocr_artifact_service

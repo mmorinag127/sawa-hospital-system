@@ -1667,6 +1667,7 @@ def test_unselected_diagnostic_draft_does_not_override_owned_cells_or_add_stale_
     from src.db import get_engine, session_scope
     from src.models.order_workflow_state import OrderWorkflowState
     from src.services.canonical_facility_store import read_snapshot
+    from src.services import workflow_state_service
     from tests.unit.test_disabled_facility_columns import _snapshot
     case = selected_projection_case(layout="repository-specimen", facility_id="FAC00002",
         period="2026-03@2026-03-22~2026-03-28", unlisted_cells="", rows=[
@@ -1677,6 +1678,7 @@ def test_unselected_diagnostic_draft_does_not_override_owned_cells_or_add_stale_
     diagnostic["rows"][0][diagnostic["fields"].index("qty.regular_x")] = "999"
     stale = ["template_unresolved", "sheet_quantity_column_unmapped",
              "ocr_evidence_recovery_required", "sheet_ocr_review_required"]
+    workflow_state_service.refresh_workflow_state(case.id, refresh_draft_from_semantic=False)
     captured = order_service._capture_synchronous_cache_write_input(case.id)
     assert captured is not None and captured["evidence_run_id"] == case.evidence["id"]
     before = _snapshot(get_engine())
@@ -1744,6 +1746,15 @@ def test_unselected_diagnostic_draft_does_not_override_owned_cells_or_add_stale_
     expected["order_sheet_drafts"] = sorted(
         [*expected["order_sheet_drafts"], tuple(actual)], key=repr,
     )
+    workflow_table = Table("order_workflow_states", MetaData(), autoload_with=engine)
+    with engine.connect() as connection:
+        refreshed = connection.execute(select(workflow_table).where(workflow_table.c.order_id == case.id)).one()
+    secondary_index = list(workflow_table.c.keys()).index("secondary_actions_json")
+    timestamp = refreshed[secondary_index]["legacy_workflow_state"]["last_transition_at"]
+    assert created <= datetime.fromisoformat(timestamp) <= datetime.utcnow()
+    for previous in expected["order_workflow_states"]:
+        if previous[list(workflow_table.c.keys()).index("order_id")] == case.id:
+            previous[secondary_index]["legacy_workflow_state"]["last_transition_at"] = timestamp
     assert _snapshot(engine) == expected
 
 

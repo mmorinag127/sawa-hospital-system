@@ -1779,6 +1779,11 @@ def test_explicit_assignment_repair_cannot_publish_unowned_replacements(selected
 @pytest.mark.parametrize("validation", ["baseline", "assignment"])
 def test_assignment_repair_validates_before_publishing_cache(selected_history_order, monkeypatch, validation):
     from src.db import get_engine
+    from types import SimpleNamespace
+    from src.services import hakodate_cell_ocr_batch_service as batch
+    from src.services.storage_service import load_selected_pdf_bytes
+    from tests.helpers.authored_cell_values import declared_field
+    from tests.unit.test_h2_operator_repair_revision import _provider_output_files
     from tests.unit.test_disabled_facility_columns import _snapshot
 
     order = _seed_order(selected_history_order, message_id=f"repair-validation-before-save-{validation}")
@@ -1788,6 +1793,35 @@ def test_assignment_repair_validates_before_publishing_cache(selected_history_or
     before = _snapshot(get_engine())
     calls = []
     actual_augment = order_service._augment_hakodate_ocr_payload_artifacts
+    declared = {"qty.regular_2f": "2", "qty.regular_3f": "1", "qty.soft_2f": "3",
+                "qty.soft_3f": "", "qty.mixer_2f": "", "qty.mixer_3f": "", "remarks": ""}
+
+    def render(**kwargs):
+        assert kwargs["order_id"] == order["id"]
+        receipt = captured["selected_pdf_receipt"]
+        return {"configured_input": deepcopy(captured["configured_input"]),
+                "selected_pdf_receipt": deepcopy(receipt),
+                "_verified_pdf_bytes": load_selected_pdf_bytes(receipt["storage_uri"], receipt)}
+
+    def recognize(*, item, output_dir, **kwargs):
+        regions = [{**deepcopy(region), "bbox": [index * 20, 0, index * 20 + 10, 10]}
+                   for index, region in enumerate(item["original_target_semantics"])]
+        values = {}
+        for region in regions:
+            assigned = set()
+            for target in region["logical_targets"]:
+                assert (target["date"], order_service._normalize_daypart_key(target["daypart"]),
+                        target["menu_name"]) == ("2026-01-08", "昼", "Menu A")
+                assigned.add(declared[declared_field(target, list(declared))])
+            assert len(assigned) == 1
+            values[region["sheet_cell"]] = assigned.pop()
+        records = [{**region, "ocr_text": values[region["sheet_cell"]], "recognizer_score": 1.0,
+                    "recognizer_accepted_candidate": {"normalized_digits": values[region["sheet_cell"]]}}
+                   for region in regions]
+        return SimpleNamespace(metrics={"expected_sheet_cells": item["original_expected_sheet_cells"]},
+            expected_sheet_cells=tuple(item["original_expected_sheet_cells"]),
+            outputs=_provider_output_files(output_dir, records=records, regions=regions, sheet_values=values),
+            ocr_engine="authored-component-external-recognizer"), None
 
     def produce_existing_owned_artifacts(**kwargs):
         assert kwargs["synchronous_write_input"] is captured
@@ -1804,6 +1838,8 @@ def test_assignment_repair_validates_before_publishing_cache(selected_history_or
         pytest.fail("Rejected assignment must not reach cache publication")
 
     monkeypatch.setattr(order_service, "_augment_hakodate_ocr_payload_artifacts", produce_existing_owned_artifacts)
+    monkeypatch.setattr(order_service, "_build_live_hakodate_manifest_item", render)
+    monkeypatch.setattr(batch, "build_hakodate_best_method_for_manifest_item", recognize)
     boundary = ("_resolve_llm_review_baseline" if validation == "baseline"
                 else "_build_hakodate_evidence_assignment_from_payload")
     monkeypatch.setattr(order_service, boundary, refuse)
@@ -6674,11 +6710,25 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     applied_draft = apply_result["draft"]
     assert applied_draft["latest_patch_candidate_id"] == first_candidate["id"]
     assert applied_draft["draft_sheet_json"]["rows"][0][3] == "5"
+    for operation, options in (
+        (order_workflow_v2_service.run_sheet_anomaly_review, {"use_llm": False}),
+        (order_workflow_v2_service.confirm_sheet_review, {}),
+    ):
+        current, error = order_workflow_v2_service.get_workflow_readonly(order["id"])
+        assert error is None
+        reviewed, error = operation(order["id"], sheet=applied_draft["draft_sheet_json"],
+            expected_revision=current["revision"], **options)
+        assert error is None and reviewed is not None
+    saved_patch, error = _save_formal_sheet(order_id=order["id"],
+        sheet=applied_draft["draft_sheet_json"], edited_by="test")
+    assert error is None and saved_patch is not None
+    selected_after_save = order_service._capture_synchronous_cache_write_input(order["id"])["draft"]
+    assert selected_after_save["draft_sheet_json"]["rows"][0][3] == "5"
 
     updated_2, error_2 = order_service.review_ocr_table_with_llm(order["id"], provider="gemini")
     assert error_2 is None
     assert updated_2 is not None
-    assert updated_2["llm_review"]["baseline_revision_id"] == applied_draft["id"]
+    assert updated_2["llm_review"]["baseline_revision_id"] == selected_after_save["id"]
     assert updated_2["llm_review"]["baseline_source"] == "current_draft"
     assert updated_2["llm_review"]["needs_more_review"] is False
     second_candidate = updated_2["patch_candidate"]
@@ -6696,7 +6746,7 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     assert "Previous yomitoku/LLM structured tables/cells" in captured_prompts[0]["user"]
     assert "Current baseline source: current_draft" in captured_prompts[0]["user"]
     assert '"qty.regular_2f": "2"' in captured_prompts[0]["user"]
-    assert f"Current baseline revision_id: {applied_draft['id']}" in captured_prompts[1]["user"]
+    assert f"Current baseline revision_id: {selected_after_save['id']}" in captured_prompts[1]["user"]
     assert "Current baseline source: current_draft" in captured_prompts[1]["user"]
     assert '"qty.regular_2f": "5"' in captured_prompts[1]["user"]
 

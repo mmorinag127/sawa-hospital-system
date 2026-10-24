@@ -7,7 +7,10 @@ const contextKeys = {
 } as const;
 
 async function fulfillDailyContext(route: Route, response: { status: number; json: any }) {
-  const section = new URL(route.request().url()).searchParams.get("section");
+  const url = new URL(route.request().url());
+  const section = url.searchParams.get("section");
+  const date = url.searchParams.get("date");
+  expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   expect(section).toMatch(/^(primary|bags|totals)$/);
   const keys = contextKeys[section as keyof typeof contextKeys];
   const sections = response.json.sections ?? {
@@ -17,7 +20,8 @@ async function fulfillDailyContext(route: Route, response: { status: number; jso
   };
   await route.fulfill({
     status: response.status,
-    json: { sections: Object.fromEntries(keys.map((key) => [key, sections[key]])) },
+    json: { date, status: url.searchParams.get("status"), facility: null,
+      sections: Object.fromEntries(keys.map((key) => [key, sections[key]])) },
   });
 }
 

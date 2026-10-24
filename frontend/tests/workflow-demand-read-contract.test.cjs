@@ -254,7 +254,8 @@ test("workflow progress polling is owned, single-flight, and refreshes on comple
   assert.match(source, /workflow-v2\/ocr-progress/);
   assert.match(source, /let polling=false/);
   assert.match(source, /if \(!current\(\) \|\| polling\) return/);
-  assert.match(source, /await refreshAll\(readCurrent, native \? nativeOwner! : \{jobId,attemptId:attemptId as string\}\)/);
+  assert.match(source, /const pendingRefresh=refreshAll\(readCurrent, native \? nativeOwner! : \{jobId,attemptId:attemptId as string\}\)/);
+  assert.match(source, /return await pendingRefresh/);
   assert.match(source, /polling=false/);
 });
 
