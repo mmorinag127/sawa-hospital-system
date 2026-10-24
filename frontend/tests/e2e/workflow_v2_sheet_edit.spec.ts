@@ -29,7 +29,7 @@ test("workflow-v2 blocks an unregistered OCR facility suggestion without adding 
   await page.getByRole("button", { name: /Step1\s.*施設/ }).click();
   await page.getByRole("button", { name: "推定を反映" }).click();
   await expect(page.getByText("この施設IDは正本の施設一覧に未登録です。内容を確認するまで保存・OCR実行はできません。")).toBeVisible();
-  await expect(page.getByLabel("施設 (Step1 必須)").locator("option")).not.toContainText("FAC-NOT-REGISTERED");
+  await expect(page.getByLabel("施設 (Step1 必須)").locator('option[value="FAC-NOT-REGISTERED"]')).toHaveCount(0);
 });
 
 test("workflow-v2 visibly blocks context actions when canonical facility retrieval fails", async ({ page }) => {

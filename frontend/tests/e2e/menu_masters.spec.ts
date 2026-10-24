@@ -28,8 +28,18 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
   page.on("console", m => { if (["error", "warning"].includes(m.type())) state.console.push(m.text()); });
   await page.addInitScript(() => {
     (window as any).menuPopEvents = 0;
-    window.addEventListener("popstate", () => {
-      queueMicrotask(() => { (window as any).menuPopEvents++; });
+    (window as any).menuPopTrace = [];
+    const go = history.go.bind(history);
+    history.go = function (delta) {
+      (window as any).menuPopTrace.push({ type: "go", delta, state: history.state, url: location.href });
+      return go(delta);
+    };
+    window.addEventListener("popstate", event => {
+      const captured = { type: "pop", state: event.state, history: history.state, url: location.href };
+      queueMicrotask(() => {
+        (window as any).menuPopEvents++;
+        (window as any).menuPopTrace.push({ ...captured, after: history.state, afterURL: location.href });
+      });
     }, true);
     const replace = history.replaceState;
     (window as any).removeOwnedMenuPosition = () => {
@@ -166,6 +176,14 @@ async function cancelOwnedHistory(page: Page, delta: number) {
   await (await dialog).dismiss();
   await expect.poll(() => page.evaluate(() => (window as any).menuPopEvents)).toBe(before + 2);
 }
+
+test.afterEach(async ({ page }, info) => {
+  if (info.status === info.expectedStatus || page.isClosed()) return;
+  await info.attach("menu-navigation-event-trace", {
+    body: JSON.stringify(await page.evaluate(() => (window as any).menuPopTrace || [])),
+    contentType: "application/json",
+  });
+});
 
 for (const path of ["/menu-masters", "/hospital/menu-masters"]) {
   test(`both entry, nine-field POST/PUT and fresh document saved values: ${path}`, async ({ page }, info) => {
