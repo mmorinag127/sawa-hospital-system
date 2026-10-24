@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.models.ocr_job import OcrJob
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.services.ocr_failure_diagnostics import recognition_failure_details
 from src.services.order_workflow_v2_service import _serialize_ocr_job
 
@@ -36,7 +37,7 @@ def test_absent_or_malformed_review_cannot_be_reported_as_recognition_completed(
 def test_existing_failure_read_uses_only_its_own_rejected_evidence(mismatch):
     job = OcrJob(id="job", order_id="order", status="failed", error_message="evidence_unusable",
                  metrics={"evidence_run_id": "evidence", "result_state": "review_required", "recovery_action": "review_recognition_cells"})
-    evidence = SimpleNamespace(id="evidence", order_id="order", payload_json={
+    evidence = OrderOcrEvidenceRun(id="evidence", order_id="order", payload_json={
         "_ocr_execution": {"job_id": "job", "evidence_run_id": "evidence", "disposition": "rejected"},
         "hakodate_recognition_review": {"count": 1, "cells": [
             {"sheet_cell": "H17", "raw_text": "-", "reason": "hakodate_ocr_quantity_non_numeric"},

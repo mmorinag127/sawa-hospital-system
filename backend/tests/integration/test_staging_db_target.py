@@ -381,6 +381,8 @@ def test_shared_gate_rejects_before_either_caller_opens_database(cloud_case, mon
     mutate(case, documents, images)
     for k,v in CONTEXT.items():
         monkeypatch.setenv(k,v)
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    monkeypatch.setenv('GITHUB_REF', 'refs/heads/develop')
     module = migration if caller == 'migration' else live
     proxy, engine = Mock(), Mock()
     monkeypatch.setattr(module,'cloud_sql_proxy',proxy)

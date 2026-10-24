@@ -141,13 +141,14 @@ UNSELECTED_BOOTSTRAP_CASES = (
 
 
 def test_unselected_legacy_bootstrap_inputs_never_create_successful_sheet(authored_sheet_case):
-    from src.models.menu import MonthlyMenu, MonthlyMenuEntry
+    from src.models.menu import MonthlyMenu, MonthlyMenuEntry, MonthlyMenuItem
     from src.models.order_ocr_cache import OrderOcrCache
 
     case = authored_sheet_case(quantity=3, include_remarks=False, produce=False)
     case.queue()
     with session_scope() as session:
         session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
         session.query(MonthlyMenu).delete()
     for case_id, old_name, kind, payload in UNSELECTED_BOOTSTRAP_CASES:
         if payload is None:
@@ -288,7 +289,8 @@ def _fac00004_owned_source(history_case, *, rows, menu_entries, lines,
                         hakodate_assignment_service._normalize_slot_text(target["menu_name"]))
             assert identity in declared, "physical target lacks an explicit authored menu"
             row = declared[identity]
-            values.add(row[fields.index(target["field"])])
+            from tests.helpers.authored_cell_values import declared_field
+            values.add(row[fields.index(declared_field(target, fields))])
         assert len(values) == 1, "a physical cell cannot merge different declared values"
         return values.pop()
     source = case.produce(cell_values=recognize)
@@ -536,7 +538,8 @@ def _owned_march_projection(history_case, *, menu_entries, regular_values):
     values = {(name, field): regular_values[name] if field == "qty.regular_2f" else ""
               for name in regular_values for field in fields[3:]}
     def recognize(region):
-        recognized = {values[(target["menu_name"], target["field"])]
+        from tests.helpers.authored_cell_values import declared_field
+        recognized = {values[(target["menu_name"], declared_field(target, fields))]
                       for target in region["logical_targets"]}
         assert len(recognized) == 1
         return recognized.pop()

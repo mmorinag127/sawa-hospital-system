@@ -8,6 +8,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 SERVICE = "backend/src/services/uploaded_pdf_service.py"
 BASE = "cfedb6ea72735bd6a2b5307699e5a9c35eb90503"
+RETIREMENT = "450f22ab3ce1813bded846314affca77cc2a7b86"
 REMOVED = {
     "_backfill_scan_limit", "_parse_datetime", "_looks_like_manual_upload_job",
     "_guess_content_sha256", "_map_ingest_job_state", "_link_current_entities",
@@ -40,7 +41,7 @@ def test_retired_backfill_default_call_stops(monkeypatch):
 
 def test_all_nonretired_functions_remain_exact_source_and_ast():
     before = subprocess.check_output(["git", "show", f"{BASE}:{SERVICE}"], cwd=ROOT, text=True)
-    after = (ROOT / SERVICE).read_text()
+    after = subprocess.check_output(["git", "show", f"{RETIREMENT}:{SERVICE}"], cwd=ROOT, text=True)
 
     def functions(source):
         return {node.name: node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)}
@@ -56,3 +57,6 @@ def test_all_nonretired_functions_remain_exact_source_and_ast():
     assert ast.dump(boundary.returns) == ast.dump(original[boundary.name].returns)
     assert len(boundary.body) == 1
     assert ast.dump(boundary.body[0]) == ast.dump(ast.parse('raise ValueError("original_uploaded_pdf_receipt_required")').body[0])
+    present = functions((ROOT / SERVICE).read_text())
+    assert REMOVED.isdisjoint(present)
+    assert ast.dump(present[boundary.name]) == ast.dump(boundary)

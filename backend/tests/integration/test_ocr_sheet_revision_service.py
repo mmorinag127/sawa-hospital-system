@@ -42,15 +42,19 @@ def test_normalize_sheet_revision_snapshot_pads_fields_header_and_row_ids() -> N
 def test_select_edited_sheet_revision_prefers_latest_exact_sheet_revision() -> None:
     payload = {
         "_edited_ocr": {
+            "selected_revision_id": "r3", "base_evidence_run_id": "component-evidence",
             "revisions": [
-                {"ui_mode": "sheet", "rows": [["a"]], "sheet_save_only": False, "revision_id": "r1"},
-                {"ui_mode": "sheet", "rows": [["b"]], "sheet_save_only": True, "revision_id": "r2"},
+                {"ui_mode": "sheet", "rows": [["a"]], "sheet_save_only": False, "revision_id": "r1", "base_evidence_run_id": "component-evidence"},
+                {"ui_mode": "sheet", "rows": [["b"]], "sheet_save_only": True, "sheet_save_mode": "exact", "revision_id": "r2", "base_evidence_run_id": "component-evidence"},
+                {"ui_mode": "sheet", "rows": [["c"]], "sheet_save_only": False, "revision_id": "r3", "base_evidence_run_id": "component-evidence"},
             ],
             "latest": {"ui_mode": "sheet", "rows": [["c"]], "sheet_save_only": False, "revision_id": "r3"},
         }
     }
 
     latest_any = ocr_sheet_revision_service.select_edited_sheet_revision(payload, exact_only=False)
+    assert ocr_sheet_revision_service.select_edited_sheet_revision(payload, exact_only=True) is None
+    payload["_edited_ocr"]["selected_revision_id"] = "r2"
     latest_exact = ocr_sheet_revision_service.select_edited_sheet_revision(payload, exact_only=True)
 
     assert latest_any is not None and latest_any["revision_id"] == "r3"
@@ -83,7 +87,6 @@ def test_build_sheet_payload_from_revision_rebases_exact_rows_on_matching_row_id
     payload = ocr_sheet_revision_service.build_sheet_payload_from_revision(
         order_id="ORDTEST",
         revision=revision,
-        fallback_sheet=fallback_sheet,
         field_label=_field_label,
         field_value_to_str=_field_value_to_str,
     )
@@ -91,4 +94,5 @@ def test_build_sheet_payload_from_revision_rebases_exact_rows_on_matching_row_id
     assert payload is not None
     assert payload["rows"] == revision["rows"]
     assert payload["row_ids"] == ["row-a", "row-b"]
-    assert payload["source"] == "weekly_menu"
+    assert payload["source"] == "edited_sheet"
+    assert fallback_sheet["rows"] == [["02/01", "Menu A", "", ""], ["02/01", "Menu B", "", ""]]

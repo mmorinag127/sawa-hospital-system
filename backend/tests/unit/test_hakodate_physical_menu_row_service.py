@@ -54,8 +54,10 @@ def test_physical_row_count_for_20260921_lunch_event_food_is_fifty_seven() -> No
 
 
 def test_sheet_physical_row_count_ignores_diet_override_rows() -> None:
+    physical = _entries({day: (2, 3, 3) for day in range(12, 19)})
     sheet = {
         "physical_menu_row_count": 56,
+        "physical_menu_row_ids": hakodate_physical_menu_row_service.physical_row_keys_from_entries(physical),
         "rows": [["regular"]] * 56 + [["soft override"]] * 7,
     }
 

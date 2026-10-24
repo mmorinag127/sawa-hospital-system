@@ -89,7 +89,8 @@ def test_invalid_date_stops_before_sql_or_output(surface, owned_bagging, route, 
     finally:
         event.remove(fixture.engine, "before_cursor_execute", observe)
     assert response.status_code == 400, response.text
-    assert response.json() == {"detail": "date must be YYYY-MM-DD"}
+    detail = "weekly_weight_date_invalid" if route == "/outputs/weekly-weight" and invalid == "bad" else "date must be YYYY-MM-DD"
+    assert response.json() == {"detail": detail}
     assert statements == []
     assert _output_files(fixture) == files
     _assert_inputs(fixture, before)

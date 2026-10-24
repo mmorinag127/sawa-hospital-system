@@ -146,7 +146,7 @@ def test_build_facility_template_from_master_keeps_post_menu_aux_columns(tmp_pat
     assert str(worksheet.print_area) == "'facility_template'!$A$1:$G$69"
 
 
-def test_build_facility_template_from_master_supports_all_master_facilities(tmp_path: Path) -> None:
+def test_build_facility_template_from_master_supports_all_master_facilities(tmp_path: Path, repository_layout_source) -> None:
     master = config_service.load_facility_master()
     facility_ids = [facility["facility_id"] for facility in master.get("facilities", []) if facility.get("facility_id")]
 
@@ -196,7 +196,7 @@ def test_build_facility_template_from_master_uses_explicit_header_groups_only(tm
     assert _generated_render_width(worksheet, 3) == service.SOURCE_GENERATED_PIXEL_WIDTH
 
 
-def test_build_facility_template_from_master_applies_configured_two_level_headers(tmp_path: Path) -> None:
+def test_build_facility_template_from_master_applies_configured_two_level_headers(tmp_path: Path, repository_layout_source) -> None:
     master = config_service.load_facility_master()
     facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00003")
     resolved = config_service._build_facility_config(facility_id="FAC00003", facility=facility)  # noqa: SLF001
@@ -235,7 +235,7 @@ def test_build_facility_template_from_master_applies_configured_two_level_header
     assert _generated_render_width(worksheet, workbook["generated_template_schema"]["B8"].value) == service.SOURCE_GENERATED_PIXEL_WIDTH
 
 
-def test_build_facility_template_from_master_freezes_logo_size_across_column_counts(tmp_path: Path) -> None:
+def test_build_facility_template_from_master_freezes_logo_size_across_column_counts(tmp_path: Path, repository_layout_source) -> None:
     outputs = []
     for facility_id in ("FAC00001", "FAC00011"):
         outputs.append(
@@ -383,7 +383,7 @@ def test_build_facility_template_from_master_keeps_week_menu_overflow_as_review_
     assert overflow_entries == []
 
 
-def test_build_facility_template_from_master_applies_configured_body_merges(tmp_path: Path) -> None:
+def test_build_facility_template_from_master_applies_configured_body_merges(tmp_path: Path, repository_layout_source) -> None:
     master = config_service.load_facility_master()
     facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00007")
     resolved = config_service._build_facility_config(facility_id="FAC00007", facility=facility)  # noqa: SLF001
@@ -413,7 +413,7 @@ def test_build_facility_template_from_master_applies_configured_body_merges(tmp_
     assert schema_values["configured_body_merged_range_details"]
 
 
-def test_build_facility_template_from_master_applies_body_merges_without_week_value(tmp_path: Path) -> None:
+def test_build_facility_template_from_master_applies_body_merges_without_week_value(tmp_path: Path, repository_layout_source) -> None:
     master = config_service.load_facility_master()
     facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00016")
     resolved = config_service._build_facility_config(facility_id="FAC00016", facility=facility)  # noqa: SLF001

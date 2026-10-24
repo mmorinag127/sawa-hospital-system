@@ -44,10 +44,15 @@ def test_partial_synchronous_cache_write_preserves_complete_source_and_operator_
     assert captured is not None
     before = _snapshot(get_engine())
     pdf_bytes = case.pdf.read_bytes()
-    result = order_service._save_order_ocr_cache(case.id, deepcopy(partial),
-        synchronous_write_input=captured, augment_hakodate_artifacts=False,
-        persist_evidence=False, refresh_workflow=False)
-    assert result is None
+    def publish():
+        return order_service._save_order_ocr_cache(case.id, deepcopy(partial),
+            synchronous_write_input=captured, augment_hakodate_artifacts=False,
+            persist_evidence=False, refresh_workflow=False)
+    if "hakodate_target_cell_map" in partial:
+        with pytest.raises(ValueError, match="hakodate_canonical_representation_missing"):
+            publish()
+    else:
+        assert publish() is None
     assert _snapshot(get_engine()) == before
     assert case.pdf.read_bytes() == pdf_bytes
     sheet, error = order_service.get_ocr_sheet(case.id)
@@ -121,15 +126,55 @@ def test_synchronous_owned_result_cannot_inject_an_operator_edit_archive(owned_c
     original_archive = deepcopy(existing["_edited_ocr"])
     proposed = deepcopy(existing)
     proposed["_edited_ocr"] = {"latest": {"rows": [["provider-injected-99"]]}}
+    before = _snapshot(get_engine())
     result = order_service._save_order_ocr_cache(case.id, proposed,
         synchronous_write_input=captured, augment_hakodate_artifacts=False,
         persist_evidence=False, refresh_workflow=False)
-    assert result == {}
+    assert result is None
+    assert _snapshot(get_engine()) == before
     saved = order_service._load_order_ocr_cache(case.id)
     assert saved["_edited_ocr"] == original_archive
     for key, value in existing.items():
         if key != "_edited_ocr":
             assert saved[key] == value
+    visible, error = order_service.get_ocr_sheet(case.id)
+    assert error is None
+    for key in ("fields", "header", "rows", "row_ids"):
+        assert visible[key] == case.operator_sheet[key]
+
+
+def test_valid_owned_cache_write_drops_injected_archive_and_retains_operator_nine(owned_cache_case):
+    from tests.unit.test_h2_operator_repair_revision import (
+        _owned_artifact_fixture, _attach_provider_artifact_packet,
+    )
+    case = owned_cache_case
+    captured = order_service._capture_synchronous_cache_write_input(case.id)
+    assert captured is not None
+    source = order_service._hakodate_owned_source(captured["configured_input"],
+        captured["selected_pdf_receipt"], captured)
+    targets, records = _owned_artifact_fixture(source)
+    payload = {"hakodate_repair_source_receipt": source,
+        "hakodate_canonical_pipeline": {"status": "ready",
+            "version": order_service.HAKODATE_CANONICAL_PIPELINE_VERSION,
+            "expected_sheet_cells": source["expected_sheet_cells"]},
+        "hakodate_preprocessing": {"target_cell_map": targets},
+        "hakodate_ocr_evidence": {"records": records},
+        "hakodate_ocr_evidence_records": deepcopy(records)}
+    _attach_provider_artifact_packet(payload)
+    order_service._validate_hakodate_owned_artifacts(payload, source)
+    existing = deepcopy(order_service._load_order_ocr_cache(case.id))
+    payload["_edited_ocr"] = {"latest": {"rows": [["provider-injected-99"]]}}
+    original = deepcopy(payload)
+    before = _snapshot(get_engine())
+    assert order_service._save_order_ocr_cache(case.id, payload,
+        synchronous_write_input=captured, augment_hakodate_artifacts=False,
+        persist_evidence=False, refresh_workflow=False) == {}
+    saved = order_service._load_order_ocr_cache(case.id)
+    assert saved["_edited_ocr"] == existing["_edited_ocr"]
+    assert saved["hakodate_ocr_evidence_records"] == records
+    assert payload == original
+    after = _snapshot(get_engine())
+    assert all(after[table] == before[table] for table in before if table != "order_ocr_cache")
     visible, error = order_service.get_ocr_sheet(case.id)
     assert error is None
     for key in ("fields", "header", "rows", "row_ids"):

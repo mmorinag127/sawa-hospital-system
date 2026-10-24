@@ -369,7 +369,7 @@ def test_canonical_marker_cannot_retire_to_bogus_legacy_six_key_success(marker):
     assert manifest["validation_errors"]
 
 
-def test_real_owned_candidate_invalid_packet_blocks_classifier_selectability_and_selected_adoption(tmp_path, monkeypatch):
+def test_real_owned_candidate_invalid_packet_blocks_classifier_selectability_and_selected_adoption(tmp_path, monkeypatch, isolated_formal_sqlite_template):
     # Native-dependent boundary regression, not the small synthetic storage
     # fixture above and not a replacement for the original three native tests.
     from test_modernization_owned_ocr_workflow import OwnedProducer, ORDER as OWNED_ORDER
@@ -377,7 +377,7 @@ def test_real_owned_candidate_invalid_packet_blocks_classifier_selectability_and
     from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
     from src.services import ocr_evidence_service as evidence_service, order_service as orders
 
-    fixture = OwnedProducer(tmp_path, monkeypatch)
+    fixture = OwnedProducer(tmp_path, monkeypatch, formal_template=isolated_formal_sqlite_template)
     monkeypatch.setenv("OCR_ARTIFACT_DIR", str(tmp_path / "owned-published"))
     try:
         evidence = fixture.produce()

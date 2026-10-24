@@ -34,8 +34,8 @@ from src.services.workbook_pdf_renderer import render_workbook_path_to_pdf
 
 
 @pytest.fixture
-def numeric_fax(tmp_path, monkeypatch):
-    f = OwnedProducer(tmp_path, monkeypatch)
+def numeric_fax(tmp_path, monkeypatch, isolated_formal_sqlite_template):
+    f = OwnedProducer(tmp_path, monkeypatch, formal_template=isolated_formal_sqlite_template)
     try:
         monkeypatch.setenv("OCR_ARTIFACT_DIR", str(tmp_path / "numeric-published"))
         original_pdf = f.pdf
@@ -45,12 +45,13 @@ def numeric_fax(tmp_path, monkeypatch):
         )}
         entries = order_service._build_position_menu_entries_safe(WEEK, FACILITY)
         identity = batch.original_physical_draft(physical_menu_entries=entries, week_code=WEEK)
-        assert len(entries) == identity["physical_menu_row_count"] == len(f.plan) == 56
+        assert len(entries) == identity["physical_menu_row_count"] == len(f.quantity_plan) == 56
+        assert len(f.notes_plan) == 56
         assert identity["week_id"] == WEEK
         assert {row[0] for row in identity["rows"]} == {
             (START + timedelta(days=offset)).isoformat() for offset in range(7)
         }
-        cells = [target["sheet_cell"] for target in f.plan]
+        cells = [target["sheet_cell"] for target in f.quantity_plan]
         assert len(set(cells)) == 56
         pattern = ("7", "0", "6", "9")
         expected = dict(zip(cells, (pattern[index % 4] for index in range(56)), strict=True))
@@ -98,7 +99,7 @@ def numeric_fax(tmp_path, monkeypatch):
             week_end=END.isoformat(), template_id=TEMPLATE, expected_revision=initial["revision"],
         )
         assert error is None, (error, f.context)
-        f.expected = expected
+        f.expected = {target["sheet_cell"]: expected.get(target["sheet_cell"], "") for target in f.plan}
         yield f, identity
         assert all(path.read_bytes() == data for path, data in originals.items())
         assert f.pdf.read_bytes() == pdf_bytes
@@ -119,7 +120,7 @@ def test_synthetic_native_numeric_fax_adoption_save_and_four_packet_stops(numeri
     assert execution["evidence_run_id"] == evidence["id"]
     assert execution["nonworkflow_execution_id"] == source["execution_id"]
     records = payload["hakodate_ocr_evidence_records"]
-    assert len(records) == 56
+    assert len(records) == len(f.quantity_plan) + len(f.notes_plan) == 112
     by_cell = {record["engine_metadata"]["sheet_cell"]: record for record in records}
     assert set(by_cell) == set(f.expected)
     for cell, expected in f.expected.items():
@@ -173,7 +174,8 @@ def test_synthetic_native_numeric_fax_adoption_save_and_four_packet_stops(numeri
                 for day, meal, menu in identity["rows"]
             ]
     quantity = sheet["fields"].index("qty.regular_x")
-    assert [row[quantity] for row in sheet["rows"]] == list(f.expected.values())
+    assert [row[quantity] for row in sheet["rows"]] == [f.expected[target["sheet_cell"]] for target in f.quantity_plan]
+    assert all(row[sheet["fields"].index("remarks")] == "" for row in sheet["rows"])
 
     uri = Path(pipeline["outputs"]["records"])
     original_bytes = uri.read_bytes()

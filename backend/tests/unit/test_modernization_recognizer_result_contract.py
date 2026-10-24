@@ -18,7 +18,7 @@ POINTS = [[[x, 0], [x + 10, 0], [x + 10, 10], [x, 10]] for x in (0, 20, 40)]
 TEXTS = ["", "0", "7"]
 SCORES = [0.0, 0.8, 0.9]
 REGIONS = [{"region_id": f"E{11 + i}", "sheet_cell": f"E{11 + i}",
-            "field": "qty.regular_x", "source_note": f"owned-input-{i}"} for i in range(3)]
+            "field": "qty.regular_x", "role": "quantity", "source_note": f"owned-input-{i}"} for i in range(3)]
 
 
 def _response():

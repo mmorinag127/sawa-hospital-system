@@ -122,4 +122,6 @@ def test_output_builder_collapses_owned_change_override_lines(monkeypatch, tmp_p
         ("regular", 33)]
     sheet, error = order_service.get_ocr_sheet(order["id"])
     assert error is None
-    assert sheet["rows"][0][sheet["fields"].index("qty.no_meat_x")] == "2"
+    raw = sheet["rows"][0][sheet["fields"].index("qty.no_meat_x")]
+    assert raw == authored[2]["quantity_original"] == 2
+    assert type(raw) is int

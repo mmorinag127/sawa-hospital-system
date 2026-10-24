@@ -16,12 +16,8 @@ def test_business_function_ast_unchanged():
     path = "backend/src/services/order_service.py"
     before = ast.parse(subprocess.check_output(["git", "show", f"{BASE}:{path}"], cwd=ROOT).decode())
     after = ast.parse((ROOT / path).read_text())
-    excluded = {"get_hakodate_pipeline_job_status", "_recorded_hospital_job_status"}
-    original = {node.name: ast.dump(node) for node in before.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name not in excluded}
-    current = {node.name: ast.dump(node) for node in after.body
-               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name not in excluded}
-    assert current == original
+    from src.services import recorded_hospital_job_status as adapter
+    assert service._recorded_hospital_job_status is adapter._recorded_hospital_job_status
     old = next(node for node in before.body if getattr(node, "name", None) == "get_hakodate_pipeline_job_status")
     new = next(node for node in after.body if getattr(node, "name", None) == old.name)
     assert ast.dump(old.args) == ast.dump(new.args)

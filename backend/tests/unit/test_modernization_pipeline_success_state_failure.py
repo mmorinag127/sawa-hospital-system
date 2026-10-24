@@ -27,11 +27,11 @@ from src.services.workflow_attempt_guard_service import (
 
 @pytest.mark.parametrize("error_write_fails", [False, True])
 def test_real_owned_caller_success_state_failure_never_returns_synthetic_done(
-    tmp_path, monkeypatch, error_write_fails,
+    tmp_path, monkeypatch, error_write_fails, isolated_formal_sqlite_template,
 ):
     from google.cloud import storage
 
-    f = OwnedProducer(tmp_path, monkeypatch)
+    f = OwnedProducer(tmp_path, monkeypatch, formal_template=isolated_formal_sqlite_template)
     try:
         path = tmp_path / "success-caller-state.json"
         monkeypatch.setenv("OCR_PIPELINE_STATE_URI", str(path))

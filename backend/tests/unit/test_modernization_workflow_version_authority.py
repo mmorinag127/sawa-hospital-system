@@ -425,6 +425,13 @@ def test_failed_explicit_context_keeps_old_order_selection_until_operator_reconf
         assert selected.id == fixture.projection_id
         assert selected.source == lineage.SOURCE
         assert selected.template_id == fixture.authored["fax_template"]["template_id"]
+    before, before_error = workflow.get_workflow_readonly(fixture.order_id)
+    assert before_error is None and before["state"] == "sheet_saved"
+    before_tables = None
+    with fixture.session_scope() as session:
+        state = session.get(OrderWorkflowState, fixture.order_id)
+        before_tables = (state.revision, state.template_version_id, state.evidence_run_id,
+                         state.draft_id, deepcopy(state.secondary_actions_json))
     result, error = workflow.confirm_context(
         order_id=fixture.order_id, facility_id="F", week_start="2026-03-01", week_end="2026-03-07",
         template_id="COMPONENT-UNDECLARED-TEMPLATE",
@@ -434,12 +441,13 @@ def test_failed_explicit_context_keeps_old_order_selection_until_operator_reconf
     with unchanged_read(fixture):
         current, error = workflow.get_workflow_readonly(fixture.order_id)
         assert error is None
-        assert current["state"] == "template_version_mismatch"
-        assert current["template_version_id"] is None
+        assert current == before
         with fixture.session_scope() as session:
             state = session.get(OrderWorkflowState, fixture.order_id)
-            assert state.template_version_id is None
-            assert state.secondary_actions_json["workflow_v2"]["template_version_id"] is None
+            assert (state.revision, state.template_version_id, state.evidence_run_id,
+                    state.draft_id, state.secondary_actions_json) == before_tables
+            assert state.template_version_id == fixture.projection_id
+            assert state.secondary_actions_json["workflow_v2"]["template_version_id"] == fixture.projection_id
             assert session.get(Order, fixture.order_id).template_version_id == fixture.projection_id
     result, error = workflow.confirm_context(
         order_id=fixture.order_id, facility_id="F", week_start="2026-03-01", week_end="2026-03-07",

@@ -233,28 +233,28 @@ def test_low_confidence_number_can_be_confirmed_unchanged_without_score_rewrite(
     assert snapshot(engine)["order_ocr_evidence_runs"][0]["payload_json"] == original
 
 
-def test_actual_http_revision_and_actor_binding(reviewed_order):
+def test_actual_http_revision_and_actor_binding(reviewed_order, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from src.api import orders, auth
+    from src.api import orders
+    from tests.contract.auth_support import registered_hospital_operator
     identity, _, review, engine = reviewed_order
     app = FastAPI()
     app.include_router(orders.router, prefix="/orders")
-    app.dependency_overrides[auth.get_current_operator] = lambda: auth.UserContext(role="operator", account="explicit-http-actor")
     body = {"source_receipt": review["source_receipt"], "values": {cell["sheet_cell"]: "" for cell in review["review_cells"]}}
     endpoint = f"/orders/{identity}/workflow-v2/recognition-review/accept"
-    before = snapshot(engine)
     revision = review["source_receipt"]["workflow_revision"]
-    with TestClient(app) as client:
+    with registered_hospital_operator(monkeypatch) as actor, TestClient(app, headers=actor.headers) as client:
+        before = snapshot(engine)
         assert client.put(endpoint, json=body).status_code == 428
         assert client.put(endpoint, json=body, headers={"If-Match": str(revision - 1)}).status_code == 409
         assert snapshot(engine) == before
         response = client.put(endpoint, json=body, headers={"If-Match": str(revision)})
         assert response.status_code == 200, response.text
-    with session_scope() as session:
-        audit = workflow._workflow_meta(session.get(OrderWorkflowState, identity))["recognition_acceptances"][-1]
-        assert audit["edited_by"] == "explicit-http-actor"
-        assert audit["values"] == body["values"]
+        with session_scope() as session:
+            audit = workflow._workflow_meta(session.get(OrderWorkflowState, identity))["recognition_acceptances"][-1]
+            assert audit["edited_by"] == actor.account
+            assert audit["values"] == body["values"]
 
 
 @pytest.mark.parametrize("value", ["", "0", "12"])

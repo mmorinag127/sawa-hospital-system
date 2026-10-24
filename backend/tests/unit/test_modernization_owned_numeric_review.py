@@ -32,19 +32,21 @@ def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_
     workbook = load_workbook(f.root / "synthetic-numeric-fax.xlsx")
     try:
         ws = workbook[master.FACILITY_TEMPLATE_SHEET_NAME]
-        authored = [str(ws[target["sheet_cell"]].value) for target in f.plan]
+        authored = [str(ws[target["sheet_cell"]].value) for target in f.quantity_plan]
+        assert all(ws[target["sheet_cell"]].value is None for target in f.notes_plan)
     finally:
         workbook.close()
-    assert len(authored) == len(f.plan) == 56
+    assert len(authored) == len(f.quantity_plan) == 56
     assert authored == [str((7, 0, 6, 9)[index % 4]) for index in range(56)]
 
     evidence = f.produce()
     payload = deepcopy(evidence["payload_json"])
     records = payload["hakodate_ocr_evidence_records"]
     by_cell = {record["engine_metadata"]["sheet_cell"]: record for record in records}
-    assert len(records) == len(by_cell) == 56
+    assert len(records) == len(by_cell) == len(f.plan) == 112
     assert set(by_cell) == {target["sheet_cell"] for target in f.plan}
-    for target, expected in zip(f.plan, authored, strict=True):
+    assert all(by_cell[target["sheet_cell"]]["raw_text"] == "" for target in f.notes_plan)
+    for target, expected in zip(f.quantity_plan, authored, strict=True):
         assert by_cell[target["sheet_cell"]]["raw_text"] == expected
         assert by_cell[target["sheet_cell"]]["normalized_value"] == expected
     artifacts.validate_payload(payload)
@@ -70,9 +72,10 @@ def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_
         assert output["_template_field_schema"]["quantity_fields"] == ["qty.regular_x"]
         output_records = output["hakodate_ocr_evidence_records"]
         output_by_cell = {record["engine_metadata"]["sheet_cell"]: record for record in output_records}
-        assert len(output_records) == len(output_by_cell) == 56
+        assert len(output_records) == len(output_by_cell) == len(f.plan) == 112
         assert set(output_by_cell) == {target["sheet_cell"] for target in f.plan}
-        for target, expected in zip(f.plan, authored, strict=True):
+        assert all(output_by_cell[target["sheet_cell"]]["raw_text"] == "" for target in f.notes_plan)
+        for target, expected in zip(f.quantity_plan, authored, strict=True):
             assert output_by_cell[target["sheet_cell"]]["raw_text"] == expected
             assert output_by_cell[target["sheet_cell"]]["normalized_value"] == expected
         assert output["hakodate_canonical_pipeline"]["artifact_packet"] == payload["hakodate_canonical_pipeline"]["artifact_packet"]
@@ -83,9 +86,9 @@ def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_
     projected, error = workflow.build_sheet_from_selected_ocr(ORDER)
     assert error is None, (error, projected)
     assert projected["selected_ocr_result_id"] == evidence["id"]
-    assert "hakodate_sheet_projection_incomplete" in projected["blockers"]
+    assert projected["blockers"] == []
     sheet = projected["sheet"]
-    assert sheet["review_state"] == "blocked"
+    assert sheet["review_state"] == "auto_assignable"
     assert len(sheet["rows"]) == sheet["physical_menu_row_count"] == 56
     assert (sheet["order_id"], sheet["facility_id"], sheet["week_id"]) == (ORDER, FACILITY, WEEK)
     assert sheet["physical_menu_row_ids"] == identity["physical_menu_row_ids"]
@@ -98,14 +101,24 @@ def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_
     assert [[row[index] for index in identity_columns] for row in sheet["rows"]] == expected_identity
     quantity = sheet["fields"].index("qty.regular_x")
     deferred = sheet["hakodate_evidence_projection"]["deferred"]
-    assert deferred, "This scenario must retain actual low-confidence candidates"
+    note_cells = {target["sheet_cell"] for target in f.notes_plan}
     for candidate in deferred:
-        assert candidate["field"] == "qty.regular_x"
-        assert candidate["defer_reason"] == "hakodate_ocr_confidence_below_strict_threshold"
-        assert candidate["assignment_confidence"] < 0.90
+        assert candidate["sheet_cell"] in note_cells
+        assert candidate["field"] == "remarks" and candidate["value"] == ""
+        assert candidate["assignment_confidence"] == by_cell[candidate["sheet_cell"]]["confidence"]
         assert candidate["classification"] != "accepted"
+        assert sheet["rows"][candidate["row_index"]][sheet["fields"].index("remarks")] == ""
+    applied = sheet["hakodate_evidence_projection"]["applied"]
+    quantity_applied = [candidate for candidate in applied if candidate["field"] == "qty.regular_x"]
+    assert len(quantity_applied) == 56
+    assert len(applied) + len(deferred) == 112
+    low_confidence = [candidate for candidate in quantity_applied
+                      if candidate["assignment_cell"]["assignment_confidence"] < 0.90]
+    assert low_confidence, "actual low confidence must remain visible without blocking the sheet"
+    for candidate in quantity_applied:
         assert candidate["value"] == authored[candidate["row_index"]]
-        assert sheet["rows"][candidate["row_index"]][quantity] == ""
+        assert candidate["assignment_cell"]["assignment_confidence"] == by_cell[candidate["sheet_cell"]]["confidence"]
+        assert sheet["rows"][candidate["row_index"]][quantity] == candidate["value"]
     assert len(sheet["ocr_numeric_cell_items"]) == 56
 
     captured = order_service._capture_synchronous_cache_write_input(ORDER)

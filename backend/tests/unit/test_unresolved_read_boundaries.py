@@ -153,11 +153,11 @@ def test_diet_projection_identity_and_sql_filter(isolated_formal_schema, diet, q
             menu_service.require_resolved_menu_items([projection])
         for requested in (None, "regular", "soft", "mixer", "常食"):
             found = session.execute(sa.select(MonthlyMenuItem.id).where(
-                menu_service._monthly_entry_diet_filter(MonthlyMenuItem.diet_type, requested))).scalars().all()
+                menu_service._monthly_item_diet_filter(MonthlyMenuItem.diet_type, requested))).scalars().all()
             expected = bool(diet and requested and menu_service.normalize_diet_type(requested) == diet)
             assert found == (["item"] if expected else [])
         entry = MonthlyMenuEntry(menu_date=date(2026, 1, 2), daypart="朝食", slot_index=0, diet_type=diet)
-        assert menu_service._monthly_entry_override_key(entry)[3] == (diet or "")
+        assert menu_service._monthly_entry_override_key(entry)[3] == (diet or "regular")
 
 
 @pytest.mark.parametrize("diet", [None, "", "regular", "常食", "soft", "mixer"])

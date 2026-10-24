@@ -70,16 +70,20 @@ def history_registration(owned_registration, authored_layout_registration):
     facility = {'facility_id': 'FAC00001', 'facility_name': 'Authored history component',
         'areas': [{'area_id': area, 'name': area} for area in ('2F', '3F')],
         'fax_template_id': 'authored-history-columns',
-        'fax_template': {'template_id': 'authored-history-columns', 'columns': columns}}
+        'fax_template': {'template_id': 'authored-history-columns', 'page': 1, 'columns': columns}}
 
     def register(**inputs):
+        from src.services.sheet_week_service import parse_sheet_week_value
+        from tests.helpers.authored_menu_recipe import declare_period_recipes
+        _, start, end = parse_sheet_week_value(inputs['week'])
+        with session_scope() as session:
+            declare_period_recipes(session, facility_id=inputs['facility_id'], period=inputs['week'],
+                qty_per_serving=1, unit_type='g')
         if inputs['facility_id'] == 'FAC00001':
             order = owned_registration(**inputs, facility_config=facility)
         else:
             assert inputs['facility_id'] == 'FAC00005', 'explicit component layout required'
             order = authored_layout_registration(**inputs)
-        from src.services.sheet_week_service import parse_sheet_week_value
-        _, start, end = parse_sheet_week_value(inputs['week'])
         current, error = order_workflow_v2_service.get_workflow_readonly(order['id'])
         assert error is None
         confirmed, error = order_workflow_v2_service.confirm_context(order_id=order['id'],
@@ -580,7 +584,7 @@ def _assert_legacy_facility_refusal(
     from tests.contract.test_orders_ocr_sheet_history_api import HistoryCase, LEGACY, _line
     from tests.contract import test_portal_google_auth
 
-    monkeypatch.setattr(test_portal_google_auth, "engine", isolated_formal_schema)
+    monkeypatch.setattr(test_portal_google_auth.db, "engine", isolated_formal_schema)
 
     with registered_hospital_operator(monkeypatch) as actor:
         f = HistoryCase(isolated_formal_schema, tmp_path, monkeypatch, actor,
@@ -3667,7 +3671,7 @@ def test_formal_save_preserves_explicit_period_without_using_legacy_materializat
     assert all(row[fields.index("date_mmdd")] == "05/01" for row in visible["rows"])
 
 
-def test_rows_from_markdown_maps_kanji_regular_column():
+def test_rows_from_markdown_maps_kanji_regular_column(repository_layout_source):
     master = config_service.load_facility_master()
     base_template = master.get("fax_template_base", {})
     facility = next(
@@ -3691,7 +3695,7 @@ def test_rows_from_markdown_maps_kanji_regular_column():
     assert first[3] == "33"
 
 
-def test_rows_from_markdown_maps_hana_getsu_subheader_and_escaped_pipe():
+def test_rows_from_markdown_maps_hana_getsu_subheader_and_escaped_pipe(repository_layout_source):
     master = config_service.load_facility_master()
     base_template = master.get("fax_template_base", {})
     facility = next(
@@ -3898,7 +3902,7 @@ def test_rows_from_markdown_maps_three_row_forbidden_split_headers_and_change2()
     assert rows == [["2/15", "朝", "Menu A", "20", "4", "5", "6", "7", ""]]
 
 
-def test_rows_from_markdown_infers_columns_from_sparse_header():
+def test_rows_from_markdown_infers_columns_from_sparse_header(repository_layout_source):
     master = config_service.load_facility_master()
     base_template = master.get("fax_template_base", {})
     facility = next(
@@ -4540,6 +4544,16 @@ def test_resolve_sheet_week_extends_explicit_range_when_ocr_dates_run_longer():
     assert resolved == "2026-03@2026-03-22~2026-03-28"
 
 
+def _declared_date_collection_template():
+    return {"main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+        "columns": [
+            {"index": 0, "source_index": 0, "name": "date_mmdd", "role": "date"},
+            {"index": 1, "source_index": 1, "name": "daypart", "role": "daypart"},
+            {"index": 2, "source_index": 2, "name": "menu", "role": "menu_name"},
+            {"index": 3, "source_index": 3, "name": "qty.regular_x", "role": "quantity",
+             "diet_type": "regular", "area_id": "X"}]}
+
+
 def test_collect_sheet_dates_ignores_footer_timestamp_when_table_dates_exist():
     payload = {
         "table_raw": """
@@ -4551,7 +4565,8 @@ OV:LL 08/10/920Z
 """.strip()
     }
     received_at = datetime(2026, 2, 13, 9, 0, 0)
-    dates = order_service._collect_sheet_dates_from_payload(payload, received_at)
+    dates = order_service._collect_sheet_dates_from_payload(payload, received_at,
+        _declared_date_collection_template(), explicit_week="2026-02@2026-02-15~2026-02-21")
     assert len(dates) >= 2
     assert all(item.month == 2 for item in dates)
 
@@ -4570,7 +4585,17 @@ def test_collect_sheet_dates_infers_weekday_hint_beyond_legacy_row_scan_window()
         + [["LZ/E\n(金)", "", "F", "10"]]
     }
 
-    dates = order_service._collect_sheet_dates_from_payload(payload, received_at)
+    from copy import deepcopy
+    original = deepcopy(payload)
+    template = _declared_date_collection_template()
+    period = "2026-03@2026-03-22~2026-03-28"
+    with pytest.raises(ValueError, match="ingest_date_unresolved_in_selected_period"):
+        order_service._collect_sheet_dates_from_payload(payload, received_at, template, explicit_week=period)
+    assert payload == original
+    # Separate explicit operator correction, never an inferred OCR replacement.
+    corrected = deepcopy(payload)
+    corrected["table_rows"][-1][0] = "3/27\n(金)"
+    dates = order_service._collect_sheet_dates_from_payload(corrected, received_at, template, explicit_week=period)
 
     assert date(2026, 3, 27) in dates
 
@@ -4592,7 +4617,16 @@ def test_collect_sheet_dates_reads_structured_table_rows_for_weekday_hint():
         ]
     }
 
-    dates = order_service._collect_sheet_dates_from_payload(payload, received_at)
+    from copy import deepcopy
+    original = deepcopy(payload)
+    template = _declared_date_collection_template()
+    period = "2026-03@2026-03-22~2026-03-28"
+    with pytest.raises(ValueError, match="ingest_date_unresolved_in_selected_period"):
+        order_service._collect_sheet_dates_from_payload(payload, received_at, template, explicit_week=period)
+    assert payload == original
+    corrected = deepcopy(payload)
+    corrected["tables"][0]["rows"][2][0] = "3/27\n(金)"
+    dates = order_service._collect_sheet_dates_from_payload(corrected, received_at, template, explicit_week=period)
 
     assert date(2026, 3, 26) in dates
     assert date(2026, 3, 27) in dates

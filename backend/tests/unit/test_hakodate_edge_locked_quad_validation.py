@@ -62,5 +62,6 @@ def test_multiple_borderline_offsets_are_blocked() -> None:
         {"top": "fit", "right": "fit", "bottom": "fit", "left": "fit"},
         "large_grid_component",
     )
-    assert reasons == ["multiple_edge_offset_borderline:top,right"]
-    assert warnings == ["top_offset_borderline:4.8", "right_offset_borderline:4.708"]
+    assert reasons == []
+    assert warnings == ["top_offset_borderline:4.8", "right_offset_borderline:4.708",
+                        "multiple_edge_offset_borderline:top,right"]

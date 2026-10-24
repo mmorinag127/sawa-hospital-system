@@ -38,6 +38,8 @@ from src.services.storage_service import load_selected_pdf_bytes
 from tests.contract.auth_support import hospital_operator  # noqa: F401
 from tests.unit.test_disabled_facility_columns import _snapshot
 from tests.unit.test_h2_operator_repair_revision import _provider_output_files
+from tests.helpers.authored_menu_recipe import declare_period_recipes
+from tests.helpers.readonly_catalog import readonly_catalog_statements
 
 
 HEADER = ["日付", "区分", "メニュー", "常食2F", "備考"]
@@ -111,7 +113,12 @@ class HistoryCase:
                 session.add(MonthlyMenu(id="2026-01", month_start=date(2026, 1, 1), filename="seed-2026-01.xlsx"))
                 session.flush()
                 session.add(MonthlyMenuEntry(id="seed-entry-2026-01-08-lunch-menu-a", monthly_menu_id="2026-01",
-                    menu_date=date(2026, 1, 8), daypart="昼", name="Menu A", slot_index=0, diet_type="regular"))
+                    menu_date=date(2026, 1, 8), daypart="昼", name="Menu A", slot_index=0, diet_type="regular", category="副菜"))
+            session.flush()
+            # This component declares a one-gram recipe, not a headcount inferred
+            # from its stored lines or recognizer response.
+            declare_period_recipes(session, facility_id=facility, period=period,
+                qty_per_serving=1, unit_type="g")
         data = Path(__file__).resolve().parents[2] / "src/data"
         self.protected = (self.source, policy, data / "facility_master.template.json",
                           data / "order_form_master_templates/master_layout_template.xlsx")
@@ -120,6 +127,7 @@ class HistoryCase:
     @contextmanager
     def readonly(self):
         before = _snapshot(self.engine)
+        schema_reads = readonly_catalog_statements(self.engine)
         paths = self.protected + ((Path(self.engine.url.database),) if self.engine.dialect.name == "sqlite" else ())
         hashes = {str(p): sha256(p.read_bytes()).hexdigest() for p in paths}
         statements = []
@@ -138,19 +146,6 @@ class HistoryCase:
             self.observations.append({"changed_tables": changed, "non_select": non_select,
                 "before_hashes": hashes, "after_hashes": after_hashes})
             assert not changed, changed
-            # Runtime menu validation inspects schema inside a read transaction.
-            schema_reads = {
-                'PRAGMA main.table_xinfo("menu_masters")',
-                'PRAGMA main.table_xinfo("menu_facility_overrides")',
-                'PRAGMA main.table_xinfo("monthly_menu_items")',
-                'PRAGMA main.table_xinfo("monthly_menu_entries")',
-                'PRAGMA main.index_list("monthly_menu_items")',
-                'PRAGMA main.index_info("uq_monthly_menu_items_scope_identity")',
-                'PRAGMA main.index_info("sqlite_autoindex_monthly_menu_items_1")',
-                "BEGIN",
-            }
-            if self.engine.dialect.name == "postgresql":
-                schema_reads.add("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             assert set(non_select) <= schema_reads, non_select
             assert after_hashes == hashes
 

@@ -12,6 +12,75 @@ from tests.integration.test_ocr_sheet_history import history_registration, selec
 from tests.unit.test_disabled_facility_columns import _snapshot
 
 
+@pytest.mark.parametrize("field", ["note", "remarks"])
+def test_declared_note_alias_preserves_target_and_raw_input(field):
+    from copy import deepcopy
+    from tests.helpers.authored_cell_values import declared_field
+    target = {"role": "note", "field": field, "sheet_cell": "F11"}
+    original = deepcopy(target)
+    values = {"qty.regular_x": "7?", "remarks": "007 備考"}
+    assert values[declared_field(target, list(values))] == "007 備考"
+    assert target == original
+    assert values == {"qty.regular_x": "7?", "remarks": "007 備考"}
+
+
+@pytest.mark.parametrize("target", [
+    {"role": "quantity", "field": "remarks"},
+    {"role": "note", "field": "qty.regular_x"},
+    {"role": "aux", "field": "aux.notes"},
+])
+def test_declared_note_alias_never_repairs_an_incompatible_role(target):
+    from copy import deepcopy
+    from tests.helpers.authored_cell_values import declared_field
+    original = deepcopy(target)
+    with pytest.raises(ValueError, match="hakodate_target_role_"):
+        declared_field(target, ["qty.regular_x", "remarks"])
+    assert target == original
+
+
+def test_declared_note_exact_field_is_preserved():
+    from tests.helpers.authored_cell_values import declared_field
+    assert declared_field({"role": "note", "field": "note"}, ["note"]) == "note"
+
+
+@pytest.mark.parametrize("field", ["note", "remarks"])
+@pytest.mark.parametrize("raw", [("same", "same"), ("007", "different")])
+def test_declared_note_aliases_are_rejected_even_when_raw_values_match(field, raw):
+    from tests.helpers.authored_cell_values import declared_field
+    values = dict(zip(["note", "remarks"], raw))
+    with pytest.raises(AssertionError, match="ambiguous declared note aliases"):
+        declared_field({"role": "note", "field": field}, list(values))
+    assert tuple(values.values()) == raw
+
+
+@pytest.mark.parametrize("field", ["note", "remarks"])
+def test_unused_declared_note_is_rejected_even_when_quantity_is_used(field):
+    from tests.helpers.authored_cell_values import assert_declared_cells_used
+    quantity = ("2025-01-01", "朝", "Menu A", "qty.regular_x")
+    note = ("2025-01-01", "朝", "Menu A", field)
+    with pytest.raises(AssertionError, match="authored quantity/note cells"):
+        assert_declared_cells_used({quantity, note}, {quantity})
+
+
+def test_unknown_declared_note_field_is_not_guessed():
+    from tests.helpers.authored_cell_values import declared_field
+    with pytest.raises(AssertionError, match="no declared input field"):
+        declared_field({"role": "note", "field": "note"}, ["unrelated"])
+
+
+@pytest.mark.parametrize("raw", [("same", "same"), ("007", "different")])
+def test_native_entry_refuses_two_note_aliases_before_any_order_or_artifact_access(monkeypatch, tmp_path, raw):
+    from tests.helpers.native_selection import produce_authored_native_result
+    columns = [{"name": name, "role": "note", "source_index": index}
+               for index, name in enumerate(["note", "remarks"])]
+    rows = [list(raw)]
+    with pytest.raises(AssertionError, match="ambiguous declared note aliases"):
+        produce_authored_native_result(monkeypatch, order_id="must-not-be-read",
+            table_rows=rows, columns=columns, unlisted_cells="", artifact_root=tmp_path / "artifacts")
+    assert rows == [list(raw)]
+    assert not (tmp_path / "artifacts").exists()
+
+
 @pytest.mark.parametrize("ocr_rows,lines", [
     (None, [{"quantity_original": 0}]),
     ([], [{"quantity_original": 7}]),

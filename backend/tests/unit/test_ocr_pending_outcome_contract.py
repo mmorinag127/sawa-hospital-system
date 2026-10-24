@@ -29,6 +29,7 @@ def waiting_job(monkeypatch):
                      "output_reference": "own-output", "generation": "42",
                      "pipeline_job_id": "own-bucket:input/current.pdf:42", "wait_timeout_seconds": 600,
                      "input_sha256": sha256(b"own-source-pdf").hexdigest(),
+                     "configured_input_sha256": sha256(b'{"component":"owned-pending-input"}').hexdigest(),
                  }},
     )
     session = SimpleNamespace(get=lambda model, key: job, flush=lambda: None)
@@ -83,17 +84,21 @@ def test_actual_reparse_callback_distinguishes_wait_from_missing_terminal(monkey
         completed.append(kwargs)
         return None, "superseded"
     monkeypatch.setattr(orders, "_complete_workflow_ocr_run", complete)
-    orders._run_reparse_background(
-        "order", ocr_prompt=" custom prompt ", selected_document_id="selected-document", llm_assist=True,
-        expected_revision=7, workflow_attempt_id="start-attempt", ocr_job_id=job.id,
-    )
+    before = deepcopy(vars(job))
+    def invoke():
+        return orders._run_reparse_background(
+            "order", ocr_prompt=" custom prompt ", selected_document_id="selected-document", llm_assist=True,
+            expected_revision=7, workflow_attempt_id="start-attempt", ocr_job_id=job.id,
+        )
     if outcome == "pending":
+        assert invoke() == supplied
         assert completed == []
         assert job.status == "awaiting_output"
     else:
-        assert completed[0]["error"] == "reparse_evidence_missing"
-        assert completed[0]["expected_revision"] == 7
-        assert completed[0]["workflow_attempt_id"] == "start-attempt"
+        with pytest.raises(ValueError, match="reparse_persisted_result_missing"):
+            invoke()
+        assert completed == []
+    assert vars(job) == before
 
 
 def test_resume_uses_original_waiting_receipt_and_own_returned_id(monkeypatch, waiting_job):
@@ -243,13 +248,17 @@ def test_nonworkflow_new_upload_wait_keeps_original_document_and_request(waiting
     from src.services.workflow_attempt_guard_service import nonworkflow_execution_context
 
     job, _ = waiting_job
-    execution = {"job_id": job.id, "order_id": "order", "execution_id": "own-execution"}
+    configured = {"component": "owned-pending-input"}
+    execution = {"job_id": job.id, "order_id": "order", "execution_id": "own-execution",
+        "selected_pdf_receipt": {"sha256": sha256(b"own-source-pdf").hexdigest()},
+        "orders": {"order": {"configured_input": configured}}}
     job.metrics.pop("workflow_attempt_id")
     job.metrics.pop("pending_receipt")
     with nonworkflow_execution_context(execution):
         assert ocr_job_service.record_own_pipeline_delivery(
             job.id, selected_input_reference="selected-input", input_reference="new-nonworkflow-upload",
-            output_reference="own-nonworkflow-output", generation="nonworkflow-generation",
+            output_reference="own-nonworkflow-output", generation="43",
+            input_sha256=sha256(b"own-source-pdf").hexdigest(),
         )
         updated = ocr_job_service.mark_own_pipeline_waiting(
             job.id, input_reference="new-nonworkflow-upload", output_reference="own-nonworkflow-output",
@@ -334,6 +343,7 @@ def own_delivery_payload(job, status="done"):
             "template_id": "authored-template",
             "input_reference": receipt["input_reference"], "input_generation": receipt["generation"],
             "input_sha256": receipt["input_sha256"], "output_reference": receipt["output_reference"],
+            "configured_input_sha256": receipt["configured_input_sha256"],
             "table_rows": [["2/15", "morning", "meal", "0"]]}
 
 

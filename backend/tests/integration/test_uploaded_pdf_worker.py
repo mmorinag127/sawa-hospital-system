@@ -29,7 +29,7 @@ from src.workers.ingest_mail_adapter import parse_ingest_payload  # noqa: E402
 from src.workers import ingest_worker  # noqa: E402
 from tests.helpers.ingest_original import (  # noqa: E402
     configure_delivery, authored_sources, process_uploaded_original, authored_pipeline_provider,
-    register_authored_original,
+    register_authored_original, recorded_upload_ocr_job,
 )
 from src.services import ingest_job_service  # noqa: E402
 from src.services import ingest_delivery_service  # noqa: E402
@@ -492,7 +492,7 @@ def test_owned_nonpersistable_first_pass_is_terminal_without_lines(monkeypatch, 
     assert after["generation_attempts"] == 1
     with session_scope() as session:
         assert session.query(OrderLine).filter_by(order_id=registered["id"]).count() == 0
-    saved_input = get_job(f"OCR-{registered['id']}")["metrics"]["nonworkflow_execution"]["start_orders"][registered["id"]]["processing_start_input"]
+    saved_input = recorded_upload_ocr_job(uploaded["id"])["metrics"]["nonworkflow_execution"]["start_orders"][registered["id"]]["processing_start_input"]
     assert len(captured) == 1
     assert snapshots_equal(captured[0], saved_input)
 
@@ -559,7 +559,7 @@ def test_actual_owned_advance_preserves_immutable_original_template(monkeypatch,
     monkeypatch.setattr(ingest_worker, "run_ocr_pipeline", output)
     assert process_uploaded_original(uploaded["id"])["result"] == "business_done"
     assert len(original_captures) == 1
-    job = get_job(f"OCR-{registered['id']}")
+    job = recorded_upload_ocr_job(uploaded["id"])
     assert snapshots_equal(job["metrics"]["nonworkflow_execution"]["start_orders"], original_captures[0])
     with session_scope() as session:
         line = session.query(OrderLine).filter_by(order_id=registered["id"]).one()

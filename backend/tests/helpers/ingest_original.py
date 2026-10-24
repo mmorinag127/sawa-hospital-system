@@ -60,6 +60,26 @@ def process_uploaded_original(uploaded_pdf_id):
     return delivery.process(delivery_id, generation)
 
 
+def recorded_upload_ocr_job(uploaded_pdf_id):
+    from src.models.ingest_delivery import IngestDelivery
+    from src.services.ocr_job_service import get_job
+
+    uploaded = uploads.get_uploaded_pdf(uploaded_pdf_id)
+    assert uploaded is not None
+    original = ingest.get_ingest_job_snapshot(uploaded["message_id"])
+    assert original is not None
+    identity, _ = delivery.delivery_for_job(original["id"], original["generation"], original["input_digest"])
+    with session_scope() as session:
+        row = session.get(IngestDelivery, identity)
+        assert row is not None and isinstance(row.terminal_receipt, dict)
+        receipt = deepcopy(row.terminal_receipt)
+    job = get_job(receipt["job_id"])
+    assert job is not None and job["order_id"] == uploaded["current_order_id"]
+    assert receipt["receipt"]["job_id"] == job["id"]
+    assert receipt["capture"]["job_id"] == job["id"]
+    return job
+
+
 def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="lunch", seed_menu=True, original_name="original.pdf", facility_config=None, seed_month=True):
     """Explicit component JSON/menu/PDF inputs, never operator scenario proof."""
     from src.models.facility import Facility

@@ -1,5 +1,6 @@
 import pathlib
 import sys
+from copy import deepcopy
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -47,38 +48,33 @@ def _sample_payload(table_raw: str = "|a|b|\n|-|-|\n|1|2|") -> dict:
     }
 
 
-def test_save_order_ocr_cache_persists_evidence_run():
+def _assert_unowned_cache_cannot_publish(order_id, payload):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+    before = _snapshot(get_engine())
+    raw = deepcopy(payload)
+    assert order_service._save_order_ocr_cache(order_id, payload) is None
+    assert _snapshot(get_engine()) == before
+    assert payload == raw
+    assert order_service.get_latest_ocr_evidence_run(order_id) is None
+    assert ocr_evidence_service.list_evidence_runs(order_id) == []
+
+
+def test_unowned_legacy_cache_cannot_publish_evidence():
     order_service.clear_all()
 
-    order_service._save_order_ocr_cache("ORD-EVIDENCE-1", _sample_payload())
-
-    latest = order_service.get_latest_ocr_evidence_run("ORD-EVIDENCE-1")
-    assert latest is not None
-    assert latest["order_id"] == "ORD-EVIDENCE-1"
-    assert latest["schema_version"] == "v1_legacy"
-    assert latest["artifact_digest"]
-    capabilities = latest.get("capabilities_json") or {}
-    assert capabilities.get("step2_view_ready") is True
-    assert capabilities.get("step2_edit_ready") is True
-    assert capabilities.get("apply_ready") is True
-    assert capabilities.get("confirm_ready") is True
+    _assert_unowned_cache_cannot_publish("ORD-EVIDENCE-1", _sample_payload())
 
 
-def test_save_order_ocr_cache_dedupes_when_only_debug_changes():
+def test_debug_changes_cannot_grant_unowned_cache_evidence_authority():
     order_service.clear_all()
     payload = _sample_payload()
 
-    order_service._save_order_ocr_cache("ORD-EVIDENCE-2", payload)
-    order_service._save_order_ocr_cache(
-        "ORD-EVIDENCE-2",
-        {
+    _assert_unowned_cache_cannot_publish("ORD-EVIDENCE-2", payload)
+    _assert_unowned_cache_cannot_publish("ORD-EVIDENCE-2", {
             **payload,
             "_reparse_debug": {"error": "sheet_llm_audit_failed"},
-        },
-    )
-
-    runs = ocr_evidence_service.list_evidence_runs("ORD-EVIDENCE-2")
-    assert len(runs) == 1
+        })
 
 
 def test_save_order_ocr_cache_ignores_draft_only_payload_without_evidence():
@@ -98,16 +94,8 @@ def test_save_order_ocr_cache_ignores_draft_only_payload_without_evidence():
     assert ocr_evidence_service.list_evidence_runs("ORD-EVIDENCE-3") == []
 
 
-def test_save_order_ocr_cache_creates_new_run_when_evidence_changes():
+def test_changed_legacy_quantity_cannot_create_new_evidence():
     order_service.clear_all()
 
-    order_service._save_order_ocr_cache("ORD-EVIDENCE-4", _sample_payload("|a|b|\n|-|-|\n|1|2|"))
-    first = order_service.get_latest_ocr_evidence_run("ORD-EVIDENCE-4")
-    order_service._save_order_ocr_cache("ORD-EVIDENCE-4", _sample_payload("|a|b|\n|-|-|\n|1|3|"))
-    latest = order_service.get_latest_ocr_evidence_run("ORD-EVIDENCE-4")
-    runs = ocr_evidence_service.list_evidence_runs("ORD-EVIDENCE-4")
-
-    assert first is not None
-    assert latest is not None
-    assert len(runs) == 2
-    assert first["artifact_digest"] != latest["artifact_digest"]
+    for value in ("2", "3"):
+        _assert_unowned_cache_cannot_publish("ORD-EVIDENCE-4", _sample_payload(f"|a|b|\n|-|-|\n|1|{value}|"))

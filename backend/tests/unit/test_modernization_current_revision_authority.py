@@ -201,6 +201,7 @@ def test_real_caller_fallback_boundaries_do_not_reenter_resolver(selected_repair
 def test_real_authored_version_failure_cannot_borrow_old_revision(selected_repair, fault):
     order_id, sheet, _evidence = selected_repair
     old = save(order_id, sheet)
+    saved = deepcopy(order_service.get_current_sheet_context(order_id)["draft_payload"])
     path = Path(os.environ["FACILITY_MASTER_PATH"])
     original = path.read_bytes()
     changed = json.loads(original)
@@ -212,11 +213,14 @@ def test_real_authored_version_failure_cannot_borrow_old_revision(selected_repai
         path.write_text(json.dumps(changed, ensure_ascii=False), encoding="utf-8")
         with no_writes():
             context = order_service.get_current_sheet_context(order_id)
-            assert context["draft_payload"] is None
+            assert context["sheet_unavailable"] is True
+            assert context["draft_payload"] == saved
             assert context["blockers"]
+            assert "original_template_configured_source_mismatch" in context["blockers"]
+            assert context["current_sheet_revision_id"] == old
             assert order_service._current_sheet_revision_id(
                 order_id=order_id, payload={"current_sheet_revision_id": old},
-            ) is None
+            ) == old
     finally:
         path.write_bytes(original)
 

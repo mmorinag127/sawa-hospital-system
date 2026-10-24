@@ -347,7 +347,8 @@ def saved_numeric(numeric_fax, monkeypatch):
     evidence = f.produce()
     records = evidence["payload_json"]["hakodate_ocr_evidence_records"]
     by_cell = {record["engine_metadata"]["sheet_cell"]: record for record in records}
-    assert len(records) == len(by_cell) == len(f.expected) == 56
+    assert len(records) == len(by_cell) == len(f.expected) == 112
+    assert len(f.quantity_plan) == len(f.notes_plan) == 56
     for cell, value in f.expected.items():
         assert by_cell[cell]["raw_text"] == by_cell[cell]["normalized_value"] == value
     f.select()
@@ -355,11 +356,13 @@ def saved_numeric(numeric_fax, monkeypatch):
     assert error is None, (error, projected)
     sheet = deepcopy(projected["sheet"])
     index = sheet["fields"].index("qty.regular_x")
-    authored = list(f.expected.values())
+    authored = [f.expected[target["sheet_cell"]] for target in f.quantity_plan]
     assert authored == [str((7, 0, 6, 9)[i % 4]) for i in range(56)]
     # Human confirmation, not recognition confidence/quantity substitution.
     for row, value in zip(sheet["rows"], authored, strict=True):
         row[index] = value
+    note_index = sheet["fields"].index("remarks")
+    assert [row[note_index] for row in sheet["rows"]] == [""] * len(f.notes_plan)
     with db.session_scope() as session:
         revision = session.get(OrderWorkflowState, ORDER).revision
     saved, error = workflow.save_sheet(

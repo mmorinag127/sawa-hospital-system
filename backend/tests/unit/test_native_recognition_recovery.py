@@ -148,19 +148,16 @@ def test_native_terminal_review_get_save_and_checkpoint_resume(native_review, mo
     assert review(f)[1] == "recognition_review_result_changed"
 
 
-def test_native_review_actual_http_get(native_review):
+def test_native_review_actual_http_get(native_review, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from src.api import orders
-    from src.api import auth
+    from tests.contract.auth_support import registered_hospital_operator
     f = native_review
     app = FastAPI()
     app.include_router(orders.router, prefix="/orders")
-    # Auth is outside this offline mechanics proof; provide an explicit actor,
-    # rather than pretending AUTH_DISABLED's anonymous user is an operator edit.
-    app.dependency_overrides[auth.get_current_operator] = lambda: auth.UserContext(role="operator", account="component-operator")
-    before = snapshot(f)
-    with TestClient(app) as client:
+    with registered_hospital_operator(monkeypatch) as actor, TestClient(app, headers=actor.headers) as client:
+        before = snapshot(f)
         response = client.get(f"/orders/{f['order_id']}/workflow-v2/recognition-review",
             params={"ocr_result_id": f["evidence_id"]})
         assert response.status_code == 200, response.text
@@ -173,10 +170,13 @@ def test_native_review_actual_http_get(native_review):
             json={"source_receipt": receipt, "values": {cell["cell"]: "7" for cell in response.json()["cells"]}})
         assert saved.status_code == 200, saved.text
         assert saved.json()["state"] == "context_confirmed"
-    after = snapshot(f)
-    for table in before:
-        if table != "order_workflow_states":
-            assert before[table] == after[table]
+        with f["factory"]() as session:
+            state = session.get(OrderWorkflowState, f["order_id"])
+            assert workflow._workflow_meta(state)["recognition_override"]["edited_by"] == actor.account
+        after = snapshot(f)
+        for table in before:
+            if table != "order_workflow_states":
+                assert before[table] == after[table]
 
 
 @pytest.mark.parametrize("damage", [

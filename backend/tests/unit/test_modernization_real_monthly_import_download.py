@@ -65,7 +65,7 @@ def imported(store, monkeypatch, tmp_path):
     from src.main import app
 
     # Actual src.main prefix; no private convenience router/dependency overrides.
-    with_client = TestClient(app)
+    with_client = TestClient(app, headers={"Accept-Encoding": "identity"})
     try:
         content = synthetic_workbook(10)
         parsed_month, parsed_diet, items, entries = service._parse_monthly_menu(

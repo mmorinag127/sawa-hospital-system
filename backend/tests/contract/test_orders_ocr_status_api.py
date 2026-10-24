@@ -1527,8 +1527,10 @@ def test_daily_bags_excludes_forbidden_but_keeps_saved_quantities(owned_outputs)
     )
     sheet, error = order_service.get_ocr_sheet(order["id"])
     assert error is None
-    for diet, quantity in (("no_meat", "2"), ("no_fish", "1"), ("forbidden_other", "3"), ("no_fried", "4")):
-        assert sheet["rows"][0][sheet["fields"].index(f"qty.{diet}_x")] == quantity
+    for diet, quantity in (("no_meat", 2), ("no_fish", 1), ("forbidden_other", 3), ("no_fried", 4)):
+        raw = sheet["rows"][0][sheet["fields"].index(f"qty.{diet}_x")]
+        assert raw == quantity
+        assert type(raw) is int
 
 
 def test_download_document_does_not_fetch_signed_substitute_when_own_read_fails(monkeypatch):
@@ -1883,7 +1885,7 @@ def test_owned_rerun_callback_acquires_real_slot_before_external_recognition(his
         result = orders_api._run_ocr_rerun_background(f.id, f.job,
             expected_revision=f.queued["workflow"]["revision"],
             workflow_attempt_id=f.queued["ocr_job"]["workflow_attempt_id"])
-    assert stages == ["ocr_slot_acquired"]
+    assert stages == ["ocr_pipeline"]
     assert len(calls) == 1
     assert result["terminal_receipt"]["job_id"] == f.job
     assert result["terminal_receipt"]["order_id"] == f.id

@@ -28,7 +28,7 @@ def test_runtime_x_snap_is_disabled_after_axis_alignment() -> None:
     snapped, evidence = _snap_regions_x_to_fax_lines_all_targets(rectified, regions)
 
     assert evidence["applied"] is False
-    assert evidence["reason"] == "disabled_after_header_intersection_axis_alignment"
+    assert evidence["reason"] == "local_grid_snap_insufficient_matches"
     assert snapped == regions
 
 
@@ -42,7 +42,7 @@ def test_runtime_x_snap_does_not_move_regions_when_spurious_line_exists() -> Non
     snapped, evidence = _snap_regions_x_to_fax_lines_all_targets(rectified, regions)
 
     assert evidence["applied"] is False
-    assert evidence["reason"] == "disabled_after_header_intersection_axis_alignment"
+    assert evidence["reason"] == "local_grid_snap_insufficient_matches"
     assert snapped == regions
 
 

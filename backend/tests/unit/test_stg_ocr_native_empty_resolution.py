@@ -20,9 +20,9 @@ from test_stg_ocr_resume_upload import mod
 from test_stg_recognition_review_verification import case
 
 
-def test_ci_includes_acceptance_without_replacing_existing_review_targets():
+def test_ci_includes_acceptance_without_replacing_existing_review_targets(monkeypatch):
     root = Path(__file__).resolve().parents[3]
-    workflow = yaml.safe_load((root/'.github/workflows/ci.yml').read_text())
+    workflow = yaml.safe_load((root/'local-checks/legacy/ci.yml').read_text())
     steps = [step for job in workflow['jobs'].values() for step in job.get('steps',[])]
     step = next(step for step in steps if step.get('name') == 'Verify OCR review-resolution root regression')
     command = step['run']
@@ -33,6 +33,25 @@ def test_ci_includes_acceptance_without_replacing_existing_review_targets():
             'test_yomitoku_text_recognizer_topk.py','test_stg_recognition_review_verification.py'):
         assert 'tests/unit/'+target in command
     assert '--confcutdir' not in command
+    manifest = json.loads((root/'scripts/local_hospital_test_manifest.json').read_text())
+    entries = [entry for entry in manifest['commands'] if entry['name'] == 'backend-tests']
+    assert len(entries) == 1
+    assert entries[0]['command'] == 'python3 scripts/run_local_backend_tests.py'
+    import runpy
+    monkeypatch.syspath_prepend(str(root / 'scripts'))
+    runner = runpy.run_path(str(root / 'scripts/run_local_backend_tests.py'))
+    dedicated = {path for modules in runner['DEDICATED_MODULES'].values() for path in modules}
+    for target in ('test_stg_ocr_native_empty_resolution.py', 'test_hakodate_review_resolution_root.py',
+            'test_hakodate_blank_input_review.py', 'test_hakodate_blank_review_persistence.py',
+            'test_hakodate_raw_authority.py', 'test_hakodate_empty_sequence_model.py',
+            'test_hakodate_text_recognizer_preprocess.py', 'test_yomitoku_text_recognizer_topk.py',
+            'test_stg_recognition_review_verification.py'):
+        assert 'backend/tests/unit/' + target not in dedicated
+        assert (root / 'backend/tests/unit' / target).is_file()
+    assert {'workflow': 'ci.yml', 'job': 'backend',
+            'step': 'Verify OCR review-resolution root regression'} in entries[0]['legacy_steps']
+    assert '--confcutdir' not in entries[0]['command']
+    assert not (root/'.github/workflows/ci.yml').exists()
 
 
 @pytest.fixture

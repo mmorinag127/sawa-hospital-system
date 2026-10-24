@@ -122,7 +122,8 @@ def test_complete_api_projection_parity(state, authored_april_context, monkeypat
                     row.secondary_actions_json = {}
                     row.state = 'uploaded'
                 elif state == 'invalid_version':
-                    row.template_version_id = 'missing'
+                    from tests.helpers.invalid_template_projection import add_invalid_projection
+                    row.template_version_id = add_invalid_projection(session, workflow['template_version_id'])
     with session_scope() as session:
         for row in full_history(session, order_id):
             row.payload_json = {**row.payload_json, 'diagnostic_pipeline_output': {'opaque': ['1', '26'] * 1000}}

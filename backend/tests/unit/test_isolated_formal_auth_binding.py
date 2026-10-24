@@ -29,7 +29,7 @@ def _stored(engine, user_id):
 def test_loaded_auth_helpers_register_and_cleanup_only_in_owned_schema(isolated_formal_schema, monkeypatch, helper):
     assert qualified is not bare
     assert Path(qualified.__file__).resolve() == Path(bare.__file__).resolve()
-    assert qualified.engine is bare.engine is isolated_formal_schema
+    assert qualified.db.engine is bare.db.engine is isolated_formal_schema
     assert db.SessionLocal.kw["bind"] is isolated_formal_schema
     account = f"isolated-alias-{uuid4().hex}@example.invalid"
     user_id = helper._seed_user(account)
@@ -85,7 +85,6 @@ def origin_probes(restored_engines, monkeypatch, tmp_path):
     for module in (local, custom, external, root_only):
         restored_engines.append((module, module.engine))
         monkeypatch.setitem(sys.modules, module.__name__, module)
-    restored_engines.extend([(qualified, BOOTSTRAP), (bare, BOOTSTRAP)])
     try:
         yield local, custom, external, root_only, independent
     finally:

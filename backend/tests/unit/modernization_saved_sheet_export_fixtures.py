@@ -180,6 +180,10 @@ class SavedSheetFixture:
 
     def republish(self):
         """Explicit fixture setup adoption, not a production guard override."""
+        invoice = self.authored.get("invoice_template")
+        if invoice is not None and "template_uri" not in invoice:
+            from tests.helpers.authored_invoice import declare_invoice
+            self.authored["invoice_template"] = declare_invoice(self.root, invoice)
         self.write_master()
         with self.session_scope() as session:
             selected, _ = lineage.resolve(session, "F", date(2026, 3, 1))

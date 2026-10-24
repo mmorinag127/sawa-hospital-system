@@ -94,6 +94,11 @@ def test_authored_area_identity_uses_canonical_saved_field_without_quantity_chan
         upload = session.execute(select(UploadedPdf)).scalar_one()
         with fitz.open(upload.storage_uri) as pdf:
             text = "".join(page.get_text() for page in pdf)
+            assert len(pdf) >= 1
+            for page in pdf:
+                pixels = page.get_pixmap()
+                assert pixels.width > 0 and pixels.height > 0
+                assert min(pixels.samples) < 255, "physical original must contain rendered content"
         for value in (upload.facility_hint, "2026-03-22", "朝", "献立A",
                       f"regular / {area} / 2"):
-            assert value in text
+            assert "".join(value.split()) in "".join(text.split()), (value, text)

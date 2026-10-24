@@ -264,8 +264,9 @@ def test_list_orders_without_ocr_uses_lightweight_summary(monkeypatch) -> None:
     assert row["workflow_state"]["state"] == "draft_ready"
     assert row["candidate_resolution"]["resolutions"]["week"]["resolved_value"] == "2026-03@2026-03-22~2026-03-28"
     assert row["candidate_resolution"]["resolutions"]["facility"]["resolved_label"] == "施設A"
-    assert row["ocr_status"] == "success"
-    assert row["ocr_pages_count"] == 1
+    # Cache pages are not a recorded OCR job or evidence of successful OCR.
+    assert "ocr_status" not in row
+    assert "ocr_pages_count" not in row
 
 
 def test_list_orders_without_ocr_skips_candidate_resolution_by_default(monkeypatch) -> None:

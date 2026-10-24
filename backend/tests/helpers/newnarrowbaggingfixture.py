@@ -116,6 +116,9 @@ def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
                 *[{"name": f"qty.{diet}_{area}", "source": "quantity", "diet_type": diet,
                    "area_id": area} for diet, area in quantities]], "include_menu_name": True}
         if invoice_template is not None:
+            if not omit_invoice and "template_uri" not in invoice_template:
+                from tests.helpers.authored_invoice import declare_invoice
+                invoice_template = declare_invoice(tmp_path, invoice_template)
             configured["invoice_template"] = deepcopy(invoice_template)
         if label_profile is not None:
             configured["label_profile"] = deepcopy(label_profile)

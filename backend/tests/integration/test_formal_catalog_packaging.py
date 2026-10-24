@@ -15,6 +15,7 @@ import sqlalchemy as sa
 BACKEND = Path(__file__).resolve().parents[2]
 ROOT = BACKEND.parent
 BASE_DOCKERFILE_SHA256 = "4259d6f559cc2ab9d5ff85dfe92c21f44d216bda4120db6e52218280eddfdc3b"
+CATALOG_PACKAGE = "91ce0c92ac350b0ba05a36942dada1a3c7889f98"
 
 
 def _copies():
@@ -24,7 +25,10 @@ def _copies():
 def test_backend_runtime_catalog_copy_contract():
     assert ["src", "./src"] in _copies()
     assert ["alembic/catalog_contracts.json", "./alembic/catalog_contracts.json"] in _copies()
-    after = (BACKEND / "Dockerfile").read_bytes()
+    assert _copies().count(["alembic/catalog_contracts.json", "./alembic/catalog_contracts.json"]) == 1
+    # Keep the original isolated COPY proof without pinning later approved
+    # dependency/runtime changes to the old whole-Dockerfile hash.
+    after = subprocess.check_output(["git", "show", f"{CATALOG_PACKAGE}:backend/Dockerfile"], cwd=ROOT)
     original = after.replace(b"COPY alembic/catalog_contracts.json ./alembic/catalog_contracts.json\n", b"")
     assert hashlib.sha256(original).hexdigest() == BASE_DOCKERFILE_SHA256
 

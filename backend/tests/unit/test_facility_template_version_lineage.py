@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from uuid import uuid4
+from copy import deepcopy
+import pytest
 
-from sqlalchemy import inspect, text
-
-from src.db import Base, engine, session_scope
+from src.db import engine, session_scope
 from src.models.facility import Facility
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.ocr_job import OcrJob
@@ -16,31 +16,7 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import facility_template_version_service, order_service, output_builder
-
-
-Base.metadata.create_all(bind=engine)
-
-
-def _ensure_facility_template_version_test_columns() -> None:
-    inspector = inspect(engine)
-    if "facility_template_versions" not in inspector.get_table_names():
-        return
-    columns = {column["name"] for column in inspector.get_columns("facility_template_versions")}
-    statements = []
-    if "config_json" not in columns:
-        statements.append("ALTER TABLE facility_template_versions ADD COLUMN config_json JSON")
-    if "valid_from" not in columns:
-        statements.append("ALTER TABLE facility_template_versions ADD COLUMN valid_from DATE")
-    if "valid_to" not in columns:
-        statements.append("ALTER TABLE facility_template_versions ADD COLUMN valid_to DATE")
-    if not statements:
-        return
-    with engine.begin() as connection:
-        for statement in statements:
-            connection.execute(text(statement))
-
-
-_ensure_facility_template_version_test_columns()
+from src.services.canonical_facility_store import CanonicalStoreError
 
 
 def _id(prefix: str) -> str:
@@ -72,7 +48,7 @@ def _registered_config(facility_id: str) -> dict:
 
 
 def test_template_columns_missing_source_index_is_blocker() -> None:
-    columns = facility_template_version_service.normalize_template_columns(
+    columns = (
         [
             {"index": 0, "role": "date", "header": "日付"},
             {"index": 1, "role": "aux", "header": "合計"},
@@ -84,9 +60,13 @@ def test_template_columns_missing_source_index_is_blocker() -> None:
 
     assert "template_source_index_missing" in validation["errors"]
     assert all(column.get("source_index") is None for column in columns)
+    original = deepcopy(columns)
+    with pytest.raises(CanonicalStoreError, match="authored_template_columns_invalid"):
+        facility_template_version_service.normalize_template_columns(columns)
+    assert columns == original
 
     validation_after_placeholder = facility_template_version_service.validate_template_columns(
-        facility_template_version_service.normalize_template_columns(
+        (
             [
                 {"index": 0, "role": "date", "header": "日付", "source_index": 0},
                 {"index": 1, "role": "quantity", "header": "-", "diet_type": "placeholder", "area_id": "X", "source_index": 1},
@@ -106,7 +86,7 @@ def test_save_path_repairs_missing_source_index_from_reference_and_next_availabl
             {"index": 3, "role": "quantity", "header": "常食", "diet_type": "regular", "area_id": "X", "source_index": 4},
         ]
     )
-    draft_columns = facility_template_version_service.normalize_template_columns(
+    draft_columns = (
         [
             {"index": 0, "role": "date", "header": "日付"},
             {"index": 1, "role": "daypart", "header": "区分"},
@@ -116,10 +96,15 @@ def test_save_path_repairs_missing_source_index_from_reference_and_next_availabl
         ]
     )
 
-    repaired = facility_template_version_service._repair_missing_source_indexes(  # noqa: SLF001
-        draft_columns,
-        reference_columns=reference_columns,
-    )
+    original = deepcopy((draft_columns, reference_columns))
+    with pytest.raises(CanonicalStoreError, match="legacy_source_index_repair_disabled"):
+        facility_template_version_service._repair_missing_source_indexes(
+            draft_columns, reference_columns=reference_columns)
+    assert (draft_columns, reference_columns) == original
+    # The component author explicitly declares all positions; none is inferred.
+    repaired = facility_template_version_service.normalize_template_columns([
+        {**column, "source_index": position}
+        for column, position in zip(draft_columns, [0, 1, 3, 4, 5], strict=True)])
 
     assert [column.get("source_index") for column in repaired] == [0, 1, 3, 4, 5]
     assert facility_template_version_service.validate_template_columns(repaired)["errors"] == []
@@ -160,80 +145,60 @@ def test_template_column_normalization_preserves_explicit_header_group() -> None
     assert columns[4]["header_group"] == "常食"
 
 
-def test_multiple_active_template_versions_are_blocker() -> None:
+def _declare_dated_versions(monkeypatch, tmp_path, facility_id, periods):
+    import json
+    from src.services.template_field_schema_service import canonical_field_name_from_template_column
+
+    base = _registered_config(facility_id)
+    base.update(facility_name="Explicit dated component facility", areas=[])
+    for column in base["fax_template"]["columns"]:
+        column["name"] = canonical_field_name_from_template_column(column)
+    versions = []
+    for index, (start, end, template_id, name) in enumerate(periods):
+        config = deepcopy(base)
+        config["facility_name"] = name
+        config["fax_template_id"] = config["fax_template"]["template_id"] = template_id
+        versions.append({"version_id": f"dated-{index}", "valid_from": start,
+                         "valid_to": end, "facility": config})
+    path = tmp_path / "dated-template-source.json"
+    path.write_text(json.dumps({"facilities": [{**base, "versions": versions}]}))
+    monkeypatch.setenv("FACILITY_MASTER_PATH", str(path))
+    monkeypatch.delenv("FACILITY_MASTER_URI", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    return path
+
+
+def test_multiple_active_template_versions_are_blocker(monkeypatch, tmp_path) -> None:
     facility_id = _id("FAC")
-    columns = facility_template_version_service.normalize_template_columns(_registered_config(facility_id)["fax_template"]["columns"])
+    source = _declare_dated_versions(monkeypatch, tmp_path, facility_id, [
+        ("2026-07-01", None, "fax_layout_regular_forbidden_v1", "Ambiguous Template Facility"),
+        ("2026-07-01", None, "fax_layout_regular_forbidden_v1", "Ambiguous Template Facility"),
+    ])
+    original = source.read_bytes()
     with session_scope() as session:
-        session.add(Facility(id=facility_id, name="Ambiguous Template Facility"))
-        for index in range(2):
-            session.add(
-                FacilityTemplateVersion(
-                    id=_id("FTV"),
-                    facility_id=facility_id,
-                    version=str(index + 1),
-                    status="active",
-                    template_id="fax_layout_regular_forbidden_v1",
-                    source="test",
-                    columns_json=columns,
-                    cells_json=[],
-                    template_digest=f"digest-{index}",
-                    validation_json={"errors": [], "warnings": []},
-                    created_at=datetime.utcnow(),
-                    activated_at=datetime.utcnow(),
-                )
-            )
-
-    with session_scope() as session:
-        active, error = facility_template_version_service.resolve_single_active_template_version(session, facility_id)
-
+        active, error = facility_template_version_service.resolve_single_active_template_version(
+            session, facility_id, effective_date=date(2026, 7, 5))
+        assert not session.new and not session.dirty and not session.deleted
     assert active is None
-    assert error == "facility_template_ambiguous"
+    assert error == "facility_version_period_overlap"
+    assert source.read_bytes() == original
 
 
-def test_effective_date_resolves_one_active_template_version() -> None:
+def test_effective_date_resolves_one_active_template_version(monkeypatch, tmp_path) -> None:
     facility_id = _id("FAC")
-    columns = facility_template_version_service.normalize_template_columns(_registered_config(facility_id)["fax_template"]["columns"])
-    with session_scope() as session:
-        session.add(Facility(id=facility_id, name="Effective Date Facility"))
-        for index, (valid_from, valid_to) in enumerate(
-            (
-                (date(2026, 7, 1), date(2026, 7, 10)),
-                (date(2026, 7, 11), None),
-            )
-        ):
-            session.add(
-                FacilityTemplateVersion(
-                    id=_id("FTV"),
-                    facility_id=facility_id,
-                    version=str(index + 1),
-                    status="active",
-                    template_id=f"template-{index + 1}",
-                    source="test",
-                    config_json={"facility_name": f"effective-{index + 1}"},
-                    columns_json=columns,
-                    cells_json=[],
-                    template_digest=f"digest-effective-{index}",
-                    validation_json={"errors": [], "warnings": []},
-                    valid_from=valid_from,
-                    valid_to=valid_to,
-                    created_at=datetime.utcnow(),
-                    activated_at=datetime.utcnow(),
-                )
-            )
-
+    source = _declare_dated_versions(monkeypatch, tmp_path, facility_id, [
+        ("2026-07-01", "2026-07-10", "template-1", "effective-1"),
+        ("2026-07-11", None, "template-2", "effective-2"),
+    ])
+    original = source.read_bytes()
     with session_scope() as session:
         first, first_error = facility_template_version_service.resolve_single_active_template_version(
-            session,
-            facility_id,
-            effective_date=date(2026, 7, 5),
-        )
+            session, facility_id, effective_date=date(2026, 7, 5))
         second, second_error = facility_template_version_service.resolve_single_active_template_version(
-            session,
-            facility_id,
-            effective_date=date(2026, 7, 12),
-        )
+            session, facility_id, effective_date=date(2026, 7, 12))
         first_template_id = first.template_id if first is not None else None
         second_template_id = second.template_id if second is not None else None
+        assert not session.new and not session.dirty and not session.deleted
 
     assert first_error is None
     assert first_template_id == "template-1"
@@ -242,54 +207,31 @@ def test_effective_date_resolves_one_active_template_version() -> None:
 
     with session_scope() as session:
         resolved_config, resolved_version, resolved_error = facility_template_version_service.resolve_facility_config_for_date(
-            session,
-            facility_id=facility_id,
-            effective_date=date(2026, 7, 12),
-        )
+            session, facility_id=facility_id, effective_date=date(2026, 7, 12))
         resolved_template_id = resolved_version.template_id if resolved_version is not None else None
         resolved_version_id = resolved_version.id if resolved_version is not None else None
-
+        assert not session.new and not session.dirty and not session.deleted
     assert resolved_error is None
     assert resolved_template_id == "template-2"
     assert resolved_config["facility_name"] == "effective-2"
     assert resolved_config["facility_template_version_id"] == resolved_version_id
+    assert source.read_bytes() == original
 
 
-def test_effective_date_overlapping_active_template_versions_are_blocker() -> None:
+def test_effective_date_overlapping_active_template_versions_are_blocker(monkeypatch, tmp_path) -> None:
     facility_id = _id("FAC")
-    columns = facility_template_version_service.normalize_template_columns(_registered_config(facility_id)["fax_template"]["columns"])
-    with session_scope() as session:
-        session.add(Facility(id=facility_id, name="Overlapping Effective Facility"))
-        for index in range(2):
-            session.add(
-                FacilityTemplateVersion(
-                    id=_id("FTV"),
-                    facility_id=facility_id,
-                    version=str(index + 1),
-                    status="active",
-                    template_id=f"template-overlap-{index + 1}",
-                    source="test",
-                    config_json={},
-                    columns_json=columns,
-                    cells_json=[],
-                    template_digest=f"digest-overlap-{index}",
-                    validation_json={"errors": [], "warnings": []},
-                    valid_from=date(2026, 7, 1 + index),
-                    valid_to=date(2026, 7, 20),
-                    created_at=datetime.utcnow(),
-                    activated_at=datetime.utcnow(),
-                )
-            )
-
+    source = _declare_dated_versions(monkeypatch, tmp_path, facility_id, [
+        ("2026-07-01", "2026-07-20", "template-overlap-1", "Overlapping Effective Facility"),
+        ("2026-07-02", "2026-07-20", "template-overlap-2", "Overlapping Effective Facility"),
+    ])
+    original = source.read_bytes()
     with session_scope() as session:
         active, error = facility_template_version_service.resolve_single_active_template_version(
-            session,
-            facility_id,
-            effective_date=date(2026, 7, 10),
-        )
-
+            session, facility_id, effective_date=date(2026, 7, 10))
+        assert not session.new and not session.dirty and not session.deleted
     assert active is None
-    assert error == "facility_template_ambiguous"
+    assert error == "facility_version_period_overlap"
+    assert source.read_bytes() == original
 
 
 def test_output_builder_blocks_template_version_date_mismatch() -> None:
@@ -340,13 +282,9 @@ def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
     draft_id = _id("ODS")
     snapshot_id = _id("OCS")
     job_id = f"OCR-{order_id}"
-    monkeypatch.setattr(
-        facility_template_version_service.config_service,
-        "get_facility_config",
-        lambda requested_id: _registered_config(requested_id) if requested_id == facility_id else None,
-    )
     with session_scope() as session:
         session.add(Facility(id=facility_id, name="Backfill Facility"))
+        session.flush()
         session.add(
             Order(
                 id=order_id,
@@ -358,6 +296,7 @@ def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
                 received_at=datetime.utcnow(),
             )
         )
+        session.flush()
         session.add(OcrJob(id=job_id, order_id=order_id, input_reference="file:///input.pdf", status="success"))
         session.add(
             OrderOcrEvidenceRun(
@@ -372,6 +311,7 @@ def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
                 created_at=datetime.utcnow(),
             )
         )
+        session.flush()
         session.add(
             OrderSheetDraft(
                 id=draft_id,
@@ -385,6 +325,7 @@ def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
                 edited_at=datetime.utcnow(),
             )
         )
+        session.flush()
         session.add(
             OrderConfirmedSnapshot(
                 id=snapshot_id,
@@ -419,42 +360,38 @@ def test_backfill_stamps_existing_order_artifact_lineage(monkeypatch) -> None:
             )
         )
 
-    with session_scope() as session:
-        summary = facility_template_version_service.backfill_facility_template_version_lineage(session)
-        assert summary["updated"]["orders"] >= 1
-        assert summary["updated"]["ocr_jobs"] >= 1
-        assert summary["updated"]["order_ocr_evidence_runs"] >= 1
-        assert summary["updated"]["order_sheet_drafts"] >= 1
-        assert summary["updated"]["order_confirmed_snapshots"] >= 1
-        assert summary["updated"]["order_workflow_states"] >= 1
-        assert summary["updated"]["order_current_states"] >= 1
+    from tests.unit.test_disabled_facility_columns import _snapshot
+    before = _snapshot(engine)
+    for dry_run in (True, False):
+        with session_scope() as session:
+            with pytest.raises(CanonicalStoreError) as refused:
+                facility_template_version_service.backfill_facility_template_version_lineage(session, dry_run=dry_run)
+            assert refused.value.detail["error"] == "legacy_canonical_lineage_backfill_disabled"
+            assert not session.new and not session.dirty and not session.deleted
+        assert _snapshot(engine) == before
 
     with session_scope() as session:
         version_id = session.get(Order, order_id).template_version_id
-        assert version_id
+        assert version_id is None
         assert session.get(OcrJob, job_id).template_version_id == version_id
         assert session.get(OrderOcrEvidenceRun, evidence_id).template_version_id == version_id
         assert session.get(OrderSheetDraft, draft_id).template_version_id == version_id
         assert session.get(OrderConfirmedSnapshot, snapshot_id).template_version_id == version_id
         workflow = session.get(OrderWorkflowState, order_id)
         assert workflow.template_version_id == version_id
-        assert workflow.secondary_actions_json["workflow_v2"]["template_version_id"] == version_id
+        assert "template_version_id" not in workflow.secondary_actions_json["workflow_v2"]
         current_state = session.get(OrderCurrentState, order_id)
         assert current_state.template_version_id == version_id
-        assert current_state.state_json["template_version_id"] == version_id
+        assert "template_version_id" not in current_state.state_json
 
 
 def test_backfill_does_not_stamp_ocr_job_by_name_without_explicit_order_lineage(monkeypatch) -> None:
     facility_id = _id("FAC")
     order_id = _id("ORD")
     job_id = f"OCR-{order_id}"
-    monkeypatch.setattr(
-        facility_template_version_service.config_service,
-        "get_facility_config",
-        lambda requested_id: _registered_config(requested_id) if requested_id == facility_id else None,
-    )
     with session_scope() as session:
         session.add(Facility(id=facility_id, name="Backfill Facility"))
+        session.flush()
         session.add(
             Order(
                 id=order_id,
@@ -468,10 +405,15 @@ def test_backfill_does_not_stamp_ocr_job_by_name_without_explicit_order_lineage(
         )
         session.add(OcrJob(id=job_id, input_reference="file:///input.pdf", status="success"))
 
+    from tests.unit.test_disabled_facility_columns import _snapshot
+    before = _snapshot(engine)
     with session_scope() as session:
-        facility_template_version_service.backfill_facility_template_version_lineage(session)
+        with pytest.raises(CanonicalStoreError) as refused:
+            facility_template_version_service.backfill_facility_template_version_lineage(session)
+        assert refused.value.detail["error"] == "legacy_canonical_lineage_backfill_disabled"
+    assert _snapshot(engine) == before
     with session_scope() as session:
-        assert session.get(Order, order_id).template_version_id
+        assert session.get(Order, order_id).template_version_id is None
         assert session.get(OcrJob, job_id).template_version_id is None
 
 
@@ -589,13 +531,9 @@ def test_resolved_config_digest_change_replaces_active_template_version(monkeypa
         columns=normalized_columns,
     )
     assert fresh_digest != "stale-digest"
-    monkeypatch.setattr(
-        facility_template_version_service.config_service,
-        "get_facility_config",
-        lambda requested_id: resolved_config if requested_id == facility_id else None,
-    )
     with session_scope() as session:
         session.add(Facility(id=facility_id, name="Digest Facility"))
+        session.flush()
         session.add(
             FacilityTemplateVersion(
                 id=stale_version_id,
@@ -613,15 +551,17 @@ def test_resolved_config_digest_change_replaces_active_template_version(monkeypa
             )
         )
 
+    from tests.unit.test_disabled_facility_columns import _snapshot
+    before = _snapshot(engine)
     with session_scope() as session:
-        version = facility_template_version_service.ensure_active_template_version_from_resolved_config(
-            session,
-            facility_id=facility_id,
-            created_by="digest-test",
-        )
-        assert version is not None
-        assert version.id != stale_version_id
-        assert version.template_digest == fresh_digest
+        with pytest.raises(CanonicalStoreError) as refused:
+            facility_template_version_service.ensure_active_template_version_from_resolved_config(
+                session, facility_id=facility_id, facility_config=resolved_config, created_by="digest-test")
+        assert refused.value.detail["error"] == "legacy_current_config_lineage_stamp_disabled"
+        assert not session.new and not session.dirty and not session.deleted
         stale = session.get(FacilityTemplateVersion, stale_version_id)
         assert stale is not None
-        assert stale.status == "archived"
+        assert stale.status == "active"
+        assert stale.template_digest == "stale-digest"
+        assert stale.template_digest != fresh_digest
+    assert _snapshot(engine) == before
