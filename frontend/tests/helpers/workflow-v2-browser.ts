@@ -57,6 +57,8 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
     headline: "正解OCRを選択済みです。シートを編集してください。",
     selected_ocr_result_id: "OCR-E2E-001",
     saved_sheet_id: "SHEET-E2E-001",
+    bagging_result_id: null as string | null,
+    output_bundle_id: null as string | null,
     facility_id: options.workflowFacilityId ?? "FAC-E2E-001",
     week_start: "2026-05-17",
     week_end: "2026-05-23",
@@ -96,6 +98,20 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
     const path = url.pathname;
     const method = route.request().method().toUpperCase();
     requestCounts[`${method} ${path}`] = (requestCounts[`${method} ${path}`] ?? 0) + 1;
+
+    if (path.endsWith("/outputs/history") && method === "GET") {
+      const current = currentWorkflow();
+      expect(url.searchParams.get("order_id")).toBe(orderId);
+      expect(url.searchParams.get("expected_workflow_revision")).toBe(String(current.revision));
+      expect(current.bagging_result_id).toBe("BAG-E2E-001");
+      await route.fulfill({ status: 200, json: { order_id: orderId, workflow_revision: current.revision,
+        current_output_bundle_id: current.output_bundle_id, page: 1, limit: 25, total: 1,
+        entries: [{ order_id: orderId, output_bundle_id: current.output_bundle_id,
+          source_saved_sheet_id: current.saved_sheet_id, source_bagging_result_id: current.bagging_result_id,
+          template_version_id: current.template_version_id, created_at: "2026-05-22T00:00:00Z",
+          current: true, validation: "validated", blocked_reasons: [] }] } });
+      return;
+    }
 
     if (path.endsWith(`/orders/${orderId}/workflow-v2`) && method === "GET") {
       await route.fulfill({ status: 200, json: currentWorkflow() });
@@ -307,6 +323,7 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
   });
 
   await page.goto(`${baseUrl}/orders/${orderId}${options.entryPath === "legacy" ? "" : "/workflow-v2"}`);
+  if (options.workflow?.output_bundle_id) await expect(page.getByRole("region", { name: "出力生成記録", exact: true })).toBeVisible();
   return {
     orderId,
     requestCounts,

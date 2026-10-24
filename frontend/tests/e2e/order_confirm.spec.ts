@@ -79,10 +79,11 @@ test("saved OCR history refusal shows its actual reason and retains the selected
 
 for (const status of [409, 500] as const) test(`final confirm pending prevents duplicates and rejection retains the order: ${status}`, async ({ page }) => {
   const mounted = await mountWorkflowV2SheetPage(page, { workflowState: "output_review",
-    workflow: { saved_sheet_id: "SHEET-E2E-001", output_bundle_id: "BUNDLE-E2E-001" } });
+    workflow: { saved_sheet_id: "SHEET-E2E-001", bagging_result_id: "BAG-E2E-001", output_bundle_id: "BUNDLE-E2E-001" } });
   await page.getByRole("button", { name: /Step3.*シート編集/ }).click();
   await page.locator('[data-sheet-row="0"][data-sheet-col="3"]').fill("123");
   await page.getByRole("button", { name: /Step4.*出力確認/ }).click();
+  await expect(page.getByRole("heading", { name: "出力確認", exact: true })).toBeVisible();
   let release!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
   let calls = 0;
@@ -117,7 +118,7 @@ for (const status of [409, 500] as const) test(`final confirm pending prevents d
 
 for (const failPostConfirmRead of [false, true]) test(`successful confirmation returns without a second detail read or training write: ${failPostConfirmRead}`, async ({ page }) => {
   const mounted = await mountWorkflowV2SheetPage(page, { workflowState: "output_review",
-    workflow: { saved_sheet_id: "SHEET-E2E-001", output_bundle_id: "BUNDLE-E2E-001" } });
+    workflow: { saved_sheet_id: "SHEET-E2E-001", bagging_result_id: "BAG-E2E-001", output_bundle_id: "BUNDLE-E2E-001" } });
   let confirmations = 0, postConfirmReads = 0;
   await page.route("**/workflow-v2/inspection", async route => {
     if (confirmations) {

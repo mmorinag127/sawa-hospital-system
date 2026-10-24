@@ -2,6 +2,25 @@
 
 ## Host Batch At b8efa378
 
+Related verification at9e5afff7:287 backend cases passed in265.71seconds,
+1794 frontend contracts passed,lint/types/inspection and24 receipt cases passed.
+Browser:107 passed,4 failed in3.8minutes. Evidence:
+`/private/tmp/sawa-related-batch-9e5afff78247-20261025/results.json`.
+This targeted run is not a full successful signed receipt.
+
+The remaining browser history failures were reproduced with four diagnostic
+cases only. Instrumentation in a disposable `/private/tmp` source copy showed
+Next's callback running before the custom window listener for the same event.
+The first decision scheduled owned restoration; the duplicate decision saw
+restoring=true and the original destination, then wrongly invalidated ownership.
+The shared boundary now consumes the same dispatch decision once regardless of
+listener order. The decision expires after the event task; unknown entries and
+unmatched restoration still refuse. Both listener orders and repeated cancellation
+retain source-input and exact history assertions. Diagnostic console statements
+are not part of the release source. Output-review fixtures now author the actual
+current bundle lineage instead of returning an invalid empty history response.
+These subsequent repairs are not yet verified.
+
 Evidence: `/private/tmp/sawa-host-batch-b8efa3788bd2-20261024/results.json`.
 Docker remained stopped. The source was fixed in the clean r3 verification tree.
 Backend:9991 passed,17 failed,184 skipped in4296.79seconds. Frontend config:

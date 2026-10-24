@@ -70,7 +70,7 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
     };
     let current: Position | null = position(history.state) ??
       (initialDocument ? (documentEntry?.token === token ? documentEntry : { token, index: 0 }) : null);
-    let capturedApproval: unknown = null;
+    let popDecision: { state: unknown; allowed: boolean } | null = null;
     ownsCurrent.current = () => current !== null && position(history.state)?.index === current.index;
     if (current) {
       documentOwners.add(token);
@@ -94,7 +94,6 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
     const unknown = () => {
       current = null;
       restoring.current = false;
-      capturedApproval = null;
       blocked.current = true;
       setError("履歴の位置を確認できません。編集内容を保持して移動を停止しました。");
     };
@@ -130,11 +129,22 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
       current = target;
       return true;
     };
+    const decidePop = (state: { as: string }) => {
+      if (popDecision?.state === state) return popDecision.allowed;
+      const decision = { state, allowed: beforePop(state) };
+      popDecision = decision;
+      // Both window listeners may see the same event, in either registration order.
+      setTimeout(() => { if (popDecision === decision) popDecision = null; }, 0);
+      return decision.allowed;
+    };
     // Next normalizes null/reloads __NA before beforePopState, and can skip it
     // for same-URL SSR entries. Observe the original entry before those branches.
     const capturePop = (event: PopStateEvent) => {
-      capturedApproval = null;
       const state = event.state;
+      if (popDecision?.state === state) {
+        if (!popDecision.allowed) event.stopImmediatePropagation();
+        return;
+      }
       const target = state?.__N && !state.__NA ? position(state) : null;
       if (!target) {
         current = null;
@@ -150,8 +160,7 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
       }
       // Cancel before Next updates its key/scroll bookkeeping for the rejected entry.
       if (restoring.current || guard.current?.active()) {
-        if (!beforePop(state)) event.stopImmediatePropagation();
-        else capturedApproval = state;
+        if (!decidePop(state)) event.stopImmediatePropagation();
       } else if (!guard.current?.active()) {
         // Clean traversal must retain Next's events, scroll restoration and key updates.
         current = target;
@@ -159,10 +168,7 @@ export function NavigationBoundary({ children }: { children: ReactNode }) {
         setError("");
       }
     };
-    liveRouter.current.beforePopState(state => {
-      if (state === capturedApproval) { capturedApproval = null; return true; }
-      return beforePop(state);
-    });
+    liveRouter.current.beforePopState(decidePop);
     window.addEventListener("popstate", capturePop, true);
     return () => {
       ownsCurrent.current = () => false;
