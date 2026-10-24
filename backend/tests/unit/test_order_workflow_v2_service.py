@@ -1799,7 +1799,7 @@ def test_sheet_source_blocks_monthly_menu_missing_before_projection(monkeypatch,
     assert error == "hakodate_original_expectation_required"
     assert database_snapshot() == before
 
-def test_sheet_source_blocks_when_selected_ocr_has_no_confirmed_context() -> None:
+def test_sheet_source_blocks_when_selected_ocr_has_no_confirmed_context(authored_april_context) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     with session_scope() as session:
         order = session.get(Order, order_id)
@@ -1824,7 +1824,7 @@ def test_sheet_source_blocks_when_selected_ocr_has_no_confirmed_context() -> Non
     assert error == "context_not_confirmed"
 
 
-def test_sheet_source_requires_fixed_workflow_template_version(monkeypatch) -> None:
+def test_sheet_source_requires_fixed_workflow_template_version(monkeypatch, authored_april_context) -> None:
     order_id, evidence_id_1, _ = _create_order_with_evidence()
     monkeypatch.setattr(
         order_workflow_v2_service.config_service,

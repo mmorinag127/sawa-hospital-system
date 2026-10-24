@@ -211,10 +211,12 @@ def validate_ocr_quantity_source(record: dict[str, Any]) -> str:
 def authored_cell_role(target: dict[str, Any]) -> str:
     role = target.get("role")
     fields = [target[key] for key in ("field", "semantic_field") if target.get(key) is not None]
-    if not isinstance(role, str) or role not in {"quantity", "note"} or not fields:
+    if not isinstance(role, str) or role not in {"quantity", "note", "aux"} or not fields:
         raise ValueError("hakodate_target_role_unresolved")
-    if any(not isinstance(field, str) or (
-        not field.startswith("qty.") if role == "quantity" else field not in {"note", "remarks"}
+    if any(not isinstance(field, str) or not (
+        (role == "quantity" and field.startswith("qty."))
+        or (role == "aux" and re.fullmatch(r"aux\.col_[0-9]+", field) is not None)
+        or (role == "note" and field in {"note", "remarks"})
     ) for field in fields):
         raise ValueError("hakodate_target_role_conflict")
     if len(set(fields)) != 1:
@@ -238,7 +240,7 @@ def validate_ocr_source_for_role(record: dict[str, Any], role: str, *, accepted_
         if role != "quantity" or re.fullmatch(r"[0-9]*", accepted_value) is None:
             raise ValueError("recognition_acceptance_numeric_value_required")
         return accepted_value
-    if role == "quantity":
+    if role in {"quantity", "aux"}:
         return validate_ocr_quantity_source(record)
     if role != "note":
         raise ValueError("hakodate_target_role_unresolved")
@@ -260,7 +262,7 @@ def validate_assigned_ocr_value(assignment: dict[str, Any]) -> str:
     role = authored_cell_role(targets[0])
     if "role" in assignment and authored_cell_role(assignment) != role:
         raise ValueError("hakodate_target_role_conflict")
-    if role == "quantity":
+    if role in {"quantity", "aux"}:
         return validate_assigned_ocr_quantity(assignment)
     state = assignment.get("assignment_state")
     value = assignment.get("assigned_value") if "assigned_value" in assignment else assignment.get("value_normalized")

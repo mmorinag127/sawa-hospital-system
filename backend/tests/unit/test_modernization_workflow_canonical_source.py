@@ -140,7 +140,7 @@ def test_order_delegation_returns_exact_canonical_result_without_db_rebuild(monk
     monkeypatch.setattr(order_service, "get_order_by_id", get_order)
     monkeypatch.setattr(workflow, "session_scope", _forbidden)
     assert workflow._load_order_payload(" canonical-order ") is result
-    assert calls == [(("canonical-order",), {})]
+    assert calls == [(("canonical-order",), {"allow_unresolved_menu_amount": True})]
 
 
 @pytest.mark.parametrize("force_refresh", [False, True])

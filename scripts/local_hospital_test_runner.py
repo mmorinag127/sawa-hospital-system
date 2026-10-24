@@ -32,6 +32,16 @@ def clean_tree() -> bool:
     return not git("status", "--porcelain")
 
 
+def require_frontend_dependencies() -> None:
+    modules = ROOT / "frontend" / "node_modules"
+    required = (".package-lock.json", ".bin/eslint", ".bin/tsc", ".bin/next",
+                "@playwright/test/package.json")
+    missing = [name for name in required if not (modules / name).is_file()]
+    if missing:
+        raise SystemExit("prepare frontend dependencies with npm ci before the local batch: "
+                         + ", ".join(missing))
+
+
 def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash: str) -> None:
     required = {"receipt_version", "owner_attestation", "source_sha_start", "source_sha_end", "clean_before", "clean_after", "definition_sha256", "commands"}
     if type(receipt) is not dict or set(receipt) != required:
@@ -73,6 +83,7 @@ def run(output: Path) -> int:
     os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     if not clean_tree():
         raise SystemExit("local hospital tests require a clean tree before execution")
+    require_frontend_dependencies()
     source_sha_start = git("rev-parse", "HEAD")
     definition_start = digest(MANIFEST)
     manifest = json.loads(MANIFEST.read_text())

@@ -389,6 +389,7 @@ def assert_only_uploaded_receipt_changed(before, after, receipt):
     jobs = [row for row in expected[OcrJob.__tablename__] if row["id"] == JOB]
     assert len(jobs) == 1
     jobs[0]["metrics"]["pipeline_delivery_receipt"] = receipt
+    jobs[0]["output_reference"] = receipt["output_reference"]
     assert after == expected
 
 

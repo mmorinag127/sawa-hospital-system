@@ -114,6 +114,7 @@ def axis_environment(monkeypatch):
     monkeypatch.setattr(pipeline, "_post_menu_boundary_preserving_xs", lambda **kw: (kw["matched_xs"], {}))
     monkeypatch.setattr(pipeline, "_draw_axis_match", lambda *a, **kw: Image.new("RGB", (100, 600)))
     monkeypatch.setattr(pipeline.master_order_form_template_service, "validated_body_row_plan", lambda ws: plan())
+    monkeypatch.setattr(pipeline.master_order_form_template_service, "validated_body_week_value", lambda ws: WEEK)
     monkeypatch.setattr(pipeline, "STEP_REVIEW_HEADER_BANDS", 3)
     return dict(rectified_fax=np.zeros((600, 100, 3), dtype=np.uint8), template_xs=[0, 100],
                 template_ys=[0, 600], worksheet=object())

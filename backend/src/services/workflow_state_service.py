@@ -375,7 +375,7 @@ def _resolve_active_evidence_run(
     latest_evidence_run: dict[str, Any] | None,
     draft_sheet: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    if not isinstance(draft_sheet, dict):
+    if not isinstance(draft_sheet, dict) or not draft_sheet.get("id"):
         return latest_evidence_run if isinstance(latest_evidence_run, dict) else None
     draft_base_evidence_run_id = str(draft_sheet.get("base_evidence_run_id") or "").strip() or None
     latest_evidence_run_id = str((latest_evidence_run or {}).get("id") or "").strip() or None

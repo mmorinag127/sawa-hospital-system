@@ -360,16 +360,7 @@ def test_stored_terminal_reparse_error_survives_current_reads(history_case, erro
                "processing_stage": stage, "result_state": "hard_failed", "error": error, "llm_assist": True}
     if retained is not None:
         metrics["confirmed_lines_retained"] = retained
-    with f.execution():
-        with session_scope() as session:
-            job = session.get(OcrJob, f.job)
-            job.metrics = {**deepcopy(job.metrics), **metrics}
-        _result, completion_error = order_service._persist_ocr_rerun_completion(
-            f.id, f.job, None, error=error)
-    assert completion_error == error
-    if old:
-        with session_scope() as session:
-            session.get(OcrJob, f.job).updated_at = datetime.utcnow() - timedelta(minutes=45)
+    output_reference = None
     if cache:
         output = {"status": "done", "table_raw": "|日付|区分|メニュー|常食2F|\n|---|---|---|---|\n|01/08|昼|Menu A|2|"}
         path = f.root / "original-diagnostic-output.json"
@@ -380,7 +371,21 @@ def test_stored_terminal_reparse_error_survives_current_reads(history_case, erro
                   "pages": [{"page_index": 1, "tables": [{"rows": rows}]}]}
         with session_scope() as session:
             session.add(OrderOcrCache(order_id=f.id, payload=cached))
-            session.get(OcrJob, f.job).output_reference = f"file://{path}"
+        output_reference = f"file://{path}"
+    finished_at = datetime.utcnow() - timedelta(minutes=45 if old else 0)
+    class CompletionClockType(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+    class CompletionClock(datetime, metaclass=CompletionClockType):
+        @classmethod
+        def utcnow(cls):
+            return finished_at
+    with f.execution(), f.monkeypatch.context() as clock:
+        clock.setattr(order_service, "datetime", CompletionClock)
+        _result, completion_error = order_service._persist_ocr_rerun_completion(
+            f.id, f.job, None, error=error, metrics_patch=metrics,
+            output_reference=output_reference)
+    assert completion_error == error
     detail = f.get()
     assert detail["ocr_status"] == "failed" and detail["ocr_error"] == error
     assert detail["ocr_metrics"]["request_mode"] == "ocr_rerun"

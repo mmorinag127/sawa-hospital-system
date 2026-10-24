@@ -394,7 +394,7 @@ def test_actual_delivery_context_duplicate_preserves_producer_first(isolated_for
         delivery = output_builder._build_delivery_rows_for_bundle(
             context["order_for_outputs"], context["invoice_template"], context["quantity_rules"],
             context["facility_config"], context["ocr_menu_meta"], allow_ocr_menu_meta=False)
-        assert [(row["menu_name"], row["qty"]) for row in delivery] == [("own", 0), ("own", 99)]
+        assert [(row["menu_name"], row["qty"]) for row in delivery] == [("own", 99)]
         assert output_builder._build_delivery_rows(
             {"lines": []}, context["invoice_template"], context["quantity_rules"],
             context["facility_config"], {"entries": [], "by_menu": {}, "entry_defaults": {}}) == []

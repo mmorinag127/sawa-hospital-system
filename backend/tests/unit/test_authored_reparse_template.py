@@ -112,7 +112,7 @@ def test_missing_pdf_receipt_and_authored_template_stop_before_pipeline_side_eff
     monkeypatch.setattr(ocr_pipeline_service, "_get_pipeline_semaphore", forbidden_pipeline_start)
     with pytest.raises(ValueError, match="authored_fax_template_missing"):
         config_service.capture_authored_processing_config("facility")
-    with pytest.raises(ValueError, match="^selected_pdf_digest_required$"):
+    with pytest.raises(ValueError, match="^selected_pdf_execution_changed$"):
         ocr_pipeline_service.run_ocr_pipeline(pdf_bytes=b"", job_id="actual", facility_id="facility")
 
 

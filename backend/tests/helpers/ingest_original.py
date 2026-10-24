@@ -96,6 +96,7 @@ def authored_sources(monkeypatch, tmp_path, *, facility_id, menu_date, daypart="
 
     facility = {
         "facility_id": facility_id, "facility_name": "Authored component facility",
+        "daily_label_comparable_diet_types": [],
         "areas": [{"area_id": "2F", "name": "Synthetic component second floor"}], "fax_template_id": "authored-component",
         "fax_template": {"template_id": "authored-component", "page": 1, "columns": [
             {"index": 0, "source_index": 0, "role": "date", "name": "date_mmdd"},

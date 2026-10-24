@@ -140,6 +140,21 @@ def selected_history_order(history_registration, monkeypatch, tmp_path):
             table_rows=rows, columns=columns, unlisted_cells='', artifact_root=tmp_path / 'native-artifacts')
         if inputs['lines']:
             assert order_service.update_lines(order['id'], deepcopy(inputs['lines'])) is True
+        if not blank_source:
+            sheet, error = order_service.get_ocr_sheet(order['id'])
+            assert error is None and sheet is not None, error
+            current, error = order_workflow_v2_service.get_workflow_readonly(order['id'])
+            assert error is None
+            reviewed, error = order_workflow_v2_service.run_sheet_anomaly_review(
+                order['id'], sheet=sheet, use_llm=False, expected_revision=current['revision'])
+            assert error is None and reviewed is not None, error
+            current, error = order_workflow_v2_service.get_workflow_readonly(order['id'])
+            assert error is None
+            reviewed, error = order_workflow_v2_service.confirm_sheet_review(
+                order_id=order['id'], sheet=sheet, expected_revision=current['revision'])
+            assert error is None and reviewed is not None, error
+            saved, error = _save_formal_sheet(order_id=order['id'], sheet=sheet, edited_by='history-component')
+            assert error is None and saved['saved_sheet']['sheet'] == sheet, error
         return _read_order(order['id'])
     return register
 
@@ -675,9 +690,7 @@ def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_sa
     order = _seed_order(selected_history_order, message_id="msg-sheet-clean-draft-override-001")
     selected_before, selected_error = order_service.get_ocr_sheet(order["id"])
     assert selected_error is None and selected_before is not None
-    order_service.persist_ocr_evidence_run(
-        order["id"],
-        {
+    stale_payload = {
             "input_reference": "gs://bucket/orders/order.pdf",
             "pages": [
                 {
@@ -704,8 +717,13 @@ def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_sa
             "table_box": None,
             "grid_column_edges": [],
             "grid_row_edges": [],
-        },
-    )
+        }
+    with pytest.raises(ValueError, match="^configured_execution_input_changed$"):
+        order_service.persist_ocr_evidence_run(order["id"], stale_payload)
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+    with session_scope() as session:
+        session.add(OrderOcrEvidenceRun(id="stale-history-diagnostic", order_id=order["id"],
+            schema_version="v1_legacy", status="diagnostic_only", payload_json=deepcopy(stale_payload)))
     persisted = order_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
@@ -1462,18 +1480,16 @@ def test_hakodate_assignment_rejects_order_document_grid_and_full_page_tesseract
         ],
     }
 
-    assignment = order_service._build_hakodate_evidence_assignment_from_payload(
-        order_id="ORD-test",
-        facility_id="FAC-test",
-        template_id="template-test",
-        payload=payload,
-        facility_config={},
-    )
-
-    assert assignment["target_cells"] == []
-    assert assignment["evidence_records"] == []
-    assert "hakodate_target_cell_map_missing" in assignment["blockers"]
-    assert "hakodate_ocr_evidence_missing" in assignment["blockers"]
+    before = deepcopy(payload)
+    with pytest.raises(ValueError, match="^hakodate_target_source_invalid$"):
+        order_service._build_hakodate_evidence_assignment_from_payload(
+            order_id="ORD-test", facility_id="FAC-test", template_id="template-test",
+            payload=payload, facility_config={},
+        )
+    assert order_service._hakodate_evidence_source_allowed(
+        payload["hakodate_ocr_evidence_records"][0],
+    ) is False
+    assert payload == before
 
 
 @pytest.mark.parametrize("cache", [
@@ -1487,10 +1503,13 @@ def test_hakodate_assignment_rejects_order_document_grid_and_full_page_tesseract
         "assignments": [{"target_cell_id": "cell-1", "assigned_value": "2"}]}}},
     {"pages": [{"page_index": 1, "ocr_overlay_uri": "gs://bucket/unowned-page.png"}]},
 ], ids=["missing-artifact", "unowned-uri", "unowned-pipeline", "unowned-compact", "legacy-page"])
-def test_unowned_preview_cannot_publish_cached_artifacts(monkeypatch, cache):
+def test_unowned_preview_cannot_publish_cached_artifacts(monkeypatch, tmp_path, cache):
     from src.db import get_engine
     from tests.unit.test_disabled_facility_columns import _snapshot
+    from tests.helpers.ingest_original import authored_sources
 
+    authored_sources(monkeypatch, tmp_path, facility_id="preview-component", menu_date=date(2026, 1, 8),
+                     seed_menu=False, seed_month=False)
     original = deepcopy(cache)
     before = _snapshot(get_engine())
     def forbidden(*_args, **_kwargs):
@@ -1531,6 +1550,9 @@ def test_partial_cache_read_cannot_replace_owned_hakodate_artifacts(selected_his
 
 
 def test_assignment_repair_rejects_artifacts_without_source_proof_before_cache_write(selected_history_order, monkeypatch):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-hakodate-assignment-repair-001")
     target_cell = {
@@ -1587,16 +1609,21 @@ def test_assignment_repair_rejects_artifacts_without_source_proof_before_cache_w
     before = order_service._load_order_ocr_cache(order["id"])
     captured = order_service._capture_synchronous_cache_write_input(order["id"])
     assert captured is not None
+    database_before = _snapshot(get_engine())
     assignment, error = order_service.build_order_hakodate_assignment(order["id"],
         synchronous_write_input=captured, expected_revision=captured['workflow_revision'])
     cached = order_service._load_order_ocr_cache(order["id"])
 
-    assert error == "hakodate_artifact_source_mismatch" and assignment is None
-    assert len(attempts) == 1 and attempts[0]['synchronous_write_input'] is captured
+    assert error is None and assignment is not None
+    assert attempts == []
+    assert _snapshot(get_engine()) == database_before
     assert cached == before
 
 
 def test_explicit_assignment_repair_rejects_legacy_partial_artifacts(selected_history_order, monkeypatch):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-hakodate-explicit-strategy-repair-001")
     target_cell = {
@@ -1652,15 +1679,20 @@ def test_explicit_assignment_repair_rejects_legacy_partial_artifacts(selected_hi
     before = order_service._load_order_ocr_cache(order["id"])
     captured = order_service._capture_synchronous_cache_write_input(order["id"])
     assert captured is not None
+    database_before = _snapshot(get_engine())
     assignment, error = order_service.build_order_hakodate_assignment(order["id"], strategy="hakodate",
         synchronous_write_input=captured, expected_revision=captured['workflow_revision'])
 
-    assert error == "hakodate_artifact_source_mismatch" and assignment is None
+    assert error == "hakodate_own_artifact_representations_conflict" and assignment is None
     assert len(attempts) == 1 and attempts[0]['synchronous_write_input'] is captured
     assert order_service._load_order_ocr_cache(order['id']) == before
+    assert _snapshot(get_engine()) == database_before
 
 
 def test_explicit_assignment_repair_cannot_publish_unowned_replacements(selected_history_order, monkeypatch):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-hakodate-explicit-regenerates-stale-001")
     stale_target = {
@@ -1732,15 +1764,59 @@ def test_explicit_assignment_repair_cannot_publish_unowned_replacements(selected
     before = order_service._load_order_ocr_cache(order["id"])
     captured = order_service._capture_synchronous_cache_write_input(order["id"])
     assert captured is not None
+    database_before = _snapshot(get_engine())
     assignment, error = order_service.build_order_hakodate_assignment(order["id"], strategy="hakodate",
         synchronous_write_input=captured, expected_revision=captured['workflow_revision'])
 
-    assert error == "hakodate_artifact_source_mismatch" and assignment is None
+    assert error == "hakodate_own_artifact_representations_conflict" and assignment is None
     assert len(attempts) == 1 and attempts[0]['synchronous_write_input'] is captured
     assert order_service._load_order_ocr_cache(order['id']) == before
+    assert _snapshot(get_engine()) == database_before
+
+
+@pytest.mark.parametrize("validation", ["baseline", "assignment"])
+def test_assignment_repair_validates_before_publishing_cache(selected_history_order, monkeypatch, validation):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
+    order = _seed_order(selected_history_order, message_id=f"repair-validation-before-save-{validation}")
+    captured = order_service._capture_synchronous_cache_write_input(order["id"])
+    assert captured is not None
+    original = deepcopy(captured["evidence"]["payload_json"])
+    before = _snapshot(get_engine())
+    calls = []
+
+    def produce_existing_owned_artifacts(**kwargs):
+        assert kwargs["synchronous_write_input"] is captured
+        calls.append("repair")
+        return deepcopy(original)
+
+    def refuse(**kwargs):
+        calls.append(validation)
+        raise order_service._CanonicalOcrProjectionError("hakodate_target_source_invalid")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Rejected assignment must not reach cache publication")
+
+    monkeypatch.setattr(order_service, "_augment_hakodate_ocr_payload_artifacts", produce_existing_owned_artifacts)
+    boundary = ("_resolve_llm_review_baseline" if validation == "baseline"
+                else "_build_hakodate_evidence_assignment_from_payload")
+    monkeypatch.setattr(order_service, boundary, refuse)
+    monkeypatch.setattr(order_service, "_save_order_ocr_cache", forbidden)
+    assignment, error = order_service.build_order_hakodate_assignment(
+        order["id"], strategy="hakodate", synchronous_write_input=captured,
+        expected_revision=captured["workflow_revision"],
+    )
+    assert assignment is None and error == "hakodate_target_source_invalid"
+    assert calls == ["repair", validation]
+    assert _snapshot(get_engine()) == before
+    assert captured["evidence"]["payload_json"] == original
 
 
 def test_ensure_hakodate_current_refuses_unselected_cache_artifacts(selected_history_order, monkeypatch):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-hakodate-cache-draft-current-001")
     target_cell = {
@@ -1784,11 +1860,15 @@ def test_ensure_hakodate_current_refuses_unselected_cache_artifacts(selected_his
     captured = order_service._capture_synchronous_cache_write_input(order["id"])
     assert captured is not None
     before = order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=False)
+    assert before is not None and captured["draft"] == before
+    database_before = _snapshot(get_engine())
     draft, error = order_service.ensure_hakodate_evidence_draft_current(order["id"],
         synchronous_write_input=captured)
 
-    assert draft is None and error == "hakodate_ocr_evidence_missing"
+    assert error is None and draft == before
+    assert draft["draft_sheet_json"] != projected_sheet
     assert order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=False) == before
+    assert _snapshot(get_engine()) == database_before
 
 
 def test_ensure_hakodate_current_reuses_captured_selected_native_projection(selected_history_order, monkeypatch):
@@ -4227,11 +4307,7 @@ def test_selected_authored_family_does_not_borrow_an_unmapped_stored_quantity(ow
     assert sheet["rows"][0][3:9] == ["20", "4", "6", "7", "8", "9"]
     assert "qty.business_x" not in fields
     assert sheet["base_evidence_run_id"]
-    assert {line["diet_type"]: line["quantity_original"]
-            for line in _read_order(order["id"])["lines"]} == {
-        "regular": 20, "staff": 4, "business": 5, "no_meat": 6,
-        "no_fish": 7, "sesame_allergy": 8, "change_1": 9,
-    }
+    assert _read_order(order["id"])["lines"] == []
 
 
 @pytest.mark.parametrize("unowned_rows", [
@@ -4657,8 +4733,11 @@ def test_merge_weekly_menu_entries_with_ocr_tail_keeps_weekly_entries_only_for_c
     assert [item.get("menu_name") for item in merged] == ["A", "B"]
 
 
-def test_get_ocr_sheet_without_facility_returns_error():
+def test_get_ocr_sheet_without_facility_returns_error(monkeypatch, tmp_path):
+    from tests.helpers.ingest_original import authored_sources
     order_service.clear_all()
+    authored_sources(monkeypatch, tmp_path, facility_id="missing-facility-component", menu_date=date(2026, 2, 15),
+                     seed_menu=False, seed_month=False)
     order = _seed_order_without_facility(message_id="msg-sheet-no-fac-001")
 
     sheet, error = order_service.get_ocr_sheet(order["id"])
@@ -4666,11 +4745,14 @@ def test_get_ocr_sheet_without_facility_returns_error():
     assert error == "facility_missing"
 
 
-def test_apply_without_facility_cannot_capture_or_publish_a_source():
+def test_apply_without_facility_cannot_capture_or_publish_a_source(monkeypatch, tmp_path):
     from src.db import get_engine
     from tests.unit.test_disabled_facility_columns import _snapshot
+    from tests.helpers.ingest_original import authored_sources
 
     order_service.clear_all()
+    authored_sources(monkeypatch, tmp_path, facility_id="missing-facility-component", menu_date=date(2026, 2, 15),
+                     seed_menu=False, seed_month=False)
     order = _seed_order_without_facility(message_id="msg-sheet-no-fac-002")
     before = _snapshot(get_engine())
     assert order_service.get_ocr_sheet(order["id"]) == (None, "facility_missing")
@@ -5221,6 +5303,7 @@ def test_selected_physical_menu_includes_intermediate_dates_when_stored_lines_ar
             [
                 MonthlyMenuEntry(
                     id="seed-entry-2099-12-26-breakfast-a-3",
+                    diet_type="regular",
                     monthly_menu_id="2099-12",
                     menu_date=date(2099, 12, 26),
                     daypart="朝食",
@@ -5229,6 +5312,7 @@ def test_selected_physical_menu_includes_intermediate_dates_when_stored_lines_ar
                 ),
                 MonthlyMenuEntry(
                     id="seed-entry-2099-12-27-breakfast-b-3",
+                    diet_type="regular",
                     monthly_menu_id="2099-12",
                     menu_date=date(2099, 12, 27),
                     daypart="朝食",
@@ -5237,6 +5321,7 @@ def test_selected_physical_menu_includes_intermediate_dates_when_stored_lines_ar
                 ),
                 MonthlyMenuEntry(
                     id="seed-entry-2099-12-28-breakfast-c-3",
+                    diet_type="regular",
                     monthly_menu_id="2099-12",
                     menu_date=date(2099, 12, 28),
                     daypart="朝食",
@@ -5557,6 +5642,7 @@ def test_selected_source_blocks_unowned_off_month_noise(selected_history_order):
             [
                 MonthlyMenuEntry(
                     id="seed-entry-2099-12-26-breakfast-a-4",
+                    diet_type="regular",
                     monthly_menu_id="2099-12",
                     menu_date=date(2099, 12, 26),
                     daypart="朝食",
@@ -5565,6 +5651,7 @@ def test_selected_source_blocks_unowned_off_month_noise(selected_history_order):
                 ),
                 MonthlyMenuEntry(
                     id="seed-entry-2099-12-27-breakfast-b-4",
+                    diet_type="regular",
                     monthly_menu_id="2099-12",
                     menu_date=date(2099, 12, 27),
                     daypart="朝食",
@@ -6389,9 +6476,9 @@ def test_archived_yomitoku_issue_metadata_does_not_override_selected_source(sele
                         {
                             "table_id": "p1_t1",
                             "rows": [
-                                ["日付", "区分", "献立", "数量", "備考"],
-                                ["", "", "", "常食", ""],
-                                ["01/08", "昼", "Menu A", "2", ""],
+                                ["日付", "区分", "献立", "常食2F", "常食3F", "軟菜2F", "軟菜3F", "ミキサー2F", "ミキサー3F", "備考"],
+                                ["", "", "", "常食", "", "", "", "", "", ""],
+                                ["01/08", "昼", "Menu A", "2", "1", "3", "", "", "", ""],
                             ],
                         }
                     ],

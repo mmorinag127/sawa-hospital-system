@@ -1474,7 +1474,7 @@ def test_owned_registration_does_not_apply_legacy_position_mapping(monkeypatch, 
         ],
     )
 
-    refreshed = order_service.get_order_by_id(order["id"])
+    refreshed = order_service.get_order_by_id(order["id"], allow_unresolved_menu_amount=True)
     assert refreshed is not None
     assert refreshed["lines"]
     first = refreshed["lines"][0]
@@ -4441,9 +4441,19 @@ def test_build_llm_assist_prompt_includes_yomitoku_context_and_generic_cell_issu
 
 
 def test_build_llm_assist_prompt_includes_numeric_verification_preset_instructions():
+    template = {
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+        "columns": [
+            {"index": 0, "source_index": 0, "role": "date"},
+            {"index": 1, "source_index": 1, "role": "daypart"},
+            {"index": 2, "source_index": 2, "role": "menu_name"},
+            {"index": 3, "source_index": 3, "role": "quantity", "name": "qty.regular_2f",
+             "diet_type": "regular", "area_id": "2F"},
+        ],
+    }
     prompt = order_service._build_llm_assist_prompt(
         provider="gemini",
-        template={**authored_aux_component_template(), "gemini_ocr_prompt": "", "gemini_ocr_enabled": True},
+        template={**template, "gemini_ocr_prompt": "", "gemini_ocr_enabled": True},
         pipeline_output={
             "table_raw": "|日付|区分|メニュー|常食|\n|03/22|朝|Menu A|5|",
             "pages": [],
@@ -4451,9 +4461,9 @@ def test_build_llm_assist_prompt_includes_numeric_verification_preset_instructio
         llm_assist=True,
         prompt_preset="numeric_verification",
         baseline={
-            "fields": ["date_mmdd", "daypart", "menu_name", "regular__2f"],
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
             "rows": [["03/22", "朝", "Menu A", "5"]],
-            "structure_fields": ["date_mmdd", "daypart", "menu_name", "regular__2f"],
+            "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
             "structure_rows": [["03/22", "朝", "Menu A", "5"]],
         },
     )
@@ -4464,9 +4474,21 @@ def test_build_llm_assist_prompt_includes_numeric_verification_preset_instructio
 
 
 def test_build_llm_assist_prompt_includes_merged_cell_span_preset_instructions():
+    template = {
+        "main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.diabetes_x"],
+        "columns": [
+            {"index": 0, "source_index": 0, "role": "date"},
+            {"index": 1, "source_index": 1, "role": "daypart"},
+            {"index": 2, "source_index": 2, "role": "menu_name"},
+            {"index": 3, "source_index": 3, "role": "quantity", "name": "qty.regular_x",
+             "diet_type": "regular", "area_id": "X"},
+            {"index": 4, "source_index": 4, "role": "quantity", "name": "qty.diabetes_x",
+             "diet_type": "diabetes", "area_id": "X"},
+        ],
+    }
     prompt = order_service._build_llm_assist_prompt(
         provider="gemini",
-        template={**authored_aux_component_template(), "gemini_ocr_prompt": "", "gemini_ocr_enabled": True},
+        template={**template, "gemini_ocr_prompt": "", "gemini_ocr_enabled": True},
         pipeline_output={
             "pages": [
                 {
@@ -4498,9 +4520,9 @@ def test_build_llm_assist_prompt_includes_merged_cell_span_preset_instructions()
         llm_assist=True,
         prompt_preset="merged_cell_quantity_spans",
         baseline={
-            "fields": ["date_mmdd", "daypart", "menu_name", "regular__x", "diabetes__x"],
+            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.diabetes_x"],
             "rows": [["03/22", "朝", "Menu A", "", ""]],
-            "structure_fields": ["date_mmdd", "daypart", "menu_name", "regular__x", "diabetes__x"],
+            "structure_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x", "qty.diabetes_x"],
             "structure_rows": [["03/22", "朝", "Menu A", "", ""]],
         },
     )
@@ -4584,92 +4606,131 @@ def test_build_llm_review_prompt_includes_baseline_tables_and_cell_issues():
     assert "88" not in user_prompt
 
 
-def test_resolve_llm_review_pdf_bytes_uses_corrected_artifact_when_available(monkeypatch):
-    captured_uris: list[str] = []
-
-    def _fake_load_bytes(uri: str) -> bytes:
-        captured_uris.append(uri)
-        if uri == "gs://bucket/corrected.pdf":
-            return b"%PDF-corrected\n%EOF\n"
-        if uri == "gs://bucket/raw.pdf":
-            return b"%PDF-raw\n%EOF\n"
-        raise AssertionError(f"unexpected uri: {uri}")
-
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
-
+def test_resolve_llm_review_pdf_bytes_uses_corrected_artifact_when_available(derived_review_pdf):
+    path, original, receipt, captured_uris, corrected, corrected_bytes, payload = derived_review_pdf
+    before = deepcopy((receipt, payload))
     pdf_bytes, meta = order_service._resolve_llm_review_pdf_bytes(
-        document_uri="gs://bucket/raw.pdf",
-        payload={
-            "combined": {
-                "corrected_pdf": "gs://bucket/corrected.pdf",
-            }
-        },
+        document_uri=str(path), selected_pdf_receipt=receipt,
+        payload=payload,
         requested_variant="corrected",
     )
 
-    assert pdf_bytes == b"%PDF-corrected\n%EOF\n"
+    assert pdf_bytes == corrected_bytes == corrected.read_bytes()
+    assert path.read_bytes() == original
+    assert (receipt, payload) == before
+    derived = payload["page_correction_artifacts"]["corrected_pdf_receipt"]
+    assert pdf_bytes.selected_pdf_receipt == {**derived, "parent": receipt}
     assert meta["requested"] == "corrected"
     assert meta["used"] == "corrected"
     assert meta["fallback_reason"] is None
-    assert captured_uris == ["gs://bucket/corrected.pdf"]
+    assert meta["corrected_pdf_uri"] == str(corrected)
+    assert captured_uris == [str(path), str(corrected)]
 
 
-def test_resolve_llm_review_pdf_bytes_falls_back_to_raw_when_corrected_missing(monkeypatch):
-    captured_uris: list[str] = []
+@pytest.fixture
+def registered_review_pdf(owned_registration, monkeypatch):
+    from src.models.order import Order
+    from src.services import storage_service
+    from src.services.workflow_attempt_guard_service import capture_selected_pdf_receipt
 
-    def _fake_load_bytes(uri: str) -> bytes:
-        captured_uris.append(uri)
-        if uri == "gs://bucket/raw.pdf":
-            return b"%PDF-raw\n%EOF\n"
-        raise AssertionError(f"unexpected uri: {uri}")
-
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
-
-    pdf_bytes, meta = order_service._resolve_llm_review_pdf_bytes(
-        document_uri="gs://bucket/raw.pdf",
-        payload={},
-        requested_variant="corrected",
+    order = owned_registration(
+        message_id="review-selected-original", facility_id="AUTHORED-REVIEW",
+        received_at=datetime(2026, 3, 22, 9), week="2026-03@2026-03-22~2026-03-28",
+        effective_date="2026-03-22", lines=[],
     )
+    with session_scope() as session:
+        receipt = capture_selected_pdf_receipt(session, session.get(Order, order["id"]))
+    path = pathlib.Path(receipt["storage_uri"])
+    original = path.read_bytes()
+    reads = []
+    load_bytes = storage_service.load_bytes_from_uri
 
-    assert pdf_bytes == b"%PDF-raw\n%EOF\n"
-    assert meta["requested"] == "corrected"
-    assert meta["used"] == "raw"
-    assert meta["fallback_reason"] == "corrected_pdf_unavailable_in_backend_cache"
-    assert captured_uris == ["gs://bucket/raw.pdf"]
+    def tracked_load(uri, **kwargs):
+        reads.append(uri)
+        return load_bytes(uri, **kwargs)
+
+    monkeypatch.setattr(storage_service, "load_bytes_from_uri", tracked_load)
+    return path, original, receipt, reads
 
 
-def test_resolve_llm_review_pdf_bytes_falls_back_to_ocr_pdf_when_corrected_missing(monkeypatch):
-    captured_uris: list[str] = []
+@pytest.fixture
+def derived_review_pdf(registered_review_pdf, tmp_path):
+    from hashlib import sha256
+    import fitz
 
-    def _fake_load_bytes(uri: str) -> bytes:
-        captured_uris.append(uri)
-        if uri == "gs://bucket/ocr.pdf":
-            return b"%PDF-ocr\n%EOF\n"
-        raise AssertionError(f"unexpected uri: {uri}")
+    path, original, receipt, reads = registered_review_pdf
+    corrected = tmp_path / "corrected-review.pdf"
+    with fitz.open(stream=original, filetype="pdf") as document:
+        document[0].insert_text((40, 80), "Authored corrected review representation")
+        corrected_bytes = document.tobytes()
+    corrected.write_bytes(corrected_bytes)
+    derived = {
+        "storage_uri": str(corrected), "sha256": sha256(corrected.read_bytes()).hexdigest(),
+        "generation": None, "source_sha256": receipt["sha256"],
+    }
+    assert sha256(path.read_bytes()).hexdigest() == derived["source_sha256"]
+    payload = {"corrected_pdf_uri": str(corrected),
+               "page_correction_artifacts": {"corrected_pdf_receipt": derived}}
+    return path, original, receipt, reads, corrected, corrected_bytes, payload
 
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
 
+def test_resolve_llm_review_pdf_bytes_rejects_unavailable_receipted_corrected_artifact(
+    derived_review_pdf,
+):
+    path, original, receipt, reads, corrected, corrected_bytes, payload = derived_review_pdf
+    from hashlib import sha256
+
+    before = deepcopy((receipt, payload))
+    assert corrected.read_bytes() == corrected_bytes
+    assert sha256(corrected_bytes).hexdigest() == payload["page_correction_artifacts"]["corrected_pdf_receipt"]["sha256"]
+    corrected.unlink()
+    with pytest.raises(ValueError, match="^selected_pdf_verification_failed$"):
+        order_service._resolve_llm_review_pdf_bytes(
+            document_uri=str(path), selected_pdf_receipt=receipt,
+            payload=payload, requested_variant="corrected",
+        )
+    assert reads == [str(path), str(corrected)]
+    assert path.read_bytes() == original
+    assert (receipt, payload) == before
+
+
+def test_resolve_llm_review_pdf_bytes_rejects_missing_corrected_receipt_without_raw_fallback(
+    registered_review_pdf,
+):
+    path, original, receipt, captured_uris = registered_review_pdf
+    before = deepcopy(receipt)
+    with pytest.raises(ValueError, match="^corrected_pdf_receipt_required$"):
+        order_service._resolve_llm_review_pdf_bytes(
+            document_uri=str(path), selected_pdf_receipt=receipt,
+            payload={}, requested_variant="corrected",
+        )
     pdf_bytes, meta = order_service._resolve_llm_review_pdf_bytes(
-        document_uri="gs://bucket/raw.pdf",
-        payload={
-            "combined": {
-                "ocr_pdf": "gs://bucket/ocr.pdf",
-            }
-        },
-        requested_variant="corrected",
+        document_uri=str(path), selected_pdf_receipt=receipt, payload={}, requested_variant="raw",
     )
-
-    assert pdf_bytes == b"%PDF-ocr\n%EOF\n"
-    assert meta["requested"] == "corrected"
-    assert meta["used"] == "ocr"
-    assert meta["fallback_reason"] == "corrected_pdf_unavailable_in_backend_cache"
-    assert meta["ocr_pdf"] == "gs://bucket/ocr.pdf"
-    assert captured_uris == ["gs://bucket/ocr.pdf"]
+    assert pdf_bytes == original == path.read_bytes()
+    assert meta == {"requested": "raw", "used": "raw", "fallback_reason": None}
+    assert receipt == before and pdf_bytes.selected_pdf_receipt == receipt
+    assert captured_uris == [str(path), str(path)]
 
 
-def test_extract_corrected_pdf_uri_from_nested_review_payload():
-    corrected_uri = order_service._extract_corrected_pdf_uri_from_payload(
-        {
+def test_resolve_llm_review_pdf_bytes_rejects_missing_corrected_receipt_despite_ocr_pdf(
+    registered_review_pdf,
+):
+    path, original, receipt, captured_uris = registered_review_pdf
+    payload = {"combined": {"ocr_pdf": "gs://bucket/ocr.pdf"}}
+    before = deepcopy((receipt, payload))
+    with pytest.raises(ValueError, match="^corrected_pdf_receipt_required$"):
+        order_service._resolve_llm_review_pdf_bytes(
+            document_uri=str(path), selected_pdf_receipt=receipt,
+            payload=payload, requested_variant="corrected",
+        )
+    assert (receipt, payload) == before
+    assert path.read_bytes() == original
+    assert captured_uris == [str(path)]
+
+
+def test_extract_corrected_pdf_uri_rejects_unreceipted_nested_review_payload():
+    payload = {
             "_edited_ocr": {
                 "latest": {
                     "llm_review": {
@@ -4682,27 +4743,17 @@ def test_extract_corrected_pdf_uri_from_nested_review_payload():
                 }
             }
         }
-    )
+    before = deepcopy(payload)
+    corrected_uri = order_service._extract_corrected_pdf_uri_from_payload(payload)
+    assert corrected_uri is None
+    assert payload == before
 
-    assert corrected_uri == "gs://bucket/review-corrected.pdf"
 
-
-def test_resolve_llm_review_pdf_bytes_falls_back_to_raw_when_corrected_load_fails(monkeypatch):
-    captured_uris: list[str] = []
-
-    def _fake_load_bytes(uri: str) -> bytes:
-        captured_uris.append(uri)
-        if uri == "gs://bucket/corrected.pdf":
-            raise RuntimeError("missing corrected artifact")
-        if uri == "gs://bucket/raw.pdf":
-            return b"%PDF-raw\n%EOF\n"
-        raise AssertionError(f"unexpected uri: {uri}")
-
-    monkeypatch.setattr(order_service, "load_bytes_from_uri", _fake_load_bytes)
-
-    pdf_bytes, meta = order_service._resolve_llm_review_pdf_bytes(
-        document_uri="gs://bucket/raw.pdf",
-        payload={
+def test_resolve_llm_review_pdf_bytes_rejects_unreceipted_nested_corrected_source(
+    registered_review_pdf,
+):
+    path, original, receipt, captured_uris = registered_review_pdf
+    payload = {
             "_edited_ocr": {
                 "raw_output": {
                     "combined": {
@@ -4710,15 +4761,16 @@ def test_resolve_llm_review_pdf_bytes_falls_back_to_raw_when_corrected_load_fail
                     }
                 }
             }
-        },
-        requested_variant="corrected",
-    )
-
-    assert pdf_bytes == b"%PDF-raw\n%EOF\n"
-    assert meta["requested"] == "corrected"
-    assert meta["used"] == "raw"
-    assert meta["fallback_reason"] == "corrected_pdf_load_failed"
-    assert captured_uris == ["gs://bucket/corrected.pdf", "gs://bucket/raw.pdf"]
+        }
+    before = deepcopy((receipt, payload))
+    with pytest.raises(ValueError, match="^corrected_pdf_receipt_required$"):
+        order_service._resolve_llm_review_pdf_bytes(
+            document_uri=str(path), selected_pdf_receipt=receipt,
+            payload=payload, requested_variant="corrected",
+        )
+    assert (receipt, payload) == before
+    assert path.read_bytes() == original
+    assert captured_uris == [str(path)]
 
 
 
@@ -5202,7 +5254,7 @@ def test_validate_and_merge_reparse_full_table_candidate_merges_aux_display_fiel
     assert detail.get("display_change_count") == 4
 
 
-def test_project_payload_display_cells_onto_sheet_row_lists_reanchors_block_total_before_projection():
+def test_project_payload_display_cells_onto_sheet_row_lists_preserves_raw_block_total_position():
     fields = [
         "date_mmdd",
         "daypart",
@@ -5222,6 +5274,8 @@ def test_project_payload_display_cells_onto_sheet_row_lists_reanchors_block_tota
         ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
     ]
 
+    original_payload = deepcopy(payload_rows)
+    original_rows = deepcopy(current_rows)
     projected_rows, stats = order_service._project_payload_display_cells_onto_sheet_row_lists(
         rows=current_rows,
         fields=fields,
@@ -5232,9 +5286,12 @@ def test_project_payload_display_cells_onto_sheet_row_lists_reanchors_block_tota
     )
 
     assert projected_rows == [
-        ["04/26", "朝", "", "大豆のトマト煮", "70", "70", ""],
+        ["04/26", "朝", "", "大豆のトマト煮", "", "70", ""],
         ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
     ]
+    assert payload_rows == original_payload
+    assert current_rows == original_rows
+    assert [row[5] for row in projected_rows] == ["70", "70"]
     assert any(int(value or 0) > 0 for value in stats.values())
 
 
@@ -5258,6 +5315,8 @@ def test_overlay_payload_aux_cells_onto_sheet_rows_clears_stale_block_total_on_n
         ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
     ]
 
+    original_payload = deepcopy(payload_rows)
+    original_rows = deepcopy(rows)
     overlaid = order_service._overlay_payload_aux_cells_onto_sheet_rows(
         rows=rows,
         fields=fields,
@@ -5265,7 +5324,10 @@ def test_overlay_payload_aux_cells_onto_sheet_rows_clears_stale_block_total_on_n
         payload_rows=payload_rows,
     )
 
-    assert [row.get("values", [])[4] for row in overlaid] == ["70", "70"]
+    assert [row.get("values", [])[4] for row in overlaid] == ["", "70"]
+    assert [row["values"][5] for row in overlaid] == ["70", "70"]
+    assert payload_rows == original_payload
+    assert rows == original_rows
 
 
 def test_project_payload_display_cells_onto_sheet_row_lists_clears_stale_block_total_on_non_anchor_rows():
@@ -5288,6 +5350,8 @@ def test_project_payload_display_cells_onto_sheet_row_lists_clears_stale_block_t
         ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
     ]
 
+    original_payload = deepcopy(payload_rows)
+    original_rows = deepcopy(current_rows)
     projected_rows, stats = order_service._project_payload_display_cells_onto_sheet_row_lists(
         rows=current_rows,
         fields=fields,
@@ -5298,9 +5362,12 @@ def test_project_payload_display_cells_onto_sheet_row_lists_clears_stale_block_t
     )
 
     assert projected_rows == [
-        ["04/26", "朝", "", "大豆のトマト煮", "70", "70", ""],
+        ["04/26", "朝", "", "大豆のトマト煮", "", "70", ""],
         ["04/26", "朝", "", "胡瓜のﾌﾚﾝﾁｻﾗﾀﾞ", "70", "70", ""],
     ]
+    assert payload_rows == original_payload
+    assert current_rows == original_rows
+    assert [row[5] for row in projected_rows] == ["70", "70"]
     assert any(int(value or 0) > 0 for value in stats.values())
 
 

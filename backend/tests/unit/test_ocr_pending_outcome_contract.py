@@ -56,6 +56,7 @@ def ingest_pipeline(pending_source, monkeypatch, tmp_path, pipeline_transport):
             pdf_bytes = load_selected_pdf_bytes(uri, selected)
             assert sha256(pdf_bytes).hexdigest() == payload["content_sha256"]
             pipeline_transport.observations["missing"] = False
+            monkeypatch.setenv("OCR_PIPELINE_TIMEOUT_SECONDS", "1")
             pipeline_transport.observations["payload_overrides"] = {
                 "engine": "yomitoku", "template_id": "authored-component",
                 "table_rows": [["2/15", "morning", "meal", "0"]]}

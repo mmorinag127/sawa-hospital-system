@@ -209,6 +209,7 @@ def test_real_owned_failed_job_read_does_not_borrow_newer_unowned_record(authore
     now = datetime.utcnow() + timedelta(minutes=1)
     with db.session_scope() as session:
         session.add(OcrJob(id="newer-unowned", order_id=fixture.id, status="done",
+            input_reference="component://unowned-newer.pdf",
             metrics={"workflow_attempt_id": "unowned-attempt"}, created_at=now, updated_at=now))
     before = snapshot(fixture)
     with fixture.readonly():

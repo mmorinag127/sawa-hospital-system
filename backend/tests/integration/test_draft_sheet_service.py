@@ -850,6 +850,7 @@ def test_owned_rerun_keeps_saved_quantities_and_requires_explicit_candidate_adop
 
 def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
     from src.models.order_workflow_state import OrderWorkflowState
+    from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
     from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal
 
     receipt = rerun["terminal_receipt"]
@@ -858,6 +859,7 @@ def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
         "workflow_attempt_id": case.queued["ocr_job"]["workflow_attempt_id"],
         "workflow_revision": case.queued["workflow"]["revision"],
         "evidence_run_id": rerun["id"], "status": "failed", "error": error,
+        "workflow_delivery_owner": {key: case.claim[key] for key in ("delivery_id", "generation", "claim_token")},
     }
     assert rerun["status"] == "diagnostic_only"
     assert rerun["order_id"] == case.id
@@ -874,21 +876,23 @@ def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
     assert job["status"] == "failed"
     assert job["error_message"] == error
     assert job["metrics"]["adopted"] is False
-    assert {key: job["metrics"]["rerun_terminal_receipt"][key] for key in receipt} == receipt
+    assert job["metrics"]["rerun_terminal_receipt"] == receipt
     after = _snapshot(case.engine)
     for table in ("order_sheet_drafts", "order_ocr_cache", "order_ocr_revisions",
                   "order_current_states", "order_confirmed_snapshots", "order_lines"):
         assert after[table] == before[table], table
     with session_scope() as session:
+        delivery = session.get(WorkflowOcrDelivery, case.claim["delivery_id"])
+        assert delivery.order_id == case.id and delivery.job_id == case.job
+        assert delivery.delivery_generation == case.claim["generation"]
+        assert delivery.claim_token == case.claim["claim_token"]
         state = session.get(OrderWorkflowState, case.id)
         assert state.evidence_run_id is None and state.draft_id is None
         assert state.confirmed_snapshot_id is None
         assert state.state == "ocr_failed" and state.blockers_json == [error]
         assert state.revision == receipt["workflow_revision"] + 1
-        retained = session.query(OrderLine).filter(OrderLine.order_id == case.id).one()
-        assert (retained.date, retained.daypart, retained.menu_name, retained.diet_type,
-                retained.area_id, retained.quantity_original) == (
-            date(2026, 3, 22), "朝", "Menu A", "regular", "2F", 3)
+        assert before["order_lines"] == []
+        assert session.query(OrderLine).filter(OrderLine.order_id == case.id).count() == 0
 
     # Real authenticated commands may acquire CAS locks, but cannot adopt or mutate state.
     revision = case.revision()

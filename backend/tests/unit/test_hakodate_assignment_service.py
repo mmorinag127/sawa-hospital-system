@@ -603,8 +603,8 @@ def test_column_slots_do_not_treat_logical_template_index_as_physical_column() -
     assert by_col[6]["slot_name"] == "qty.placeholder_x"
     assert by_col[7]["slot_name"] == "qty.no_meat_x"
     assert by_col[8]["slot_name"] == "qty.no_fish_x"
-    assert by_col[11]["slot_name"] == "note"
-    assert by_col[12]["slot_name"] == "note"
+    assert by_col[11]["slot_name"] == "remarks"
+    assert by_col[12]["slot_name"] == "remarks"
 
 
 def test_structure_slot_assignment_blocks_when_detected_table_box_is_invalid(monkeypatch) -> None:

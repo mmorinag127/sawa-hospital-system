@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import pytest
 
-from src.services import order_service
+from src.services import order_service, hakodate_ocr_evidence_service as evidence
 from tests.helpers.authored_parser_templates import authored_aux_component_template
 
 
@@ -80,3 +80,28 @@ def test_unresolved_auxiliary_identity_cannot_modify_the_target(surface, identit
                 rows=target, fields=fields, header=header, payload_rows=source, template=template,
             )
     assert target == original_target and source == original_source
+
+
+@pytest.mark.parametrize("raw", ["", "0", "-", "※", "７０"])
+def test_authored_auxiliary_role_preserves_raw_text_without_quantity_conversion(raw):
+    target = {"role": "aux", "field": "aux.col_4", "semantic_field": "aux.col_4"}
+    record = {**target, "raw_text": raw,
+              "engine_metadata": {"recognizer_output": {"recognizer_raw_text": raw}}}
+    original = deepcopy(record)
+    assert evidence.authored_cell_role(target) == "aux"
+    assert evidence.validate_ocr_source_for_role(record, "aux") == raw
+    assert record == original
+
+
+@pytest.mark.parametrize("target", [
+    {"role": "aux", "field": "qty.regular_2f"},
+    {"role": "aux", "field": "remarks"},
+    {"role": "aux", "field": "aux.col_4", "semantic_field": "aux.col_5"},
+    {"role": "quantity", "field": "aux.col_4"},
+    {"role": "note", "field": "aux.col_4"},
+])
+def test_auxiliary_role_cannot_impersonate_a_quantity_note_or_another_field(target):
+    original = deepcopy(target)
+    with pytest.raises(ValueError, match="^hakodate_target_role_conflict$"):
+        evidence.authored_cell_role(target)
+    assert target == original

@@ -472,7 +472,7 @@ def test_workflow_gates_both_deploy_surfaces_and_retains_bootstraps():
     for assertion in ('test "${GITHUB_REF_NAME}" = "develop"', 'test -z "$(git status --porcelain)"',
                       'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/develop)"'):
         assert assertion in source
-    assert workflow["on"]["push"]["branches"] == ["develop"]
+    assert set(workflow["on"]) == {"workflow_dispatch"}
     bootstrap = (ROOT / "scripts/bootstrap_automation_user.sh").read_text()
     assert runner.PROXY_URL in bootstrap and runner.PROXY_SHA256 in bootstrap
 

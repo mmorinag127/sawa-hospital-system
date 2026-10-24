@@ -1078,7 +1078,7 @@ def _normalize_output_daypart(value: object) -> str:
 
 
 def _menu_entry_category_label(entry: dict) -> str:
-    if entry.get("category") in {"主A", "主Ａ"}:
+    if entry.get("category") in {"主A", "主Ａ", "副菜"}:
         return entry["category"]
     normalized = _normalize_delivery_category_label(entry.get("category"))
     if normalized in {"副菜1", "副菜2", "副菜3", "主菜", "副菜", "主食"}:

@@ -2664,6 +2664,12 @@ def mark_ocr_run_queued(
                 reservation_metrics["selected_pdf_receipt"] = capture_selected_pdf_receipt(session, order, selected_input, input_reference)
             except ValueError as exc:
                 return finalize_queue_blocker(str(exc))
+            captured_document_id = reservation_metrics["selected_pdf_receipt"]["document_id"]
+            if any(value is not None and value != captured_document_id for value in (
+                reservation_metrics.get("selected_document_id"), delivery_selected_document_id,
+            )):
+                return finalize_queue_blocker("selected_document_input_changed")
+            reservation_metrics["selected_document_id"] = captured_document_id
             reservation_metrics["job_id"] = normalized_job_id
             if request_mode not in {"ocr_reparse", "llm_reparse", "ocr_rerun"}:
                 raise ValueError("workflow_ocr_delivery_request_mode_unknown")

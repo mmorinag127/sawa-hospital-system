@@ -433,7 +433,7 @@ def test_get_ocr_output_and_sheet_prefer_active_evidence_over_stale_cache(author
         assert payload_error is None and isinstance(payload, dict)
         assert payload["hakodate_canonical_pipeline"] == selected["payload_json"]["hakodate_canonical_pipeline"]
         assert payload["hakodate_ocr_evidence_records"] == selected["payload_json"]["hakodate_ocr_evidence_records"]
-        assert any(record["ocr_text"] == "9" for record in payload["hakodate_ocr_evidence_records"])
+        assert any(record["raw_text"] == "9" for record in payload["hakodate_ocr_evidence_records"])
         assert sheet_error is None and isinstance(sheet, dict)
         assert sheet["rows"][0][:4] == ["03/21", "朝", "Menu A", "9"]
         with session_scope() as session:
@@ -448,6 +448,14 @@ def test_get_ocr_output_prefers_active_evidence_over_stale_job_output(authored_s
         menu_date=date(2026, 3, 21), period="2026-03@2026-03-21~2026-03-28")
     selected = order_service.get_ocr_evidence_run(case.evidence)
     terminal = deepcopy(get_job(case.job)["metrics"]["rerun_terminal_receipt"])
+    from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
+    with session_scope() as session:
+        owner = terminal["workflow_delivery_owner"]
+        delivery = session.get(WorkflowOcrDelivery, owner["delivery_id"])
+        assert delivery is not None
+        assert delivery.order_id == case.id and delivery.job_id == case.job
+        assert owner == {"delivery_id": delivery.id, "generation": delivery.delivery_generation,
+                         "claim_token": delivery.claim_token}
     inject_stale_job_diagnostics(case, output_reference="gs://bucket/stale-output.json")
     assert get_job(case.job)["metrics"]["rerun_terminal_receipt"] == terminal
     before = get_job(case.job)
@@ -456,7 +464,7 @@ def test_get_ocr_output_prefers_active_evidence_over_stale_job_output(authored_s
         assert error is None and isinstance(payload, dict)
         assert payload["hakodate_canonical_pipeline"] == selected["payload_json"]["hakodate_canonical_pipeline"]
         assert payload["hakodate_ocr_evidence_records"] == selected["payload_json"]["hakodate_ocr_evidence_records"]
-        assert any(record["ocr_text"] == "9" for record in payload["hakodate_ocr_evidence_records"])
+        assert any(record["raw_text"] == "9" for record in payload["hakodate_ocr_evidence_records"])
         assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == [["03/21", "朝", "Menu A", "9"]]
         assert get_job(case.job) == before
 
@@ -692,7 +700,9 @@ def test_get_ocr_sheet_prefers_saved_revision_over_confirmed_lines_by_default(au
         assert sheet["rows"] == [["03/21", "朝", "Menu A", "9", "draft"]]
         assert sheet["rows"][0][3] == "9"
         assert sheet["source"] == saved_sheet["source"]
-        assert sheet["draft_id"] == saved["id"]
+        context = order_service.get_current_sheet_context(case.id)
+        assert context is not None and context["draft_id"] == saved["id"]
+        assert context["draft_record"]["draft_sheet_json"] == saved_sheet
         assert case.get("workflow-v2/sheet-source")["sheet"]["rows"] == [["03/21", "朝", "Menu A", "2", ""]]
         with session_scope() as session:
             lines = session.query(OrderLine).filter_by(order_id=case.id).all()
@@ -1647,7 +1657,10 @@ def test_owned_menu_identity_keeps_breakfast_blanks_and_lunch_quantities(selecte
 
 
 def test_unselected_diagnostic_draft_does_not_override_owned_cells_or_add_stale_warnings(selected_projection_case):
-    from src.db import get_engine
+    from sqlalchemy import MetaData, Table, select
+    from src.db import get_engine, session_scope
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.services.canonical_facility_store import read_snapshot
     from tests.unit.test_disabled_facility_columns import _snapshot
     case = selected_projection_case(layout="repository-specimen", facility_id="FAC00002",
         period="2026-03@2026-03-22~2026-03-28", unlisted_cells="", rows=[
@@ -1663,21 +1676,69 @@ def test_unselected_diagnostic_draft_does_not_override_owned_cells_or_add_stale_
     before = _snapshot(get_engine())
     latest_before = order_service.get_latest_sheet_draft(case.id)
     original_diagnostic = deepcopy(diagnostic)
+    original_capture = deepcopy(captured)
+    original_pdf = case.pdf.read_bytes()
+    source_revision = read_snapshot().revision
+    with session_scope() as session:
+        selected_draft_id = session.get(OrderWorkflowState, case.id).draft_id
+    started = datetime.utcnow()
     saved = order_service.persist_sheet_draft(order_id=case.id,
         draft_sheet_json=diagnostic, draft_state="draft_ready",
         blockers=["template_unresolved"], warnings=stale,
         synchronous_write_input=captured)
-    assert saved is None
+    assert saved is not None
+    assert saved["order_id"] == case.id
+    assert saved["base_evidence_run_id"] == captured["evidence_run_id"] == case.evidence["id"]
+    assert saved["template_version_id"] == case.evidence["template_version_id"]
+    resolution = case.evidence["payload_json"]["template_resolution"]
+    assert saved["base_template_resolution_id"] == resolution["resolved_template_id"]
+    assert saved["base_menu_snapshot_id"] is None
+    assert saved["draft_sheet_json"] == original_diagnostic
+    assert saved["draft_sheet_json"]["rows"][0][diagnostic["fields"].index("qty.regular_x")] == "999"
+    assert saved["draft_state"] == "draft_ready"
+    assert saved["blockers_json"] == ["template_unresolved"]
+    assert saved["warnings_json"] == stale
+    assert saved["latest_patch_candidate_id"] is None
+    assert saved["edited_by"] is None
+    created = datetime.fromisoformat(saved["created_at"])
+    assert started <= created <= datetime.utcnow()
+    assert saved["edited_at"] == saved["created_at"]
+    with session_scope() as session:
+        assert session.get(OrderWorkflowState, case.id).draft_id == selected_draft_id
     sheet, error = order_service.get_ocr_sheet(case.id)
     assert error is None and sheet is not None
     assert sheet["rows"] == case.sheet["rows"]
+    quantity_index = sheet["fields"].index("qty.regular_x")
+    assert [row[quantity_index] for row in sheet["rows"]] == ["23", "27"]
     assert sheet["base_evidence_run_id"] == case.evidence["id"]
     assert sheet.get("warnings") == case.sheet.get("warnings")
     assert sheet.get("apply_blockers") == case.sheet.get("apply_blockers")
     assert sheet.get("can_apply") == case.sheet.get("can_apply")
     assert order_service.get_latest_sheet_draft(case.id) == latest_before
     assert diagnostic == original_diagnostic
-    assert _snapshot(get_engine()) == before
+    assert captured == original_capture
+    assert case.pdf.read_bytes() == original_pdf
+    assert read_snapshot().revision == source_revision
+    engine = get_engine()
+    table = Table("order_sheet_drafts", MetaData(), autoload_with=engine)
+    with engine.connect() as connection:
+        actual = connection.execute(select(table).where(table.c.id == saved["id"])).one()
+    assert dict(actual._mapping) == {
+        "id": saved["id"], "order_id": case.id,
+        "template_version_id": case.evidence["template_version_id"],
+        "base_evidence_run_id": case.evidence["id"],
+        "base_template_resolution_id": resolution["resolved_template_id"],
+        "base_menu_snapshot_id": None, "draft_sheet_json": original_diagnostic,
+        "draft_state": "draft_ready", "blockers_json": ["template_unresolved"],
+        "warnings_json": stale, "latest_patch_candidate_id": None, "edited_by": None,
+        "edited_at": created, "created_at": created,
+    }
+    expected = deepcopy(before)
+    assert tuple(actual) not in expected["order_sheet_drafts"]
+    expected["order_sheet_drafts"] = sorted(
+        [*expected["order_sheet_drafts"], tuple(actual)], key=repr,
+    )
+    assert _snapshot(engine) == expected
 
 
 def test_foreign_facility_candidates_cannot_rebind_owned_six_column_source(selected_projection_case):

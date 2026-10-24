@@ -234,7 +234,7 @@ def test_context_refusal_preserves_every_row_and_source(context_source, monkeypa
             assert session.get(OrderWorkflowState, ORDER) is None
 
 
-def test_successful_reconfirm_keeps_existing_invalidation_semantics(context_source):
+def test_successful_reconfirm_clears_current_refs_but_preserves_saved_history(context_source):
     f = context_source
     with session_scope() as session:
         selected, _ = lineage.resolve(session, FACILITY, "2026-01-15")
@@ -242,14 +242,17 @@ def test_successful_reconfirm_keeps_existing_invalidation_semantics(context_sour
     initial = _request(f)
     assert initial.status_code == 200, initial.text
     revision = _stored_downstream()
+    downstream_before = _snapshot(f.engine)
     projection_before = _snapshot(f.engine)["facility_template_versions"]
     source_before = f.source.read_bytes()
     response = _request(f, revision=revision)
     assert response.status_code == 200, response.text
-    assert response.json()["revision"] == revision + 3
+    assert response.json()["revision"] == revision + 2
+    downstream_after = _snapshot(f.engine)
+    for model in (OrderOcrEvidenceRun, OrderSheetDraft, OrderConfirmedSnapshot):
+        assert downstream_after[model.__tablename__] == downstream_before[model.__tablename__]
     with session_scope() as session:
-        for model in (OrderOcrEvidenceRun, OrderSheetDraft, OrderConfirmedSnapshot, OrderLine):
-            assert session.query(model).count() == 0
+        assert session.query(OrderLine).count() == 0
         workflow = session.get(OrderWorkflowState, ORDER)
         assert workflow.state == "context_confirmed"
         assert workflow.evidence_run_id is workflow.draft_id is workflow.confirmed_snapshot_id is None

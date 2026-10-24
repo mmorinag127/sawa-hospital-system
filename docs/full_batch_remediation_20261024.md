@@ -1,5 +1,64 @@
 # Fixed-source full batch remediation
 
+## Follow-up At 57e9dffe
+
+The clean fixed-source run completed all30 local commands at
+`57e9dffe35c96b23f91039ae2769d0c3a9d4b40d`, with23 zero exits and7 nonzero.
+Evidence: `/private/tmp/sawa-hospital-full-57e9dffe35c9-20261024-3/failed-run.json`.
+Backend:9837 passed,131 failed,22 setup errors,184 skipped in3852.72seconds.
+Its153 failure/error sections are indexed beside the original log.
+The five frontend commands lacked the clean worktree's ignored node_modules;
+the browser flow did not run and is not a functional failure or success proof.
+The C1 guard group had202 passes and one obsolete push-trigger expectation:
+the approved workflow is manual-only. Actual Linux agent tests and owned
+container cleanup succeeded. These are local results, not deploy evidence.
+
+Follow-up implementation is in progress, without a new test run:
+
+- Queue capture now copies the document ID from the actual selected PDF receipt,
+  rejecting differing explicit/metadata IDs. Pending handoff no longer relies on
+  a caller redundantly supplying that same identity. Guards remain strict.
+- Selected evidence with unavailable artifacts retains identity-only recovery
+  metadata. Its unusable payload is never returned or selected by this change.
+- The original target plan includes post-menu auxiliary cells, but its evidence
+  validator rejected their authored role. Only explicit aux.col_N roles are now
+  accepted; raw text is preserved, not summed, reanchored or used as a quantity.
+- Authored fixture sources explicitly declare their label-comparison policy.
+  Terminal-history setup records diagnostics during owned completion instead of
+  modifying already-completed jobs outside their delivery owner.
+- Receipt transition assertions cover both the actual pipeline delivery receipt
+  and its output reference atomically, retaining whole-database comparisons.
+- Assignment merge diagnostics count body cells only, not header merges.
+- A blocked-source placeholder without a persisted draft ID no longer hides the
+  selected evidence identity and presents it again as a new candidate.
+- Raw monthly category 副菜 is preserved independently of output slot labels.
+- The isolated worker's two OCR integration fixture files were reviewed and
+  copied into the parent. Corrected-PDF tests use real registered source bytes,
+  derived hashes and parent receipts; missing receipts/artifacts never fall back.
+  Diagnostic draft persistence proves exactly one added row, unchanged current
+  selection, raw operator cells, PDF and canonical facility revision.
+- Assignment public-command boundaries now return the existing typed refusal
+  for inconsistent repaired representations and invalid assignment sources,
+  instead of leaking a validation exception. Cache publication is deferred until
+  baseline and final assignment validation have both succeeded. Two failure-
+  injection cases require no publication and whole-database/source immutability;
+  these new cases are not yet run.
+- The local batch now refuses missing frontend dependencies before starting
+  backend tests. Dependency installation remains explicit; no Actions or network
+  installation is introduced by the runner. New refusal coverage is unrun.
+- The daily-category fixture now declares a real scoped side-dish recipe while
+  retaining the different master category and all quantity assertions.
+
+Unresolved source semantics: partial-month order periods versus full seven-day
+FAX periods must not be silently conflated. The former Sunday expansion and
+the explicit-period boundary currently disagree. No narrowing was implemented.
+Totals-only forbidden-diet fixtures also conflict with the explicit exclusion
+introduced in 5a89ce6e; the production exclusion has not been removed to pass
+those tests. Frontend dependencies must be prepared before the next clean batch.
+
+All follow-up changes remain unverified and unintegrated. The current parent
+AGENTS.md modification is unrelated and remains unstaged.
+
 Fixed requirements: complete known implementation repairs first, then update
 fixtures together, then run serial local verification on one fixed source.
 Preserve raw OCR/operator edits, canonical input/geometry/receipt validation,

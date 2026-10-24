@@ -10329,7 +10329,9 @@ def _resolve_active_ocr_evidence_run(order_id: str) -> Optional[dict]:
 
 def _load_active_ocr_payload(order_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     from src.services.recognition_acceptance_service import payload_for_evidence
-    active_evidence = _resolve_active_ocr_evidence_run(order_id)
+    active_evidence = ocr_evidence_service.get_selected_evidence_run(order_id, require_selectable=False)
+    if isinstance(active_evidence, dict) and active_evidence.get("selectable") is False:
+        return None, active_evidence
     payload = payload_for_evidence(active_evidence) if isinstance(active_evidence, dict) else None
     if not isinstance(payload, dict):
         return None, active_evidence
@@ -19642,6 +19644,8 @@ def get_ocr_pages(
             return None, job_binding_error
         if order_job_pending:
             return None, "ocr_output_pending"
+        if isinstance(active_evidence_run, dict):
+            return None, "ocr_evidence_recovery_required"
         if job and _job_is_pending(job):
             return None, "ocr_output_pending"
         if not document_uri:
@@ -24005,10 +24009,14 @@ def build_order_hakodate_assignment(
         )
         if (repaired_payload.get("hakodate_canonical_pipeline") or {}).get("status") == "blocked":
             return None, "hakodate_artifact_repair_failed"
-        if (
-            _payload_has_hakodate_target_cells(repaired_payload)
-            and _payload_has_hakodate_evidence_records(repaired_payload, order_id=order_id)
-        ):
+        try:
+            artifacts_complete = (
+                _payload_has_hakodate_target_cells(repaired_payload)
+                and _payload_has_hakodate_evidence_records(repaired_payload, order_id=order_id)
+            )
+        except ValueError as exc:
+            return None, str(exc)
+        if artifacts_complete:
             try:
                 receipt = (synchronous_write_input or {}).get("selected_pdf_receipt") or processing_start_pdf_receipt()
                 _validate_hakodate_owned_artifacts(repaired_payload,
@@ -24017,18 +24025,6 @@ def build_order_hakodate_assignment(
                 return None, str(exc)
             payload = repaired_payload
             repaired_own_result = True
-            if persist_artifact_repair:
-                saved = _save_order_ocr_cache(
-                    order_id,
-                    payload,
-                    job_id=_workflow_ocr_job_id.get(),
-                    synchronous_write_input=synchronous_write_input,
-                    augment_hakodate_artifacts=False,
-                    persist_evidence=False,
-                    refresh_workflow=False,
-                )
-                if saved is None:
-                    return None, "workflow_revision_conflict" if operator_write else "synchronous_input_conflict"
         else:
             return None, "hakodate_artifact_repair_failed"
 
@@ -24051,13 +24047,16 @@ def build_order_hakodate_assignment(
     except _CanonicalOcrProjectionError as exc:
         return None, str(exc)
     skeleton_rows = _hakodate_skeleton_rows_from_baseline(baseline)
-    assignment = _build_hakodate_evidence_assignment_from_payload(
-        order_id=order_id,
-        facility_id=facility_id,
-        template_id=effective_template_id or str(template_to_use.get("template_id") or "").strip() or None,
-        payload=payload,
-        facility_config=facility_config,
-    )
+    try:
+        assignment = _build_hakodate_evidence_assignment_from_payload(
+            order_id=order_id,
+            facility_id=facility_id,
+            template_id=effective_template_id or str(template_to_use.get("template_id") or "").strip() or None,
+            payload=payload,
+            facility_config=facility_config,
+        )
+    except ValueError as exc:
+        return None, str(exc)
     assignment["baseline_source"] = baseline.get("baseline_source") if isinstance(baseline, dict) else None
     assignment["baseline_row_count"] = len(skeleton_rows)
     assignment["quantity_assignment_strategy"] = assignment.get("strategy")
@@ -24068,6 +24067,18 @@ def build_order_hakodate_assignment(
             return None, str(exc)
         if current_authority is None or any(not snapshots_equal(synchronous_write_input.get(key), value) for key, value in current_authority.items()):
             return None, "synchronous_input_conflict"
+    if repaired_own_result and persist_artifact_repair:
+        saved = _save_order_ocr_cache(
+            order_id,
+            payload,
+            job_id=_workflow_ocr_job_id.get(),
+            synchronous_write_input=synchronous_write_input,
+            augment_hakodate_artifacts=False,
+            persist_evidence=False,
+            refresh_workflow=False,
+        )
+        if saved is None:
+            return None, "workflow_revision_conflict" if operator_write else "synchronous_input_conflict"
     return assignment, None
 
 

@@ -116,7 +116,12 @@ def test_disabled_columns_http_preserves_all_stored_state(stored_records, monkey
         else:
             actor.verifier.assert_not_called()
         assert response.status_code == status
-        assert response.json() == {"detail": detail}
+        if case == "stale":
+            current, error = order_workflow_v2_service.get_workflow_readonly(order_id)
+            assert error is None
+            assert response.json() == {"detail": {**detail, "workflow": current}}
+        else:
+            assert response.json() == {"detail": detail}
         if case in {"missing-revision", "unauthenticated"}:
             save.assert_not_called()
         else:

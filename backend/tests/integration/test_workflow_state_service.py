@@ -1456,12 +1456,12 @@ def test_refresh_workflow_state_suppresses_older_pending_candidate_ids_after_ack
     )
     assert decision is not None
     job = get_ocr_job(case.job)
-    receipt = deepcopy(job.metrics["rerun_terminal_receipt"])
+    receipt = deepcopy(job["metrics"]["rerun_terminal_receipt"])
     # Deliberate out-of-band corruption must not impersonate an authorized writer.
     inject_stale_job_diagnostics(case, metrics={
-        **job.metrics, "evidence_run_id": older["id"], "new_evidence_available": True,
+        **job["metrics"], "evidence_run_id": older["id"], "new_evidence_available": True,
     })
-    assert get_ocr_job(case.job).metrics["rerun_terminal_receipt"] == receipt
+    assert get_ocr_job(case.job)["metrics"]["rerun_terminal_receipt"] == receipt
     job_before = get_ocr_job(case.job)
     refreshed = workflow_state_service.refresh_workflow_state(case.id)
 
@@ -1623,7 +1623,7 @@ def test_refresh_workflow_state_uses_owned_terminal_metrics_to_surface_new_candi
     workflow = workflow_state_service.refresh_workflow_state(case.id)
 
     assert isinstance(workflow, dict)
-    assert workflow["state"] == "new_evidence_available"
+    _assert_owned_refresh_states(case, workflow, "new_evidence_available")
     assert workflow["active_evidence_run_id"] == first["id"]
     assert workflow["candidate_evidence_run_id"] == second["id"]
     with case.readonly():
@@ -1997,7 +1997,7 @@ def test_unowned_llm_reparse_job_cannot_become_current_rerun_or_replace_formally
         job = session.get(OcrJob, job_id)
         # This is deliberately an unowned legacy diagnostic, never a terminal receipt.
         job.metrics = {"processing_stage": "llm_reparse", "request_mode": "llm_reparse"}
-        assert job.workflow_attempt_id is None
+        assert job.metrics.get("workflow_attempt_id") is None
     diagnostic = get_ocr_job(job_id)
     with case.readonly():
         state = workflow_state_service.project_workflow_state(case.id)
@@ -2300,7 +2300,11 @@ def _assert_refresh_workflow_state_blocks_when_monthly_menu_object_is_missing(au
     with case.readonly():
         workflow = workflow_state_service.project_workflow_state(case.id)
         current = order_service.get_current_sheet_context(case.id)
-        assert current["blockers"] == ["monthly_menu_object_missing"]
+        assert current["blockers"] == ["hakodate_original_expectation_required"]
+        diagnostics = order_service._build_monthly_menu_diagnostics(
+            week_id=case.selected_sheet["week_id"], facility_id=case.facility,
+        )
+        assert diagnostics["order_codes"] == ["monthly_menu_object_missing"]
         assert current["rows"] == []
         assert current["draft_payload"] is None
         assert order_service.get_ocr_evidence_run(case.evidence) == evidence
@@ -2349,7 +2353,7 @@ def test_formal_saved_five_preserves_weekly_warning_but_missing_physical_menu_bl
 
 
 def test_actual_initial_blank_semantic_sheet_is_editable_but_missing_menu_has_no_guessed_shell(authored_sheet_case):
-    from src.models.menu import MonthlyMenu
+    from src.models.menu import MonthlyMenu, MonthlyMenuItem
     from src.services import order_workflow_v2_service as workflow
 
     case = authored_sheet_case(quantity=5, cell_values="", include_remarks=False)
@@ -2368,13 +2372,18 @@ def test_actual_initial_blank_semantic_sheet_is_editable_but_missing_menu_has_no
     # authoritative menu. The current boundary must not fabricate that shell.
     with session_scope() as session:
         session.query(MonthlyMenuEntry).delete()
+        session.query(MonthlyMenuItem).delete()
         session.query(MonthlyMenu).delete()
     with case.readonly():
         current = order_service.get_current_sheet_context(case.id)
         state = workflow_state_service.project_workflow_state(case.id)
         assert current["rows"] == []
         assert current["draft_payload"] is None
-        assert "monthly_menu_object_missing" in current["menu_diagnostics"]["order_codes"]
+        assert current["blockers"] == ["hakodate_original_expectation_required"]
+        diagnostics = order_service._build_monthly_menu_diagnostics(
+            week_id=case.selected_sheet["week_id"], facility_id=case.facility,
+        )
+        assert diagnostics["order_codes"] == ["monthly_menu_object_missing"]
         assert state["apply_gate"]["can_apply"] is False
         assert state["apply_gate"]["can_confirm"] is False
         assert "monthly_menu_object_missing" in state["apply_gate"]["blockers"]
@@ -2396,7 +2405,7 @@ def test_project_workflow_state_blocks_on_menu_entries_missing_without_monthly_m
     with case.readonly():
         workflow = workflow_state_service.project_workflow_state(case.id)
         current = order_service.get_current_sheet_context(case.id)
-        assert current["blockers"] == ["menu_entries_missing"]
+        assert current["blockers"] == ["hakodate_original_expectation_required"]
         assert current["rows"] == []
         assert current["draft_payload"] is None
         assert order_service.get_ocr_evidence_run(case.evidence) == evidence

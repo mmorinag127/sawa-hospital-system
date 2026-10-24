@@ -23,6 +23,30 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class ReceiptContractTest(unittest.TestCase):
+    def test_missing_frontend_dependency_stops_before_any_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            required = ('.package-lock.json', '.bin/eslint', '.bin/tsc', '.bin/next',
+                        '@playwright/test/package.json')
+            for name in required:
+                path = root / 'frontend' / 'node_modules' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            for name in required:
+                path = root / 'frontend' / 'node_modules' / name
+                path.unlink()
+                with patch.object(RUNNER, 'ROOT', root), \
+                     patch.object(RUNNER, 'clean_tree', return_value=True), \
+                     patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': ''}), \
+                     patch.object(RUNNER.subprocess, 'run') as execute:
+                    with self.assertRaisesRegex(SystemExit, 'prepare frontend dependencies'):
+                        RUNNER.run(root / 'evidence')
+                    execute.assert_not_called()
+                    self.assertFalse((root / 'evidence').exists())
+                path.touch()
+            with patch.object(RUNNER, 'ROOT', root):
+                RUNNER.require_frontend_dependencies()
+
     def test_agent_preflight_requires_each_owned_environment_without_starting_tests(self):
         commands = {item['name']: item['command'] for item in json.loads(RUNNER.MANIFEST.read_text())['commands']}
         self.assertEqual(commands['agent-assistant-tests'], 'python3 scripts/run_local_agent_tests.py')
@@ -274,6 +298,7 @@ class ReceiptContractTest(unittest.TestCase):
                 output = Path(directory) / 'evidence'
                 with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': ''}), \
                      patch.object(RUNNER, 'MANIFEST', manifest), patch.object(RUNNER, 'clean_tree', return_value=True), \
+                     patch.object(RUNNER, 'require_frontend_dependencies'), \
                      patch.object(RUNNER, 'git', side_effect=['a' * 40, ('c' if changed else 'a') * 40, ('c' if changed else 'a') * 40]), \
                      patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], code)):
                     self.assertEqual(RUNNER.run(output), 1)
@@ -288,6 +313,7 @@ class ReceiptContractTest(unittest.TestCase):
             output = Path(directory) / 'evidence'
             with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': ''}), \
                  patch.object(RUNNER, 'MANIFEST', manifest), \
+                 patch.object(RUNNER, 'require_frontend_dependencies'), \
                  patch.object(RUNNER, 'clean_tree', return_value=True), \
                  patch.object(RUNNER, 'git', return_value='a' * 40), \
                  patch.object(RUNNER.subprocess, 'run', side_effect=[
@@ -307,6 +333,7 @@ class ReceiptContractTest(unittest.TestCase):
             with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': '', 'SAWA_IMPACT_FULL': '0',
                                         'PYTEST_ADDOPTS': '-k hidden --last-failed', 'PYTEST_PLUGINS': 'foreign_selector'}), \
                  patch.object(RUNNER, 'MANIFEST', manifest), \
+                 patch.object(RUNNER, 'require_frontend_dependencies'), \
                  patch.object(RUNNER, 'clean_tree', return_value=True), \
                  patch.object(RUNNER, 'git', return_value='a' * 40), \
                  patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)) as execute:
@@ -326,6 +353,7 @@ class ReceiptContractTest(unittest.TestCase):
             output = Path(directory) / 'evidence'
             with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': ''}), \
                  patch.object(RUNNER, 'MANIFEST', manifest), \
+                 patch.object(RUNNER, 'require_frontend_dependencies'), \
                  patch.object(RUNNER, 'clean_tree', side_effect=[True, False, False]), \
                  patch.object(RUNNER, 'git', return_value='a' * 40), \
                  patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as execute:
@@ -342,6 +370,7 @@ class ReceiptContractTest(unittest.TestCase):
             output = Path(directory) / 'evidence'
             with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': ''}), \
                  patch.object(RUNNER, 'MANIFEST', manifest), \
+                 patch.object(RUNNER, 'require_frontend_dependencies'), \
                  patch.object(RUNNER, 'clean_tree', return_value=True), \
                  patch.object(RUNNER, 'git', side_effect=['a' * 40, 'c' * 40, 'a' * 40]), \
                  patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):

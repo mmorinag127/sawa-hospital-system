@@ -408,8 +408,12 @@ def test_actual_quad_and_axis_save_commands_use_one_writer_after_readonly_cas(ge
         expected_transactions = 4 if command == "row" else 2
         assert len(checkouts) == expected_transactions
         assert lifecycle == ["begin", "commit"] * expected_transactions
-        assert all(statements and set(statements) <= {"SELECT", "PRAGMA"} for statements in transactions[:-1])
-        assert any(statement in {"INSERT", "UPDATE"} for statement in transactions[-1])
+        writers = [index for index, statements in enumerate(transactions)
+                   if set(statements) & {"INSERT", "UPDATE", "DELETE", "REPLACE"}]
+        assert len(writers) == 1 and writers[0] > 0, transactions
+        assert all(statements and set(statements) <= {"SELECT", "PRAGMA"}
+                   for index, statements in enumerate(transactions) if index != writers[0]), transactions
+        assert set(transactions[writers[0]]) <= {"SELECT", "PRAGMA", "INSERT", "UPDATE"}, transactions
     finally:
         for name, callback in reversed(listeners):
             event.remove(f.engine, name, callback)

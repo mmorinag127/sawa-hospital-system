@@ -1980,6 +1980,7 @@ def build_structure_slot_assignment_from_pdf(
         region
         for region in actual_merge_regions
         if bool(region.get("is_quantity")) and int(region.get("row_span") or 0) > 1
+        and region["min_row"] >= master_order_form_template_service.BODY_START_ROW
     ]
     skeleton_by_index = {
         idx: row

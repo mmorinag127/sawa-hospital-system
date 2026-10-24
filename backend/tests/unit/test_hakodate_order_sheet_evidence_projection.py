@@ -520,7 +520,7 @@ def test_hakodate_payload_augmentation_uses_live_canonical_payload_not_legacy_oc
     assert all(logical["date"] in {"04/26", "2026-04-26"} for logical in logical_targets)
     # Geometry comes from this declared physical producer, never legacy table/tokens.
     assert [target["bbox"] for target in target_cells] == [region["bbox"] for region in calls[0]]
-    assert all(record["text"] == "１２" for record in evidence_records)
+    assert all(record["raw_text"] == "１２" for record in evidence_records)
     assert all(record["normalized_value"] == "１２" for record in evidence_records)
     assert all(record["source_scope"] == "hakodate_cell_crop_batch" for record in evidence_records)
     assert [record["center"] for record in evidence_records] == [
@@ -562,7 +562,7 @@ def test_hakodate_payload_augmentation_regenerates_stale_pipeline_payload(projec
     assert augmented["hakodate_canonical_pipeline"]["version"] == order_service.HAKODATE_CANONICAL_PIPELINE_VERSION
     assert augmented["hakodate_preprocessing"]["target_cell_map"]
     assert all(target["target_cell_id"] != "old" for target in augmented["hakodate_preprocessing"]["target_cell_map"])
-    assert all(record["text"] == "7" for record in augmented["hakodate_ocr_evidence_records"])
+    assert all(record["raw_text"] == "7" for record in augmented["hakodate_ocr_evidence_records"])
     assert payload["hakodate_ocr_evidence_records"][0]["text"] == "9"
 
 
@@ -989,6 +989,7 @@ def test_hakodate_evidence_projection_blocks_stale_row_identity_instead_of_sheet
                         "worksheet_row": 11,
                         "worksheet_col": 5,
                         "semantic_field": "qty.regular_x",
+                        "role": "quantity",
                         "date": "2026-04-26",
                         "daypart": "昼",
                         "menu_name": "献立B",

@@ -237,7 +237,7 @@ def test_candidate_sidecar_filters_current_template_without_loading_all_details(
 
 
 def test_ocr_progress_reads_only_the_recorded_owned_job(monkeypatch, authored_sheet_case):
-    case = authored_sheet_case(quantity=5, produce=False)
+    case = authored_sheet_case(quantity=5, produce=False, facility="inspection-progress-component")
     case.queue()
     order_id = case.id
     attempt = case.queued["ocr_job"]["workflow_attempt_id"]

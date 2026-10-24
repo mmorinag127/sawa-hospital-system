@@ -583,7 +583,7 @@ def assign_yomitoku_words_to_contact_regions(
                         "text": text,
                         "x": cx,
                         "y": cy,
-                        "normalized_digits": text if roles[str(region.get("region_id"))] == "note" else _normalize_digits(text),
+                        "normalized_digits": _normalize_digits(text) if roles[str(region.get("region_id"))] == "quantity" else text,
                         "source_word": raw_word,
                     }
                 )
@@ -597,7 +597,7 @@ def assign_yomitoku_words_to_contact_regions(
                 **region,
                 "raw_text": text,
                 "ocr_text": text,
-                "ocr_normalized": text if roles[str(region.get("region_id"))] == "note" else _normalize_digits(text),
+                "ocr_normalized": _normalize_digits(text) if roles[str(region.get("region_id"))] == "quantity" else text,
                 "ocr_words": region_words,
                 "ocr_word_count": len(region_words),
             }
@@ -764,14 +764,14 @@ def validate_cell_ocr_mapping(
         region_text = str(region.get("ocr_text") or "")
         region_normalized = str(region.get("ocr_normalized") or "")
         role = hakodate_ocr_evidence_service.authored_cell_role(expected_targets[0])
-        if role == "note":
+        if role != "quantity":
             region_normalized = region_text
         region_words = region.get("ocr_words") or []
         if not isinstance(region_words, list):
             errors.append(f"{region_id}: ocr_words is not a list")
             region_words = []
         reparsed_text = _words_to_region_text(region_words)
-        reparsed_normalized = reparsed_text if role == "note" else _normalize_digits(reparsed_text)
+        reparsed_normalized = _normalize_digits(reparsed_text) if role == "quantity" else reparsed_text
         if reparsed_text != region_text:
             errors.append(f"{region_id}: raw OCR words do not reparse to ocr_text")
         if reparsed_normalized != region_normalized:

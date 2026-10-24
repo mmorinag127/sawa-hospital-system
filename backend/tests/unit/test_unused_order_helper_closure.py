@@ -140,7 +140,8 @@ def test_other_recorded_job_tests_and_adapter_oracles_are_byte_identical():
     inventory = "test_existing_backend_functions_are_unchanged_except_additive_workflow_projection"
     old = definitions(old_tree)
     new = definitions(new_tree)
-    assert old.keys() == new.keys()
+    assert old.keys() <= new.keys()
+    assert new.keys() - old.keys() == {"test_real_owned_failed_job_read_does_not_borrow_newer_unowned_record"}
     for name, node in old.items():
         if name != inventory:
             assert ast.dump(node) == ast.dump(new[name])

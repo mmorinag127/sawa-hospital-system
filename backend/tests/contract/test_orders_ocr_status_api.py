@@ -424,9 +424,8 @@ def test_detail_reads_do_not_wait_for_missing_ocr_output_and_surface_rerun(monke
         assert detail["ocr_status"] not in {"done", "running", "awaiting_output"}
         assert detail.get("ocr_error")
         output = case.client.get(f"/orders/{case.id}/ocr-output", headers=case.actor.headers)
-        assert output.status_code == 409, output.text
-        assert output.json() == {
-            "recovery_required": True, "detail": "ocr evidence recovery required"}
+        assert output.status_code == 404, output.text
+        assert output.json() == {"detail": "ocr output not found"}
         assert get_job(case.job) == before
         assert order_service.get_latest_ocr_evidence_run(case.id, backfill_from_cache=False) is None
 
@@ -1045,6 +1044,13 @@ def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master(owned_o
                 facility_override=None,
             )
         )
+        session.add(MonthlyMenuItem(
+            id=f"MI-daily-side-{uuid4().hex}", monthly_menu_id=month_id,
+            menu_master_id=menu_item["menu_master_id"], name=menu_name,
+            daypart="昼食", diet_type="regular", facility_override="FAC00003",
+            category="副菜", qty_per_serving=70, unit_type="g",
+            master_resolution_mode="manual",
+        ))
     order = owned_outputs.create_order_from_ingest(
         IngestEmailPayload(
             message_id="msg-status-api-daily-bags-entry-001",
