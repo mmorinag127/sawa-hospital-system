@@ -21,6 +21,8 @@ MODULES = {
                   'backend/tests/integration/test_stg_menu_master_migration.py',
                   'backend/tests/contract/test_automation_bootstrap_postgres.py'],
     'menu-identity': ['backend/tests/integration/test_monthly_menu_identity_migration.py'],
+    'output': ['backend/tests/integration/pg_output_boundary_cases.py'],
+    'formal': ['backend/tests/integration/test_formal_alembic_fresh_chain.py'],
 }
 DATABASES = {
     'readonly': {'C2_MENU_READONLY_PG_URI': 'postgres'},
@@ -31,6 +33,8 @@ DATABASES = {
         'TEST_BOOTSTRAP_DB_URI': 'c2_hospital_c1_bootstrap_pg16',
     },
     'menu-identity': {'C2_MENU_PG_URI': 'postgres'},
+    'output': {'MODERNIZATION_PG_TEST_URI': 'sawa_modernization_output_test'},
+    'formal': {'C2_FORMAL_PG_URI': 'postgres'},
 }
 
 
@@ -40,7 +44,8 @@ def owned_root(run_id, attempt, suite='readonly'):
     if any(not re.fullmatch(r'[1-9][0-9]{0,19}', value) for value in (run_id, attempt)):
         raise ValueError('explicit numeric local run identity required')
     prefix = {'readonly': 'sawa-ro', 'c1': 'sawa-c1',
-              'c1-guards': 'sawa-c1-guards', 'menu-identity': 'sawa-menu-identity'}[suite]
+              'c1-guards': 'sawa-c1-guards', 'menu-identity': 'sawa-menu-identity',
+              'output': 'sawa-output', 'formal': 'sawa-formal'}[suite]
     return Path('/tmp').resolve() / f'{prefix}-{run_id}-{attempt}'
 
 
@@ -78,13 +83,14 @@ def run(source, run_id, attempt, suite='readonly'):
         owner.write_text(str(source))
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(('PG', 'C1_', 'C2_', 'SAWA_OWNED_PG_'))
-           and key not in ('TEST_BOOTSTRAP_DB_URI', 'PYTEST_ADDOPTS')}
+           and key not in ('TEST_BOOTSTRAP_DB_URI', 'MODERNIZATION_PG_TEST_URI', 'PYTEST_ADDOPTS')}
     uri = 'sqlite:///' + str(root / 'bootstrap.sqlite3')
     env.update({key: uri for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')})
     env.update({
         'C2_MENU_READONLY_OWNED_ROOT': str(root),
         'SAWA_OWNED_PG_ROOT': str(pg), 'SAWA_OWNED_PG_PORT': port,
         'SAWA_OWNED_PG_SOURCE': str(source),
+        'SAWA_LOCAL_PG_EVIDENCE_DIR': str(evidence),
         'PYTHONPATH': str(source / 'backend'), 'PYTHONDONTWRITEBYTECODE': '1',
         'AUTH_DISABLED': 'true', 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
         'HF_DATASETS_OFFLINE': '1', 'ORDERS_OUTPUT_DIR': str(root / 'output'),
@@ -93,6 +99,9 @@ def run(source, run_id, attempt, suite='readonly'):
     })
     env.update({key: f'postgresql+psycopg2://mmorinag@/{database}?' + urlencode(
         {'host': str(socket), 'port': port}) for key, database in databases.items()})
+    if suite == 'output':
+        env.update({key: env['MODERNIZATION_PG_TEST_URI']
+                    for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')})
     lifecycle = []
     initialized = False
     owned_pid = None
@@ -154,7 +163,10 @@ def run(source, run_id, attempt, suite='readonly'):
                 if actual != {'data_directory': str(data), 'port': port, 'socket': str(socket),
                               'listen_addresses': '', 'major': 16, 'role': 'mmorinag', 'database': database}:
                     raise ValueError('C1 physical server identity mismatch')
-        # The readonly fixture separately validates PID, server, role and case databases.
+        if suite == 'output':
+            command([sys.executable, 'backend/tests/integration/pg_output_migration_probe.py',
+                     '--evidence=' + str(evidence / 'migration-probe.json')], 'migration.log')
+        # Every fixture validates the owned server before exercising its cases.
         result = command(pytest_command(root, suite), 'pytest.log', check=False)
         lifecycle.append({'pytest_exit': result})
     except BaseException:

@@ -2,6 +2,7 @@ import pytest
 import sqlalchemy as sa
 
 import c1_pg_ownership as owned
+import pg_output_migration_probe as output_probe
 
 
 @pytest.fixture
@@ -25,7 +26,7 @@ def uri(profile, kind="menu"):
 
 
 @pytest.mark.parametrize("major", [15, 16])
-@pytest.mark.parametrize("kind", ["menu", "migration", "live"])
+@pytest.mark.parametrize("kind", ["menu", "migration", "live", "bootstrap", "identity", "output", "formal"])
 def test_exact_additional_profile(profile, major, kind):
     (profile[0] / "pgdata/PG_VERSION").write_text(str(major))
     if major == 16:
@@ -92,6 +93,30 @@ def test_current_run_refuses_aliased_ownership_markers(profile, marker):
     path.symlink_to(target)
     with pytest.raises(AssertionError):
         owned.additional_profile(uri(profile), "menu")
+
+
+@pytest.mark.parametrize("fault", ["foreign", "existing", "alias", "owner"])
+def test_output_probe_rejects_nonowned_evidence_before_connect(profile, monkeypatch, fault):
+    import sys
+    root = profile[0].parent / "evidence"
+    root.mkdir()
+    destination = root / "probe.json"
+    if fault == "foreign":
+        destination = root.parent / "foreign.json"
+    elif fault == "existing":
+        destination.write_text("do not replace")
+    elif fault == "alias":
+        destination.symlink_to(root / "other.json")
+    url = uri(profile, "output").render_as_string(hide_password=False)
+    for key in ("MODERNIZATION_PG_TEST_URI", "DB_URI", "DATABASE_URL", "ALEMBIC_DB_URI"):
+        monkeypatch.setenv(key, url)
+    monkeypatch.setenv("SAWA_LOCAL_PG_EVIDENCE_DIR", "/foreign" if fault == "owner" else str(root))
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(sys, "argv", ["probe", "--evidence", str(destination)])
+    monkeypatch.setattr(output_probe.sa, "create_engine", lambda *a, **kw: pytest.fail("invalid target connected"))
+    with pytest.raises(RuntimeError, match="evidence"):
+        output_probe.main()
 
 
 @pytest.mark.parametrize("attribute", ["data_directory", "port", "unix_socket_directories", "listen_addresses", "server_version_num", "current_user"])

@@ -14,8 +14,6 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_TEST_JOBS = {
     ('modernization-image-ci.yml', 'frontend-image'),
-    ('modernization-pg-output.yml', 'pg-output-boundary'),
-    ('modernization-pg-output.yml', 'formal-pg-chain'),
     ('live-schema-adoption-test.yml', 'live-schema-adoption'),
     ('verify-stg-ocr-ui.yml', 'verify'),
 }
@@ -76,6 +74,9 @@ def execute(workflow, job_name, names, cleanup=None):
         def run(name):
             job, item = step(workflow, job_name, name)
             inherited = {**job.get('env', {}), **item.get('env', {})}
+            if inherited.get('GH_TOKEN') == '${{ github.token }}':
+                # Local gh uses its existing login, never an Actions job token.
+                inherited.pop('GH_TOKEN')
             # Dependency selection never omits a test in the local full run.
             for key in ('PYTEST_ADDOPTS', 'SAWA_IMPACT_ROOT', 'SAWA_IMPACT_STATE',
                         'SAWA_IMPACT_SPLIT_RUNS', 'TESTMON_DATAFILE', 'SAWA_IMPACT_FULL',
@@ -87,8 +88,6 @@ def execute(workflow, job_name, names, cleanup=None):
                 if key in local_env and key not in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI'):
                     continue
                 local_env[key] = local_text(str(value), context)
-            if workflow == 'modernization-pg-output.yml' and job_name == 'pg-output-boundary':
-                Path(directory, 'pg-output-boundary').mkdir(exist_ok=True)
             if 'TEST_BOOTSTRAP_DB_URI' in inherited and 'TEST_BOOTSTRAP_DB_URI' not in env:
                 raise ValueError('TEST_BOOTSTRAP_DB_URI must name an explicitly owned local test database')
             command = item['run']

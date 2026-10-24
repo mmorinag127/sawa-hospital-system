@@ -30,6 +30,8 @@ SOURCE_SHA = '04ef4a6ce7897bb187bb4d91f77839cfa30edde7'
                                    'backend/tests/integration/test_stg_menu_master_migration.py',
                                    'backend/tests/contract/test_automation_bootstrap_postgres.py']),
     ('menu-identity', 'sawa-menu-identity', ['backend/tests/integration/test_monthly_menu_identity_migration.py']),
+    ('output', 'sawa-output', ['backend/tests/integration/pg_output_boundary_cases.py']),
+    ('formal', 'sawa-formal', ['backend/tests/integration/test_formal_alembic_fresh_chain.py']),
 ])
 def test_explicit_suite_selects_whole_modules_and_distinct_owned_root(suite, prefix, modules):
     root = runner.owned_root('123', '2', suite)
@@ -55,6 +57,8 @@ def test_fixed_profiles_match_unchanged_fixture_paths_and_databases():
         'menu-identity': {
             'C2_MENU_PG_URI': 'postgres',
         },
+        'output': {'MODERNIZATION_PG_TEST_URI': 'sawa_modernization_output_test'},
+        'formal': {'C2_FORMAL_PG_URI': 'postgres'},
     }
 
 
@@ -158,6 +162,11 @@ def transport(monkeypatch, tmp_path):
             code = state.pytest_exit
             (root / 'evidence/results.xml').write_text('<testsuites/>')
             stdout.write(f'controlled pytest exit {code}\n')
+        elif args[:2] == [sys.executable, 'backend/tests/integration/pg_output_migration_probe.py']:
+            assert all(env[key] == env['MODERNIZATION_PG_TEST_URI']
+                       for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI'))
+            code = 1 if state.fail == 'migration-probe' else 0
+            (root / 'evidence/migration-probe.json').write_text('{"controlled_probe": true}')
         else:
             pytest.fail(f'unexpected subprocess: {args}')
         return SimpleNamespace(returncode=code)
@@ -300,6 +309,38 @@ def test_cleanup_failure_cannot_turn_successful_pytest_green(transport, failure,
     assert {'pytest_exit': 0} in json.loads((evidence / 'lifecycle.json').read_text())
     assert (evidence / 'cleanup-error.log').read_text()
     assert 'cleanup-error.log' in json.loads((evidence / 'sha256.json').read_text())
+
+
+@pytest.mark.parametrize('suite', ['output', 'formal'])
+@pytest.mark.parametrize('exit_code', [0, 1])
+def test_output_and_formal_use_current_owned_socket_and_all_cases(transport, suite, exit_code):
+    transport.pytest_exit = exit_code
+    assert runner.run(transport.source, '123', '1', suite) == exit_code
+    calls = [(args, env) for args, env in transport.commands if args[:3] == [sys.executable, '-m', 'pytest']]
+    assert len(calls) == 1
+    argv, env = calls[0]
+    assert argv == runner.pytest_command(transport.root, suite)
+    key, database = next(iter(runner.DATABASES[suite].items()))
+    url = urlsplit(env[key])
+    assert url.hostname is None and url.username == 'mmorinag' and url.path == '/' + database
+    assert parse_qs(url.query) == {'host': [str(transport.root / 'pg/socket')], 'port': ['55471']}
+    probes = [args for args, _ in transport.commands
+              if args[:2] == [sys.executable, 'backend/tests/integration/pg_output_migration_probe.py']]
+    assert len(probes) == int(suite == 'output')
+    if probes:
+        assert all(env[name] == env[key] for name in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI'))
+        commands = [args for args, _ in transport.commands]
+        assert commands.index(probes[0]) < commands.index(argv)
+    assert not transport.active
+
+
+def test_output_migration_failure_is_not_hidden_or_followed_by_transaction_cases(transport):
+    transport.fail = 'migration-probe'
+    with pytest.raises(subprocess.CalledProcessError):
+        runner.run(transport.source, '123', '1', 'output')
+    assert not transport.active
+    assert not any(args[:3] == [sys.executable, '-m', 'pytest'] for args, _ in transport.commands)
+    assert (transport.root / 'evidence/runner-error.log').is_file()
 
 
 @pytest.mark.parametrize('suite', ['c1-guards', 'menu-identity'])

@@ -13,6 +13,7 @@ import run_local_agent_tests as AGENT_RUNNER
 import run_local_backend_tests as BACKEND_RUNNER
 import run_local_frontend_e2e as E2E_RUNNER
 import local_hospital_legacy_step as LEGACY_RUNNER
+import run_local_pg_output_boundary as PG_OUTPUT_RUNNER
 
 
 MODULE = Path(__file__).with_name("local_hospital_test_runner.py")
@@ -60,6 +61,8 @@ class ReceiptContractTest(unittest.TestCase):
             self.assertEqual(BACKEND_RUNNER.DEDICATED_MODULES[command], BACKEND_RUNNER.MODULES[suite])
             self.assertIn('--suite ' + suite, commands[command])
         self.assertIn('test_live_schema_adoption.py', ' '.join(BACKEND_RUNNER.DEDICATED_MODULES['live-schema-adoption']))
+        self.assertEqual(BACKEND_RUNNER.DEDICATED_MODULES['modernization-pg-output'],
+                         BACKEND_RUNNER.MODULES['output'] + BACKEND_RUNNER.MODULES['formal'])
         with tempfile.TemporaryDirectory() as directory, \
              patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': directory, 'DB_HOST': 'foreign',
                                     'DB_URI': 'foreign', 'DATABASE_URL': 'foreign', 'ALEMBIC_DB_URI': 'foreign',
@@ -117,9 +120,38 @@ class ReceiptContractTest(unittest.TestCase):
         for expression in ('${{ secrets.VALUE }}', '${{ github.actor }}', '${{ matrix.suite }}'):
             with self.assertRaisesRegex(ValueError, 'unresolved workflow expression'):
                 LEGACY_RUNNER.local_text(expression, context)
-        for workflow, job in (('../ci.yml', 'backend'), ('ci.yml', 'backend'), ('deploy-stg.yml', 'deploy')):
+        for workflow, job in (('../ci.yml', 'backend'), ('ci.yml', 'backend'), ('deploy-stg.yml', 'deploy'),
+                              ('modernization-pg-output.yml', 'formal-pg-chain'),
+                              ('modernization-pg-output.yml', 'pg-output-boundary')):
             with self.assertRaises(ValueError):
                 LEGACY_RUNNER.step(workflow, job, 'not-run')
+
+    def test_output_and_formal_groups_both_run_after_an_independent_failure(self):
+        for results in ((0, 0), (1, 0), (RuntimeError('controlled failure'), 0), (0, 1)):
+            def execute(_root, _run, _attempt, suite):
+                result = results[0 if suite == 'output' else 1]
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            with patch.dict(os.environ, {'SAWA_LOCAL_RUN_ID': '123', 'CI': '', 'GITHUB_ACTIONS': ''}), \
+                 patch.object(PG_OUTPUT_RUNNER, 'run', side_effect=execute) as run, \
+                 patch.object(PG_OUTPUT_RUNNER.traceback, 'print_exc'):
+                self.assertEqual(PG_OUTPUT_RUNNER.main(), int(results != (0, 0)))
+            self.assertEqual([call.args[3] for call in run.call_args_list], ['output', 'formal'])
+
+    def test_local_legacy_gh_uses_existing_login_not_a_synthetic_actions_token(self):
+        for token in (None, 'synthetic-existing-local-token'):
+            with tempfile.TemporaryDirectory() as directory, \
+                 patch.dict(os.environ, {} if token is None else {'GH_TOKEN': token}, clear=True), \
+                 patch.object(LEGACY_RUNNER.tempfile, 'mkdtemp', return_value=directory), \
+                 patch.object(LEGACY_RUNNER, 'step', return_value=(
+                     {'env': {}}, {'env': {'GH_TOKEN': '${{ github.token }}'}, 'run': 'true'})), \
+                 patch.object(LEGACY_RUNNER.subprocess, 'check_output', return_value='a' * 40), \
+                 patch.object(LEGACY_RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as execute:
+                LEGACY_RUNNER.execute('verify-stg-ocr-ui.yml', 'verify', ['owned-step'])
+                self.assertEqual(execute.call_args.kwargs['env'].get('GH_TOKEN'), token)
+                self.assertFalse(any(name.startswith(('GITHUB_', 'RUNNER_'))
+                                     for name in execute.call_args.kwargs['env']))
 
     def test_e2e_copies_only_tracked_source_and_keeps_next_generated_changes_isolated(self):
         with tempfile.TemporaryDirectory() as directory:

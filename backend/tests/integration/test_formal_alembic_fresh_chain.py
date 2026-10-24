@@ -12,6 +12,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 import pytest
 import sqlalchemy as sa
+from c1_pg_ownership import additional_profile, require_server
 from src.services.monthly_menu_identity_schema import require_canonical_identity_schema
 from src.monthly_menu_identity import (
     identity_index_ddl, legacy_index_ddl, LEGACY_INDEX, RAW_CONSTRAINT, RAW_COLUMNS,
@@ -23,7 +24,6 @@ from src.maintenance.formal_migration_schema import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-OWNED_CATALOG_ROOT = ROOT.parent / "tmp/hospital-v1-catalog-20261007"
 
 
 @pytest.mark.parametrize("user,owner,database,message", (
@@ -57,22 +57,13 @@ def explicit_formal_target_environment(monkeypatch):
 
 def _owned_postgres(uri):
     owner = sa.engine.make_url(uri)
-    assert owner.drivername == "postgresql+psycopg2" and owner.host is None and owner.port is None
-    assert owner.database == "postgres"
-    assert set(owner.query) == {"host", "port"}, "only owned Unix socket target parameters are permitted"
-    targets = {
-        "55482": (OWNED_CATALOG_ROOT / "pg15", 15),
-        "55483": (OWNED_CATALOG_ROOT / "pg16", 16),
-    }
-    port = owner.query["port"]
-    assert port in targets, "only explicitly owned PG15/PG16 ports are permitted"
-    root, major = targets[port]
-    assert Path(owner.query["host"]).resolve() == (root / "socket").resolve()
-    assert (root / "socket").is_dir()
+    major = additional_profile(owner, "formal")
+    root, port = Path(os.environ["SAWA_OWNED_PG_ROOT"]), os.environ["SAWA_OWNED_PG_PORT"]
     return owner, root, port, major
 
 
 def _verify_postgres_owner(connection, root, port, major):
+    require_server(connection, major)
     assert Path(connection.exec_driver_sql("SHOW data_directory").scalar_one()).resolve() == (root / "pgdata").resolve()
     assert connection.exec_driver_sql("SHOW port").scalar_one() == port
     assert connection.exec_driver_sql("SHOW listen_addresses").scalar_one() == ""

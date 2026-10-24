@@ -76,6 +76,28 @@ fe1f66ebbd0369b1380f0eead061ecc7de21f66b79f3dd09338c06245c4d05a2
 was dumped to the preserved tail-diagnostic directory, then gracefully stopped.
 Docker inspection reported Running=false, ExitCode=0. No other container changed.
 
+## Unreached PostgreSQL sibling path
+
+After5f03d613 was saved, source review of the previously aborted output group
+found another fixed-target path: TCP5432, Linux-only PG binaries, historical
+formal-cluster paths/socket aliases and the old runner role. The output and
+formal modules now use the same per-run owned PG16 implementation as the other
+dedicated suites. Output runs the real migration observer first, then every
+transaction case; formal uses an independent cluster and the whole original
+module. Failure of one group does not omit the independent other group.
+The observer validates physical owner/source/PID/server/role and a new evidence
+path before production imports. Current formal fixtures retain their actual
+catalog/server assertions and reject old/TCP/foreign targets.
+The two obsolete archived PG jobs are no longer executable via the generic
+legacy-step entry, preventing the same fixed-target path from re-entering.
+Additional contract cases cover migration failure, both suite executions,
+independent failure collection and foreign/existing/aliased evidence refusal.
+No test was executed while these known implementation repairs were pending.
+
+Local read-only OCR artifact verification now leaves gh on its existing local
+login instead of trying to resolve an unavailable Actions github.token. An
+already supplied GH_TOKEN is preserved; no Actions identity/token is generated.
+
 Native selected sheets remain viewable with sheet_unavailable and source blockers
 when the authored source is unavailable. This does not authorize adoption or
 borrow historical authority; negative tests must preserve both the blocked state

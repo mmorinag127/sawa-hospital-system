@@ -10,6 +10,7 @@ DATABASES = {
     "menu": "c1_menu_master", "migration": "c2_hospital_c1_migration_pg16",
     "live": "c2_hospital_c1_live_pg16", "bootstrap": "c2_hospital_c1_bootstrap_pg16",
     "identity": "postgres",
+    "output": "sawa_modernization_output_test", "formal": "postgres",
 }
 
 
