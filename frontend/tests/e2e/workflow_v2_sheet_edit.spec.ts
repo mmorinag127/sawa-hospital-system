@@ -196,6 +196,8 @@ test("workflow-v2 sheet checks advance the edited sheet revision before save", a
   const mounted = await mountWorkflowV2SheetPage(page);
   const firstQuantity = page.locator('[data-sheet-row="0"][data-sheet-col="3"]');
   await firstQuantity.fill("123");
+  await expect(firstQuantity).toBeFocused();
+  await expect(page.getByText("シートに未保存の編集があります。再読込やOCR進捗更新では編集中の値を置き換えません。")).toBeVisible();
 
   await page.getByRole("button", { name: "異常チェック" }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(1);

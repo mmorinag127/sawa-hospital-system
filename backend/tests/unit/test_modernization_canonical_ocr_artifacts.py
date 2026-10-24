@@ -100,6 +100,84 @@ def published(tmp_path, local_storage):
     return persist(tmp_path / "producer")
 
 
+def test_packet_reads_bound_parallelism_and_preserve_pinned_dataset(published, monkeypatch):
+    from collections import Counter
+    from threading import Barrier, Lock
+    from src import staging_data as datasets
+
+    packet, arguments, _ = published
+    real_load = storage.load_bytes_from_uri
+    selected_manifest = {"fixture": "owned-read-copy"}
+    monkeypatch.setattr(datasets, "staging_runtime", lambda: True)
+    monkeypatch.setattr(datasets, "manifest_for", lambda identity: selected_manifest)
+    first_batch = {packet["outputs"][key]["uri"] for key in list(packet["outputs"])[:3]}
+    barrier, lock = Barrier(3), Lock()
+    active = peak = 0
+    calls = []
+
+    def observed(uri, **kwargs):
+        nonlocal active, peak
+        assert datasets.current_dataset() == "replay-artifact-fixture"
+        assert datasets._pinned_manifest.get() is selected_manifest
+        assert kwargs == {"verification": True}
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            calls.append(uri)
+        try:
+            if uri in first_batch:
+                barrier.wait(timeout=10)
+            # Real authored local bytes; only the request's copy transport is doubled.
+            with datasets.dataset_context("test"):
+                return real_load(uri, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(storage, "load_bytes_from_uri", observed)
+    with datasets.dataset_context("replay-artifact-fixture"):
+        first = artifacts.validate_packet(packet, **arguments)
+        second = artifacts.validate_packet(packet, **arguments)
+    expected = Counter(receipt["uri"] for receipt in packet["outputs"].values())
+    expected[packet["metadata"]["uri"]] += 1
+    assert Counter(calls) == expected + expected
+    assert first == second
+    assert peak == 3 and active == 0
+    assert datasets.current_dataset() == "test"
+
+
+def test_packet_parallel_failures_preserve_first_error_and_join_workers(published, monkeypatch):
+    from threading import Event, Lock
+
+    packet, arguments, _ = published
+    real_load = storage.load_bytes_from_uri
+    pdf_uri = packet["outputs"]["pdf"]["uri"]
+    overlay_uri = packet["outputs"]["overlay"]["uri"]
+    later_failed, lock = Event(), Lock()
+    active = 0
+
+    def fail_out_of_order(uri, **kwargs):
+        nonlocal active
+        with lock:
+            active += 1
+        try:
+            if uri == pdf_uri:
+                assert later_failed.wait(timeout=10)
+                return b"changed first artifact"
+            if uri == overlay_uri:
+                later_failed.set()
+                raise OSError("synthetic later transport failure")
+            return real_load(uri, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(storage, "load_bytes_from_uri", fail_out_of_order)
+    with pytest.raises(ValueError, match="^canonical_artifact_bytes_changed$"):
+        artifacts.validate_packet(packet, **arguments)
+    assert later_failed.is_set() and active == 0
+
+
 def test_real_outputs_survive_workspace_close_with_bound_metadata(tmp_path, local_storage, monkeypatch):
     monkeypatch.setenv("OCR_ARTIFACT_DIR", f"  {local_storage}  ")
     with TemporaryDirectory(dir=tmp_path) as temporary:

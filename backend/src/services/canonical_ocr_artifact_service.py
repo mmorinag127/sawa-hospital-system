@@ -1,6 +1,9 @@
 """Persist the actual best-method output contract before its workspace closes."""
 
 from copy import deepcopy
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 import hashlib
 import json
 import math
@@ -206,23 +209,41 @@ def validate_packet(packet, *, source_receipt, outputs, expected_sheet_cells, pr
     metadata = {key: value for key, value in packet.items() if key != "metadata"}
     if _verify(packet.get("metadata")) != _json_bytes(metadata):
         raise ValueError("canonical_artifact_metadata_changed")
-    verified_inputs = {}
-    for key, receipt in receipts.items():
+    def verify_output(key, receipt):
         if not isinstance(receipt, dict) or outputs[key] != receipt.get("uri"):
             raise ValueError("canonical_artifact_reference_changed")
-        data = _verify(receipt)
-        if key in ("records", "ocr_regions") and not isinstance(json.loads(data), list):
-            raise ValueError("canonical_artifact_content_invalid")
-        if key == "sheet_values" and not isinstance(json.loads(data), dict):
-            raise ValueError("canonical_artifact_content_invalid")
-        if key in ("overlay", "overlay_png", "sheet_review_base", "contact_sheet") and not data.startswith(b"\x89PNG\r\n\x1a\n"):
-            raise ValueError("canonical_artifact_content_invalid")
-        if key == "pdf" and not data.startswith(b"%PDF-"):
-            raise ValueError("canonical_artifact_content_invalid")
-        if key in ("records", "contact_sheet"):
-            verified_inputs[key] = data
-        if key == 'preprocess_observation':
-            verified_inputs[key] = data
+        return _verify(receipt)
+
+    verified_inputs = {}
+    remaining = iter(receipts.items())
+    # Bound both in-flight transfers and retained bodies; preserve rejection order.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        pending = deque()
+
+        def queue_next():
+            item = next(remaining, None)
+            if item is not None:
+                key, receipt = item
+                pending.append((key, executor.submit(copy_context().run, verify_output, key, receipt)))
+
+        for _ in range(3):
+            queue_next()
+        while pending:
+            key, future = pending.popleft()
+            data = future.result()
+            if key in ("records", "ocr_regions") and not isinstance(json.loads(data), list):
+                raise ValueError("canonical_artifact_content_invalid")
+            if key == "sheet_values" and not isinstance(json.loads(data), dict):
+                raise ValueError("canonical_artifact_content_invalid")
+            if key in ("overlay", "overlay_png", "sheet_review_base", "contact_sheet") and not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ValueError("canonical_artifact_content_invalid")
+            if key == "pdf" and not data.startswith(b"%PDF-"):
+                raise ValueError("canonical_artifact_content_invalid")
+            if key in ("records", "contact_sheet"):
+                verified_inputs[key] = data
+            if key == 'preprocess_observation':
+                verified_inputs[key] = data
+            queue_next()
     original_records = json.loads(verified_inputs['records'])
     has_observation = any(isinstance(row,dict) and 'recognizer_preprocess_observation' in row for row in original_records)
     if has_observation != ('preprocess_observation' in verified_inputs):
