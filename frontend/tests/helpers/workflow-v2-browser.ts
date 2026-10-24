@@ -102,7 +102,14 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
     if (path.endsWith("/outputs/history") && method === "GET") {
       const current = currentWorkflow();
       expect(url.searchParams.get("order_id")).toBe(orderId);
-      expect(url.searchParams.get("expected_workflow_revision")).toBe(String(current.revision));
+      const expectedRevision = Number(url.searchParams.get("expected_workflow_revision"));
+      expect(Number.isInteger(expectedRevision) && expectedRevision > 0).toBe(true);
+      expect(url.searchParams.get("page")).toBe("1");
+      expect(url.searchParams.get("limit")).toBe("25");
+      if (expectedRevision !== current.revision) {
+        await route.fulfill({ status: 409, json: { detail: "output_history_workflow_revision_mismatch" } });
+        return;
+      }
       expect(current.bagging_result_id).toBe("BAG-E2E-001");
       await route.fulfill({ status: 200, json: { order_id: orderId, workflow_revision: current.revision,
         current_output_bundle_id: current.output_bundle_id, page: 1, limit: 25, total: 1,
