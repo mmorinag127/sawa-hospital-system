@@ -721,9 +721,11 @@ def test_get_ocr_sheet_does_not_reintroduce_stale_evidence_blockers_for_clean_sa
     with pytest.raises(ValueError, match="^configured_execution_input_changed$"):
         order_service.persist_ocr_evidence_run(order["id"], stale_payload)
     from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+    from hashlib import sha256
     with session_scope() as session:
         session.add(OrderOcrEvidenceRun(id="stale-history-diagnostic", order_id=order["id"],
-            schema_version="v1_legacy", status="diagnostic_only", payload_json=deepcopy(stale_payload)))
+            schema_version="v1_legacy", status="diagnostic_only", payload_json=deepcopy(stale_payload),
+            artifact_digest=sha256(json.dumps(stale_payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()))
     persisted = order_service.persist_sheet_draft(
         order_id=order["id"],
         draft_sheet_json={
@@ -1785,11 +1787,14 @@ def test_assignment_repair_validates_before_publishing_cache(selected_history_or
     original = deepcopy(captured["evidence"]["payload_json"])
     before = _snapshot(get_engine())
     calls = []
+    actual_augment = order_service._augment_hakodate_ocr_payload_artifacts
 
     def produce_existing_owned_artifacts(**kwargs):
         assert kwargs["synchronous_write_input"] is captured
         calls.append("repair")
-        return deepcopy(original)
+        repaired = actual_augment(**kwargs)
+        assert repaired["hakodate_canonical_pipeline"]["status"] == "ready", repaired
+        return repaired
 
     def refuse(**kwargs):
         calls.append(validation)
@@ -1871,7 +1876,7 @@ def test_ensure_hakodate_current_refuses_unselected_cache_artifacts(selected_his
     assert _snapshot(get_engine()) == database_before
 
 
-def test_ensure_hakodate_current_reuses_captured_selected_native_projection(selected_history_order, monkeypatch):
+def test_ensure_hakodate_current_preserves_selected_operator_sheet_without_projection_metadata(selected_history_order, monkeypatch):
     from src.db import get_engine
     from tests.unit.test_disabled_facility_columns import _snapshot
 
@@ -1879,7 +1884,8 @@ def test_ensure_hakodate_current_reuses_captured_selected_native_projection(sele
     order = _seed_order(selected_history_order, message_id="msg-owned-native-current-projection")
     captured = order_service._capture_synchronous_cache_write_input(order["id"])
     assert captured is not None
-    assert order_service._draft_payload_has_hakodate_evidence_projection(captured["draft"])
+    assert order_service._draft_record_is_authoritative_current_sheet(captured["draft"])
+    assert not order_service._draft_payload_has_hakodate_evidence_projection(captured["draft"])
     selected_rows = deepcopy(captured["draft"]["draft_sheet_json"]["rows"])
 
     def forbidden(*args, **kwargs):
@@ -6502,6 +6508,7 @@ def test_archived_yomitoku_issue_metadata_does_not_override_selected_source(sele
 def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_draft_as_baseline(selected_history_order, monkeypatch):
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-sheet-llm-review-loop-001")
+    selected_before = order_service._capture_synchronous_cache_write_input(order["id"])["evidence"]
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -6652,10 +6659,10 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     history_1, history_error_1 = order_service.get_ocr_edit_history(order["id"])
     assert history_error_1 is None
     assert history_1 is not None
-    assert isinstance(history_1["latest"], dict)
-    assert history_1["latest"]["ui_mode"] == "evidence"
-    assert str(history_1["latest"]["revision_id"]).startswith("OEV")
-    assert len(history_1["revisions"]) == 1
+    assert history_1["latest"] is None and history_1["revisions"] == []
+    assert history_1["raw_output_source"] == "order_ocr_evidence_runs.payload_json"
+    assert history_1["raw_output"] == selected_before["payload_json"]
+    assert order_service.get_ocr_evidence_run(selected_before["id"]) == selected_before
 
     apply_result, apply_error = order_service.apply_patch_candidate_to_draft(
         order["id"],
@@ -6680,10 +6687,10 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
     history_2, history_error_2 = order_service.get_ocr_edit_history(order["id"])
     assert history_error_2 is None
     assert history_2 is not None
-    assert isinstance(history_2["latest"], dict)
-    assert history_2["latest"]["ui_mode"] == "evidence"
-    assert str(history_2["latest"]["revision_id"]).startswith("OEV")
-    assert len(history_2["revisions"]) == 1
+    assert history_2["latest"] is None and history_2["revisions"] == []
+    assert history_2["raw_output_source"] == "order_ocr_evidence_runs.payload_json"
+    assert history_2["raw_output"] == selected_before["payload_json"]
+    assert order_service.get_ocr_evidence_run(selected_before["id"]) == selected_before
 
     assert "Previous yomitoku/LLM markdown" in captured_prompts[0]["user"]
     assert "Previous yomitoku/LLM structured tables/cells" in captured_prompts[0]["user"]
@@ -6697,6 +6704,7 @@ def test_review_ocr_table_with_llm_persists_patch_candidates_and_uses_latest_dra
 def test_review_ocr_table_with_llm_rejects_invalid_overwrite_and_keeps_latest_baseline(selected_history_order, monkeypatch):
     order_service.clear_all()
     order = _seed_order(selected_history_order, message_id="msg-sheet-llm-review-reject-001")
+    selected_before = order_service._capture_synchronous_cache_write_input(order["id"])["evidence"]
     order_service._save_order_ocr_cache(
         order["id"],
         {
@@ -6805,10 +6813,10 @@ def test_review_ocr_table_with_llm_rejects_invalid_overwrite_and_keeps_latest_ba
     history, history_error = order_service.get_ocr_edit_history(order["id"])
     assert history_error is None
     assert history is not None
-    assert isinstance(history["latest"], dict)
-    assert history["latest"]["ui_mode"] == "evidence"
-    assert str(history["latest"]["revision_id"]).startswith("OEV")
-    assert len(history["revisions"]) == 1
+    assert history["latest"] is None and history["revisions"] == []
+    assert history["raw_output_source"] == "order_ocr_evidence_runs.payload_json"
+    assert history["raw_output"] == selected_before["payload_json"]
+    assert order_service.get_ocr_evidence_run(selected_before["id"]) == selected_before
 
 
 def test_unowned_corrected_pdf_reference_cannot_replace_selected_review_source(selected_history_order, monkeypatch):

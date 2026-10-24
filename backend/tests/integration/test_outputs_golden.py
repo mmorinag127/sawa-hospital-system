@@ -56,5 +56,5 @@ def test_outputs_match_authored_golden_values(monkeypatch, tmp_path, isolated_fo
     actual_delivery = pd.read_excel(outputs["delivery_note"])
     # Both authored quantity columns must survive; the retired workbook omitted the second.
     expected_delivery = pd.DataFrame([{
-        "日付": pd.Timestamp("2025-01-06"), "区分": "朝", "献立": "副菜① Menu A", "常食": 10, "糖尿": 5}])
+        "日付": pd.Timestamp("2025-01-06"), "区分": "朝", "献立": "副① Menu A", "常食": 10, "糖尿": 5}])
     assert_frame_equal(actual_delivery, expected_delivery, check_dtype=False)

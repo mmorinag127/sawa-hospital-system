@@ -1,5 +1,41 @@
 # Fixed-source full batch remediation
 
+## Follow-up Diagnostic At f4e01502
+
+The clean owned verification worktree was fast-forwarded to f4e01502 and its
+locked frontend dependencies were installed explicitly with npm ci (297 packages).
+One serial related backend diagnostic selected 114 existing/new test functions,
+including their parameter neighbors: 142 passed,32 failed,10013 deselected in
+303.88seconds. Source and tracked tree remained unchanged. Evidence:
+`/private/tmp/sawa-followup-f4e01502-20261024/diagnostic-result.json` and backend.xml.
+This is not a full test receipt, integration or deployment result.
+
+Two additional shared production causes were identified and repaired locally:
+
+- A formally saved operator sheet without OCR projection metadata could enter
+  re-projection. Keep an authoritative current draft only when its nonempty base
+  evidence and template IDs match the captured selected source; do not reuse a
+  different-source native projection merely because it has projection metadata.
+- Pending handoff binding adds the delivery owner at flush, replacing the stored
+  receipt. Return a copy of that flushed receipt rather than the pre-binding
+  local dictionary, preserving the exact recovery fence and all ownership checks.
+
+Remaining diagnostic fixes are being batched before another verification:
+explicit local artifact storage in April fixtures, source-bound physical row
+ordering from declared slots, raw SQL evidence retention checks independent of
+dynamic availability serialization, missing fixture imports/schema fields and
+current manual-save/history contracts. Display expectations are derived from
+existing physical-slot rules (副菜1 for aggregation, 副① for delivery, 朝/夕の主),
+not copied wholesale from generated output; numeric checks remain unchanged.
+Old forbidden-diet confirmation expectations conflict with the June exclusion
+policy. That policy is unchanged. Native cases retain original excluded cells
+and prove non-materialization; vocabulary/quantity components remain separate
+from successful operator-flow proof. Initial blank sheets are saved as drafts,
+not prematurely confirmed or filled with substitute quantities.
+
+All subsequent changes remain unverified. The partial-month/full-FAX source
+semantics question remains unresolved and was not silently decided.
+
 ## Follow-up At 57e9dffe
 
 The clean fixed-source run completed all30 local commands at

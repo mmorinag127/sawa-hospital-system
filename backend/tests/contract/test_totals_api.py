@@ -140,7 +140,7 @@ def test_totals_prefers_monthly_menu_entry_category_over_menu_master(totals_inpu
 
     assert res.status_code == 200
     row = next(item for item in res.json()["rows"] if item.get("menu_name") == menu_name)
-    assert row["menu_category"] == "副菜"
+    assert row["menu_category"] == "副菜1"
 
 
 def test_totals_merges_regular_equivalent_diets(totals_inputs):
@@ -475,9 +475,12 @@ def test_totals_reflects_confirmed_lines_rebuilt_from_latest_draft(totals_inputs
     assert res.status_code == 200
     rows = [item for item in res.json()["rows"] if item.get("menu_name") == "ホイコーロー"]
     regular = next(item for item in rows if item.get("diet_type") == "regular")
-    forbidden = next(item for item in rows if item.get("diet_type") == "forbidden")
     assert regular["quantity"] == 104.0
-    assert forbidden["quantity"] == 3.0
+    assert not any(item["diet_type"] == "forbidden" for item in rows)
+    sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    assert sheet_error is None
+    assert [sheet["rows"][0][sheet["fields"].index(field)]
+            for field in ("qty.no_meat_x", "qty.no_fish_x")] == ["2", "1"]
     assert {
         (ref["source_diet_type"], ref["aggregated_diet_type"], ref["quantity"])
         for ref in regular["order_refs"]
@@ -487,7 +490,16 @@ def test_totals_reflects_confirmed_lines_rebuilt_from_latest_draft(totals_inputs
     }
 
 
-def test_totals_merges_forbidden_diets(totals_inputs):
+def test_existing_forbidden_diet_vocabulary_keeps_raw_quantity_components():
+    """Vocabulary/quantity component only, not a successful new confirmation."""
+    pairs = [("no_meat", 2), ("no_fish", 1), ("forbidden_other", 3), ("no_fried", 4)]
+    actual = [(total_service.bucket_diet_type_for_aggregation(diet),
+               total_service._final_quantity(None, quantity, True)) for diet, quantity in pairs]
+    assert actual == [("forbidden", 2.0), ("forbidden", 1.0), ("forbidden", 3.0), ("forbidden", 4.0)]
+    assert sum(quantity for _bucket, quantity in actual) == 10.0
+
+
+def test_owned_forbidden_only_sheet_preserves_raw_without_materializing_excluded_rows(totals_inputs):
     inputs = totals_inputs
     inputs.assert_fresh()
     month_id = "2026-03"
@@ -507,7 +519,7 @@ def test_totals_merges_forbidden_diets(totals_inputs):
             facility_hint="FAC00014",
             week_hint="2026-03@2026-03-24~2026-03-24",
         ),
-        physical_slot=0, lines=[
+        confirm=False, physical_slot=0, lines=[
             {
                 "date": "2026-03-24",
                 "daypart": "昼",
@@ -546,16 +558,23 @@ def test_totals_merges_forbidden_diets(totals_inputs):
             },
         ],
     )
-    inputs.assert_confirmed(order["id"])
+    from src.db import get_engine
+    from src.services import order_workflow_v2_service as workflow
+    from tests.unit.test_disabled_facility_columns import _snapshot
 
-    client = TestClient(app)
-    res = client.get("/totals?date=2026-03-24")
-
-    assert res.status_code == 200
-    rows = [item for item in res.json()["rows"] if item.get("menu_name") == "豆腐の煮物"]
-    forbidden = next(item for item in rows if item.get("diet_type") == "forbidden")
-    assert forbidden["quantity"] == 10.0
-    assert not any(item.get("diet_type") in {"no_meat", "no_fish", "forbidden_other", "no_fried"} for item in rows)
+    sheet, error = order_service.get_ocr_sheet(order["id"])
+    assert error is None
+    assert [sheet["rows"][0][sheet["fields"].index("qty." + diet + "_x")]
+            for diet in ("no_meat", "no_fish", "forbidden_other", "no_fried")] == ["2", "1", "3", "4"]
+    current, error = workflow.get_workflow_readonly(order["id"])
+    assert error is None
+    before = _snapshot(get_engine())
+    result, error = workflow.run_bagging(order["id"], expected_revision=current["revision"])
+    assert result is None and error == "sheet_identity_review_required"
+    assert _snapshot(get_engine()) == before
+    assert order_service.get_ocr_sheet(order["id"])[0] == sheet
+    res = TestClient(app).get("/totals?date=2026-03-24")
+    assert res.status_code == 200 and res.json()["rows"] == []
 
 
 def test_totals_reflects_confirmed_semantic_sheet_materialization_for_multi_column_facility(totals_inputs):
@@ -624,9 +643,12 @@ def test_totals_reflects_confirmed_semantic_sheet_materialization_for_multi_colu
     assert res.status_code == 200
     rows = [item for item in res.json()["rows"] if item.get("menu_name") == "ホイコーロー"]
     regular = next(item for item in rows if item.get("diet_type") == "regular")
-    forbidden = next(item for item in rows if item.get("diet_type") == "forbidden")
     assert regular["quantity"] == 104.0
-    assert forbidden["quantity"] == 3.0
+    assert not any(item["diet_type"] == "forbidden" for item in rows)
+    sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    assert sheet_error is None
+    assert [sheet["rows"][0][sheet["fields"].index(field)]
+            for field in ("qty.no_meat_x", "qty.no_fish_x")] == ["2", "1"]
     assert [
         (item["source_diet_type"], item["aggregated_diet_type"], item["quantity"])
         for item in regular["order_refs"]
@@ -657,6 +679,7 @@ def test_totals_reflect_confirmed_lines_materialized_from_semantic_draft_sheet(t
             facility_hint="FAC00004",
             week_hint="2026-03@2026-03-24~2026-03-24",
         ),
+        confirm=False,
         declared_quantity_pairs=[("regular", "X"), ("daycare", "X"), ("staff", "X"), ("no_meat", "X"), ("no_fish", "X"), ("no_fried", "X"), ("change_1", "X")],
         physical_slot=0, lines=[{"date": "2026-03-24", "daypart": "昼", "menu_name": "ホイコーロー",
             "diet_type": "regular", "area_id": "X", "bag_type": "standard", "quantity_original": None}],
@@ -693,6 +716,7 @@ def test_totals_reflect_confirmed_lines_materialized_from_semantic_draft_sheet(t
             facility_hint="FAC00014",
             week_hint="2026-03@2026-03-24~2026-03-24",
         ),
+        confirm=False,
         declared_quantity_pairs=[("regular", "X"), ("staff", "X"), ("no_meat", "X"), ("no_fish", "X"), ("sesame_allergy", "X"), ("change_1", "X")],
         physical_slot=0, lines=[{"date": "2026-03-24", "daypart": "昼", "menu_name": "ホイコーロー",
             "diet_type": "regular", "area_id": "X", "bag_type": "standard", "quantity_original": None}],

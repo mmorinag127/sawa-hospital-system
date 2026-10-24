@@ -244,9 +244,9 @@ def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(isolat
     assert delivery_wb.sheetnames == [invoice_template["sheet_name"]]
     ws_out = delivery_wb[invoice_template["sheet_name"]]
 
-    assert ws_out.cell(row=2, column=3).value == "主A メニュー朝"
+    assert ws_out.cell(row=2, column=3).value == "主 メニュー朝"
     assert ws_out.cell(row=2, column=4).value == 5
-    assert ws_out.cell(row=4, column=3).value == "主A メニュー夕"
+    assert ws_out.cell(row=4, column=3).value == "主 メニュー夕"
     assert ws_out.cell(row=4, column=4).value == 7
     assert ws_out.cell(row=3, column=3).value in ("", None)
     assert ws_out.cell(row=3, column=4).value in ("", None)

@@ -627,6 +627,7 @@ def _claim_april_job(queued):
 
 
 def _complete_owned_april_job(order_id, job_id, queued, payload, monkeypatch):
+    from pathlib import Path
     from src.services import hakodate_cell_ocr_batch_service as batch
     from src.services.storage_service import load_selected_pdf_bytes
     from tests.helpers.authored_cell_values import declared_field
@@ -640,6 +641,10 @@ def _complete_owned_april_job(order_id, job_id, queued, payload, monkeypatch):
           guard.workflow_execution_context(job_id, order_id, attempt, revision)):
         start = guard.processing_start_read_input()
         pdf = guard.processing_start_pdf_receipt()
+        original_path = Path(pdf["storage_uri"])
+        assert original_path.is_absolute() and original_path.is_file()
+        monkeypatch.delenv("OCR_OUTPUT_BUCKET", raising=False)
+        monkeypatch.setenv("OCR_ARTIFACT_DIR", str(original_path.parent / "canonical-artifacts"))
         sheet, = payload["tables"]
         fields = sheet["fields"]
         declared = {}

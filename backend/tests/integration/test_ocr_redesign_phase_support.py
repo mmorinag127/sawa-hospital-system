@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from src.db import session_scope
 from tests.helpers.newnarrowbaggingfixture import selected_bagging_order
 from tests.helpers.owned_order import authored_layout_registration, owned_registration  # noqa: F401
 from tests.integration.test_ocr_sheet_history import history_registration  # noqa: F401
@@ -558,6 +559,7 @@ def test_owned_aux_quantities_are_not_shifted_or_recomputed_from_stale_position_
 
 def test_missing_owned_artifact_cannot_be_recovered_from_stale_aux_mapping_without_tables(history_case):
     from src.services import canonical_ocr_artifact_service
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
     case, source = _fac4_original_quantities(history_case)
     stale = {
             "status": "done",
@@ -590,6 +592,8 @@ def test_missing_owned_artifact_cannot_be_recovered_from_stale_aux_mapping_witho
     overlay = pathlib.Path(original["hakodate_overlay"]["uri"].removeprefix("file://"))
     assert overlay.is_file()
     assert overlay.is_relative_to(case.root)
+    with session_scope() as session:
+        stored_payload = deepcopy(session.get(OrderOcrEvidenceRun, case.evidence).payload_json)
     overlay.unlink()
     with case.readonly():
         with pytest.raises(ValueError, match="^canonical_artifact_bytes_unavailable$"):
@@ -598,8 +602,10 @@ def test_missing_owned_artifact_cannot_be_recovered_from_stale_aux_mapping_witho
         assert payload is None
         assert error == "ocr_evidence_recovery_required"
         stored = order_service.get_ocr_evidence_run(case.evidence)
-        assert stored["payload_json"] == original
+        assert stored["selectable"] is False
         assert stored["artifact_digest"] == selected["artifact_digest"]
+        with session_scope() as session:
+            assert session.get(OrderOcrEvidenceRun, case.evidence).payload_json == stored_payload
 
 
 def _assert_selected_native_page(case):
@@ -1690,8 +1696,8 @@ def test_unselected_diagnostic_draft_does_not_override_owned_cells_or_add_stale_
     assert saved["order_id"] == case.id
     assert saved["base_evidence_run_id"] == captured["evidence_run_id"] == case.evidence["id"]
     assert saved["template_version_id"] == case.evidence["template_version_id"]
-    resolution = case.evidence["payload_json"]["template_resolution"]
-    assert saved["base_template_resolution_id"] == resolution["resolved_template_id"]
+    assert "template_resolution" not in case.evidence["payload_json"]
+    assert saved["base_template_resolution_id"] is None
     assert saved["base_menu_snapshot_id"] is None
     assert saved["draft_sheet_json"] == original_diagnostic
     assert saved["draft_sheet_json"]["rows"][0][diagnostic["fields"].index("qty.regular_x")] == "999"
@@ -1727,7 +1733,7 @@ def test_unselected_diagnostic_draft_does_not_override_owned_cells_or_add_stale_
         "id": saved["id"], "order_id": case.id,
         "template_version_id": case.evidence["template_version_id"],
         "base_evidence_run_id": case.evidence["id"],
-        "base_template_resolution_id": resolution["resolved_template_id"],
+        "base_template_resolution_id": None,
         "base_menu_snapshot_id": None, "draft_sheet_json": original_diagnostic,
         "draft_state": "draft_ready", "blockers_json": ["template_unresolved"],
         "warnings_json": stale, "latest_patch_candidate_id": None, "edited_by": None,
@@ -2205,8 +2211,10 @@ def test_confirm_materialization_uses_sheet_fields_for_fac00004_multi_quantity_r
     assert {(line.get("diet_type"), line.get("quantity_original")) for line in hits} == {
         ("regular", 65),
         ("daycare", 45),
-        ("no_meat", 2),
     }
+    sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    assert sheet_error is None
+    assert sheet["rows"][0][sheet["fields"].index("qty.no_meat_x")] == "2"
 
 
 def test_confirm_materialization_uses_sheet_fields_for_fac00014_multi_quantity_rows(owned_outputs, monkeypatch, tmp_path):
@@ -2264,9 +2272,11 @@ def test_confirm_materialization_uses_sheet_fields_for_fac00014_multi_quantity_r
     assert {(line.get("diet_type"), line.get("quantity_original")) for line in hits} == {
         ("regular", 102),
         ("staff", 2),
-        ("no_meat", 2),
-        ("no_fish", 1),
     }
+    sheet, sheet_error = order_service.get_ocr_sheet(order["id"])
+    assert sheet_error is None
+    assert [sheet["rows"][0][sheet["fields"].index(field)]
+            for field in ("qty.no_meat_x", "qty.no_fish_x")] == ["2", "1"]
 
 
 def test_owned_staff_and_forbidden_columns_ignore_missing_legacy_template_hint(selected_projection_case):

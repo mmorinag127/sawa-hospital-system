@@ -302,10 +302,10 @@ def _fac00004_owned_source(history_case, *, rows, menu_entries, lines,
 
 def _legacy_aux_target_refused(case, value):
     from src.services.hakodate_ocr_evidence_service import authored_cell_role
-    target = {"role": "aux", "field": "aux.col_4", "semantic_field": "aux.col_4",
+    target = {"role": "aux", "field": "legacy.sum", "semantic_field": "legacy.sum",
               "worksheet_col": 5, "field_label": "合計", "ocr_text": value}
     with case.readonly():
-        with pytest.raises(ValueError, match="^hakodate_target_role_unresolved$"):
+        with pytest.raises(ValueError, match="^hakodate_target_role_conflict$"):
             authored_cell_role(target)
     assert target["ocr_text"] == value
 
@@ -891,8 +891,10 @@ def _assert_rejected_rerun(case, rerun, error, diagnostic, before):
         assert state.confirmed_snapshot_id is None
         assert state.state == "ocr_failed" and state.blockers_json == [error]
         assert state.revision == receipt["workflow_revision"] + 1
-        assert before["order_lines"] == []
-        assert session.query(OrderLine).filter(OrderLine.order_id == case.id).count() == 0
+        retained = session.query(OrderLine).filter(OrderLine.order_id == case.id).one()
+        assert (retained.date, retained.daypart, retained.menu_name, retained.diet_type,
+                retained.area_id, retained.quantity_original) == (
+            date(2026, 3, 22), "朝", "Menu A", "regular", "2F", 3)
 
     # Real authenticated commands may acquire CAS locks, but cannot adopt or mutate state.
     revision = case.revision()

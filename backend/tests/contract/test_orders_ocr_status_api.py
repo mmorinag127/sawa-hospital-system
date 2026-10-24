@@ -1079,7 +1079,7 @@ def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master(owned_o
 
     assert res.status_code == 200
     group = next(item for item in res.json()["groups"] if item.get("menu_name") == menu_name)
-    assert group["menu_category"] == "副菜"
+    assert group["menu_category"] == "副菜1"
     regular = next(item for item in group["diet_groups"] if item.get("diet_type") == "regular")
     assert regular["calculation_basis_label"] == "70g/人"
     assert regular["total_amount_label"] == "630g"
@@ -1142,7 +1142,7 @@ def test_daily_bags_uses_explicit_meal_recipe_and_physical_category_over_master_
 
     assert res.status_code == 200
     group = next(item for item in res.json()["groups"] if item.get("menu_name") == menu_name)
-    assert group["menu_category"] == "副菜"
+    assert group["menu_category"] == "副菜1"
     regular = next(item for item in group["diet_groups"] if item.get("diet_type") == "regular")
     assert regular["calculation_basis_label"] == "70g/人"
     assert regular["total_amount_label"] == "630g"

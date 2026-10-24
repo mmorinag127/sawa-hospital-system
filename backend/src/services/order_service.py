@@ -11074,7 +11074,17 @@ def ensure_hakodate_evidence_draft_current(
     ):
         return None, "hakodate_ocr_evidence_missing"
     current_draft = synchronous_write_input.get("draft")
-    if _draft_payload_has_hakodate_evidence_projection(current_draft):
+    same_selected_source = (
+        isinstance(current_draft, dict)
+        and bool(selected_evidence.get("id"))
+        and current_draft.get("base_evidence_run_id") == selected_evidence["id"]
+        and bool(selected_evidence.get("template_version_id"))
+        and current_draft.get("template_version_id") == selected_evidence["template_version_id"]
+    )
+    if same_selected_source and (
+        _draft_record_is_authoritative_current_sheet(current_draft)
+        or _draft_payload_has_hakodate_evidence_projection(current_draft)
+    ):
         return current_draft, None
 
     switched_draft, switch_error = switch_draft_to_latest_evidence(
@@ -17886,6 +17896,7 @@ def _mark_reparse_job_awaiting_output(
         job.metrics = metrics
         job.updated_at = now
         session.flush()
+        receipt = deepcopy(job.metrics["pending_receipt"])
     return {"outcome": "pending", "status": "awaiting_output",
             "output_reference": output_reference, "pending_receipt": receipt}
 

@@ -174,6 +174,12 @@ def selected_bagging_order(monkeypatch, tmp_path, lines, *, invoice_template=Non
     for line in lines:
         assert date.fromisoformat(line["date"]) == day
         groups.setdefault((line["daypart"], line["menu_name"]), []).append(line)
+    if physical_slot_indexes is not None:
+        assert all(name in physical_slot_indexes and type(physical_slot_indexes[name]) is int
+                   for _meal, name in groups)
+        groups = dict(sorted(groups.items(), key=lambda item: (
+            {"朝": 0, "昼": 1, "夕": 2}[item[0][0]], physical_slot_indexes[item[0][1]],
+        )))
     with session_scope() as session:
         if not prepared_sources and not prepared_menu_sources:
             if session.get(MonthlyMenu, day.strftime("%Y-%m")) is None:

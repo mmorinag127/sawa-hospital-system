@@ -411,7 +411,7 @@ def test_actual_quad_and_axis_save_commands_use_one_writer_after_readonly_cas(ge
         writers = [index for index, statements in enumerate(transactions)
                    if set(statements) & {"INSERT", "UPDATE", "DELETE", "REPLACE"}]
         assert len(writers) == 1 and writers[0] > 0, transactions
-        assert all(statements and set(statements) <= {"SELECT", "PRAGMA"}
+        assert all(statements and set(statements) <= {"BEGIN", "SELECT", "PRAGMA"}
                    for index, statements in enumerate(transactions) if index != writers[0]), transactions
         assert set(transactions[writers[0]]) <= {"SELECT", "PRAGMA", "INSERT", "UPDATE"}, transactions
     finally:

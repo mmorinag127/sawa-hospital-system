@@ -649,6 +649,7 @@ def test_list_workflow_states_serializes_within_session(authored_sheet_case):
 
 def test_missing_actual_native_artifact_requires_recovery_without_unowned_cache_substitution(authored_sheet_case):
     from src.models.order_ocr_cache import OrderOcrCache
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
     from src.services import canonical_ocr_artifact_service
 
     case = authored_sheet_case(quantity=5, include_remarks=False)
@@ -663,6 +664,8 @@ def test_missing_actual_native_artifact_requires_recovery_without_unowned_cache_
     overlay = pathlib.Path(selected["payload_json"]["hakodate_overlay"]["uri"])
     assert overlay.resolve().is_relative_to(case.root.resolve())
     assert overlay.is_file()
+    with session_scope() as session:
+        stored_payload = deepcopy(session.get(OrderOcrEvidenceRun, case.evidence).payload_json)
     overlay.unlink()
     with case.readonly():
         with pytest.raises(ValueError, match="^canonical_artifact_bytes_unavailable$"):
@@ -671,9 +674,10 @@ def test_missing_actual_native_artifact_requires_recovery_without_unowned_cache_
         assert output is None
         assert error == "ocr_evidence_recovery_required"
         stored = order_service.get_ocr_evidence_run(case.evidence)
-        assert stored["payload_json"] == selected["payload_json"]
+        assert stored["selectable"] is False
         assert stored["artifact_digest"] == selected["artifact_digest"]
         with session_scope() as session:
+            assert session.get(OrderOcrEvidenceRun, case.evidence).payload_json == stored_payload
             assert session.get(OrderOcrCache, case.id).payload == original
 
 
