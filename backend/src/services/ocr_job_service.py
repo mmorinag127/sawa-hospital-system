@@ -593,6 +593,168 @@ def get_jobs(job_ids: list[str]) -> dict[str, dict[str, Any]]:
         return {job.id: _job_to_dict(job) for job in jobs}
 
 
+def get_recorded_order_job_bindings(order_ids: list[str], *, read_session=None) -> dict[str, dict[str, Any]]:
+    """Read the workflow's explicit execution, never a name or latest-row guess."""
+    from src.models.order import Order
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.models.document import OrderDocument
+    from src.models.uploaded_pdf import UploadedPdf
+    from src.models.order_version import OrderVersion
+    from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
+    from src.services.workflow_attempt_guard_service import selected_version_snapshot, snapshots_equal
+
+    identities = list(dict.fromkeys(value for value in order_ids if value))
+    if not identities:
+        return {}
+    context = nullcontext(read_session) if read_session is not None else session_scope()
+    with context as session:
+        rows = session.execute(select(
+            Order.id, Order.current_document_id, OrderWorkflowState.state,
+            OrderWorkflowState.secondary_actions_json,
+        ).select_from(Order).outerjoin(
+            OrderWorkflowState, OrderWorkflowState.order_id == Order.id,
+        ).where(Order.id.in_(identities))).all()
+        records = {}
+        for order_id, document_id, state, secondary in rows:
+            meta = secondary.get("workflow_v2") if isinstance(secondary, dict) else None
+            meta = meta if isinstance(meta, dict) else {}
+            identity = meta.get("ocr_job_id")
+            identity = identity if isinstance(identity, str) and identity else None
+            records[order_id] = (document_id, state, meta, identity)
+        job_ids = {record[3] for record in records.values() if record[3]}
+        jobs = {job.id: job for job in session.execute(
+            select(OcrJob).where(OcrJob.id.in_(job_ids)),
+        ).scalars()} if job_ids else {}
+        inputs = {}
+        for job_id, job in jobs.items():
+            metrics = job.metrics if isinstance(job.metrics, dict) else {}
+            capture = metrics.get("nonworkflow_execution")
+            capture = capture if isinstance(capture, dict) else {}
+            if metrics.get("workflow_attempt_id") is None:
+                orders = capture.get("orders")
+                captured = orders.get(job.order_id) if isinstance(orders, dict) else None
+                selected, version = capture.get("selected_pdf_receipt"), capture.get("selected_version_input")
+            else:
+                captured = metrics.get("reparse_read_input")
+                selected, version = metrics.get("selected_pdf_receipt"), metrics.get("selected_version_input")
+            inputs[job_id] = (captured, selected, version, capture)
+        receipts = [value[1] for value in inputs.values() if isinstance(value[1], dict)]
+        def string_ids(values):
+            return {value for value in values if isinstance(value, str) and value}
+        documents = {row.id: row for row in session.execute(select(OrderDocument).where(
+            OrderDocument.id.in_(string_ids(value.get("document_id") for value in receipts)),
+        )).scalars()} if receipts else {}
+        uploads = {row.id: row for row in session.execute(select(UploadedPdf).where(
+            UploadedPdf.id.in_(string_ids(value.get("uploaded_pdf_id") for value in receipts)),
+        )).scalars()} if receipts else {}
+        version_ids = string_ids(value[2].get("id") for value in inputs.values() if isinstance(value[2], dict))
+        versions = {row.id: row for row in session.execute(select(OrderVersion).where(
+            OrderVersion.id.in_(version_ids),
+        )).scalars()} if version_ids else {}
+        attempts = string_ids(job.metrics.get("workflow_attempt_id") for job in jobs.values()
+                              if isinstance(job.metrics, dict))
+        deliveries = {row.workflow_attempt_id: row for row in session.execute(select(
+            WorkflowOcrDelivery.workflow_attempt_id, WorkflowOcrDelivery.order_id,
+            WorkflowOcrDelivery.job_id, WorkflowOcrDelivery.selected_pdf_receipt,
+            WorkflowOcrDelivery.request_identity["selected_version_input"].label("selected_version_input"),
+            WorkflowOcrDelivery.request_identity["reparse_read_input"].label("reparse_read_input"),
+        ).where(WorkflowOcrDelivery.workflow_attempt_id.in_(attempts)))} if attempts else {}
+        bindings = {}
+        for order_id, (document_id, state, meta, identity) in records.items():
+            job = jobs.get(identity)
+            error = None
+            if identity is None:
+                if ("ocr_job_id" in meta or "ocr_job_attempt_id" in meta
+                        or state in {"ocr_running", "ocr_completed", "ocr_failed"}):
+                    error = "ocr_job_not_recorded"
+            elif job is None:
+                error = "ocr_recorded_job_missing"
+            elif job.order_id != order_id:
+                error = "ocr_recorded_job_order_mismatch"
+            elif not isinstance(job.metrics, dict):
+                error = "ocr_recorded_job_input_missing"
+            else:
+                metrics = job.metrics
+                expected = meta.get("ocr_job_attempt_id")
+                actual = metrics.get("workflow_attempt_id")
+                if (type(expected) is not type(actual) or expected != actual
+                        or (expected is not None and (not isinstance(expected, str) or not expected))):
+                    error = "ocr_recorded_job_attempt_mismatch"
+                else:
+                    captured, selected, selected_version, capture = inputs[identity]
+                    if expected is None:
+                        if (capture.get("job_id") != identity or capture.get("order_id") != order_id
+                                or not has_recorded_execution_input(_job_to_dict(job))):
+                            error = "ocr_recorded_job_input_missing"
+                    else:
+                        delivery = deliveries.get(expected)
+                        if (delivery is None or delivery.order_id != order_id or delivery.job_id != identity
+                                or not snapshots_equal(delivery.selected_pdf_receipt, selected)
+                                or not snapshots_equal(delivery.selected_version_input, selected_version)
+                                or not snapshots_equal(delivery.reparse_read_input, captured)):
+                            error = "ocr_recorded_job_input_changed"
+                    order_input = captured.get("order") if isinstance(captured, dict) else None
+                    if error is None and (not isinstance(order_input, dict) or order_input.get("id") != order_id):
+                        error = "ocr_recorded_job_input_missing"
+                    if error is None and order_input.get("current_document_id") != document_id:
+                        error = "ocr_recorded_job_document_changed"
+                    if error is None and (not isinstance(selected, dict)
+                            or selected.get("order_id") != order_id
+                            or selected.get("storage_uri") != job.input_reference
+                            or not all(isinstance(selected.get(key), str) and selected[key]
+                                       for key in ("document_id", "uploaded_pdf_id", "message_id", "sha256"))):
+                        error = "ocr_recorded_job_pdf_mismatch"
+                    if error is None:
+                        document = documents.get(selected.get("document_id"))
+                        uploaded = uploads.get(selected.get("uploaded_pdf_id"))
+                        if (document is None or uploaded is None
+                                or (document.storage_uri, document.source_email_id) != (selected.get("storage_uri"), selected.get("message_id"))
+                                or (uploaded.storage_uri, uploaded.message_id, uploaded.content_sha256)
+                                != (selected.get("storage_uri"), selected.get("message_id"), selected.get("sha256"))):
+                            error = "ocr_recorded_job_pdf_mismatch"
+                        elif selected_version is None:
+                            if selected.get("document_id") != document_id:
+                                error = "ocr_recorded_job_document_changed"
+                        else:
+                            version_id = selected_version.get("id") if isinstance(selected_version, dict) else None
+                            version = versions.get(version_id) if isinstance(version_id, str) else None
+                            version_identity = ("id", "order_id", "version_no", "document_id", "message_id", "storage_uri",
+                                                "facility_code", "week_code", "received_at")
+                            actual_version = selected_version_snapshot(version) if version is not None else {}
+                            if (version is None or version.order_id != order_id
+                                    or version.document_id != selected.get("document_id")
+                                    or not snapshots_equal(
+                                        {key: actual_version.get(key) for key in version_identity},
+                                        {key: selected_version.get(key) for key in version_identity},
+                                    )):
+                                error = "ocr_recorded_job_version_changed"
+            bindings[order_id] = {
+                "job_id": identity,
+                "job": _job_to_dict(job) if job is not None and error is None else None,
+                "error": error,
+            }
+        return bindings
+
+
+def get_recorded_order_job(order_id: str) -> dict[str, Any] | None:
+    binding = get_recorded_order_job_bindings([order_id]).get(order_id)
+    if not binding:
+        return None
+    if binding["error"]:
+        raise ValueError(binding["error"])
+    return binding["job"]
+
+
+def recorded_order_job_fields(binding: dict[str, Any] | None) -> dict[str, Any]:
+    binding = binding or {}
+    error = binding.get("error")
+    result = {"ocr_job_id": binding.get("job_id") if binding.get("job") is not None else None,
+              "ocr_job_binding_error": error}
+    if error:
+        result.update(ocr_status="failed", ocr_error=error, ocr_job_binding_error=error)
+    return result
+
+
 def get_latest_order_job(order_id: str) -> dict[str, Any] | None:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:

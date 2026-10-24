@@ -24,6 +24,8 @@ from tests.helpers.owned_order import owned_registration  # noqa: E402
 from tests.helpers.owned_output import owned_outputs  # noqa: E402
 from tests.contract.test_orders_draft_review_api import _refuse
 from tests.contract.test_orders_ocr_sheet_history_api import history_case  # noqa: F401
+from tests.helpers.job_diagnostics_corruption import inject_stale_job_diagnostics as _inject_stale_job_diagnostics
+from tests.helpers.job_diagnostics_corruption import inject_unowned_job_diagnostics
 
 
 def _create_seed_order(owned_registration, message_id: str) -> dict:
@@ -78,7 +80,7 @@ def test_owned_running_job_is_not_completed_by_unowned_cache_success(history_cas
     from datetime import date
     period = "2026-02@2026-02-15~2026-02-21"
     f = history_case(week=period, period=period, received=datetime(2026, 2, 15, 9),
-        lines=[{"date": "2026-02-15", "daypart": "朝", "menu_name": "Menu A",
+        lines=[{"date": date(2026, 2, 15), "daypart": "朝", "menu_name": "Menu A",
                 "diet_type": "regular", "area_id": "2F", "bag_type": "standard", "quantity_original": 5}],
         menu_entries=[{"id": "status-feb-15", "monthly_menu_id": "2026-02",
             "menu_date": date(2026, 2, 15), "daypart": "朝", "name": "Menu A",
@@ -129,7 +131,6 @@ def test_list_orders_include_ocr_does_not_refresh_workflow_state_on_read(monkeyp
     ids=["native_anchor_failure_keeps_saved_five", "historical_provider_failure_detail_keeps_saved_five"])
 def test_owned_terminal_failure_cannot_be_completed_by_stale_done_output(history_case, monkeypatch, tmp_path, failure):
     from copy import deepcopy
-    from src.models.ocr_job import OcrJob
     from src.services import hakodate_cell_ocr_batch_service as batch
 
     case = _owned_status_case(history_case)
@@ -154,11 +155,9 @@ def test_owned_terminal_failure_cannot_be_completed_by_stale_done_output(history
     assert result["terminal_receipt"]["evidence_run_id"] is None
     assert error == "hakodate_live_rerun_failed"
     assert calls == []
-    with session_scope() as session:
-        failed = session.get(OcrJob, case.job)
-        terminal = deepcopy(failed.metrics["rerun_terminal_receipt"])
-        failed.output_reference = f"file://{output_path}"
-        assert failed.metrics["rerun_terminal_receipt"] == terminal
+    terminal = deepcopy(get_job(case.job)["metrics"]["rerun_terminal_receipt"])
+    _inject_stale_job_diagnostics(case, output_reference=f"file://{output_path}")
+    assert get_job(case.job)["metrics"]["rerun_terminal_receipt"] == terminal
     job = get_job(case.job)
     assert job["status"] == "failed"
     receipt = job["metrics"]["rerun_terminal_receipt"]
@@ -351,8 +350,6 @@ def test_owned_completed_rerun_publishes_eight_without_neighbor_discovery(histor
 
 
 def test_done_owned_rerun_keeps_stale_pending_diagnostics_readonly(history_case, tmp_path):
-    from src.models.ocr_job import OcrJob
-
     case = _owned_status_case(history_case)
     source = case.produce(cell_values="8")
     order = {"id": case.id}
@@ -365,10 +362,9 @@ def test_done_owned_rerun_keeps_stale_pending_diagnostics_readonly(history_case,
     case.protected += (output_path,)
     stale_metrics = {'request_mode': 'ocr_rerun', 'processing_stage': 'evidence_ready', 'result_state': 'evidence_ready', 'error': 'ocr_output_pending', 'trigger_error': 'OCR pipeline request timeout: The read operation timed out', 'awaiting_output_since': '2026-04-22T16:26:04.410692', 'next_recovery_at': '2026-04-22T16:36:04.410692', 'evidence_run_id': 'OEV-stale-done', 'new_evidence_available': True, 'order_id': order['id']}
     # Deliberate stale diagnostic metadata, never a fabricated evidence/receipt.
+    _inject_stale_job_diagnostics(case, error_message="ocr_output_pending",
+        metrics={**get_job(case.job)["metrics"], **stale_metrics})
     with session_scope() as session:
-        job = session.get(OcrJob, case.job)
-        job.error_message = "ocr_output_pending"
-        job.metrics = {**job.metrics, **stale_metrics}
         cached = session.get(OrderOcrCache, case.id)
         if cached is None:
             session.add(OrderOcrCache(order_id=case.id, payload=cached_input))
@@ -488,7 +484,7 @@ def test_owned_running_detail_does_not_reconcile_unowned_first_pass_file(history
     job_id = f"OCR-{order_service.get_order_by_id(case.id)['message_id']}"
     _, fresh = create_job(job_id, input_reference=str(case.pdf), status="running")
     assert fresh is True
-    update_job(job_id, status="running", output_reference=f"file://{output_path}",
+    inject_unowned_job_diagnostics(case.engine, job_id, output_reference=f"file://{output_path}",
         metrics={"request_mode": "ingest_first_pass"}, error_message=None)
     diagnostic = get_job(job_id)
     assert diagnostic["metrics"].get("workflow_attempt_id") is None
@@ -520,9 +516,9 @@ def test_unowned_done_message_job_does_not_publish_evidence_on_detail(history_ca
     output_path.write_text(json.dumps(original), encoding="utf-8")
     case.protected += (output_path,)
     job_id = f"OCR-{order_service.get_order_by_id(case.id)['message_id']}"
-    _, fresh = create_job(job_id, input_reference=str(case.pdf), status="done")
+    _, fresh = create_job(job_id, input_reference=baseline["document"], status="done")
     assert fresh is True
-    update_job(job_id, status="done", output_reference=f"file://{output_path}",
+    inject_unowned_job_diagnostics(case.engine, job_id, output_reference=f"file://{output_path}",
         metrics={"request_mode": "ingest_first_pass"}, error_message=None)
     diagnostic = get_job(job_id)
     assert diagnostic["metrics"].get("workflow_attempt_id") is None
@@ -557,7 +553,7 @@ def test_get_order_does_not_reconcile_done_first_pass_output_when_persisted_evid
     created, fresh = create_job(job_id, input_reference=str(case.pdf),
         status="done", order_id=case.id)
     assert fresh is True
-    update_job(job_id, status="done", output_reference=f"file://{output_path}",
+    inject_unowned_job_diagnostics(case.engine, job_id, output_reference=f"file://{output_path}",
         metrics={"request_mode": "ingest_first_pass"}, error_message=None)
     diagnostic = get_job(job_id)
     assert diagnostic["metrics"].get("workflow_attempt_id") is None
@@ -589,9 +585,9 @@ def test_unowned_done_order_job_does_not_publish_evidence_on_detail(history_case
     output_path.write_text(json.dumps(original), encoding="utf-8")
     case.protected += (output_path,)
     job_id = f"OCR-{case.id}"
-    _, fresh = create_job(job_id, input_reference=str(case.pdf), status="done", order_id=case.id)
+    _, fresh = create_job(job_id, input_reference=baseline["document"], status="done", order_id=case.id)
     assert fresh is True
-    update_job(job_id, status="done", output_reference=f"file://{output_path}",
+    inject_unowned_job_diagnostics(case.engine, job_id, output_reference=f"file://{output_path}",
         metrics={"request_mode": "ingest_first_pass"}, error_message=None)
     diagnostic = get_job(job_id)
     assert diagnostic["metrics"].get("workflow_attempt_id") is None
@@ -1046,6 +1042,8 @@ def test_daily_bags_prefers_monthly_menu_entry_category_over_menu_master(owned_o
                 category="副菜",
                 slot_index=2,
                 diet_type="regular",
+                qty_per_serving=70,
+                unit_type="g",
                 facility_override=None,
             )
         )
@@ -1106,6 +1104,8 @@ def test_daily_bags_prefers_monthly_menu_entry_over_item_defaults(owned_outputs)
                 category="副菜",
                 slot_index=1,
                 diet_type="regular",
+                qty_per_serving=70,
+                unit_type="g",
             )
         )
 
@@ -1917,19 +1917,16 @@ def test_owned_rerun_real_slot_timeout_persists_failed_owned_receipt(history_cas
 
 def _owned_debug_case(history_case, *, metrics, cached_debug):
     from copy import deepcopy
-    from src.models.ocr_job import OcrJob
 
     case = _owned_status_case(history_case)
     sheet = case.produce(cell_values="5")["sheet"]
     case.save(sheet)
     selected = case.evidence
+    terminal = deepcopy(get_job(case.job)["metrics"]["rerun_terminal_receipt"])
+    _inject_stale_job_diagnostics(case, metrics={**get_job(case.job)["metrics"], **deepcopy(metrics)})
+    assert get_job(case.job)["status"] == "done"
+    assert get_job(case.job)["metrics"]["rerun_terminal_receipt"] == terminal
     with session_scope() as session:
-        job = session.get(OcrJob, case.job)
-        terminal = deepcopy(job.metrics["rerun_terminal_receipt"])
-        # Deliberately stale/display-only diagnostics, not a forged producer result.
-        job.metrics = {**job.metrics, **deepcopy(metrics)}
-        assert job.status == "done"
-        assert job.metrics["rerun_terminal_receipt"] == terminal
         cached = session.get(OrderOcrCache, case.id)
         if cached is None:
             session.add(OrderOcrCache(order_id=case.id, payload={"_reparse_debug": deepcopy(cached_debug)}))

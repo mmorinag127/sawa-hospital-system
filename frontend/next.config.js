@@ -35,7 +35,10 @@ const nextConfig = {
     const target = process.env.API_PROXY_TARGET;
     const shiftTarget = process.env.SHIFT_WEB_PROXY_TARGET;
     const schoolLunchTarget = process.env.SCHOOL_LUNCH_WEB_PROXY_TARGET;
-    const routes = [];
+    const routes = [
+      { source: "/hospital", destination: "/hospital-dashboard" },
+      { source: "/hospital/:path*", destination: "/:path*" },
+    ];
     if (shiftTarget) {
       routes.push(
         { source: "/shift", destination: `${shiftTarget}/shift` },

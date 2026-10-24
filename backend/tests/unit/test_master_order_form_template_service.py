@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from datetime import date
 
 from openpyxl import load_workbook
 from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor
@@ -155,7 +156,7 @@ def test_build_facility_template_from_master_supports_all_master_facilities(tmp_
         facility_id = facility.get("facility_id")
         if not facility_id:
             continue
-        resolved = config_service._build_facility_config(facility_id=facility_id, facility=facility)  # noqa: SLF001
+        resolved = config_service.get_facility_config(facility_id)
         output = service.build_facility_template_xlsx(
             facility_config=resolved,
             output_path=tmp_path / f"{facility_id}_facility_template.xlsx",
@@ -197,9 +198,7 @@ def test_build_facility_template_from_master_uses_explicit_header_groups_only(tm
 
 
 def test_build_facility_template_from_master_applies_configured_two_level_headers(tmp_path: Path, repository_layout_source) -> None:
-    master = config_service.load_facility_master()
-    facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00003")
-    resolved = config_service._build_facility_config(facility_id="FAC00003", facility=facility)  # noqa: SLF001
+    resolved = config_service.get_facility_config("FAC00003")
 
     output = service.build_facility_template_xlsx(
         facility_config=resolved,
@@ -384,14 +383,19 @@ def test_build_facility_template_from_master_keeps_week_menu_overflow_as_review_
 
 
 def test_build_facility_template_from_master_applies_configured_body_merges(tmp_path: Path, repository_layout_source) -> None:
-    master = config_service.load_facility_master()
-    facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00007")
-    resolved = config_service._build_facility_config(facility_id="FAC00007", facility=facility)  # noqa: SLF001
+    resolved = config_service.get_facility_config("FAC00007")
 
     output = service.build_facility_template_xlsx(
         facility_config=resolved,
         output_path=tmp_path / "FAC00007_facility_template.xlsx",
         week_value="2026-04@2026-04-26~2026-04-30",
+        week_menu_entries=[
+            {"menu_date": date(2026, 4, day), "daypart": meal, "slot_index": slot,
+             "name": f"Authored {day}-{meal}-{slot}", "diet_type": "regular"}
+            for day in range(26, 31)
+            for meal, count in (("朝", 2), ("昼", 3), ("夕", 3))
+            for slot in range(count)
+        ],
     )
 
     workbook = load_workbook(output)
@@ -414,9 +418,7 @@ def test_build_facility_template_from_master_applies_configured_body_merges(tmp_
 
 
 def test_build_facility_template_from_master_applies_body_merges_without_week_value(tmp_path: Path, repository_layout_source) -> None:
-    master = config_service.load_facility_master()
-    facility = next(item for item in master.get("facilities", []) if item.get("facility_id") == "FAC00016")
-    resolved = config_service._build_facility_config(facility_id="FAC00016", facility=facility)  # noqa: SLF001
+    resolved = config_service.get_facility_config("FAC00016")
 
     output = service.build_facility_template_xlsx(
         facility_config=resolved,

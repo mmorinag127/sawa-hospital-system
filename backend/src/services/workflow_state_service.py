@@ -22,8 +22,7 @@ from src.services.workflow_attempt_guard_service import (
 )
 from src.services.ocr_job_service import (
     describe_job_state,
-    get_latest_order_job,
-    get_job as get_ocr_job,
+    get_recorded_order_job_bindings,
     get_job_request_mode,
     is_order_reparse_job,
 )
@@ -93,20 +92,6 @@ def _legacy_refresh_snapshot(
         "confidence_band": update_payload.get("confidence_band"),
         "last_transition_at": last_transition_at.isoformat(),
     }
-
-
-def _get_order_reparse_job(order_id: str) -> dict[str, Any] | None:
-    normalized_order_id = str(order_id or "").strip()
-    if not normalized_order_id:
-        return None
-    candidates = [
-        get_latest_order_job(normalized_order_id),
-        get_ocr_job(f"OCR-{normalized_order_id}"),
-    ]
-    for candidate in candidates:
-        if is_order_reparse_job(candidate if isinstance(candidate, dict) else None, normalized_order_id):
-            return candidate
-    return None
 
 
 def _attach_top_level_apply_flags(
@@ -298,6 +283,7 @@ def _build_sheet_gate(
     order_id: str,
     order_payload: dict[str, Any] | None,
     draft_sheet: dict[str, Any] | None,
+    reparse_job: dict[str, Any] | None,
     active_evidence_run: dict[str, Any] | None = None,
     candidate_resolution: dict[str, Any] | None = None,
     current_sheet_context: dict[str, Any] | None = None,
@@ -326,7 +312,6 @@ def _build_sheet_gate(
     position_fallback_semantics_ready = position_column_mapping_service.candidate_resolution_uses_position_fallback(
         candidate_resolution
     )
-    reparse_job = _get_order_reparse_job(order_id)
     reparse_state = describe_job_state(reparse_job if isinstance(reparse_job, dict) else None)
     return apply_gate_service.evaluate_sheet_gate(
         rows=rows if isinstance(rows, list) else None,
@@ -982,7 +967,11 @@ def _build_locked_workflow_state_projection(
         if isinstance(current_sheet_context, dict)
         else None
     )
-    reparse_job = _get_order_reparse_job(normalized_order_id)
+    job_binding = get_recorded_order_job_bindings(
+        [normalized_order_id], read_session=projection_session,
+    ).get(normalized_order_id) or {}
+    recorded_job = job_binding.get("job")
+    reparse_job = recorded_job if is_order_reparse_job(recorded_job, normalized_order_id) else None
     active_evidence_run = _resolve_active_evidence_run(evidence_run, draft_sheet)
     active_evidence_run = _augment_workflow_evidence_run(
         active_evidence_run,
@@ -1036,6 +1025,8 @@ def _build_locked_workflow_state_projection(
     )
     evidence_payload = active_evidence_run.get("payload_json") if isinstance(active_evidence_run, dict) else None
     reparse_state = describe_job_state(reparse_job if isinstance(reparse_job, dict) else None)
+    if job_binding.get("error"):
+        reparse_state = {**reparse_state, "status": "blocked", "blockers": [job_binding["error"]]}
     reparse_request_mode = _infer_reparse_request_mode(reparse_job if isinstance(reparse_job, dict) else None, reparse_state)
     if isinstance(reparse_state, dict) and reparse_request_mode:
         reparse_state = {**reparse_state, "request_mode": reparse_request_mode}
@@ -1045,6 +1036,8 @@ def _build_locked_workflow_state_projection(
         week_code=current_week_code,
         received_at=order_payload.get("received_at"),
         evidence_payload=evidence_payload if isinstance(evidence_payload, dict) else None,
+        current_sheet_context=current_sheet_context,
+        read_session=projection_session,
     )
     decision_projector = (
         critical_decision_service.sync_pending_decisions
@@ -1083,6 +1076,7 @@ def _build_locked_workflow_state_projection(
             order_id=normalized_order_id,
             order_payload=order_payload,
             draft_sheet=draft_sheet,
+            reparse_job=reparse_job,
             active_evidence_run=active_evidence_run,
             candidate_resolution=candidate_resolution,
             current_sheet_context=current_sheet_context,
@@ -1263,6 +1257,8 @@ def _build_locked_workflow_state_projection(
     )
     serialized["active_evidence_run_id"] = str((active_evidence_run or {}).get("id") or "").strip() or None
     serialized["reparse_state"] = reparse_state
+    if job_binding.get("error"):
+        serialized["ocr_job_binding_error"] = job_binding["error"]
     effective_ocr_status = str((reparse_state or {}).get("status") or "").strip() or None
     if effective_ocr_status == "idle" and isinstance(active_evidence_run, dict):
         effective_ocr_status = "done"

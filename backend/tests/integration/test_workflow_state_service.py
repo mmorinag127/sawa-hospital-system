@@ -10,6 +10,10 @@ sys.path.append(str(ROOT))
 
 from src.db import session_scope  # noqa: E402
 from src.models.order_workflow_state import OrderWorkflowState  # noqa: E402
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun  # noqa: E402
+from src.services import order_workflow_v2_service  # noqa: E402
+from tests.helpers.job_diagnostics_corruption import inject_stale_job_diagnostics  # noqa: E402
+from tests.helpers.job_diagnostics_corruption import inject_unowned_job_diagnostics  # noqa: E402
 from src.services import config_service, critical_decision_service, draft_sheet_service, order_current_state_service, order_service, template_resolution_service, workflow_state_service  # noqa: E402
 from src.services.ocr_job_service import create_job, get_job as get_ocr_job, update_job  # noqa: E402
 from src.models.order import Order, OrderLine  # noqa: E402
@@ -1604,7 +1608,6 @@ def test_refresh_workflow_state_uses_owned_terminal_metrics_to_surface_new_candi
 
 def test_owned_selected_eight_is_not_replaced_by_stale_candidate_five(authored_sheet_case):
     from copy import deepcopy
-    from src.models.ocr_job import OcrJob
 
     case = authored_sheet_case(quantity=5, include_remarks=False)
     older = case.evidence
@@ -1621,13 +1624,10 @@ def test_owned_selected_eight_is_not_replaced_by_stale_candidate_five(authored_s
     })
     assert isinstance(saved, dict)
     assert saved["base_evidence_run_id"] == latest
-    with session_scope() as session:
-        job = session.get(OcrJob, case.job)
-        receipt = deepcopy(job.metrics["rerun_terminal_receipt"])
-        # Deliberate stale diagnostic metadata; never alter physical ownership or its receipt.
-        job.metrics = {**job.metrics, "request_mode": "ocr_rerun",
-                       "new_evidence_available": True, "evidence_run_id": older}
-        assert job.metrics["rerun_terminal_receipt"] == receipt
+    receipt = deepcopy(get_ocr_job(case.job)["metrics"]["rerun_terminal_receipt"])
+    inject_stale_job_diagnostics(case, metrics={**get_ocr_job(case.job)["metrics"],
+        "request_mode": "ocr_rerun", "new_evidence_available": True, "evidence_run_id": older})
+    assert get_ocr_job(case.job)["metrics"]["rerun_terminal_receipt"] == receipt
     before_job = get_ocr_job(case.job)
     with case.readonly():
         workflow = workflow_state_service.project_workflow_state(case.id)
@@ -1726,7 +1726,7 @@ def test_unowned_failed_jobs_cannot_heal_or_replace_owned_saved_five(authored_sh
         created, fresh = create_job(job_id, input_reference="file://dummy-workflow.pdf",
             status="failed", order_id=case.id)
         assert fresh is True
-        update_job(job_id, status="failed", output_reference=f"file://{path}",
+        inject_unowned_job_diagnostics(case.engine, job_id, output_reference=f"file://{path}",
             error_message=failure, metrics=metrics)
         before = get_ocr_job(job_id)
         assert before["metrics"].get("workflow_attempt_id") is None

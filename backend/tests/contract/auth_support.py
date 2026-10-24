@@ -45,11 +45,13 @@ def _registered_hospital_user(monkeypatch, *, role, status="active", systems=("h
         verifier = Mock(side_effect=verify)
         patch.setattr(auth_module.id_token, "verify_oauth2_token", verifier)
         # Reuse the existing canonical test grant schema and real user inserts.
-        user_id = _seed_user(account, role=role, status=status, systems=systems)
+        with auth_module.session_scope() as session:
+            engine = session.get_bind()
+        user_id = _seed_user(account, role=role, status=status, systems=systems, engine=engine)
         try:
             yield HospitalUser(user_id, account, token, verifier)
         finally:
-            _cleanup(user_id)
+            _cleanup(user_id, engine=engine)
 
 
 def registered_hospital_operator(monkeypatch, *, status="active", systems=("hospital",)):

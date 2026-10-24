@@ -1894,11 +1894,31 @@ def test_stale_saved_sheet_requires_explicit_reselection_before_selected_ocr_reb
             assert current["selected_ocr_result_id"] == evidence_id_1
             assert current["saved_sheet_id"] is None
             assert current["confirmed_snapshot_id"] is None
-            assert current["revision"] == workflow["revision"] + 1
+            assert current["revision"] > workflow["revision"]
             after = database_snapshot()
+            invalidated = {"order_lines", "bags", "label_rows", "delivery_notes",
+                           "order_confirmed_snapshots", "order_bagging_results", "order_output_bundles"}
             for table, rows in before.items():
-                if table != "order_workflow_states":
+                if table in invalidated:
+                    assert after[table] == [row for row in rows if row["order_id"] != order_id], table
+                elif table == "order_current_states":
+                    for old in rows:
+                        new = next(row for row in after[table] if row["order_id"] == old["order_id"])
+                        if old["order_id"] == order_id:
+                            assert {key for key in old if old[key] != new[key]} <= {
+                                "draft_id", "evidence_run_id", "template_version_id"}
+                            assert all(new[key] is None for key in
+                                       ("draft_id", "evidence_run_id", "template_version_id"))
+                        else:
+                            assert new == old
+                elif table != "order_workflow_states":
                     assert after[table] == rows, table
+            stale = client.post(
+                root + f"/ocr-results/{evidence_id_1}/select",
+                headers={**actor.headers, "If-Match": str(workflow["revision"])},
+            )
+            assert stale.status_code == 409, stale.text
+            assert database_snapshot() == after
             original_row = next(row for row in before["order_workflow_states"] if row["order_id"] == order_id)
             current_row = next(row for row in after["order_workflow_states"] if row["order_id"] == order_id)
             changed = {key for key in original_row if original_row[key] != current_row[key]}

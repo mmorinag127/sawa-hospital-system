@@ -51,6 +51,7 @@ def main():
     }}
     env.update({"E2E_BASE_URL": f"http://127.0.0.1:{port}",
                 "NEXT_PUBLIC_API_BASE_URL": "/api/hospital",
+                "API_PROXY_TARGET": "http://127.0.0.1:39091",
                 "NEXT_PUBLIC_GIT_SHA": source, "NEXT_TELEMETRY_DISABLED": "1",
                 "NODE_ENV": "development"})
     (evidence / "source.json").write_text(json.dumps({

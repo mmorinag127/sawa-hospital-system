@@ -50,7 +50,9 @@ def test_synthetic_native_manual_confirmation_save_and_packet_rejection(numeric_
         assert by_cell[target["sheet_cell"]]["raw_text"] == expected
         assert by_cell[target["sheet_cell"]]["normalized_value"] == expected
     artifacts.validate_payload(payload)
-    assert len(payload["hakodate_canonical_pipeline"]["artifact_packet"]["outputs"]) == 8
+    assert set(payload["hakodate_canonical_pipeline"]["artifact_packet"]["outputs"]) == (
+        set(artifacts.REQUIRED_OUTPUTS) | {"preprocess_observation"}
+    )
     f.select()
     original_json = f.master_json.read_bytes()
     before_output_read = database_snapshot()

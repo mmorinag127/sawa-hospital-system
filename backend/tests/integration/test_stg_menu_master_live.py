@@ -395,9 +395,9 @@ def test_runner_finally_real_sql_cleanup_or_explicit_unresolved(pg, local_runner
     def browser(path, token):
         ledger = json.loads(path.read_text())
         assert ledger['absentBefore'] is True and ledger['receipts'] == [] and count(pg) == 0
-        payload = dict(name=NAME, unit_type='cut', qty_per_serving=0, bag_max_qty=1500, bag_max_unit='count',
+        payload = dict(name=ledger['name'], unit_type='cut', qty_per_serving=0, bag_max_qty=1500, bag_max_unit='count',
                        temp_type='cold', daypart='昼食', category='主菜', condiments=['塩'])
-        item = dict(id='MNU0123abcd', revision=1, normalized_name=NAME, **payload)
+        item = dict(id='MNU0123abcd', revision=1, normalized_name=ledger['name'], **payload)
         with pg.begin() as c:
             c.execute(pg.test_master.insert(), item)
         ledger['writeAttempted'] = True

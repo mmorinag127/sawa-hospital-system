@@ -1,5 +1,8 @@
 import pathlib
 import sys
+from copy import deepcopy
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
@@ -672,7 +675,7 @@ def test_rows_from_structured_payload_prefers_quantity_column_order_for_diabetes
     ]
 
 
-def test_rows_from_pipeline_payload_realigns_stale_floor_family_quantity_block_for_staff_facility():
+def test_rows_from_pipeline_payload_rejects_stale_floor_family_quantity_block_for_staff_facility():
     payload = {
         "table_raw": """
 |日付|区 分||献立|常食||軟菜||ミキサー||備考欄|
@@ -682,11 +685,11 @@ def test_rows_from_pipeline_payload_realigns_stale_floor_family_quantity_block_f
 """.strip()
     }
 
-    rows = _rows_from_pipeline_payload(payload, _template_staff_forbidden_sesame())
-
-    assert rows == [
-        ["2/15", "朝", "Menu A", "12", "1", "2", "3", "4", "", ""],
-    ]
+    original = deepcopy(payload)
+    from src.services.fax_extractor import CanonicalOcrProjectionError
+    with pytest.raises(CanonicalOcrProjectionError, match="^sheet_quantity_column_unmapped$"):
+        _rows_from_pipeline_payload(payload, _template_staff_forbidden_sesame())
+    assert payload == original
 
 
 def test_rows_from_pipeline_payload_realigns_split_forbidden_headers_by_numeric_block_order():

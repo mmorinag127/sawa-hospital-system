@@ -62,7 +62,9 @@ def execute(workflow, job_name, names, cleanup=None):
     with nullcontext(tempfile.mkdtemp(prefix='sawa-local-legacy-')) as directory:
         print('local_evidence_directory=' + directory, flush=True)
         env = {key: value for key, value in os.environ.items()
-               if not key.startswith(('GITHUB_', 'RUNNER_'))}
+               if not key.startswith(('GITHUB_', 'RUNNER_', 'SAWA_IMPACT_'))
+               and key not in {'PYTEST_ADDOPTS', 'PYTEST_PLUGINS', 'TESTMON_DATAFILE', 'SAWA_NODE_IMPACT_STATE'}}
+        env['SAWA_IMPACT_FULL'] = '1'
         context = {'SAWA_LOCAL_SOURCE_DIR': str(ROOT), 'SAWA_LOCAL_LEGACY_TEMP_DIR': directory,
                    'SAWA_LOCAL_SOURCE_SHA': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                    'SAWA_LOCAL_RUN_ID': env.get('SAWA_LOCAL_RUN_ID', str(os.getpid())),
@@ -78,10 +80,10 @@ def execute(workflow, job_name, names, cleanup=None):
                 # Local gh uses its existing login, never an Actions job token.
                 inherited.pop('GH_TOKEN')
             # Dependency selection never omits a test in the local full run.
-            for key in ('PYTEST_ADDOPTS', 'SAWA_IMPACT_ROOT', 'SAWA_IMPACT_STATE',
-                        'SAWA_IMPACT_SPLIT_RUNS', 'TESTMON_DATAFILE', 'SAWA_IMPACT_FULL',
-                        'SAWA_NODE_IMPACT_STATE', 'NODE_OPTIONS'):
-                inherited.pop(key, None)
+            inherited = {key: value for key, value in inherited.items()
+                         if not key.startswith('SAWA_IMPACT_')
+                         and key not in {'PYTEST_ADDOPTS', 'PYTEST_PLUGINS', 'TESTMON_DATAFILE',
+                                         'SAWA_NODE_IMPACT_STATE', 'NODE_OPTIONS'}}
             local_env = dict(env)
             for key, value in inherited.items():
                 key = LOCAL_NAMES.get(key, key)
@@ -94,6 +96,11 @@ def execute(workflow, job_name, names, cleanup=None):
             if 'export GITHUB_ACTIONS=true' in command:
                 command = command.replace('export GITHUB_ACTIONS=true', ': # local owned PostgreSQL execution')
             command = local_text(command, context)
+            if (workflow, job_name) == ('modernization-image-ci.yml', 'frontend-image'):
+                command = command.replace(
+                    'evidence="$SAWA_LOCAL_SOURCE_DIR/tmp/image-ci"',
+                    'evidence="$SAWA_LOCAL_LEGACY_TEMP_DIR/image-ci"',
+                )
             argv = [sys.executable, '-c', command] if item.get('shell') == 'python' else ['bash', '-euo', 'pipefail', '-c', command]
             subprocess.run(argv, cwd=ROOT / item.get('working-directory', '.'), env=local_env, check=True)
             updates = Path(env['SAWA_LOCAL_LEGACY_ENV_FILE'])

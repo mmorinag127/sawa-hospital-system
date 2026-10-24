@@ -129,8 +129,8 @@ def test_synthetic_native_numeric_fax_adoption_save_and_four_packet_stops(numeri
     pipeline = payload["hakodate_canonical_pipeline"]
     assert pipeline["expected_sheet_cells"] == list(f.expected)
     packet = pipeline["artifact_packet"]
-    assert set(packet["outputs"]) == set(artifacts.REQUIRED_OUTPUTS)
-    assert len(packet["outputs"]) == 8
+    assert set(packet["outputs"]) == set(artifacts.REQUIRED_OUTPUTS) | {"preprocess_observation"}
+    assert len(packet["outputs"]) == 9
     assert packet["source_receipt"] == source
     artifacts.validate_payload(payload)
     for key, receipt in packet["outputs"].items():

@@ -170,6 +170,7 @@ def test_monthly_menu_keeps_same_name_daypart_quantities_independent(monkeypatch
                 "name": "ジャーマンポテト",
                 "daypart": "朝食",
                 "category": "主菜",
+                "diet_type": "regular",
                 "unit_type": "g",
                 "qty_per_serving": 70,
             },
@@ -177,6 +178,7 @@ def test_monthly_menu_keeps_same_name_daypart_quantities_independent(monkeypatch
                 "name": "ジャーマンポテト",
                 "daypart": "昼食",
                 "category": "副菜",
+                "diet_type": "regular",
                 "unit_type": "g",
                 "qty_per_serving": 40,
             },
@@ -222,6 +224,7 @@ def test_monthly_menu_keeps_same_name_daypart_quantities_independent(monkeypatch
             "qty_per_serving": 75,
             "daypart": "朝食",
             "category": "主菜",
+            "diet_type": "regular",
         },
     ) == "updated"
 
@@ -262,6 +265,7 @@ def test_get_menu_displays_unresolved_entries_without_writing_or_name_linking():
                 temp_type="hot",
                 daypart="朝食",
                 category="主菜",
+                diet_type="regular",
             )
         )
         session.add_all(

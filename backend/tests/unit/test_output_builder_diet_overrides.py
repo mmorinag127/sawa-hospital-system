@@ -1659,6 +1659,51 @@ def test_captured_physical_same_diet_duplicate_and_ambiguous_choice_stop():
         output_builder._resolve_monthly_entry_by_source_row({"source_row_index": 0, "diet_type": "soft_mixer"}, rows)
 
 
+@pytest.mark.parametrize("diet", ["regular", "daycare", "staff", "diabetes"])
+def test_source_diet_identity_is_not_an_aggregation_bucket(diet):
+    from copy import deepcopy
+
+    diets = ["regular", "daycare", "staff", "diabetes"]
+    entries = [{"menu_date": "2026-07-13", "daypart": "昼", "slot_index": 0,
+                "name": "explicit same physical menu", "category": "主菜", "diet_type": value}
+               for value in diets]
+    items = [{"name": entry["name"], "daypart": entry["daypart"], "category": entry["category"],
+              "diet_type": entry["diet_type"], "qty_per_serving": 70 + index}
+             for index, entry in enumerate(entries)]
+    line = {"date": "2026-07-13", "daypart": "昼", "menu_name": entries[0]["name"],
+            "menu_category": "主菜", "diet_type": diet, "source_row_index": 0}
+    before = deepcopy((entries, items, line))
+    rows = output_builder._build_monthly_entry_physical_rows(entries, [line])
+    assert len(rows) == 1 and len(rows[0]) == len(diets)
+    assert output_builder._resolve_monthly_entry_by_source_row(line, rows)["diet_type"] == diet
+    key = output_builder._normalize_menu_key(line["menu_name"])
+    selected = output_builder._select_menu_item_for_line(line, {key: items})
+    assert selected["diet_type"] == diet
+    assert selected["qty_per_serving"] == 70 + diets.index(diet)
+    remapped = dict(line, diet_type="regular", source_diet_type=diet)
+    assert output_builder._resolve_monthly_entry_by_source_row(remapped, rows)["diet_type"] == diet
+    assert output_builder._select_menu_item_for_line(remapped, {key: items})["diet_type"] == diet
+    assert output_builder._normalize_diet_key("daycare") == "regular"
+    assert output_builder._normalize_diet_key("staff") == "regular"
+    assert (entries, items, line) == before
+
+
+def test_explicit_output_diet_mapping_uses_distinct_source_diets():
+    from copy import deepcopy
+
+    config = {"areas": [{"area_id": "X", "name": "Explicit component area"}],
+              "fax_template": {"columns": [
+                  {"role": "quantity", "diet_type": "daycare", "area_id": "X", "output_diet_type": "regular"},
+                  {"role": "quantity", "diet_type": "staff", "area_id": "X", "output_diet_type": "soft"}]}}
+    lines = [{"diet_type": diet, "area_id": "X", "quantity_original": quantity}
+             for diet, quantity in (("regular", 11), ("daycare", 22), ("staff", 33))]
+    original = deepcopy((config, lines))
+    result = output_builder._apply_output_diet_type_overrides(lines, config)
+    assert [(line["diet_type"], line.get("source_diet_type"), line["quantity_original"]) for line in result] == [
+        ("regular", None, 11), ("regular", "daycare", 22), ("soft", "staff", 33)]
+    assert (config, lines) == original
+
+
 def test_label_slot_categories_ignore_excluded_split_monthly_lines(isolated_formal_schema):
     lines = [
         {

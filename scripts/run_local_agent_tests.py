@@ -18,7 +18,7 @@ def inspect(identity):
     return json.loads(docker("inspect", identity, capture_output=True, text=True).stdout)[0]
 
 
-def cleanup_owned_containers(names, owner, source):
+def cleanup_owned_containers(names, owner, source, *, evidence=None):
     errors = []
     for name in names:
         try:
@@ -31,6 +31,15 @@ def cleanup_owned_containers(names, owner, source):
                     or actual["Config"]["Labels"].get("sawa.git_sha") != source
                     or not re.fullmatch(r"[0-9a-f]{64}", actual["Id"])):
                 raise RuntimeError("Owned test container identity changed; cleanup refused")
+            if evidence is not None:
+                try:
+                    logs = subprocess.run(["docker", "logs", "--timestamps", actual["Id"]],
+                                          capture_output=True, text=True)
+                    (evidence / (actual["Id"] + ".log")).write_text(logs.stdout + logs.stderr)
+                    if logs.returncode:
+                        raise RuntimeError("Owned test container log capture failed")
+                except BaseException as exc:
+                    errors.append(("logs:" + name, exc))
             docker("stop", "--time", "30", actual["Id"])
             if inspect(actual["Id"])["State"]["Running"]:
                 raise RuntimeError("Owned test container did not stop")
@@ -79,12 +88,13 @@ def main():
                "-e", "POSTGRES_DB=agent_trial_" + owner, postgres["Id"],
                "postgres", "-c", "shared_buffers=16MB", "-c", "max_connections=20")
         deadline = time.monotonic() + 30
-        while subprocess.run(["docker", "exec", database, "pg_isready", "-U", "sawa_agent_local"],
+        while subprocess.run(["docker", "exec", database, "pg_isready", "-h", "127.0.0.1",
+                              "-U", "sawa_agent_local", "-d", "agent_trial_" + owner],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
             if time.monotonic() >= deadline:
                 raise RuntimeError("Owned test PostgreSQL did not become ready")
             time.sleep(0.2)
-        actual = json.loads(docker("exec", database, "psql", "-X", "-At", "-U", "sawa_agent_local",
+        actual = json.loads(docker("exec", database, "psql", "-X", "-At", "-h", "127.0.0.1", "-U", "sawa_agent_local",
                                   "-d", "agent_trial_" + owner, "-c",
                                   "SELECT json_build_object('database',current_database(),'role',current_user,"
                                   "'major',current_setting('server_version_num')::int/10000)",
@@ -112,8 +122,12 @@ def main():
         result = subprocess.run(["docker", *args])
         record["test_exit_code"] = result.returncode
         return result.returncode
+    except subprocess.CalledProcessError as exc:
+        record["process_error"] = {"exit_code": exc.returncode,
+                                   "stdout": exc.stdout, "stderr": exc.stderr}
+        raise
     finally:
-        errors = cleanup_owned_containers((test, database), owner, source)
+        errors = cleanup_owned_containers((test, database), owner, source, evidence=evidence)
         if not clean_tree() or git("rev-parse", "HEAD") != source:
             errors.append(("source", RuntimeError("Native test source changed")))
         record["cleanup_verified"] = not errors

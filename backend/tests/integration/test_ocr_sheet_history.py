@@ -134,6 +134,8 @@ def selected_history_order(history_registration, monkeypatch, tmp_path):
         assert all(len(row) == max(column['source_index'] for column in columns) + 1 for row in rows)
         select_authored_native_result(monkeypatch, order_id=order['id'],
             table_rows=rows, columns=columns, unlisted_cells='', artifact_root=tmp_path / 'native-artifacts')
+        if inputs['lines']:
+            assert order_service.update_lines(order['id'], deepcopy(inputs['lines'])) is True
         return order_service.get_order_by_id(order['id'])
     return register
 
@@ -888,22 +890,34 @@ def test_selected_draft_is_not_replaced_by_unselected_blank_rows_or_synthetic_fr
     assert _snapshot(get_engine()) == before
 
 
-def test_merge_current_draft_quantity_values_into_semantic_sheet_does_not_blank_fresh_values():
+@pytest.mark.parametrize("saved_quantity", ["", "0", "17"])
+def test_merge_current_draft_quantity_values_preserves_exact_saved_values(saved_quantity):
     merged = order_service._merge_current_draft_quantity_values_into_semantic_sheet(
         {
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "remarks"],
-            "rows": [["03/22", "昼", "Menu A", "", ""]],
-            "row_ids": ["draft-1"],
+            "rows": [["03/22", "昼", "Menu A", saved_quantity, ""]],
+            "row_ids": ["explicit-same-row"],
         },
         {
             "fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.no_meat_x", "remarks"],
             "rows": [["03/22", "昼", "Menu A", "23", "4", ""]],
-            "row_ids": ["fresh-1"],
+            "row_ids": ["explicit-same-row"],
         },
     )
 
     assert merged is not None
-    assert merged["rows"] == [["03/22", "昼", "Menu A", "23", "", ""]]
+    assert merged["rows"] == [["03/22", "昼", "Menu A", saved_quantity, "", ""]]
+
+
+def test_merge_current_draft_does_not_pair_different_ids_by_matching_labels():
+    current = {"fields": ["date_mmdd", "daypart", "menu", "qty.regular_2f"],
+               "rows": [["03/22", "昼", "Menu A", "17"]], "row_ids": ["saved-row"]}
+    fresh = {"fields": list(current["fields"]),
+             "rows": [["03/22", "昼", "Menu A", "23"]], "row_ids": ["different-row"]}
+    before = deepcopy((current, fresh))
+    with pytest.raises(ValueError, match="^saved_draft_row_identity_unresolved$"):
+        order_service._merge_current_draft_quantity_values_into_semantic_sheet(current, fresh)
+    assert (current, fresh) == before
 
 
 def test_selected_draft_blockers_are_not_rewritten_from_an_unselected_neighbor(selected_history_order, monkeypatch):
@@ -1471,7 +1485,7 @@ def test_hakodate_assignment_rejects_order_document_grid_and_full_page_tesseract
     assert "hakodate_ocr_evidence_missing" in assignment["blockers"]
 
 
-def test_hakodate_overlay_preview_ready_requires_rendered_artifact(monkeypatch):
+def test_hakodate_overlay_preview_ready_requires_rendered_artifact(monkeypatch, repository_layout_source):
     target_cell = {
         "target_cell_id": "cell-1",
         "sheet_cell": "D3",
@@ -1509,7 +1523,7 @@ def test_hakodate_overlay_preview_ready_requires_rendered_artifact(monkeypatch):
     assert saved == {}
 
 
-def test_hakodate_overlay_preview_uses_pipeline_overlay_for_pipeline_coordinates(monkeypatch):
+def test_hakodate_overlay_preview_uses_pipeline_overlay_for_pipeline_coordinates(monkeypatch, repository_layout_source):
     target_cell = {
         "target_cell_id": "cell-1",
         "sheet_cell": "D3",
@@ -1559,7 +1573,7 @@ def test_hakodate_overlay_preview_uses_pipeline_overlay_for_pipeline_coordinates
     assert preview["overlay_url"] == "signed:gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png"
 
 
-def test_hakodate_overlay_preview_reuses_cached_compact_assignment(monkeypatch):
+def test_hakodate_overlay_preview_reuses_cached_compact_assignment(monkeypatch, repository_layout_source):
     cached_assignment = {
         "target_cells": [{"target_cell_id": "cell-1", "bbox": [1, 2, 3, 4]}],
         "assignments": [{"target_cell_id": "cell-1", "assigned_value": "2"}],
@@ -1601,7 +1615,7 @@ def test_hakodate_overlay_preview_reuses_cached_compact_assignment(monkeypatch):
     assert preview["overlay_url"] == "signed:gs://bucket/artifacts/OCR-ORD-test/hakodate-overlay.png"
 
 
-def test_hakodate_overlay_preview_blocks_when_pipeline_overlay_missing(monkeypatch):
+def test_hakodate_overlay_preview_blocks_when_pipeline_overlay_missing(monkeypatch, repository_layout_source):
     assignment = {
         "target_cells": [
             {
@@ -1641,7 +1655,7 @@ def test_hakodate_overlay_preview_blocks_when_pipeline_overlay_missing(monkeypat
     assert saved == {}
 
 
-def test_hakodate_overlay_preview_blocks_when_render_artifact_missing(monkeypatch):
+def test_hakodate_overlay_preview_blocks_when_render_artifact_missing(monkeypatch, repository_layout_source):
     assignment = {
         "target_cells": [{"target_cell_id": "cell-1", "bbox": [0.1, 0.2, 0.3, 0.4]}],
         "evidence_records": [{"evidence_id": "ev-1", "text": "2"}],
@@ -1928,7 +1942,6 @@ def test_ensure_hakodate_current_refuses_unselected_cache_artifacts(selected_his
         "source": "hakodate_ocr_evidence_sheet",
         "hakodate_evidence_projection": {"metrics": {"applied_count": 1}},
     }
-    monkeypatch.setattr(order_service, "_latest_hakodate_evidence_available", lambda _order_id: False)
     monkeypatch.setattr(
         order_service,
         "build_order_hakodate_projected_sheet",
@@ -1943,6 +1956,30 @@ def test_ensure_hakodate_current_refuses_unselected_cache_artifacts(selected_his
 
     assert draft is None and error == "hakodate_ocr_evidence_missing"
     assert order_service.get_latest_sheet_draft(order["id"], backfill_from_revision=False) == before
+
+
+def test_ensure_hakodate_current_reuses_captured_selected_native_projection(selected_history_order, monkeypatch):
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
+
+    order_service.clear_all()
+    order = _seed_order(selected_history_order, message_id="msg-owned-native-current-projection")
+    captured = order_service._capture_synchronous_cache_write_input(order["id"])
+    assert captured is not None
+    assert order_service._draft_payload_has_hakodate_evidence_projection(captured["draft"])
+    selected_rows = deepcopy(captured["draft"]["draft_sheet_json"]["rows"])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A captured selected native projection must not be replaced on read")
+
+    monkeypatch.setattr(order_service, "get_latest_ocr_evidence_run", forbidden)
+    monkeypatch.setattr(order_service, "switch_draft_to_latest_evidence", forbidden)
+    before = _snapshot(get_engine())
+    draft, error = order_service.ensure_hakodate_evidence_draft_current(
+        order["id"], synchronous_write_input=captured)
+    assert error is None and draft == captured["draft"]
+    assert draft["draft_sheet_json"]["rows"] == selected_rows
+    assert _snapshot(get_engine()) == before
 
 
 def test_unselected_partial_page_fragments_cannot_trigger_read_time_repair(history_registration, monkeypatch):
@@ -3695,16 +3732,23 @@ def test_rows_from_markdown_maps_kanji_regular_column(repository_layout_source):
     assert first[3] == "33"
 
 
-def test_rows_from_markdown_maps_hana_getsu_subheader_and_escaped_pipe(repository_layout_source):
-    master = config_service.load_facility_master()
-    base_template = master.get("fax_template_base", {})
-    facility = next(
-        fac for fac in master.get("facilities", []) if fac.get("facility_id") == "FAC00003"
-    )
-    template = facility.get("fax_template") or config_service._merge_template(
-        base_template,
-        facility.get("fax_template_override"),
-    )
+def test_rows_from_markdown_maps_hana_getsu_subheader_and_escaped_pipe():
+    # This twelve-column component specimen is not the current FAC00003 layout.
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_2f", "qty.regular_3f",
+              "qty.soft_2f", "qty.soft_3f", "qty.mixer_2f", "qty.mixer_3f",
+              "qty.no_fish_regular_x", "remarks"]
+    template = {
+        "main_ocr_row_fields": fields,
+        "columns_authoritative": True,
+        "columns": [
+            {"role": "date", "source_index": 0},
+            {"role": "daypart", "source_index": 2},
+            {"role": "menu_name", "source_index": 3},
+            *[{"role": "quantity", "name": field, "source_index": index}
+              for index, field in enumerate(fields[3:10], 4)],
+            {"role": "note", "source_index": 11},
+        ],
+    }
 
     markdown = """
 |日 付||区 分|献立|常食||軟菜||ミキサー||魚焼\\(常食\\)|備考欄|
@@ -3754,6 +3798,14 @@ def test_merge_header_rows_avoids_duplicate_forbidden_parent_and_change_prefix()
 
 def test_rows_from_markdown_maps_split_forbidden_subheaders_without_parent_group():
     template = {
+        "columns": [
+            {"role": "quantity", "name": "qty.regular_2f", "source_index": 3},
+            {"role": "quantity", "name": "qty.regular_3f", "source_index": 4},
+            {"role": "quantity", "name": "qty.mixer_2f", "source_index": 5},
+            {"role": "quantity", "name": "qty.mixer_3f", "source_index": 6},
+            {"role": "quantity", "name": "qty.no_meat_x", "source_index": 7},
+            {"role": "quantity", "name": "qty.no_fish_x", "source_index": 8},
+        ],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -3877,6 +3929,13 @@ def test_get_ocr_sheet_rejects_broken_ocr_shell_when_no_weekly_source_exists(his
 
 def test_rows_from_markdown_maps_three_row_forbidden_split_headers_and_change2():
     template = {
+        "columns": [
+            {"role": "quantity", "name": "qty.regular_x", "source_index": 3},
+            {"role": "quantity", "name": "qty.no_meat_x", "source_index": 5},
+            {"role": "quantity", "name": "qty.no_fish_x", "source_index": 6},
+            {"role": "quantity", "name": "qty.change_1_x", "source_index": 7},
+            {"role": "quantity", "name": "qty.change_2_x", "source_index": 8},
+        ],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -4001,7 +4060,7 @@ def test_count_source_row_alignment_penalty_cells_counts_shifted_rows():
     assert penalty == 2
 
 
-def test_apply_order_line_quantities_defaults_missing_area_to_x():
+def test_apply_order_line_quantities_uses_explicit_unscoped_area_column():
     fields = [
         "date_mmdd",
         "daypart",
@@ -4011,7 +4070,11 @@ def test_apply_order_line_quantities_defaults_missing_area_to_x():
         "qty.mixer_x",
         "remarks",
     ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
+    template = {"columns": [
+        {"index": index, "role": "quantity", "diet_type": diet, "area_id": None}
+        for index, diet in enumerate(("regular", "soft", "mixer"), 3)
+    ]}
+    quantity_index = order_service._build_sheet_quantity_index(fields, template=template)
     rows = [
         {
             "row_id": "r0",
@@ -4088,7 +4151,8 @@ def test_apply_order_line_quantities_fallbacks_date_menu_when_daypart_field_abse
         "qty.regular_2f",
         "remarks",
     ]
-    quantity_index = order_service._build_sheet_quantity_index(fields)
+    template = {"columns": [{"index": 2, "role": "quantity", "diet_type": "regular", "area_id": "2F"}]}
+    quantity_index = order_service._build_sheet_quantity_index(fields, template=template)
     rows = [
         {
             "row_id": "r0",
@@ -5257,7 +5321,7 @@ def test_get_ocr_sheet_keeps_late_week_dates_without_borrowing_unowned_table_row
     assert ("04/11", "厚揚げと竹輪の煮物") in rows_by_identity
 
 
-def test_apply_payload_quantities_numeric_only_aligns_weekly_shell_for_late_week_rows():
+def test_apply_payload_quantities_numeric_only_aligns_weekly_shell_for_late_week_rows(repository_layout_source):
     config_service.reload_configs()
     fields = [
         "date_mmdd",
@@ -5603,7 +5667,7 @@ def test_extract_sheet_rows_from_payload_merges_blocks_and_collects_unstructured
     assert "16" in candidates
 
 
-def test_hakodate_projection_uses_target_truth_field_for_remarks_column():
+def test_hakodate_projection_does_not_adopt_unowned_target_truth_for_remarks():
     base_sheet = {
         "fields": [
             "date_mmdd",
@@ -5650,14 +5714,12 @@ def test_hakodate_projection_uses_target_truth_field_for_remarks_column():
         },
     }
 
-    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
-        base_sheet=base_sheet,
-        assignment=assignment,
-    )
-
-    assert projected["rows"][2][10] == "111"
-    assert projected["hakodate_projection_version"] == order_service.HAKODATE_EVIDENCE_PROJECTION_VERSION
-    assert projected["hakodate_evidence_projection"]["applied"][0]["field"] == "remarks"
+    original = deepcopy(base_sheet)
+    with pytest.raises(ValueError, match="^hakodate_projection_config_required$"):
+        order_service._apply_hakodate_sheet_output_to_sheet_payload(
+            base_sheet=base_sheet, assignment=assignment,
+        )
+    assert base_sheet == original
 
 
 def test_hakodate_projection_does_not_fallback_to_worksheet_position_without_truth():
@@ -5690,16 +5752,12 @@ def test_hakodate_projection_does_not_fallback_to_worksheet_position_without_tru
         },
     }
 
-    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(  # noqa: SLF001
-        base_sheet=base_sheet,
-        assignment=assignment,
-    )
-
-    assert projected["rows"][0][3] == ""
-    projection = projected["hakodate_evidence_projection"]
-    assert projection["applied"] == []
-    assert projection["skipped"][0]["skip_reason"] == "row_identity_not_found"
-    assert "hakodate_sheet_projection_incomplete" in projected["blockers"]
+    original = deepcopy(base_sheet)
+    with pytest.raises(ValueError, match="^hakodate_projection_config_required$"):
+        order_service._apply_hakodate_sheet_output_to_sheet_payload(
+            base_sheet=base_sheet, assignment=assignment,
+        )
+    assert base_sheet == original
 
 
 def test_selected_source_blocks_unowned_off_month_noise(selected_history_order):
@@ -6169,6 +6227,12 @@ def test_get_ocr_sheet_final_priority_fixed_after_repeated_apply_and_line_update
     )
     assert error_2 is None
     assert updated_2 is not None
+    with session_scope() as session:
+        cache = session.get(OrderOcrCache, order["id"])
+        persisted_edit = deepcopy(cache.payload["_edited_ocr"])
+        assert persisted_edit["latest"]["rows"][0][3] == "3"
+        assert persisted_edit["selected_revision_id"] == persisted_edit["latest"]["revision_id"]
+        assert [revision["rows"][0][3] for revision in persisted_edit["revisions"]] == ["11", "3"]
     selected_2, selected_error_2 = _save_formal_sheet(order_id=order["id"],
         sheet={"fields": fields, "header": header,
                "rows": [["11/15", "昼", "昼メニュー", "3", "", "", "", "", "", "apply-2"]],

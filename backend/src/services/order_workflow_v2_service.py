@@ -517,7 +517,7 @@ def _normalize_context_suggestion(suggestion: dict[str, Any] | None) -> dict[str
             if str(item).strip()
         ][:20],
         "confidence": _normalize_id(suggestion.get("confidence")) or ("medium" if facility_id or week_code else None),
-        "created_at": _normalize_id(suggestion.get("created_at")) or _now().isoformat(),
+        "created_at": _normalize_id(suggestion.get("created_at")) or None,
     }
     if not normalized["facility_id"] and not normalized["week_code"] and not normalized["facility_candidates"]:
         return None
@@ -1082,6 +1082,7 @@ def _serialize_workflow(
         "output_bundle_id": meta.get("output_bundle_id"),
         "pre_save_checks": _workflow_pre_save_checks(meta),
         "ocr_job": _serialize_ocr_job(ocr_job, session=session),
+        "ocr_job_binding_error": None,
         "common_job_status": _recorded_workflow_job_status(row, meta, ocr_job),
         "blockers": list(row.blockers_json or []),
         "warnings": list(row.warnings_json or []),
@@ -1422,7 +1423,14 @@ def _serialize_workflow_checked(
         meta=meta,
         session=session,
     )
+    job_binding = ocr_job_service.get_recorded_order_job_bindings(
+        [order.id], read_session=session,
+    ).get(order.id) or {}
+    ocr_job = session.get(OcrJob, job_binding["job_id"]) if job_binding.get("job") is not None else None
     serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta, session=session)
+    if job_binding.get("error"):
+        serialized["ocr_job_binding_error"] = job_binding["error"]
+        serialized["common_job_status"] = None
     canonical_state = _canonical_workflow_v2_state(workflow, meta)
     lineage_error = _workflow_lineage_error(session, order=order, workflow=workflow, meta_override=meta, _analysis=_analysis)
     if lineage_error:
@@ -1618,6 +1626,7 @@ def _serialize_uninitialized_workflow(order: Order) -> dict[str, Any]:
         "bagging_result_id": None,
         "output_bundle_id": None,
         "ocr_job": None,
+        "ocr_job_binding_error": None,
         "blockers": ["workflow_not_initialized"],
         "warnings": [],
         "updated_at": None,
@@ -1769,9 +1778,12 @@ def get_ocr_progress(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
                 "state": "not_initialized",
                 "ocr_job": None,
             }, None
-        meta = _workflow_meta(workflow)
-        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
-        job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
+        binding = ocr_job_service.get_recorded_order_job_bindings(
+            [order.id], read_session=session,
+        ).get(order.id) or {}
+        if binding.get("error"):
+            return None, binding["error"]
+        job = session.get(OcrJob, binding["job_id"]) if binding.get("job") is not None else None
         serialized = _serialize_workflow(workflow, ocr_job=job, session=session)
         if job is not None and serialized["common_job_status"] is None:
             return None, "ocr_job_ownership_mismatch"
@@ -3273,8 +3285,8 @@ def select_ocr_result(
             required_template_version_id=workflow_template_version_id,
         )
         if template_error:
-            revision_error = _finalize_workflow_blocker(session, workflow, template_error)
-            return _serialize_workflow(workflow), revision_error or template_error
+            # Refusing a candidate must not invalidate the current selection.
+            return _serialize_workflow(workflow), template_error
         from src.services.recognition_acceptance_service import KEY
         if KEY in (ocr_result.artifact_manifest_json or {}):
             if (meta.get("latest_ocr_result_id") != ocr_result.id

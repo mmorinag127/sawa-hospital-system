@@ -117,3 +117,182 @@ validated immutable source receipt.
 Do not treat old tests as the cause without reading each failure. Genuine source
 defects are reported to the parent. Do not replace unknown expected values,
 remove assertions, skip cases or reintroduce fallback to make this batch green.
+
+## Integrated-source batch and recorded execution reads
+
+The first integrated-source batch is running from clean develop
+7dd6677ce19597146e76855cf53bcadbc1c00532 in the independent verifier worktree.
+Its evidence directory is
+/private/tmp/sawa-hospital-full-7dd6677ce195-20261024.
+The general backend partition collected10075 cases. Failures have been observed;
+this source is not verified and has not been deployed by this batch.
+The verifier source remains unchanged while production repairs are made in the
+separate assistant-business-workflows-20261023 worktree.
+
+Source inspection found fabricated OCR-{order_id} reads and latest-job selection
+in list/detail/summary, pipeline status, sheet/pages and current history status.
+The shared binding reader now resolves only workflow_v2.ocr_job_id, checking
+order/attempt, captured current document, the original upload/document/hash,
+explicit selected version and the independent workflow delivery input.
+Missing or inconsistent bindings produce explicit diagnostics without selecting
+another job or changing persisted data. List reads stay bulk rather than adding
+per-order job/source queries. Audit history retains its legacy search targets and
+also includes actual job IDs belonging to the order.
+Saved-sheet origin is a separate identity: it comes from its base evidence's
+recorded execution, not from a newer candidate job.
+These repairs remain unverified until all known implementation work is complete.
+
+Required batch regressions for this failure class:
+- UUID job remains current with newer unrelated/stale jobs present, across list,
+  detail, summary, pages, workflow and current history status.
+- Missing job, foreign order, old attempt, changed current document and malformed
+  receipt identities are refused without a latest/name/cache substitution.
+- Explicit historical-version selection works when its original document,
+  upload digest and version identity agree.
+- Changing captured current_document_id to match a newer document cannot bypass
+  the independent delivery's original processing input comparison.
+- Receipt document/version/digest alterations are refused; operator quantities,
+  saved sheets, audit rows and original evidence remain unchanged.
+- Progress reads use the same binding. Permanent binding errors stop only their
+  owned poller; late errors cannot clear another document/job/attempt/revision.
+  The existing workflow banner distinguishes binding failures from execution
+  failures and shows the concrete cause. A fresh explicit null clears an older
+  detail error without changing operator input.
+
+## Completed failed baseline and additional root causes
+
+The clean integrated 7dd6677ce195 source completed all 30 local commands:
+25 commands succeeded and 5 failed. Backend: 475 failed, 9408 passed,
+184 skipped, 8 errors in 3370.56 seconds. Browser: 136 failed, 2 passed;
+133 failures reported a redirect loop. These are not a successful receipt.
+Evidence: /private/tmp/sawa-hospital-full-7dd6677ce195-20261024/failed-run.json.
+
+- Daily delivery requires template_uri in the accepted source resolver but
+  rejects it in the workbook embedding path. The requirement appeared in
+  05fde4ce (2026-10-21), while the rejection dates to 24c392aa (2026-05-16).
+  This is a real integration inconsistency, not merely an obsolete assertion.
+  Repair must preserve the authored template package rather than remove its URI.
+- Contact OCR did not emit raw_text. The producer now supplies its own rendered
+  word text alongside ocr_text; no test-input raw value is injected.
+- The local image proof reused source/tmp/image-ci. Its local executor now maps
+  that exact output root to its newly allocated evidence directory, preserving
+  old proofs and keeping deploy inputs/source identity unchanged.
+- Progress error side effects now reject an obsolete request revision before
+  changing the banner or stopping the current poller.
+- The PostgreSQL C1 guard batch had 200 passes and 3 failures: two fail the
+  run-scoped ledger-name check; one expects the old workflow commands without
+  the CA update. PostgreSQL corruption has not been established by these failures.
+
+These new repairs are uncommitted and unverified. The remaining failure-index
+records were read against their tracebacks; fixture updates are not yet complete.
+The repeated-apply synchronous-input conflict still requires diagnosis from its
+exact guard rejection and must not be classified as an obsolete expectation.
+
+## Current implementation and fixture batch
+
+- Daily delivery now retains each authored workbook package and packages complete
+  facility workbooks in a ZIP. Original support worksheets, drawings and print
+  definitions are retained; multiple delivery dates clone worksheet package parts.
+  Package-retention regression cases have been added but not executed.
+  Review found that table-bearing worksheet clones would share table identities;
+  these now fail explicitly before publishing instead of producing a corrupt ZIP.
+  Single-date tables remain supported. General multi-date Excel-table cloning is
+  not implemented and is not claimed as complete.
+- New recognition bases no longer seed quantities from stored OrderLines. The
+  authored weekly physical structure is copied without borrowing saved values.
+  Operator-saved sheets are not rewritten by this change.
+- Current candidate template resolution consumes the validated current-sheet
+  configured-input receipt instead of an unrelated legacy candidate template.
+- Formal user/audit timestamps retain the nullable shape of migration0035;
+  no live schema or production records were changed.
+- The isolated fixture writer has frozen four unit-test files. Parent reviewed
+  and copied their changes into the repair worktree through apply_patch. No tests
+  executed, no stage/commit/push. The first producer's no-recapture assertions
+  were restored around the actual producer, not around fixture preparation.
+- Parent fixture updates retain raw artifact hashes, real authentication grants,
+  terminal-owner protections, read-only snapshots and explicit source geometry.
+  Test-only stale-diagnostic injection deliberately uses out-of-band SQL while
+  keeping native terminal receipt and execution ownership fields unchanged.
+
+No new local test, type check, build, Actions run or deployment has been executed
+against this repair batch. The earlier failed clean-source run remains preserved.
+
+Additional review/fixture work in progress:
+- Actual admin-user save errors are now displayed by EditForm once rather than
+  both EditForm and the page; query invalidation and authority refresh remain.
+- Copied-sheet formulas and local defined names share token-based self-sheet
+  reference translation. String literals and foreign sheet references are not
+  text-replaced. Formula and package regression cases remain unexecuted.
+- Manifest template consumption now checks the captured facility ID against the
+  requested facility before consuming its authored template.
+- HistoryCase now uses an independent UUID by default, avoiding collisions with
+  deliberately unowned OCR-order/message-ID diagnostic rows.
+- Unowned diagnostic corruption is installed only by an explicit test SQL helper
+  that refuses recorded current jobs and any execution/terminal owner metadata.
+  Authorized terminal update guards remain unchanged.
+- Six ingest lifecycle cases now resolve their original job through the actual
+  generation's IngestDelivery receipt, with independent successor assertions.
+- The operator receipt-wire test now uses the real native failed-job review,
+  full-manual save and newly claimed workflow resume scenario. Receipt-less
+  hand-built overrides are negative cases, not successful resumes.
+- The legacy local child runner now removes inherited pytest/impact selectors
+  and forces full selection while leaving the invoking environment and TLS trust
+  settings unchanged. A fresh-image-evidence/full-child-scope test was added.
+
+Known remaining fixture groups include the original-target geometry specimens,
+captured evidence/projection components, and the worker's pending first-pass
+boundary cases. The repeated-apply conflict remains unresolved. No clean-source
+success, develop integration or stg verification is claimed for this batch.
+
+Further source/fixture reconciliation (not executed):
+- Current Hakodate reconciliation dispatches to captured native recovery before
+  the retired structured first-pass branch. The old success fixture must not
+  drive a relaxation of owned H2 artifact validation. The isolated writer has
+  supplied a native recovery replacement; parent review is still in progress.
+- Removed latest-evidence helper expectations now reject uncaptured reads. A
+  positive selected native projection reuse case checks exact rows and database
+  immutability, without borrowing unselected latest/cache artifacts.
+- Shared-row merge specimens now preserve explicit saved blanks, zero and 17.
+  Matching display labels with different row IDs remain a rejected join.
+- Evidence persistence specimens now exercise separately owned native 3/3/9
+  runs, preserve each prior payload, and reject ownership-free source labels.
+  An actual native artifact packet supplies the positive classification case.
+- A suspected missing template-version argument in repeated save was disproved:
+  the local persistence wrapper already passes the captured evidence version.
+  The attempted extra argument was immediately removed. The repeated-apply
+  cause remains unconfirmed; no fix or successful verification is claimed.
+
+- Subsequent read-only review found a concrete repeated-save failure mechanism:
+  `_append_edited_ocr_revision` shallow-copied the ORM JSON payload and mutated
+  its shared `_edited_ocr` dictionary. This can hide the JSON change from ORM
+  dirty checking while advancing the timestamp, so the subsequent refreshed CAS
+  reads an older body. The write now deep-copies the payload before mutation.
+  The existing 11 -> manual lines20 -> edit3 regression additionally inspects
+  the persisted cache in a separate session. Runtime confirmation is pending.
+- The history fixture now explicitly saves its declared operator lines after
+  native evidence selection, which intentionally invalidates old derived rows.
+  Recognition evidence and the independently declared operator values are not
+  substituted for one another.
+- Daily reference specimens explicitly declare facility-aggregate columns for
+  inputs without an area. The complete delivery/label bundle check reads the
+  two separate workbooks from the ZIP and retains label quantity assertions.
+- Monthly-menu component inputs explicitly declare regular diet identity so
+  the test does not depend on guessing a blank identity from another row.
+- Bagging source identity used the aggregation normalizer that collapses
+  daycare/staff into regular. The retained weekly-weight database contains all
+  three distinct declared rows at the same physical slot; the source-row
+  duplicate gate and item ranking therefore rejected legitimate input.
+  Monthly item/entry identity now uses the existing identity-preserving delivery
+  diet normalizer. Aggregation normalization itself remains unchanged. Added
+  regular/daycare/staff/diabetes component cases verify distinct source choice,
+  distinct authored amounts, explicit source-diet retention and unchanged
+  aggregation aliases. Full bagging/weekly output verification is pending.
+- The projection writer's final single-file delta is now copied into the parent.
+  Canonical record and augmentation positives use actual registration, queued
+  execution, capture and producer code; doubles remain at external rendering
+  and recognizer leaves. Explicit logical targets replace inferred shared-row
+  copies. Raw full-width/nonnumeric/blank values stay editable and unchanged.
+- Parent `git diff --check` passed after integration. All writers are frozen for
+  staged review. This is not a test, build, commit or deployment success. The
+  next full local batch must use a new clean named verification worktree and
+  fresh evidence directories, preserving the earlier failed 7dd source/run.

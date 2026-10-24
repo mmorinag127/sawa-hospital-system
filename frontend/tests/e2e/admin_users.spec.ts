@@ -96,6 +96,7 @@ test("admin sees an explicit save error and can retry without losing the form", 
   await expect(
     page.getByText("ユーザーを保存できませんでした: Account already exists", { exact: true }),
   ).toBeVisible();
+  await expect(page.getByText("ユーザーを保存できませんでした: Account already exists", { exact: true })).toHaveCount(1);
   await expect(page.getByLabel("メールアドレス")).toHaveValue("duplicate@example.com");
   await expect(page.getByRole("button", { name: "保存", exact: true })).toBeEnabled();
 });

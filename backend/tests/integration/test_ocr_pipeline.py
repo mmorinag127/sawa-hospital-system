@@ -87,6 +87,7 @@ def _ensure_week_menu_entries(week_id: str) -> None:
                     daypart=daypart,
                     name=name,
                     slot_index=idx,
+                    diet_type="regular",
                 )
             )
 
@@ -120,82 +121,50 @@ def _patch_first_pass_payload(monkeypatch, payload: dict) -> None:
 
 
 
-def test_load_existing_first_pass_payload_for_reparse_rejects_stale_aux_schema(monkeypatch):
-    template = config_service.get_facility_config("FAC00004").get("fax_template")
-    stale_payload = _make_first_pass_payload(
-        rows=[["04/26", "昼", "Menu A", "1", "2", "3", "4", "5", "6", "7", "note"]]
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_get_ocr_output_without_legacy_edits",
-        lambda *_args, **_kwargs: (stale_payload, None),
-    )
-    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda *_args, **_kwargs: stale_payload)
+@pytest.mark.parametrize("width", [11, 13])
+def test_unowned_first_pass_aux_payload_cannot_be_borrowed_from_cache(monkeypatch, width):
+    from copy import deepcopy
+    from tests.helpers.authored_parser_templates import authored_aux_component_template
 
-    reused = order_service._load_existing_first_pass_payload_for_reparse(
-        "ORD-test-stale-first-pass",
-        template=template,
-    )
-
-    assert reused is None
-
-
-def test_load_existing_first_pass_payload_for_reparse_accepts_matching_aux_schema(monkeypatch):
-    template = config_service.get_facility_config("FAC00004").get("fax_template")
-    matching_payload = _make_first_pass_payload(
-        rows=[["04/26", "昼", "主", "Menu A", "7", "1", "2", "3", "4", "5", "6", "7", "note"]]
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_get_ocr_output_without_legacy_edits",
-        lambda *_args, **_kwargs: (matching_payload, None),
-    )
-    monkeypatch.setattr(order_service, "_load_order_ocr_cache", lambda *_args, **_kwargs: matching_payload)
-
-    reused = order_service._load_existing_first_pass_payload_for_reparse(
-        "ORD-test-matching-first-pass",
-        template=template,
-    )
-
-    assert isinstance(reused, dict)
-    assert reused.get("_template_field_schema", {}).get("field_count") == 13
+    template = authored_aux_component_template()
+    payload = _make_first_pass_payload(rows=[["04/26", "昼", "主", "Menu A", *(["7"] * (width - 4))]])
+    before = deepcopy(payload)
+    def forbidden(*args, **kwargs):
+        pytest.fail("unowned first-pass lookup consulted a current or cached result")
+    monkeypatch.setattr(order_service, "_get_ocr_output_without_legacy_edits", forbidden)
+    monkeypatch.setattr(order_service, "_load_order_ocr_cache", forbidden)
+    token = order_service._workflow_ocr_job_id.set(None)
+    try:
+        assert order_service._load_existing_first_pass_payload_for_reparse(
+            "unowned-aux-component", template=template) == (None, "workflow_attempt_superseded")
+    finally:
+        order_service._workflow_ocr_job_id.reset(token)
+    assert payload == before
 
 
-def test_merge_legacy_first_pass_payload_ignores_cached_rows_when_schema_mismatches():
-    template = config_service.get_facility_config("FAC00004").get("fax_template")
-    active_payload = {"status": "ready"}
-    active_run = {"schema_version": "v1_legacy"}
-    stale_cached_payload = _make_first_pass_payload(
-        rows=[["04/26", "昼", "Menu A", "1", "2", "3", "4", "5", "6", "7", "note"]]
-    )
-    merged = order_service._merge_legacy_first_pass_payload(
-        active_payload,
-        active_run,
-        stale_cached_payload,
-        template=template,
-    )
+def test_first_pass_aux_schema_annotation_requires_exact_authored_width():
+    from copy import deepcopy
+    from tests.helpers.authored_parser_templates import authored_aux_component_template
 
-    assert merged == active_payload
-
-    matching_cached_payload = _make_first_pass_payload(
-        rows=[["04/26", "昼", "主", "Menu A", "7", "1", "2", "3", "4", "5", "6", "7", "note"]]
-    )
-    merged_matching = order_service._merge_legacy_first_pass_payload(
-        active_payload,
-        active_run,
-        matching_cached_payload,
-        template=template,
-    )
-
-    assert merged_matching is not active_payload
-    assert merged_matching.get("rows") == matching_cached_payload.get("rows")
+    template = authored_aux_component_template()
+    stale = _make_first_pass_payload(rows=[["04/26", "昼", "Menu A", *(["7"] * 8)]])
+    matching = _make_first_pass_payload(rows=[["04/26", "昼", "主", "Menu A", *(["7"] * 8), "note"]])
+    before = deepcopy((stale, matching))
+    assert order_service._payload_first_pass_schema_matches_template(stale, template) is False
+    assert order_service._annotate_payload_with_template_field_schema(stale, template) == stale
+    annotated = order_service._annotate_payload_with_template_field_schema(matching, template)
+    assert annotated["_template_field_schema"]["field_count"] == 13
+    assert annotated["rows"] == matching["rows"]
+    assert not hasattr(order_service, "_merge_legacy_first_pass_payload")
+    assert (stale, matching) == before
 
 
 def test_extract_first_pass_rows_prefers_raw_body_rows_when_header_is_generic():
-    canonical_date, canonical_daypart, canonical_menu = _canonical_row_for_week("2026-02")
-    canonical_mmdd = datetime.fromisoformat(canonical_date).strftime("%m/%d")
+    canonical_mmdd, canonical_daypart, canonical_menu = "02/15", "朝", "Authored parser meal"
     payload = _make_first_pass_payload([[canonical_mmdd, canonical_daypart, canonical_menu, "2"]])
-    template = config_service.get_facility_config("FAC00001").get("fax_template")
+    template = {"main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
+                "columns": [{"index": 3, "source_index": 3, "role": "quantity",
+                             "diet_type": "regular", "area_id": "X"}]}
 
     rows = order_service._extract_first_pass_rows_from_payload(payload, template)
 
@@ -403,7 +372,7 @@ def test_build_sheet_lines_from_ocr_payload_treats_first_pass_rows_as_body_only(
         payload={},
         template=template,
         received_at=datetime(2026, 4, 26, 9, 0, 0),
-        week_id=None,
+        week_id="2026-04@2026-04-26~2026-04-30",
         facility_id="FAC00006",
         quantity_rules={
             "zero_as_empty": False,
@@ -2376,20 +2345,16 @@ def test_build_llm_assist_prompt_warns_against_dense_fill_when_sheet_has_more_ro
     pipeline_output = {
         "rows": [
             {
-                "cells": {
-                    "date_mmdd": "02/15",
-                    "daypart": "昼",
-                    "menu": "Menu C",
-                    "qty.regular_x": "42",
-                }
+                "date_mmdd": "02/15",
+                "daypart": "昼",
+                "menu": "Menu C",
+                "qty.regular_x": "42",
             },
             {
-                "cells": {
-                    "date_mmdd": "02/15",
-                    "daypart": "昼",
-                    "menu": "Menu D",
-                    "qty.regular_x": "42",
-                }
+                "date_mmdd": "02/15",
+                "daypart": "昼",
+                "menu": "Menu D",
+                "qty.regular_x": "42",
             },
         ],
     }
@@ -2824,20 +2789,16 @@ def test_build_llm_assist_prompt_prefers_structural_rows_for_blank_anchor_preser
     pipeline_output = {
         "rows": [
             {
-                "cells": {
-                    "date_mmdd": "02/15",
-                    "daypart": "昼",
-                    "menu": "Menu C",
-                    "qty.regular_x": "42",
-                }
+                "date_mmdd": "02/15",
+                "daypart": "昼",
+                "menu": "Menu C",
+                "qty.regular_x": "42",
             },
             {
-                "cells": {
-                    "date_mmdd": "02/15",
-                    "daypart": "昼",
-                    "menu": "Menu D",
-                    "qty.regular_x": "42",
-                }
+                "date_mmdd": "02/15",
+                "daypart": "昼",
+                "menu": "Menu D",
+                "qty.regular_x": "42",
             },
         ],
     }
@@ -3784,81 +3745,34 @@ def test_build_reparse_block_anchor_hints_omits_blank_quantity_indexes_when_stru
 
 
 
-def test_resolve_reparse_llm_baseline_prefers_current_sheet_rows(monkeypatch):
-    monkeypatch.setattr(order_service, "_build_reparse_structural_baseline", lambda **kwargs: None)
-    monkeypatch.setattr(
-        order_service,
-        "get_ocr_sheet",
-        lambda order_id, **_kwargs: (
-            {
-                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
-                "rows": [
-                    ["02/15", "朝", "Menu A", ""],
-                    ["02/15", "昼", "Menu B", "42"],
-                ],
-            },
-            None,
-        ),
-    )
-    monkeypatch.setattr(
-        order_service,
-        "_load_order_ocr_cache",
-        lambda order_id: {"template_id": "fax_layout_regular_forbidden_v1"},
-    )
+@pytest.mark.parametrize("truncated", [False, True])
+def test_llm_review_baseline_preserves_exact_captured_draft_instead_of_larger_payload(truncated):
+    from copy import deepcopy
 
-    baseline = order_service._resolve_reparse_llm_baseline(
-        order_id="ORDTEST0001",
-        template={"main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"]},
-    )
-
-    assert baseline is not None
-    assert baseline["baseline_source"] == "sheet"
-    assert baseline["rows"] == [
-        ["02/15", "朝", "Menu A", ""],
-        ["02/15", "昼", "Menu B", "42"],
+    fields = ["date_mmdd", "daypart", "menu", "qty.regular_x"]
+    authored = [
+        ["02/15", "朝", "Menu A", ""], ["02/15", "朝", "Menu B", ""],
+        ["02/15", "昼", "Menu C", "42"], ["02/15", "昼", "Menu D", ""],
     ]
-    assert baseline["fields"] == ["date_mmdd", "daypart", "menu", "qty.regular_x"]
-
-
-def test_resolve_reparse_llm_baseline_prefers_full_structure_when_current_sheet_truncated(monkeypatch):
-    monkeypatch.setattr(
-        order_service,
-        "_build_reparse_structural_baseline",
-        lambda **kwargs: {
-            "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
-            "rows": [
-                ["02/15", "朝", "Menu A", ""],
-                ["02/15", "朝", "Menu B", ""],
-                ["02/15", "昼", "Menu C", ""],
-                ["02/15", "昼", "Menu D", ""],
-            ],
-            "row_ids": ["row-1", "row-2", "row-3", "row-4"],
-            "baseline_source": "weekly_menu_structure",
-        },
+    rows = [authored[0], authored[2]] if truncated else authored
+    draft = {"id": "explicit-component-draft", "draft_sheet_json": {
+        "fields": fields, "rows": deepcopy(rows),
+        "row_ids": [f"explicit-row-{index}" for index in range(len(rows))],
+    }}
+    captured = {"draft": draft}
+    payload = {"rows": [row[:3] + ["99"] for row in authored]}
+    before = deepcopy((captured, payload))
+    # Pure baseline projection, not an execution/receipt ownership proof.
+    baseline = order_service._resolve_llm_review_baseline(
+        order_id="baseline-component", payload=payload,
+        template={"main_ocr_row_fields": fields}, synchronous_write_input=captured,
     )
-    monkeypatch.setattr(
-        order_service,
-        "get_ocr_sheet",
-        lambda order_id, **_kwargs: (
-            {
-                "fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"],
-                "rows": [
-                    ["02/15", "朝", "Menu A", ""],
-                    ["02/15", "昼", "Menu C", "42"],
-                ],
-            },
-            None,
-        ),
-    )
-
-    baseline = order_service._resolve_reparse_llm_baseline(
-        order_id="ORDTEST0001",
-        template={"main_ocr_row_fields": ["date_mmdd", "daypart", "menu", "qty.regular_x"]},
-    )
-
-    assert baseline is not None
-    assert baseline["baseline_source"] == "weekly_menu_structure"
-    assert len(baseline["rows"]) == 4
+    assert baseline["baseline_source"] == "current_draft"
+    assert baseline["baseline_revision_id"] == draft["id"]
+    assert baseline["fields"] == fields
+    assert baseline["rows"] == rows
+    assert baseline["row_ids"] == draft["draft_sheet_json"]["row_ids"]
+    assert (captured, payload) == before
 
 
 def test_evaluate_quantity_only_rows_quality_detects_row_overfill():
@@ -4548,6 +4462,8 @@ def test_apply_payload_quantities_numeric_only_relaxes_noisy_daypart_constraint(
 
 def test_extract_first_pass_rows_from_payload_keeps_yomitoku_baseline_without_roi_merge():
     template = {
+        "columns": [{"index": 3, "role": "quantity", "name": "qty.regular_x", "source_index": 3,
+                     "diet_type": "regular", "area_id": "X"}],
         "main_ocr_row_fields": [
             "date_mmdd",
             "daypart",
@@ -5429,6 +5345,8 @@ def test_project_payload_display_cells_onto_sheet_row_lists_reanchors_block_tota
         fields=fields,
         header=header,
         payload_rows=payload_rows,
+        template={"columns": [{"index": 5, "source_index": 5, "role": "quantity",
+                               "diet_type": "regular", "area_id": "X"}]},
     )
 
     assert projected_rows == [
@@ -5493,6 +5411,8 @@ def test_project_payload_display_cells_onto_sheet_row_lists_clears_stale_block_t
         fields=fields,
         header=header,
         payload_rows=payload_rows,
+        template={"columns": [{"index": 5, "source_index": 5, "role": "quantity",
+                               "diet_type": "regular", "area_id": "X"}]},
     )
 
     assert projected_rows == [
@@ -5524,13 +5444,17 @@ def test_project_payload_quantities_onto_sheet_row_lists_maps_first_row_in_stric
         fields=fields,
         payload_rows=payload_rows,
         strict_raw_ocr_only=True,
+        template={"columns": [
+            {"index": 5, "source_index": 5, "role": "quantity", "diet_type": "regular", "area_id": "X"},
+            {"index": 6, "source_index": 6, "role": "quantity", "diet_type": "daycare", "area_id": "X"},
+        ]},
     )
 
     assert projected_rows == [["04/26", "朝", "主", "鶏じゃが", "67", "66", ""]]
     assert stats["exact"] == 1
 
 
-def test_overlay_payload_aux_cells_onto_sheet_rows_derives_block_total_without_structured_segments():
+def test_overlay_payload_aux_cells_onto_sheet_rows_derives_block_total_without_structured_segments(repository_layout_source):
     template = config_service.get_facility_config("FAC00004").get("fax_template")
     fields = order_service._get_row_fields(template)
     header = order_service._sheet_header_from_template(fields, template)

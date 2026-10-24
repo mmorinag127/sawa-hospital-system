@@ -39,7 +39,7 @@ def test_real_low_score_hold_then_explicit_original_fax_operator_save(numeric_fa
     assert {cell: record["raw_text"] for cell, record in by_cell.items()} == original_expected
     assert {cell: record["normalized_value"] for cell, record in by_cell.items()} == original_expected
     packet = payload["hakodate_canonical_pipeline"]["artifact_packet"]
-    assert set(packet["outputs"]) == set(artifacts.REQUIRED_OUTPUTS)
+    assert set(packet["outputs"]) == set(artifacts.REQUIRED_OUTPUTS) | {"preprocess_observation"}
     assert packet["source_receipt"]["selected_pdf_receipt"] == f.receipt
     artifact_bytes = {Path(item["uri"]): Path(item["uri"]).read_bytes()
                       for item in packet["outputs"].values()}

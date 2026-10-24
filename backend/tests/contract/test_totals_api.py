@@ -48,7 +48,7 @@ def test_totals_prefers_line_daypart_over_snapshot_daypart(totals_inputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     order = totals_inputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -110,7 +110,7 @@ def test_totals_prefers_monthly_menu_entry_category_over_menu_master(totals_inpu
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 70, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     with session_scope() as session:
         session.add(
@@ -167,7 +167,7 @@ def test_totals_merges_regular_equivalent_diets(totals_inputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     order = inputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -247,7 +247,7 @@ def test_totals_can_include_order_refs_for_debug(totals_inputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     order_a = inputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -376,7 +376,7 @@ def test_totals_splits_main_garnish_menu_and_keeps_facility_refs(totals_inputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 2, "unit_type": "個", "daypart": "夕食", "category": "主菜"},
+        {"qty_per_serving": 2, "unit_type": "個", "daypart": "夕食", "category": "主菜", "diet_type": "regular"},
     )
     order = inputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -429,7 +429,7 @@ def test_totals_reflects_confirmed_lines_rebuilt_from_latest_draft(totals_inputs
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     order = inputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -511,7 +511,7 @@ def test_totals_merges_forbidden_diets(totals_inputs):
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 40, "unit_type": "g", "daypart": "昼食", "category": "副菜"},
+        {"qty_per_serving": 40, "unit_type": "g", "daypart": "昼食", "category": "副菜", "diet_type": "regular"},
     )
     order = inputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -582,7 +582,7 @@ def test_totals_reflects_confirmed_semantic_sheet_materialization_for_multi_colu
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
     order = inputs.create_order_from_ingest(
         IngestEmailPayload(
@@ -660,7 +660,7 @@ def test_totals_reflect_confirmed_lines_materialized_from_semantic_draft_sheet(t
     menu_service.update_item(
         month_id,
         menu_item["id"],
-        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜"},
+        {"qty_per_serving": 100, "unit_type": "g", "daypart": "昼食", "category": "主菜", "diet_type": "regular"},
     )
 
     order_a = inputs.create_order_from_ingest(

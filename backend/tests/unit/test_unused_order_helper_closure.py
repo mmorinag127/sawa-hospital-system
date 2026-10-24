@@ -73,9 +73,8 @@ def test_only_the_fixed_retired_definitions_and_their_separators_are_deleted():
     assert current_source == "".join(lines)
     tree.body = [node for node in tree.body if not isinstance(node, ast.FunctionDef) or node.name not in RETIRED]
     assert ast.dump(current_tree) == ast.dump(tree)
-    for name, node in current.items():
-        assert ast.dump(node) == ast.dump(old[name])
-        assert ast.get_source_segment(current_source, node) == ast.get_source_segment(original, old[name])
+    # Whole-source byte equality and whole-AST equality above cover every
+    # retained function without repeatedly scanning the full source per node.
     # Later approved source fixes are not constrained to this deletion-only diff.
     assert RETIRED.isdisjoint(definitions(ast.parse((ROOT / SOURCE).read_text())))
 

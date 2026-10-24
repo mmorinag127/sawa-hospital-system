@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from sqlalchemy import event, select, update
 from sqlalchemy.orm import Session
+from loguru import logger
 
 from src.models.ocr_job import OcrJob
 from src.models.order import Order, OrderLine
@@ -1010,16 +1011,20 @@ def lock_current_synchronous_cache_write(
     source_failure: str | None = None,
 ) -> bool:
     """CAS a synchronous cache repair from the operator-read input snapshot."""
+    def reject(reason):
+        logger.warning("Synchronous sheet input rejected: {}", reason, order_id=order_id)
+        return False
+
     if not order_id or expected_workflow_revision is None or not expected_evidence_run_id:
-        return False
+        return reject("required_identity_missing")
     if not isinstance(expected_input_versions, dict):
-        return False
+        return reject("input_versions_missing")
     if not lock_current_workflow_revision(
         session,
         order_id=order_id,
         expected_workflow_revision=expected_workflow_revision,
     ):
-        return False
+        return reject("workflow_revision_changed")
 
     order_query = select(Order).where(Order.id == order_id)
     evidence_query = select(OrderOcrEvidenceRun).where(OrderOcrEvidenceRun.id == expected_evidence_run_id)
@@ -1034,14 +1039,14 @@ def lock_current_synchronous_cache_write(
 
     order = session.execute(order_query.execution_options(populate_existing=True)).scalar_one_or_none()
     if order is None or order.lines_updated_at != expected_order_lines_updated_at:
-        return False
+        return reject("order_lines_revision_changed")
     evidence = session.execute(evidence_query.execution_options(populate_existing=True)).scalar_one_or_none()
     if evidence is None or evidence.order_id != order_id:
-        return False
+        return reject("evidence_order_changed")
     from src.services.ocr_evidence_service import evidence_run_is_selectable
 
     if not evidence_run_is_selectable(evidence):
-        return False
+        return reject("evidence_not_selectable")
     workflow_evidence = session.execute(
         select(OrderWorkflowState).where(
             OrderWorkflowState.order_id == order_id,
@@ -1050,13 +1055,13 @@ def lock_current_synchronous_cache_write(
     ).scalar_one_or_none()
     if workflow_evidence is not None:
         if workflow_evidence.evidence_run_id != expected_evidence_run_id:
-            return False
+            return reject("selected_evidence_changed")
         if workflow_evidence.draft_id != expected_draft_id:
-            return False
+            return reject("selected_draft_changed")
         if workflow_evidence.template_version_id != evidence.template_version_id:
-            return False
+            return reject("selected_template_changed")
     else:
-        return False
+        return reject("workflow_revision_changed")
     draft = None
     if draft_query is not None:
         draft = session.execute(draft_query.execution_options(populate_existing=True)).scalar_one_or_none()
@@ -1067,24 +1072,28 @@ def lock_current_synchronous_cache_write(
             or draft.base_evidence_run_id != expected_evidence_run_id
             or draft.template_version_id != evidence.template_version_id
         ):
-            return False
+            return reject("draft_lineage_changed")
         if not isinstance(draft.draft_sheet_json, dict) or any(
             draft.draft_sheet_json.get(key) and draft.draft_sheet_json[key] != expected_evidence_run_id
             for key in ("base_evidence_run_id", "evidence_run_id")
         ):
-            return False
+            return reject("draft_evidence_changed")
     cache = session.execute(cache_query.execution_options(populate_existing=True)).scalar_one_or_none()
     if (cache is not None) != expected_cache_exists:
-        return False
+        return reject("cache_presence_changed")
     lines_query = select(OrderLine).where(OrderLine.order_id == order_id).order_by(OrderLine.id)
     if session.bind.dialect.name != "sqlite":
         lines_query = lines_query.with_for_update()
     lines = session.execute(lines_query.execution_options(populate_existing=True)).scalars().all()
     pdf_receipt = expected_input_versions.get("selected_pdf_receipt")
     if not is_selected_pdf_failure(source_failure) and not verify_selected_pdf_receipt(session, pdf_receipt):
-        return False
+        return reject("selected_pdf_changed")
     current_versions = synchronous_input_versions(order, evidence, draft, cache, lines)
     current_versions["selected_pdf_receipt"] = pdf_receipt
     if not snapshots_equal(current_versions, expected_input_versions):
-        return False
-    return cache is None or cache.updated_at == expected_cache_updated_at
+        changed = sorted(key for key in current_versions.keys() | expected_input_versions.keys()
+                         if not snapshots_equal(current_versions.get(key), expected_input_versions.get(key)))
+        return reject("input_versions_changed:" + ",".join(changed))
+    if cache is not None and cache.updated_at != expected_cache_updated_at:
+        return reject("cache_revision_changed")
+    return True

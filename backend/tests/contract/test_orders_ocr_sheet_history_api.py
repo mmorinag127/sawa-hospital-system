@@ -11,6 +11,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 import pytest
@@ -172,7 +173,7 @@ class HistoryCase:
         assert result["state"] == "context_confirmed"
         return result
 
-    def queue(self):
+    def queue(self, *, job_id=None):
         import fitz
         if not hasattr(self, "pdf"):
             self.confirm()
@@ -213,7 +214,7 @@ class HistoryCase:
             "TARGET_URL": "https://reserved.invalid", "SERVICE_ACCOUNT_EMAIL": "worker@history-component.iam.gserviceaccount.com",
             "AUDIENCE": "https://reserved.invalid", "DISPATCH_DEADLINE_SECONDS": "300"}.items():
             self.monkeypatch.setenv("HOSPITAL_WORKFLOW_OCR_DELIVERY_" + key, value)
-        self.job = "OCR-" + self.id
+        self.job = job_id if job_id is not None else str(uuid4())
         self.queued, error = workflow.mark_ocr_run_queued(self.id, self.job, input_reference=str(self.pdf),
             request_mode="ocr_rerun", expected_revision=self.revision())
         assert error is None, error
@@ -229,9 +230,9 @@ class HistoryCase:
               guard.workflow_execution_context(self.job, self.id, attempt, revision)):
             yield
 
-    def prepare_provider(self, *, cell_values="2"):
+    def prepare_provider(self, *, cell_values="2", job_id=None):
         from src.services import hakodate_cell_ocr_batch_service as batch
-        self.queue()
+        self.queue(job_id=job_id)
         with session_scope() as session:
             receipt, start = workflow._axis_source_receipt(session, session.get(Order, self.id), session.get(OrderWorkflowState, self.id))
         def manifest(**_kwargs):
@@ -261,8 +262,8 @@ class HistoryCase:
         self.monkeypatch.setattr(batch, "build_hakodate_best_method_for_manifest_item", recognize)
         return calls
 
-    def produce(self, *, cell_values="2"):
-        calls = self.prepare_provider(cell_values=cell_values)
+    def produce(self, *, cell_values="2", job_id=None):
+        calls = self.prepare_provider(cell_values=cell_values, job_id=job_id)
         with self.execution():
             evidence, error = order_service.rerun_ocr_evidence_only(self.id, job_id=self.job, project_sheet=False, refresh_workflow=False)
         assert error is None, (error, evidence)

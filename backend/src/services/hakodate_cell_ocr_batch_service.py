@@ -595,6 +595,7 @@ def assign_yomitoku_words_to_contact_regions(
         assigned.append(
             {
                 **region,
+                "raw_text": text,
                 "ocr_text": text,
                 "ocr_normalized": text if roles[str(region.get("region_id"))] == "note" else _normalize_digits(text),
                 "ocr_words": region_words,
@@ -1132,6 +1133,8 @@ def _fax_template_for_manifest_item(item: dict[str, Any], facility_code: str) ->
     if not isinstance(captured, dict) or not isinstance(captured.get("facility"), dict) or not isinstance(captured.get("policy"), dict):
         raise ValueError("hakodate_captured_config_required")
     facility_config = dict(captured["facility"])
+    if facility_config.get("facility_id") != facility_code:
+        raise ValueError("hakodate_captured_facility_mismatch")
     config_service._validate_authored_facility_config(facility_config, template_id)
     page = facility_config["fax_template"].get("page")
     if type(page) is not int or page <= 0:

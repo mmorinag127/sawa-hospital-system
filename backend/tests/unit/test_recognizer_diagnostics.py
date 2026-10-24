@@ -202,9 +202,16 @@ def test_both_loaders_preserve_arguments_and_return(module, monkeypatch, caplog)
     def constructor(**kwargs):
         calls.append(kwargs)
         return recognizer
-    monkeypatch.setitem(sys.modules, 'yomitoku', SimpleNamespace(TextRecognizer=constructor))
+    if module == 'run_text_recognizer_corner_noise_trial':
+        from src.services import hakodate_empty_sequence_model as adapter
+        monkeypatch.setattr(adapter, 'load_empty_sequence_recognizer',
+                            lambda device: constructor(device=device, adapter='initial_eos'))
+        expected = {'device': 'cpu', 'adapter': 'initial_eos'}
+    else:
+        monkeypatch.setitem(sys.modules, 'yomitoku', SimpleNamespace(TextRecognizer=constructor))
+        expected = {'device': 'cpu', 'visualize': False}
     assert runtime._load_text_recognizer('cpu') is recognizer
-    assert calls == [{'device': 'cpu', 'visualize': False}]
+    assert calls == [expected]
     assert [event['event'] for event in events(caplog)] == ['begin', 'end']
 
 

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from src.db import session_scope
 from src.models.order import Order
+from src.models.ocr_job import OcrJob
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import hakodate_cell_ocr_batch_service as batch
 from src.services import hakodate_assignment_service as assignment
@@ -135,7 +136,12 @@ def produce_authored_native_result(monkeypatch, *, order_id, table_rows, columns
         provider_patch.setattr(batch, "build_hakodate_best_method_for_manifest_item", recognize)
         evidence, error = order_service.rerun_ocr_evidence_only(order_id, job_id=job_id,
             project_sheet=False, refresh_workflow=False)
-    assert error is None and evidence is not None, error
+    if error is not None:
+        with session_scope() as session:
+            job = session.get(OcrJob, job_id)
+            detail = (job.metrics or {}).get("error_detail") if job is not None else None
+        raise AssertionError((error, detail))
+    assert evidence is not None
     assert len(calls) == 1
     return evidence
 

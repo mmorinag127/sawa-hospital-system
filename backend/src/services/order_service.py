@@ -112,7 +112,9 @@ from src.services.ocr_job_service import (
     create_job,
     update_job,
     get_job as get_ocr_job,
-    get_latest_order_job,
+    get_recorded_order_job,
+    get_recorded_order_job_bindings,
+    recorded_order_job_fields,
     get_job_request_mode,
     describe_job_state as describe_ocr_job_state,
     get_stale_minutes as get_ocr_job_stale_minutes,
@@ -4922,6 +4924,7 @@ def _fetch_orders(
         if normalized_limit is not None:
             query = query.limit(normalized_limit)
         rows = session.execute(query).mappings().all()
+        job_bindings = get_recorded_order_job_bindings([row["id"] for row in rows], read_session=session)
         payloads: list[dict[str, Any]] = []
         for row in rows:
             week_code = row["week_code"]
@@ -4932,7 +4935,7 @@ def _fetch_orders(
             payloads.append(
                 {
                     "id": row["id"],
-                    "ocr_job_id": f"OCR-{row['id']}",
+                    **recorded_order_job_fields(job_bindings.get(row["id"])),
                     "facility": row["facility_code"],
                     "week": week_month_id,
                     "week_value": week_value,
@@ -9335,61 +9338,8 @@ def _hakodate_best_method_draft_sheet(order_id: str, *, synchronous_write_input:
         logger.warning("Hakodate best method draft fallback failed", order_id=order_id, error=error)
     if not isinstance(base_sheet, dict):
         return None
-    order = {"lines": deepcopy(synchronous_write_input["input_versions"]["order_lines"] if synchronous_write_input is not None else processing_input["lines"])}
-    order_lines = order.get("lines") if isinstance(order, dict) and isinstance(order.get("lines"), list) else []
-    if not order_lines:
-        return base_sheet
-    fields = [str(field or "").strip() for field in (base_sheet.get("fields") or [])]
-    rows = [list(row) for row in (base_sheet.get("rows") or []) if isinstance(row, list)]
-    original_input = synchronous_write_input if synchronous_write_input is not None else processing_input
-    configured = original_input.get("configured_input") if isinstance(original_input, dict) else None
-    template = (configured.get("facility") or {}).get("fax_template") if isinstance(configured, dict) else None
-    quantity_index = _build_sheet_quantity_index(fields, template=template)
-    if not fields or not rows or not quantity_index:
-        return base_sheet
-    date_idx = fields.index("date_mmdd") if "date_mmdd" in fields else (fields.index("date") if "date" in fields else -1)
-    daypart_idx = fields.index("daypart") if "daypart" in fields else -1
-    menu_idx = fields.index("menu") if "menu" in fields else (fields.index("menu_name") if "menu_name" in fields else -1)
-    if date_idx < 0 or daypart_idx < 0 or menu_idx < 0:
-        return base_sheet
-    row_lookup: dict[tuple[str, str, str], int] = {}
-    for row_index, row in enumerate(rows):
-        key = _hakodate_sheet_identity(
-            row[date_idx] if date_idx < len(row) else "",
-            row[daypart_idx] if daypart_idx < len(row) else "",
-            row[menu_idx] if menu_idx < len(row) else "",
-        )
-        if all(key) and key not in row_lookup:
-            row_lookup[key] = row_index
-    for line in order_lines:
-        if not isinstance(line, dict):
-            continue
-        qty = line.get("quantity_corrected")
-        if qty is None:
-            qty = line.get("quantity_original")
-        if qty is None:
-            continue
-        try:
-            qty_float = float(qty)
-        except Exception:
-            continue
-        col_idx = _resolve_quantity_column_index(
-            quantity_index=quantity_index,
-            diet_key=line.get("diet_type"),
-            area_key=line.get("area_id"),
-        )
-        if col_idx is None:
-            continue
-        row_index = row_lookup.get(_hakodate_sheet_identity(line.get("date"), line.get("daypart"), line.get("menu_name")))
-        if row_index is None:
-            continue
-        while len(rows[row_index]) <= col_idx:
-            rows[row_index].append("")
-        rows[row_index][col_idx] = _numeric_string_add(str(rows[row_index][col_idx] or ""), qty_float)
-    seeded = deepcopy(base_sheet)
-    seeded["rows"] = rows
-    seeded["source"] = "hakodate_confirmed_lines_seed_sheet"
-    return seeded
+    # Recognition input is the authored physical menu, not saved order quantities.
+    return deepcopy(base_sheet)
 
 
 def _estimate_hakodate_template_bbox_from_rendered_image(image: Any) -> list[float]:
@@ -9916,6 +9866,7 @@ def _hakodate_canonical_payload_from_manifest_item(
                     or recognition_override.get("source") != "operator"
                     or not recognition_override.get("edited_by")):
                 raise ValueError("recognition_operator_identity_required")
+            recovery.require_resume_source_receipt(recognition_override)
             receipt = (captured["input_versions"]["selected_pdf_receipt"]
                        if synchronous_write_input is not None else processing_start_pdf_receipt())
             if not isinstance(receipt, dict):
@@ -11276,12 +11227,13 @@ def ensure_hakodate_evidence_draft_current(
 
 def get_hakodate_pipeline_job_status(order_id: str) -> dict[str, Any]:
     normalized_order_id = str(order_id or "").strip()
-    job = get_latest_order_job(normalized_order_id) if normalized_order_id else None
+    try:
+        job = get_recorded_order_job(normalized_order_id) if normalized_order_id else None
+    except ValueError as exc:
+        return {**describe_ocr_job_state(None), "status": "blocked", "blockers": [str(exc)], "job_status": None}
     if not isinstance(job, dict):
         return {**describe_ocr_job_state(None), "job_status": None}
     request_mode = get_job_request_mode(job)
-    if request_mode and request_mode not in {"ocr_rerun", "ocr_reparse", "llm_reparse"}:
-        return {**describe_ocr_job_state(None), "job_status": None}
     state = describe_ocr_job_state(job)
     metrics = job.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
@@ -13921,6 +13873,7 @@ def get_order_candidate_resolution(order_id: str) -> Optional[dict]:
         week_code=str((order or {}).get("week_value") or (order or {}).get("week") or "").strip() or None,
         received_at=(order or {}).get("received_at"),
         evidence_payload=payload if isinstance(payload, dict) else None,
+        current_sheet_context=get_current_sheet_context(order_id),
     )
 
 
@@ -14316,7 +14269,18 @@ def _authoritative_surface_payload_from_current_sheet_context(
     if base_evidence_run_id:
         surface_payload["evidence_run_id"] = base_evidence_run_id
         surface_payload["base_evidence_run_id"] = base_evidence_run_id
-    surface_payload["ocr_job_id"] = f"OCR-{order_id}"
+        evidence = ocr_evidence_service.get_evidence_run(base_evidence_run_id)
+        payload = evidence.get("payload_json") if isinstance(evidence, dict) else None
+        execution = payload.get("_ocr_execution") if isinstance(payload, dict) else None
+        if (isinstance(evidence, dict) and evidence.get("order_id") == order_id
+                and isinstance(execution, dict) and execution.get("evidence_run_id") == base_evidence_run_id
+                and isinstance(execution.get("job_id"), str) and execution["job_id"]):
+            surface_payload["ocr_job_id"] = execution["job_id"]
+        else:
+            surface_payload["ocr_job_id"] = None
+            surface_payload["ocr_job_binding_error"] = "sheet_ocr_execution_missing"
+    else:
+        surface_payload["ocr_job_id"] = None
     return surface_payload, current_sheet_record
 
 
@@ -15959,7 +15923,7 @@ def _append_edited_ocr_revision(
             if not cache:
                 cache = OrderOcrCache(order_id=order_id, payload={})
                 session.add(cache)
-            payload = dict(cache.payload) if isinstance(cache.payload, dict) else {}
+            payload = deepcopy(cache.payload) if isinstance(cache.payload, dict) else {}
             edited = payload.get("_edited_ocr")
             if not isinstance(edited, dict):
                 edited = {}
@@ -16919,7 +16883,10 @@ def _augment_sheet_review_payload(
         )
     enriched["warnings"] = list(warnings)
     draft_state = _extract_order_draft_state(order_id, ocr_payload, lines_updated_at=lines_updated_at)
-    job = get_latest_order_job(order_id)
+    binding = get_recorded_order_job_bindings([order_id]).get(order_id) or {}
+    job = binding.get("job")
+    if binding.get("error"):
+        enriched["ocr_job_binding_error"] = binding["error"]
     menu_diagnostics = (
         dict(payload.get("menu_diagnostics") or {})
         if isinstance(payload.get("menu_diagnostics"), dict)
@@ -19304,7 +19271,11 @@ def get_ocr_output(
     active_evidence_payload = None
     active_evidence_run = None
     active_evidence_payload, active_evidence_run = _load_active_ocr_payload(order_id)
-    job = get_latest_order_job(order_id)
+    job_binding_error = None
+    try:
+        job = get_recorded_order_job(order_id)
+    except ValueError as exc:
+        job, job_binding_error = None, str(exc)
     if _job_is_pending(job):
         return None, "ocr_output_pending"
     facility_template = _resolve_order_fax_template(order_id)
@@ -19320,6 +19291,8 @@ def get_ocr_output(
     ):
         parsed = active_evidence_payload
     if parsed is None:
+        if job_binding_error:
+            return None, job_binding_error
         active_job = job
         if not active_job:
             return None, "ocr_job_not_found"
@@ -19343,6 +19316,15 @@ def get_ocr_output(
             strip_legacy_surface=not include_legacy_edits,
         )
     metrics_job = job
+    execution = active_evidence_payload.get("_ocr_execution") if isinstance(active_evidence_payload, dict) else None
+    if isinstance(metrics_job, dict):
+        metrics = metrics_job.get("metrics") or {}
+        capture = metrics.get("nonworkflow_execution") or {}
+        if (not isinstance(execution, dict) or execution.get("job_id") != metrics_job.get("id")
+                or execution.get("workflow_attempt_id") != metrics.get("workflow_attempt_id")
+                or (metrics.get("workflow_attempt_id") is None
+                    and execution.get("nonworkflow_execution_id") != capture.get("execution_id"))):
+            metrics_job = None
     if isinstance(parsed, dict):
         parsed, synced = _sync_reparse_debug_from_job_metrics(parsed, metrics_job)
     parsed = evidence_manifest_service.ensure_evidence_manifest(parsed)
@@ -19350,6 +19332,8 @@ def get_ocr_output(
     output_template = facility_template if isinstance(facility_template, dict) else None
     if isinstance(parsed, dict) and isinstance(output_template, dict):
         parsed = _annotate_payload_with_template_field_schema(parsed, output_template)
+    if isinstance(parsed, dict) and job_binding_error:
+        parsed["ocr_job_binding_error"] = job_binding_error
     return parsed, None
 
 
@@ -19742,7 +19726,11 @@ def get_ocr_pages(
         active_evidence_payload,
         facility_template,
     )
-    job = get_latest_order_job(order_id)
+    job_binding_error = None
+    try:
+        job = get_recorded_order_job(order_id)
+    except ValueError as exc:
+        job, job_binding_error = None, str(exc)
     parsed = None
     parsed_source = ""
     order_job_pending = _job_is_pending(job)
@@ -19758,6 +19746,8 @@ def get_ocr_pages(
         parsed = None
         parsed_source = "missing"
     if parsed is None:
+        if job_binding_error:
+            return None, job_binding_error
         if order_job_pending:
             return None, "ocr_output_pending"
         if job and _job_is_pending(job):
@@ -19925,6 +19915,7 @@ def get_ocr_pages(
         {
             "order_id": order_id,
             "engine": parsed.get("engine"),
+            "ocr_job_binding_error": job_binding_error,
             "template_id": parsed.get("template_id"),
             "facility_id": parsed.get("facility_id"),
             "pages": pages,
@@ -23591,8 +23582,10 @@ def get_ocr_edit_history(order_id: str):
         raw_output = latest_evidence.get("payload_json")
         raw_output_source = "order_ocr_evidence_runs.payload_json"
     latest = revisions[-1] if revisions else None
-    reparse_job = get_latest_order_job(order_id)
-    reparse_state = None
+    binding = get_recorded_order_job_bindings([order_id]).get(order_id) or {}
+    reparse_job = binding.get("job")
+    reparse_state = ({"status": "blocked", "blockers": [binding["error"]], "job_id": None}
+                     if binding.get("error") else None)
     latest_reparse_attempt = None
     if isinstance(reparse_job, dict):
         metrics = reparse_job.get("metrics")
@@ -23643,7 +23636,10 @@ def get_order_history(order_id: str, limit: int = 100):
         rows = (
             session.execute(
                 select(AuditLog)
-                .where(AuditLog.target.in_(sorted(targets)))
+                .where(or_(
+                    AuditLog.target.in_(sorted(targets)),
+                    AuditLog.target.in_(select(OcrJob.id).where(OcrJob.order_id == order_id)),
+                ))
                 .order_by(AuditLog.created_at.desc())
                 .limit(normalized_limit)
             )

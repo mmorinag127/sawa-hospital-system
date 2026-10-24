@@ -1,9 +1,8 @@
 """Real confirmed synthetic saved-sheet receipts -> mounted XLSX/ZIP HTTP.
 
 AUTH_DISABLED, owned SQLite, no startup, manually seeded OCR. Not native/auth/
-PG/live proof. Only OUTPUT_DIR is rebound. The single invoice uses an explicitly
-authored disposable workbook; daily embedding uses the existing non-template
-invoice contract because templated daily embedding is explicitly prohibited.
+PG/live proof. Only OUTPUT_DIR is rebound. Invoices use explicitly authored
+disposable workbooks; the daily ZIP retains each complete template package.
 """
 
 import csv
@@ -31,10 +30,15 @@ MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 @pytest.fixture
 def bundle_order(owned_bagging, surface):
     fixture = owned_bagging
-    # The non-template writer consumes row keys, with optional header labels.
-    # Explicit source-key names keep date/menu identity in the real workbook.
+    template = fixture.root / "authored-daily-invoice.xlsx"
+    workbook = Workbook()
+    workbook.active.title = "Authored invoice"
+    workbook.active.append(["Date", "Menu", "Quantity"])
+    workbook.save(template)
+    workbook.close()
     fixture.authored["invoice_template"] = {
         "include_menu_name": True,
+        "template_uri": str(template), "sheet_name": "Authored invoice",
         "columns": [{"name": "date", "header": "Date", "source": "date"},
                     {"name": "menu_name", "header": "Menu", "source": "menu_name"},
                     {"name": "Quantity", "source": "quantity", "diet_type": "regular", "area_id": "X"}],
@@ -127,14 +131,12 @@ def test_real_daily_bundle_modes_receive_exact_members_and_accepted_identity(
     day = date.fromisoformat(str(candidate["lines"][0]["date"])[:10])
     before = preservation(fixture)
     response = client.get("/outputs/daily-bundle", params={"date": day.isoformat(), "bundle_type": mode})
-    zipped = mode in {"labels", "labels_csv"}
-    body = receive(response, fixture, f"daily-{mode}.{'zip' if zipped else 'xlsx'}",
-                   "application/zip" if zipped else MIME, capsys)
+    body = receive(response, fixture, f"daily-{mode}.zip", "application/zip", capsys)
     for key, expected in {"total-orders": "1", "success-orders": "1", "empty-orders": "0",
                           "error-orders": "0", "type": mode}.items():
         assert response.headers["x-daily-bundle-" + key] == expected
     facility_name = candidate["configured_input"]["facility"]["facility_name"]
-    if zipped:
+    if mode in {"labels", "labels_csv"}:
         with ZipFile(BytesIO(body)) as archive:
             assert archive.testzip() is None
             assert len(archive.namelist()) == 1
@@ -149,21 +151,27 @@ def test_real_daily_bundle_modes_receive_exact_members_and_accepted_identity(
             assert len(sheets) == 1
             label_rows(next(iter(sheets.values())), zero=True)
     else:
-        sheets = workbook_rows(body)
-        delivery = [rows for name, rows in sheets.items()
-                    if name == (facility_name if mode == "delivery" else "納品書_" + facility_name)]
-        assert len(delivery) == 1
-        assert delivery[0][0] == ("Date", "Menu", "Quantity")
-        assert all(row[0].date() == day for row in delivery[0][1:])
-        quantities = {row[1]: row[2] for row in delivery[0][1:]}
+        with ZipFile(BytesIO(body)) as archive:
+            assert archive.testzip() is None
+            assert len(archive.namelist()) == (2 if mode == "both" else 1)
+            assert all(day.isoformat() in name and facility_name in name for name in archive.namelist())
+            delivery_names = [name for name in archive.namelist() if name.endswith("_delivery.xlsx")]
+            assert len(delivery_names) == 1
+            sheets = workbook_rows(archive.read(delivery_names[0]))
+            assert set(sheets) == {"Authored invoice"}
+            delivery = sheets["Authored invoice"]
+            labels = [archive.read(name) for name in archive.namelist() if name.endswith("_labels.xlsx")]
+        assert delivery[0] == ("Date", "Menu", "Quantity")
+        assert all(row[0].date() == day for row in delivery[1:])
+        quantities = {row[1]: row[2] for row in delivery[1:]}
         assert quantities == {"選択献立0": 7}
-        assert all(facility_name in name for name in sheets)
         if mode == "both":
-            labels = [rows for name, rows in sheets.items() if name == "ラベル_" + facility_name]
             assert len(labels) == 1
-            label_rows(labels[0], zero=False)
+            label_sheets = workbook_rows(labels[0])
+            assert len(label_sheets) == 1
+            label_rows(next(iter(label_sheets.values())), zero=False)
         else:
-            assert len(sheets) == 1
+            assert labels == []
     assert_preserved(fixture, before)
     absent = client.get("/outputs/daily-bundle", params={
         "date": (day + timedelta(days=7)).isoformat(), "bundle_type": mode,

@@ -925,7 +925,12 @@ def _make_connected_physical_pipeline(monkeypatch, tmp_path, *, merged=False, ex
                 quad_px=[[20, 20], [270, 20], [270, 290], [20, 290]],
                 quad_source="explicit-fixture", quad_override=None,
                 header_axis_override=None, row_axis_override=None)
-    axis = {"row_intersection_y_match": {"structural_match": {"body_day_boundary_indexes": [0, 1, 2, 3, 4, 7, 8, 9] if merged else list(range(8)), "detected_body_band_count": 9 if merged else 7}, "corrected_ys": fax_ys}, "header_intersection_x_match": {"header_roi": [20, 20, 270, 80]}}
+    observed_xs, header_observation = pipeline._header_intersection_correct_xs(
+        rectified_fax=image, template_xs=xs, template_ys=template_ys,
+    )
+    assert header_observation.get("used") is True, header_observation
+    assert observed_xs == pytest.approx(xs, abs=1.0)
+    axis = {"row_intersection_y_match": {"structural_match": {"body_day_boundary_indexes": [0, 1, 2, 3, 4, 7, 8, 9] if merged else list(range(8)), "detected_body_band_count": 9 if merged else 7}, "corrected_ys": fax_ys}, "header_intersection_x_match": header_observation}
     # Inject only external raster/registration observations. Actual target plan,
     # row mapping, preprocessing, snap, runtime evaluation and adoption stay real.
     for module in (batch, collector):
@@ -1026,8 +1031,8 @@ def test_connected_preprocess_runtime_producer_serialization_and_adoption(connec
             assert len(records) == len(item["original_expected_sheet_cells"])
             assert all(record["raw_text"] == ("0" if value == 0 else "") for record in records)
             assessment = order_service._classify_owned_evidence_payload(payload)
-            assert assessment["persistable"] is (value == 0)
-            saved = ocr_evidence_service.persist_evidence_run(order_id, payload, template_version_id=template_version_id, status="ready" if value == 0 else "diagnostic_only", source="own-recognizer", producer_version="fixture-external-recognizer/v1", workflow_job_id=job_id, workflow_attempt_id=attempt, expected_workflow_revision=revision)
+            assert assessment["persistable"] is True
+            saved = ocr_evidence_service.persist_evidence_run(order_id, payload, template_version_id=template_version_id, status="ready", source="own-recognizer", producer_version="fixture-external-recognizer/v1", workflow_job_id=job_id, workflow_attempt_id=attempt, expected_workflow_revision=revision)
             assert saved is not None
             assert guard.snapshots_equal(saved["payload_json"]["_ocr_execution"]["processing_start_input"], start)
     finally:
@@ -1702,20 +1707,22 @@ def two_accepted_output_orders(accepted_output_writer, request, monkeypatch):
         envelope = envelopes[0]
         versions = [item for item in envelope["versions"] if item["version_id"] == "repair-October"]
         assert len(versions) == 1
-        version = versions[0]
-        assert version == configured["selected_authored_version"]
+        assert versions[0] == configured["selected_authored_version"]
+        version = deepcopy(versions[0])
+        version.update(version_id="repair-November", valid_from="2026-11-01", valid_to="2026-11-30")
         if options["setting"] == "mapping":
-            configured["facility"]["fax_template"]["columns"].append({"column_id": "soft", "index": 4, "source_index": 4, "role": "quantity", "diet_type": "soft"})
+            configured["facility"]["fax_template"]["columns"].append({"column_id": "soft", "index": 4, "source_index": 4, "role": "quantity", "diet_type": "soft", "area_id": "x"})
         else:
             configured["facility"]["label_profile"] = {"label_fields": ["menu_name", "quantity"]}
         config_service._validate_authored_facility_config(configured["facility"], "own")
-        # Publish a new snapshot of the same dated authored version, not an
-        # overlapping version or a replacement for the first accepted receipt.
+        # Keep October immutable; the second component receives a distinct,
+        # non-overlapping November configuration for the same explicit period.
         version["facility"] = deepcopy(configured["facility"])
+        envelope["versions"].append(version)
         envelope.update(deepcopy(configured["facility"]))
         master_path.write_text(json.dumps(master, ensure_ascii=False), encoding="utf-8")
         with session_scope() as session:
-            selected, _ = lineage.resolve(session, facility_id, date(2026, 10, 1))
+            selected, _ = lineage.resolve(session, facility_id, date(2026, 11, 1))
             _, projection = lineage.materialize(session, selected)
             assert lineage.verify_projection(projection)["authored_version"] == version
             second_template_id = projection.id
@@ -1727,15 +1734,26 @@ def two_accepted_output_orders(accepted_output_writer, request, monkeypatch):
         assert captured["selected_authored_version"] == version
     second_values = options.get("values", (0, None, None))
     second_id, evidence_id, draft_id = "zz-second-owned-output", str(uuid4()), str(uuid4())
+    import fitz
+    second_pdf = Path(os.environ["FACILITY_MASTER_PATH"]).parent / "second-authored-output.pdf"
+    with fitz.open() as document:
+        document.new_page().insert_text((40, 40), "fixture / 2026-10-01 to 2026-10-03 / second output component")
+        second_pdf.write_bytes(document.tobytes())
     with session_scope() as session:
         first = session.get(Order, first_id)
-        first_state = session.get(OrderWorkflowState, first_id)
-        source = session.get(OrderOcrEvidenceRun, first_state.evidence_run_id)
-        # Two explicit orders of the same authored fixture PDF/facility/period;
-        # second receipt IDs are produced independently, never copied/relabelled.
-        session.add(Order(id=second_id, facility_code=first.facility_code, week_code=first.week_code, received_at=first.received_at, current_document_id=first.current_document_id, document_uri=first.document_uri, message_id=first.message_id, template_version_id=second_template_id))
+        message_id, document_id = str(uuid4()), str(uuid4())
+        received_at = datetime(2026, 11, 1) if options.get("setting") else first.received_at
+        session.add(OrderDocument(id=document_id, storage_uri=str(second_pdf), source_email_id=message_id))
+        session.add(UploadedPdf(id=str(uuid4()), message_id=message_id, storage_uri=str(second_pdf),
+            original_filename=second_pdf.name, content_sha256=sha256(second_pdf.read_bytes()).hexdigest(), received_at=received_at))
         session.flush()
-        session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=second_id, template_version_id=second_template_id, schema_version=source.schema_version, status=source.status, payload_json=deepcopy(source.payload_json), artifact_digest=source.artifact_digest))
+        # Independent synthetic consumer records, not a copied native OCR result.
+        session.add(Order(id=second_id, facility_code=first.facility_code, week_code=first.week_code, received_at=received_at, current_document_id=document_id, document_uri=str(second_pdf), message_id=message_id, template_version_id=second_template_id))
+        session.flush()
+        component_payload = {"own": 0, "component": "independent-second-output"}
+        session.add(OrderOcrEvidenceRun(id=evidence_id, order_id=second_id, template_version_id=second_template_id,
+            schema_version="fixture", status="ready", payload_json=component_payload,
+            artifact_digest=workflow._canonical_payload_digest(component_payload)))
         session.flush()
         state = OrderWorkflowState(order_id=second_id, evidence_run_id=evidence_id, template_version_id=second_template_id, state="bagging_ready")
         session.add(state)

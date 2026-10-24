@@ -114,81 +114,65 @@ def registration_only_order(monkeypatch, tmp_path):
     return register
 
 
-def test_persist_evidence_run_dedupes_identical_payload_digest(registration_only_order):
-    order_service.clear_all()
-    order = registration_only_order("msg-evidence-dedupe")
-
-    first = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v1_legacy",
-        producer_version="test",
-    )
-    second = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v1_legacy",
-        producer_version="test",
-    )
-    third = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("9"),
-        schema_version="v1_legacy",
-        producer_version="test",
-    )
-
-    assert isinstance(first, dict)
-    assert isinstance(second, dict)
-    assert isinstance(third, dict)
-    assert first["id"] == second["id"]
-    assert first["artifact_digest"] == second["artifact_digest"]
-    assert third["id"] != first["id"]
-    assert third["artifact_digest"] != first["artifact_digest"]
+def test_owned_native_runs_with_identical_values_keep_independent_execution_identity(history_case):
+    case = history_case()
+    records = []
+    for quantity in ("3", "3", "9"):
+        case.produce(cell_values=quantity)
+        record = ocr_evidence_service.get_evidence_run(case.evidence)
+        assert record is not None
+        execution = record["payload_json"]["_ocr_execution"]
+        assert execution["job_id"] == case.job
+        assert execution["evidence_run_id"] == record["id"]
+        recognized = record["payload_json"]["hakodate_ocr_evidence"]["records"]
+        assert recognized and {item["raw_text"] for item in recognized} == {quantity}
+        records.append(record)
+    assert len({record["id"] for record in records}) == 3
+    assert len({record["payload_json"]["_ocr_execution"]["job_id"] for record in records}) == 3
+    for record in records:
+        assert ocr_evidence_service.get_evidence_run(record["id"])["payload_json"] == record["payload_json"]
 
 
-def test_persist_evidence_run_does_not_dedupe_different_record_identity_for_same_digest(registration_only_order):
+@pytest.mark.parametrize("source,schema", [("legacy-cache-mirror", "v1_legacy"),
+                                           ("ocr-rerun-hakodate", "v2_hakodate_evidence_rerun")])
+def test_payload_labels_cannot_replace_owned_execution(registration_only_order, source, schema):
     order_service.clear_all()
     order = registration_only_order("msg-evidence-dedupe-identity")
 
-    legacy = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v1_legacy",
-        producer_version="legacy-cache-mirror/v1",
-        source="legacy-cache-mirror",
-    )
-    hakodate = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v2_hakodate_evidence_rerun",
-        producer_version="hakodate_best_method_pipeline",
-        source="ocr-rerun-hakodate",
-    )
+    from copy import deepcopy
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
 
-    assert isinstance(legacy, dict)
-    assert isinstance(hakodate, dict)
-    assert legacy["artifact_digest"] == hakodate["artifact_digest"]
-    assert legacy["id"] != hakodate["id"]
-    assert hakodate["created"] is True
+    payload = _sample_payload("3")
+    original = deepcopy(payload)
+    before = _snapshot(get_engine())
+    with pytest.raises(ValueError, match="^configured_execution_input_changed$"):
+        ocr_evidence_service.persist_evidence_run(order_id=order["id"], payload=payload,
+            schema_version=schema, producer_version="unowned-component", source=source)
+    assert payload == original
+    assert _snapshot(get_engine()) == before
 
 
-def test_persist_evidence_run_blocks_without_template_version(registration_only_order):
-    order_service.clear_all()
-    order = registration_only_order("msg-evidence-no-template-version")
+def test_persist_evidence_run_blocks_changed_captured_template_version(history_case):
+    case = history_case()
+    case.prepare_provider(cell_values="3")
     # Explicit corrupted projection: absence must not be repaired from the cache.
     with session_scope() as session:
-        session.get(Order, order["id"]).template_version_id = None
+        session.get(Order, case.id).template_version_id = None
+    from src.db import get_engine
+    from tests.unit.test_disabled_facility_columns import _snapshot
 
-    evidence = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
-        payload=_sample_payload("3"),
-        schema_version="v1_legacy",
-        producer_version="test",
-        source="test",
-    )
-
-    assert evidence is None
-    assert ocr_evidence_service.get_latest_evidence_run(order["id"]) is None
+    before = _snapshot(get_engine())
+    with pytest.raises(ValueError, match="^configured_execution_input_changed$"):
+        with case.execution():
+            ocr_evidence_service.persist_evidence_run(order_id=case.id, payload=_sample_payload("3"),
+                schema_version="v2_hakodate_evidence_rerun", producer_version="test", source="test",
+                template_version_id=case.queued["ocr_job"]["template_version_id"],
+                workflow_job_id=case.job,
+                workflow_attempt_id=case.queued["ocr_job"]["workflow_attempt_id"],
+                expected_workflow_revision=case.queued["workflow"]["revision"])
+    assert ocr_evidence_service.get_latest_evidence_run(case.id) is None
+    assert _snapshot(get_engine()) == before
 
 
 def test_save_order_ocr_cache_does_not_create_legacy_mirror_for_hakodate_payload(registration_only_order):
@@ -265,7 +249,7 @@ def test_classify_evidence_payload_marks_empty_done_output_unpersistable():
     assert result["error"] == "evidence_unusable"
 
 
-def test_classify_evidence_payload_accepts_hakodate_live_artifacts():
+def test_classify_evidence_payload_rejects_unreceipted_hakodate_looking_artifacts():
     result = ocr_evidence_service.classify_evidence_payload(
         {
             "status": "done",
@@ -298,7 +282,21 @@ def test_classify_evidence_payload_accepts_hakodate_live_artifacts():
         }
     )
 
+    assert result["persistable"] is False
+
+
+def test_classify_evidence_payload_accepts_actual_owned_native_artifacts(history_case):
+    from copy import deepcopy
+
+    case = history_case()
+    case.produce(cell_values="9")
+    evidence = ocr_evidence_service.get_evidence_run(case.evidence)
+    payload = evidence["payload_json"]
+    expected = evidence["artifact_manifest_json"]["original_hakodate_source"]
+    original = deepcopy(payload)
+    result = ocr_evidence_service.classify_evidence_payload(payload, expected_hakodate_source=expected)
     assert result["persistable"] is True
+    assert payload == original
 
 
 def test_classify_evidence_payload_rejects_hakodate_target_map_without_ocr_evidence():
@@ -566,9 +564,7 @@ def test_process_ingest_inline_persists_evidence_run_from_pipeline_output(monkey
         assert line.quantity_original == 7
 
 
-def test_persist_evidence_run_uses_resolved_template_registry_grid_metadata_when_classifier_differs(registration_only_order):
-    order_service.clear_all()
-    order = registration_only_order("msg-evidence-registry-grid")
+def test_evidence_record_does_not_invent_grid_from_template_or_classifier_labels():
     payload = _sample_payload("6")
     payload["template_resolution"] = template_resolution_service.build_template_resolution(
         requested_template_id="fax_layout_regular_soft_mixer_forbidden_v1",
@@ -591,8 +587,10 @@ def test_persist_evidence_run_uses_resolved_template_registry_grid_metadata_when
     payload["grid_column_edges"] = []
     payload["grid_row_edges"] = []
 
-    evidence = ocr_evidence_service.persist_evidence_run(
-        order_id=order["id"],
+    from copy import deepcopy
+    before = deepcopy(payload)
+    evidence = ocr_evidence_service.build_evidence_run_record(
+        order_id="unpersisted-component-record",
         payload=payload,
         schema_version="v2_evidence_rerun",
         producer_version="test",
@@ -600,6 +598,9 @@ def test_persist_evidence_run_uses_resolved_template_registry_grid_metadata_when
     )
 
     assert isinstance(evidence, dict)
-    assert evidence["artifact_manifest_json"]["artifacts"]["grid_metadata"] is True
-    assert evidence["capabilities_json"]["semantic_shell_only"] is False
-    assert evidence["capabilities_json"]["apply_ready"] is True
+    assert evidence["artifact_manifest_json"]["artifacts"]["grid_metadata"] is False
+    assert evidence["payload_json"]["table_box"] is None
+    assert evidence["payload_json"]["grid_column_edges"] == []
+    assert evidence["payload_json"]["grid_row_edges"] == []
+    assert evidence["payload_json"]["template_resolution"] == template_resolution_service.normalize_template_resolution_state(payload["template_resolution"])
+    assert payload == before

@@ -14,9 +14,15 @@ from src.services import order_output_artifact_service as artifacts
 
 
 @pytest.fixture
-def saved(isolated_formal_schema):
+def saved(isolated_formal_schema, monkeypatch, tmp_path):
+    from datetime import date
+    from tests.helpers.ingest_original import authored_sources
     from src.services.order_workflow_v2_service import _canonical_payload_digest
 
+    # Artifact corruption is separate from missing canonical configuration.
+    # This source is explicit and scoped to this component, never a global default.
+    authored_sources(monkeypatch, tmp_path, facility_id="synthetic-artifact-facility",
+                     menu_date=date(2026, 10, 7), seed_menu=False)
     # Synthetic artifact-only input, not a publishable order-output candidate.
     candidate = {
         "order_id": "order", "source_saved_sheet_id": "sheet",
@@ -185,6 +191,8 @@ def test_output_audit_and_repair_share_stop_instead_of_inline_resurrection(saved
             secondary_actions_json={"workflow_v2": meta})
         order = session.get(Order, "order")
         draft = session.get(OrderSheetDraft, "sheet")
+        from tests.unit.test_disabled_facility_columns import _snapshot
+        before = _snapshot(session.get_bind())
         with pytest.raises(ValueError, match="output bundle artifact missing or invalid"):
             output_builder._workflow_v2_materialization_candidate(session, {"id": order.id}, workflow, draft)
         issues = audit._audit_bagging_and_output(session=session, order=order, workflow=workflow,
@@ -195,3 +203,4 @@ def test_output_audit_and_repair_share_stop_instead_of_inline_resurrection(saved
         assert workflow.secondary_actions_json["workflow_v2"]["output_bundle"] == output
         assert session.query(OrderOutputBundle).count() == 1
         assert output["quantities"] == [0, None]
+        assert _snapshot(session.get_bind()) == before

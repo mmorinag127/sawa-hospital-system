@@ -134,13 +134,13 @@ def _make_context(order_id: str, facility_code: str, facility_name: str, menu_na
     }
 
 
-def _declared_reference_groups(groups):
+def _declared_reference_groups(groups, *, area_id="2F"):
     """Pure workbook component: explicit physical column semantics, no OCR proof."""
     from copy import deepcopy
     groups = deepcopy(groups)
     columns = [
         {"name": label, "header": label, "source": "quantity", "diet_type": diet,
-         "area_id": "2F", "column_index": index}
+         "area_id": area_id, "column_index": index}
         for index, (label, diet) in enumerate([
             ("常食", "regular"), ("職員", "staff"), ("肉禁", "no_meat"),
             ("魚禁", "no_fish"), ("その他", "change_1")], 5)]
@@ -1683,7 +1683,7 @@ def test_reference_daily_delivery_rewrites_static_menu_cells_for_target_date(tmp
     }
     workbook = output_builder._create_reference_daily_delivery_workbook(  # noqa: SLF001
         target_date=dt_date(2026, 5, 26),
-        grouped_outputs=_declared_reference_groups(grouped_outputs),
+        grouped_outputs=_declared_reference_groups(grouped_outputs, area_id=None),
     )
     output_path = tmp_path / "delivery.xlsx"
     workbook.save(output_path)
@@ -1824,7 +1824,7 @@ def test_reference_daily_delivery_writing_values_does_not_change_template_border
                     }
                 ],
             }
-        }),
+        }, area_id=None),
     )
     output_path = tmp_path / "delivery.xlsx"
     workbook.save(output_path)
@@ -2479,7 +2479,7 @@ def test_reference_daily_delivery_removes_static_artifacts(tmp_path):
         assert saved["池袋病院"].cell(row=row_idx, column=6).value is None
 
 
-def test_daily_output_both_bundle_uses_reference_delivery_and_label_rows(tmp_path, monkeypatch, isolated_formal_schema):
+def test_daily_output_both_bundle_keeps_authored_delivery_workbook_and_label_rows(tmp_path, monkeypatch, isolated_formal_schema):
     from src.services import order_workflow_v2_service as workflow
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path / "output")
     lines = [{"date": TARGET_DATE.isoformat(), "daypart": "朝", "menu_category": "副①",
@@ -2502,13 +2502,21 @@ def test_daily_output_both_bundle_uses_reference_delivery_and_label_rows(tmp_pat
     assert error is None, error
     assert order_service.get_order_by_id(f.id)["status"] == "確定"
     output_path, manifest = output_builder.build_daily_output_bundle(TARGET_DATE, bundle_type="both", status="確定")
-    saved = load_workbook(output_path, data_only=False)
     assert manifest["success_orders"] == 1
-    delivery_sheets = [name for name in saved.sheetnames if name.startswith("納品書_グループホームそよかぜ")]
-    assert delivery_sheets
-    label_sheets = [name for name in saved.sheetnames if name.startswith("ラベル_グループホームそよかぜ")]
-    assert label_sheets
-    label_ws = saved[label_sheets[0]]
+    assert manifest["file_format"] == "zip"
+    with zipfile.ZipFile(output_path) as archive:
+        delivery_files = [name for name in archive.namelist() if name.endswith("_delivery.xlsx")]
+        label_files = [name for name in archive.namelist() if name.endswith("_labels.xlsx")]
+        assert len(delivery_files) == len(label_files) == 1
+        assert set(archive.namelist()) == set(delivery_files + label_files)
+        delivery = load_workbook(BytesIO(archive.read(delivery_files[0])), data_only=False)
+        saved = load_workbook(BytesIO(archive.read(label_files[0])), data_only=False)
+    assert delivery.sheetnames == ["component-invoice"]
+    assert [cell.value for cell in delivery.active[1]] == [
+        "日付", "区分", "献立", "qty.regular_2f", "qty.no_fish_2f"]
+    assert delivery.active["D2"].value == 3
+    assert saved.sheetnames == ["そよかぜ"]
+    label_ws = saved["そよかぜ"]
     assert label_ws["D2"].value == "朝２階"
     assert label_ws["E2"].value == "副菜①"
     assert label_ws["I2"].value == "210g"

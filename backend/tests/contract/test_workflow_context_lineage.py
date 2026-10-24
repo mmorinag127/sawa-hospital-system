@@ -127,8 +127,11 @@ def test_context_materializes_exact_dated_selection_once_and_reuses_it(context_s
         assert session.get(OrderWorkflowState, ORDER) is None
     actual = facility_master_service.get_snapshot
     reads = []
+    readers = []
 
     def observe():
+        import sys
+        readers.append(sys._getframe(1).f_code.co_name)
         value = actual()
         reads.append(value)
         return value
@@ -160,7 +163,10 @@ def test_context_materializes_exact_dated_selection_once_and_reuses_it(context_s
     # Repeating an unconsumed selection publishes one command revision.
     assert repeated.json()["revision"] == result["revision"] + 1
     assert initial_read_count == 1
-    assert len(reads) == 2
+    assert readers == ["resolve_facility_for_date", "get_binding", "resolve_facility_for_date"]
+    # Repeated commands validate the existing import binding independently of
+    # the requested dated selection; neither read rematerializes a projection.
+    assert all(value.revision == snapshot.revision for value in reads)
     assert _snapshot(f.engine)["facility_template_versions"] == first_projection
     assert f.source.read_bytes() == source_before
 

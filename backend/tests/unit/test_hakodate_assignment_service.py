@@ -162,7 +162,7 @@ def _real_pdf_template(facility_id: str, debug_dir: Path) -> tuple[dict, list[di
     return template, skeleton_rows
 
 
-def test_structure_template_source_worksheet_uses_explicit_facility_merged_template() -> None:
+def test_structure_template_source_worksheet_uses_explicit_facility_merged_template(repository_layout_source) -> None:
     worksheet = hakodate_assignment_service._source_worksheet_for_structure_template(  # noqa: SLF001
         facility_id="FAC00007",
         week_sheet_name="4月26日～4月30日",
@@ -726,6 +726,7 @@ def test_structure_slot_assignment_blocks_when_detected_table_box_is_invalid(mon
 def test_structure_slot_real_pdfs_cover_representative_degraded_and_sibling_cases(
     monkeypatch,
     tmp_path,
+    repository_layout_source,
     case_name: str,
     facility_id: str,
     pdf_path: Path,

@@ -412,7 +412,7 @@ def _build_output_diet_type_map(facility_config: dict | None) -> dict[tuple[str,
             continue
         if str(column.get("role") or "").strip() != "quantity":
             continue
-        source_diet = _normalize_diet_key(column.get("diet_type"))
+        source_diet = _normalize_delivery_diet_key(column.get("diet_type"))
         output_diet = _normalize_diet_key(
             column.get("output_diet_type")
             or column.get("aggregation_diet_type")
@@ -436,7 +436,7 @@ def _apply_output_diet_type_overrides(
         return lines
     updated_lines: list[dict] = []
     for line in lines:
-        diet_key = _normalize_diet_key(line.get("diet_type"))
+        diet_key = _normalize_delivery_diet_key(line.get("diet_type"))
         area_key = _resolve_area_key(line.get("area_id"), _build_area_alias_map(facility_config))
         exact = (diet_key or "", area_key)
         output_diet = overrides[exact] if exact in overrides else overrides.get((diet_key or "", None))
@@ -883,8 +883,8 @@ def _menu_item_matches_context(item: dict, line: dict) -> tuple[int, int] | None
     line_daypart = _normalize_delivery_daypart(line.get("daypart"))
     item_category = _normalize_delivery_category_label(item.get("category"))
     line_category = _normalize_delivery_category_label(line.get("menu_category"))
-    item_diet = _normalize_diet_key(item.get("diet_type")) or ""
-    line_diet = _normalize_diet_key(
+    item_diet = _normalize_delivery_diet_key(item.get("diet_type")) or ""
+    line_diet = _normalize_delivery_diet_key(
         line.get("source_diet_type") or line.get("diet_type") or line.get("menu_diet_type")
     ) or ""
     score = 0
@@ -1092,12 +1092,12 @@ def _is_specific_delivery_category(value: object) -> bool:
 
 def _monthly_entry_diet_matches_line(entry_diet: object, line_diet: object) -> bool:
     if isinstance(entry_diet, dict):
-        entry_key = _normalize_diet_key(entry_diet.get("diet_type"))
+        entry_key = _normalize_delivery_diet_key(entry_diet.get("diet_type"))
     else:
-        entry_key = _normalize_diet_key(entry_diet)
+        entry_key = _normalize_delivery_diet_key(entry_diet)
     if not entry_key:
         return True
-    line_key = _normalize_diet_key(line_diet) or "regular"
+    line_key = _normalize_delivery_diet_key(line_diet) or "regular"
     if entry_key == line_key:
         return True
     if entry_key == "regular" and line_key in {"soft", "mixer", "soft_mixer"}:
@@ -1110,7 +1110,7 @@ def _monthly_entry_diet_matches_line(entry_diet: object, line_diet: object) -> b
 
 
 def _monthly_entry_line_diet(line: dict) -> str:
-    return _normalize_diet_key(line.get("source_diet_type") or line.get("diet_type")) or "regular"
+    return _normalize_delivery_diet_key(line.get("source_diet_type") or line.get("diet_type")) or "regular"
 
 
 def _derived_accessory(line: dict) -> bool:
@@ -1129,8 +1129,8 @@ def _canonical_monthly_entry_menu_name(entry: dict, line: dict) -> str | None:
 
 
 def _monthly_entry_diet_priority(entry: dict, line_diet: object) -> int:
-    entry_key = _normalize_diet_key(entry.get("diet_type")) or ""
-    line_key = _normalize_diet_key(line_diet) or "regular"
+    entry_key = _normalize_delivery_diet_key(entry.get("diet_type")) or ""
+    line_key = _normalize_delivery_diet_key(line_diet) or "regular"
     if entry_key == line_key:
         return 0
     if entry_key == "soft_mixer" and line_key in {"soft", "mixer", "soft_mixer"}:
@@ -1157,8 +1157,8 @@ def _build_monthly_entry_physical_rows(
             raise ValueError("monthly_entry_source_row_unresolved")
         key = (menu_date.isoformat(), daypart, slot)
         row = grouped.setdefault(key, [])
-        diet = _normalize_diet_key(entry.get("diet_type"))
-        if not diet or any(_normalize_diet_key(existing.get("diet_type")) == diet for existing in row):
+        diet = _normalize_delivery_diet_key(entry.get("diet_type"))
+        if not diet or any(_normalize_delivery_diet_key(existing.get("diet_type")) == diet for existing in row):
             raise ValueError("monthly_entry_source_row_unresolved")
         row.append(entry)
     rows = [grouped[key] for key in sorted(grouped, key=lambda key: (key[0], {"朝": 0, "昼": 1, "夕": 2}[key[1]], key[2]))]
@@ -1208,7 +1208,7 @@ def _build_menu_entry_indexes(
         menu_date = str(entry.get("menu_date") or "").strip()
         menu_name = str(entry.get("name") or "").strip()
         daypart = _normalize_output_daypart(entry.get("daypart"))
-        diet_key = _normalize_diet_key(entry.get("diet_type")) or ""
+        diet_key = _normalize_delivery_diet_key(entry.get("diet_type")) or ""
         if not menu_date or not menu_name:
             continue
         for alias in _build_menu_name_aliases(menu_name):
@@ -3748,10 +3748,8 @@ def _write_delivery_note(
     if not slot_rows:
         _apply_delivery_configured_headers(ws, header_row, columns, column_map)
     if slot_rows:
-        original_sheet_count = len(workbook.worksheets)
-        for name in list(workbook.sheetnames):
-            if workbook[name] is not ws:
-                workbook.remove(workbook[name])
+        worksheet_sources = {sheet.title: sheet.title for sheet in workbook.worksheets}
+        source_sheet_name = ws.title
         rows_by_date: dict[dt_date | None, list[dict]] = {}
         for row in rows:
             rows_by_date.setdefault(row.get("date"), []).append(row)
@@ -3780,24 +3778,20 @@ def _write_delivery_note(
                 if current_daypart:
                     slot_rows_by_daypart.setdefault(current_daypart, []).append(row)
         if not dates:
-            if len(workbook.worksheets) == original_sheet_count:
-                _patch_template_package_with_workbook_values(
-                    workbook,
-                    template_bytes=template_bytes,
-                    output_path=path,
-                )
-            else:
-                workbook.save(path)
+            _patch_template_package_with_workbook_values(
+                workbook, template_bytes=template_bytes, output_path=path,
+                worksheet_sources=worksheet_sources,
+                modified_worksheets={ws.title},
+            )
             return
         for idx, date_val in enumerate(dates):
             target_ws = ws if idx == 0 else workbook.copy_worksheet(ws)
-            if idx == 0:
-                target_ws.title = date_val.isoformat()
-            else:
+            if idx != 0:
                 title = date_val.isoformat()
                 if title in workbook.sheetnames:
                     title = f"{title}-{idx + 1}"
                 target_ws.title = title[:31]
+                worksheet_sources[target_ws.title] = source_sheet_name
             _apply_delivery_facility_name(target_ws, facility_name)
             if date_col_idx:
                 if daypart_col_idx:
@@ -3836,14 +3830,11 @@ def _write_delivery_note(
                     )
                 else:
                     _clear_delivery_slot_row(target_ws, slot_row, columns, column_map, include_menu_name)
-        if len(workbook.worksheets) == original_sheet_count:
-            _patch_template_package_with_workbook_values(
-                workbook,
-                template_bytes=template_bytes,
-                output_path=path,
-            )
-        else:
-            workbook.save(path)
+        _patch_template_package_with_workbook_values(
+            workbook, template_bytes=template_bytes, output_path=path,
+            worksheet_sources=worksheet_sources,
+            modified_worksheets={name for name, source in worksheet_sources.items() if source == source_sheet_name},
+        )
         return
 
     start_row = _delivery_start_row(ws, header_row)
@@ -3870,6 +3861,7 @@ def _write_delivery_note(
         workbook,
         template_bytes=template_bytes,
         output_path=path,
+        modified_worksheets={ws.title},
     )
 
 def _delivery_menu_entry_date(entry: dict) -> dt_date | None:
@@ -4790,6 +4782,26 @@ def _remove_delivery_static_artifacts(workbook: Workbook) -> None:
                     cell.value = None
 
 
+def _remap_copied_sheet_formula(formula: str, source_name: str, target_name: str) -> str:
+    from openpyxl.formula import Tokenizer
+    from openpyxl.utils.cell import quote_sheetname
+
+    has_equals = formula.startswith("=")
+    tokens = Tokenizer(formula if has_equals else "=" + formula).items
+    changed = False
+    for token in tokens:
+        if token.type != "OPERAND" or token.subtype != "RANGE":
+            continue
+        qualifier, separator, address = token.value.rpartition("!")
+        sheet = qualifier[1:-1].replace("''", "'") if qualifier.startswith("'") and qualifier.endswith("'") else qualifier
+        if separator and sheet == source_name:
+            token.value = quote_sheetname(target_name) + "!" + address
+            changed = True
+    if not changed:
+        return formula
+    return ("=" if has_equals else "") + "".join(token.value for token in tokens)
+
+
 def _patch_template_package_with_workbook_values(
     workbook: Workbook,
     *,
@@ -4797,6 +4809,8 @@ def _patch_template_package_with_workbook_values(
     output_path: Path,
     min_row: int = 1,
     max_row: int | None = None,
+    worksheet_sources: dict[str, str] | None = None,
+    modified_worksheets: set[str] | None = None,
 ) -> None:
     parts = _xlsx_parts_from_bytes(template_bytes)
     _drop_calc_chain(parts)
@@ -4805,6 +4819,84 @@ def _patch_template_package_with_workbook_values(
     workbook_root = ET.fromstring(parts["xl/workbook.xml"])
     sheet_paths = _worksheet_paths_by_name(parts)
     sheet_nodes = list(workbook_root.find(_xlsx_tag("sheets")) or [])
+    if worksheet_sources is not None:
+        if (set(worksheet_sources) != set(workbook.sheetnames)
+                or set(worksheet_sources.values()) != set(sheet_paths)):
+            raise ValueError("template_worksheet_sources_mismatch")
+        original_names = set(sheet_paths)
+        if not original_names.issubset(workbook.sheetnames):
+            raise ValueError("template_original_worksheets_required")
+        for ws in workbook.worksheets:
+            if ws.title in original_names:
+                if worksheet_sources[ws.title] != ws.title:
+                    raise ValueError("template_original_worksheet_source_changed")
+                continue
+            source_name = worksheet_sources[ws.title]
+            source_path = sheet_paths[source_name]
+            source_xml = ET.fromstring(parts[source_path])
+            if source_xml.find(_xlsx_tag("tableParts")) is not None:
+                raise ValueError("template_table_worksheet_clone_unsupported")
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.data_type == "f" and isinstance(cell.value, str):
+                        cell.value = _remap_copied_sheet_formula(cell.value, source_name, ws.title)
+            new_path = f"xl/worksheets/sawa-{uuid4().hex}.xml"
+            parts[new_path] = parts[source_path]
+            source_rels = str(Path(source_path).parent / "_rels" / (Path(source_path).name + ".rels"))
+            if source_rels in parts:
+                new_rels = str(Path(new_path).parent / "_rels" / (Path(new_path).name + ".rels"))
+                parts[new_rels] = parts[source_rels]
+            rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+            rel_id = "sawa-" + uuid4().hex
+            rel = ET.Element(f"{{{rel_ns}}}Relationship", {
+                "Id": rel_id, "Type": _XLSX_REL_NS + "/worksheet",
+                "Target": new_path.removeprefix("xl/"),
+            })
+            rel_content = parts["xl/_rels/workbook.xml.rels"]
+            rel_root = _template_xml_spans(rel_content)
+            parts["xl/_rels/workbook.xml.rels"] = _template_xml_insert(
+                rel_content, rel_root, rel_root["close_start"], ET.tostring(rel, encoding="utf-8"),
+            )
+            source_node = next(node for node in sheet_nodes if node.attrib["name"] == source_name)
+            new_node = ET.Element(source_node.tag, {
+                **source_node.attrib, "name": ws.title,
+                "sheetId": str(max(int(node.attrib["sheetId"]) for node in sheet_nodes) + 1),
+                f"{{{_XLSX_REL_NS}}}id": rel_id, "state": ws.sheet_state,
+            })
+            content = parts["xl/workbook.xml"]
+            root = _template_xml_spans(content)
+            sheets = next(node for node in root["children"] if node["tag"] == _xlsx_tag("sheets"))
+            parts["xl/workbook.xml"] = _template_xml_insert(
+                content, sheets, sheets["close_start"], ET.tostring(new_node, encoding="utf-8"),
+            )
+            content = parts["[Content_Types].xml"]
+            root = _template_xml_spans(content)
+            source_type = next(node for node in ET.fromstring(content)
+                               if node.attrib.get("PartName") == "/" + source_path)
+            new_type = ET.Element(source_type.tag, {**source_type.attrib, "PartName": "/" + new_path})
+            parts["[Content_Types].xml"] = _template_xml_insert(
+                content, root, root["close_start"], ET.tostring(new_type, encoding="utf-8"),
+            )
+            source_index = next(i for i, node in enumerate(sheet_nodes) if node.attrib["name"] == source_name)
+            defined_names = workbook_root.find(_xlsx_tag("definedNames"))
+            additions = []
+            for name in (defined_names if defined_names is not None else []):
+                if name.attrib.get("localSheetId") != str(source_index):
+                    continue
+                cloned = deepcopy(name)
+                cloned.attrib["localSheetId"] = str(workbook.worksheets.index(ws))
+                if cloned.text:
+                    cloned.text = _remap_copied_sheet_formula(cloned.text, source_name, ws.title)
+                additions.append(ET.tostring(cloned, encoding="utf-8"))
+            if additions:
+                content = parts["xl/workbook.xml"]
+                root = _template_xml_spans(content)
+                names = next(node for node in root["children"] if node["tag"] == _xlsx_tag("definedNames"))
+                parts["xl/workbook.xml"] = _template_xml_insert(
+                    content, names, names["close_start"], b"".join(additions),
+                )
+            sheet_nodes.append(new_node)
+            sheet_paths[ws.title] = new_path
     if len(workbook.worksheets) != len(sheet_nodes):
         raise ValueError("template-preserving xlsx output cannot add or remove sheets")
     ordered_paths: list[str] = []
@@ -4822,6 +4914,8 @@ def _patch_template_package_with_workbook_values(
         sheet_path = sheet_paths.get(ws.title) or ordered_paths[index]
         if not sheet_path or sheet_path not in parts:
             raise ValueError(f"template-preserving xlsx output cannot add or rename sheet: {ws.title}")
+        if modified_worksheets is not None and ws.title not in modified_worksheets:
+            continue
         row_stop = max_row if max_row is not None else ws.max_row
         row_indices = set(range(min_row, min(ws.max_row, row_stop) + 1))
         original_root = ET.fromstring(parts[sheet_path])
@@ -5980,15 +6074,10 @@ def build_daily_output_bundle(
 
     orders = order_service.list_orders_by_line_date(target_date, status=status)
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    bundle_name = f"daily_outputs_{target_date.isoformat()}_{normalized_type}_{stamp}.xlsx"
     request_dir = local_directory(OUTPUT_DIR) / uuid4().hex
-    bundle_path = request_dir / bundle_name
 
     manifest_items: list[dict] = []
     grouped_outputs: dict[str, dict[str, Any]] = {}
-    workbook = Workbook()
-    workbook.remove(workbook.active)
-    used_titles: set[str] = set()
 
     for order_summary in orders:
         order_id = str(order_summary.get("id") or "").strip()
@@ -6121,95 +6210,52 @@ def build_daily_output_bundle(
         }
         return zip_path, manifest
 
-    if normalized_type == "labels" and "メニュー" not in workbook.sheetnames:
-        menu_ws = workbook.create_sheet(title="メニュー")
-        _populate_daily_label_menu_sheet(menu_ws, target_date)
-
+    bundle_path = request_dir / f"daily_outputs_{target_date.isoformat()}_{normalized_type}_{stamp}.zip"
     success_count = 0
-    output_groups = (
-        sorted(grouped_outputs.values(), key=_daily_label_group_sort_key)
-        if normalized_type == "labels"
-        else list(grouped_outputs.values())
-    )
-    for group in output_groups:
-        item_payload: dict[str, object] = {
-            "order_ids": list(group["order_ids"]),
-            "facility_code": group["facility_code"],
-            "facility_name": group["facility_name"],
-            "status": "ok",
-            "files": [],
-        }
-        try:
-            has_label_rows = bool(group["bags"])
-            merged_delivery_rows = _merge_delivery_bundle_rows(
-                group["delivery_rows"],
-                group["invoice_template"],
-            ) if normalized_type in {"delivery", "both"} else []
-            has_delivery_rows = bool(merged_delivery_rows)
-
-            should_create_label_sheet = normalized_type in {"labels", "both"} and has_label_rows
-            should_create_delivery_sheet = normalized_type in {"delivery", "both"} and has_delivery_rows
-
-            if normalized_type == "labels" and not should_create_label_sheet:
-                item_payload["status"] = "empty"
-                item_payload["error"] = "label rows not found for target date"
-                manifest_items.append(item_payload)
-                continue
-            if normalized_type == "delivery" and not should_create_delivery_sheet:
-                item_payload["status"] = "empty"
-                item_payload["error"] = "delivery rows not found for target date"
-                manifest_items.append(item_payload)
-                continue
-            if normalized_type == "both" and not should_create_label_sheet and not should_create_delivery_sheet:
-                item_payload["status"] = "empty"
-                item_payload["error"] = "no bundle rows found for target date"
-                manifest_items.append(item_payload)
-                continue
-
-            if should_create_label_sheet:
-                label_title_seed = (
-                    _daily_label_sheet_name(group.get("facility_code"), group.get("facility_name"))
-                    if normalized_type == "labels"
-                    else f"ラベル_{group['sheet_seed']}"
-                )
-                sheet_name = _create_daily_labels_sheet(
-                    workbook,
-                    used_titles,
-                    title_seed=label_title_seed,
-                    bags=group["bags"],
-                    label_profile=group["label_profile"],
-                    facility_name=group["facility_config"].get("facility_name"),
-                )
-                item_payload["files"].append(sheet_name)
-            if should_create_delivery_sheet:
-                delivery_title_seed = (
-                    group["sheet_seed"]
-                    if normalized_type == "delivery"
-                    else f"納品書_{group['sheet_seed']}"
-                )
-                sheet_name = _create_daily_delivery_sheet(
-                    workbook,
-                    used_titles,
-                    title_seed=delivery_title_seed,
-                    rows=merged_delivery_rows,
-                    invoice_template=group["invoice_template"],
-                    facility_name=group["facility_config"].get("facility_name"),
-                    order_id=str(group["order_ids"][0]),
-                    output_dir=request_dir,
-                )
-                item_payload["files"].append(sheet_name)
-            success_count += 1
-        except Exception as exc:  # noqa: BLE001
-            item_payload["status"] = "error"
-            item_payload["error"] = str(exc)
-        manifest_items.append(item_payload)
-
-    if normalized_type == "labels" and success_count == 0:
+    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index, group in enumerate(grouped_outputs.values(), start=1):
+            item_payload = {
+                "order_ids": list(group["order_ids"]),
+                "facility_code": group["facility_code"],
+                "facility_name": group["facility_name"],
+                "status": "ok", "files": [],
+            }
+            try:
+                rows = _merge_delivery_bundle_rows(group["delivery_rows"], group["invoice_template"])
+                members = []
+                if rows:
+                    template = group["invoice_template"]
+                    filename = _safe_output_filename(
+                        f"{index}_{target_date.isoformat()}_{group['sheet_seed']}_delivery.xlsx",
+                        f"{index}_delivery.xlsx",
+                    )
+                    path = request_dir / filename
+                    _write_delivery_note(
+                        path, rows, template["columns"], template["template_uri"],
+                        bool(template.get("include_menu_name", False)), template.get("sheet_name"),
+                        group["facility_config"].get("facility_name"),
+                    )
+                    members.append((filename, path.read_bytes()))
+                if normalized_type == "both" and group["bags"]:
+                    label_bytes, label_name = _create_daily_label_workbook_bytes(
+                        target_date=target_date, group=group,
+                    )
+                    members.append((f"{index}_{label_name}", label_bytes))
+                if not members:
+                    item_payload["status"] = "empty"
+                    item_payload["error"] = "no bundle rows found for target date"
+                else:
+                    # Render the entire group before publishing any of its files.
+                    for filename, content in members:
+                        archive.writestr(filename, content)
+                        item_payload["files"].append(filename)
+                    success_count += 1
+            except Exception as exc:  # noqa: BLE001
+                item_payload["status"] = "error"
+                item_payload["error"] = str(exc)
+            manifest_items.append(item_payload)
+    if success_count == 0:
         raise ValueError("対象日の出力対象がありません")
-    if not workbook.sheetnames:
-        raise ValueError("対象日の出力対象がありません")
-
-    workbook.save(bundle_path)
     manifest = {
         "date": target_date.isoformat(),
         "bundle_type": normalized_type,
@@ -6219,7 +6265,7 @@ def build_daily_output_bundle(
         "success_orders": success_count,
         **_daily_bundle_status_counts(manifest_items),
         "items": manifest_items,
-        "file_format": "xlsx",
+        "file_format": "zip",
     }
 
     return bundle_path, manifest
