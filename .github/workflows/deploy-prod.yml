@@ -127,7 +127,7 @@ jobs:
           [[ "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$EXPECTED_SOURCE_SHA" = "$GITHUB_SHA"
           printf '%s' "$LOCAL_TEST_RECEIPT" > "$RUNNER_TEMP/local-test-receipt.json"
-          python3 scripts/local_hospital_test_runner.py --validate "$RUNNER_TEMP/local-test-receipt.json" \
+          python3 scripts/local_hospital_test_runner.py --validate "$RUNNER_TEMP/local-test-receipt.json" --require-full \
             --expected-source-sha "$EXPECTED_SOURCE_SHA" \
             --expected-definition-sha256 "$(sha256sum scripts/local_hospital_test_manifest.json | awk '{print $1}')"
 

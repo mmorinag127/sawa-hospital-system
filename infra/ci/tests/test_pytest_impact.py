@@ -48,8 +48,8 @@ def test_data():
 
     def run_tests(self, expected=0):
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-p", "testmon.pytest_testmon",
-             "-p", "pytest_impact", "--testmon", "-q", "test_example.py"],
+            [sys.executable, "-m", "pytest", "-p", "pytest_impact",
+             "-p", "pytest-testmon", "--testmon", "-q", "test_example.py"],
             cwd=self.root, env=self.env, text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, expected, (result.stdout + result.stderr)[-6000:])
@@ -75,14 +75,147 @@ def test_data():
         self.assertIn("test_example.py::test_data", changed["selected"])
         self.assertEqual(changed["reasons"]["test_example.py::test_data"], "file-input-changed")
 
+    def test_failed_run_cannot_publish_reusable_history(self):
+        self.run_tests()
+        self.write('leaf.py', 'def value():\n    return 99\n')
+        self.run_tests(expected=1)
+        self.assertFalse((self.state / 'inputs.json').exists())
+        self.write('leaf.py', 'def value():\n    return 1\n')
+        report = self.run_tests()
+        self.assertTrue(report['full'])
+        self.assertEqual(len(report['selected']), 3)
+        self.assertEqual(report['reused'], [])
+
+    def test_tracking_database_must_match_input_history(self):
+        self.run_tests()
+        with __import__('sqlite3').connect(self.state / 'testmon.sqlite') as connection:
+            connection.execute('CREATE TABLE foreign_tracking(value INTEGER)')
+        report = self.run_tests()
+        self.assertTrue(report['full'])
+        self.assertEqual(report['reused'], [])
+
+    def test_malformed_metadata_shapes_and_unsafe_values_force_full(self):
+        for malformed in ([], None, {'unsafe': [{}]}, {'unsafe': [None]}):
+            with self.subTest(malformed=malformed):
+                self.run_tests()
+                if isinstance(malformed, dict):
+                    metadata = json.loads((self.state / 'inputs.json').read_text())
+                    metadata['tests']['test_example.py::test_first'].update(malformed)
+                else:
+                    metadata = malformed
+                (self.state / 'inputs.json').write_text(json.dumps(metadata))
+                report = self.run_tests()
+                self.assertTrue(report['full'])
+                self.assertEqual(report['reused'], [])
+
+    def test_directory_membership_change_reruns_its_consumers(self):
+        (self.root / 'inputs').mkdir()
+        self.write('inputs/first.txt', 'first')
+        self.write('test_example.py', "from pathlib import Path\ndef test_names():\n    assert sorted(p.name for p in Path('inputs').iterdir()) == ['first.txt']\n")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        self.assertEqual(self.run_tests()['reused'], ['test_example.py::test_names'])
+        self.write('inputs/second.txt', 'second')
+        self.assertEqual(self.run_tests(1)['selected'], ['test_example.py::test_names'])
+
+    def test_directory_changes_during_a_case_cannot_authorize_reuse(self):
+        (self.root / 'inputs').mkdir()
+        self.write('test_example.py', "from pathlib import Path\ndef test_changes():\n    list(Path('inputs').iterdir())\n    Path('inputs/new.txt').write_text('new')\n    list(Path('inputs').iterdir())\n")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        report = self.run_tests()
+        self.assertEqual(report['selected'], ['test_example.py::test_changes'])
+        self.assertIn('changing-file-input', report['untracked']['test_example.py::test_changes'])
+
+    def test_environment_changes_during_a_case_cannot_authorize_reuse(self):
+        self.env['NODE_TEST_WORKER_ID'] = 'original'
+        self.write('test_example.py', "import os\ndef test_changes():\n    assert os.environ['NODE_TEST_WORKER_ID'] == 'original'\n    os.environ['NODE_TEST_WORKER_ID'] = 'changed'\n    assert os.environ['NODE_TEST_WORKER_ID'] == 'changed'\n")
+        self.run_tests()
+        report = self.run_tests()
+        self.assertEqual(report['selected'], ['test_example.py::test_changes'])
+        self.assertIn('changing-file-input', report['untracked']['test_example.py::test_changes'])
+
+    def test_external_directory_membership_is_not_silently_ignored(self):
+        with tempfile.TemporaryDirectory() as external:
+            self.write('test_example.py', f"from pathlib import Path\ndef test_names():\n    assert list(Path({external!r}).iterdir()) == []\n")
+            self.run_tests()
+            report = self.run_tests()
+            self.assertEqual(report['selected'], ['test_example.py::test_names'])
+            self.assertIn('external-directory-input', report['untracked']['test_example.py::test_names'])
+
+    def test_runtime_link_hash_tracks_original_path_resolution(self):
+        self.write('test_example.py', """from pathlib import Path
+from unittest.mock import patch
+import pytest_impact as impact
+def test_resolution():
+    first, second, link = (Path(name).absolute() for name in ('first', 'second', 'link'))
+    first.write_text('first')
+    second.write_text('second')
+    link.symlink_to(first)
+    assert not impact.immutable_runtime_file(first)
+    with patch.object(impact, 'immutable_runtime_file', return_value=True), patch.object(impact, 'root_owned_path', return_value=True):
+        before = impact.runtime_link_digest(link)
+        link.unlink()
+        link.symlink_to(second)
+        assert impact.runtime_link_digest(link) != before
+""")
+        report = self.run_tests()
+        self.assertEqual(report['selected'], ['test_example.py::test_resolution'])
+
+    def test_threaded_inputs_cannot_escape_tracking_busy_state(self):
+        self.write('test_example.py', """from pathlib import Path
+from threading import Thread
+import pytest_impact as impact
+def test_thread():
+    impact.BUSY = True
+    try:
+        thread = Thread(target=lambda: Path('data.txt').read_text())
+        thread.start()
+        thread.join()
+    finally:
+        impact.BUSY = False
+""")
+        self.run_tests()
+        report = self.run_tests()
+        self.assertEqual(report['selected'], ['test_example.py::test_thread'])
+        self.assertIn('threaded-input', report['untracked']['test_example.py::test_thread'])
+
+    def test_repo_file_symlink_target_change_reruns_original_reader(self):
+        self.write('first.txt', 'first')
+        self.write('second.txt', 'second')
+        link = self.root / 'input.link'
+        link.symlink_to('first.txt')
+        self.write('test_example.py', "from pathlib import Path\ndef test_link():\n    assert Path('input.link').read_text() == 'first'\n")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        self.assertEqual(self.run_tests()['reused'], ['test_example.py::test_link'])
+        link.unlink()
+        link.symlink_to('second.txt')
+        self.assertEqual(self.run_tests(1)['selected'], ['test_example.py::test_link'])
+
+    def test_repo_directory_symlink_target_change_reruns_original_reader(self):
+        (self.root / 'first').mkdir()
+        (self.root / 'second').mkdir()
+        self.write('first/first.txt', 'first')
+        self.write('second/second.txt', 'second')
+        link = self.root / 'input.link'
+        link.symlink_to('first', target_is_directory=True)
+        self.write('test_example.py', "from pathlib import Path\ndef test_link():\n    assert [p.name for p in Path('input.link').iterdir()] == ['first.txt']\n")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        self.assertEqual(self.run_tests()['reused'], ['test_example.py::test_link'])
+        link.unlink()
+        link.symlink_to('second', target_is_directory=True)
+        self.assertEqual(self.run_tests(1)['selected'], ['test_example.py::test_link'])
+
     def test_separate_invocations_reuse_independently_and_keep_each_report(self):
         self.env["SAWA_IMPACT_SPLIT_RUNS"] = "1"
         self.write("test_other.py", "from pathlib import Path\ndef test_other():\n assert Path('other.txt').read_text() == 'original'\n")
         self.write("other.txt", "original")
         subprocess.run(["git", "add", "."], cwd=self.root, check=True)
         def run(name, *, report_name, expected=0):
-            result = subprocess.run([sys.executable, "-m", "pytest", "-p", "testmon.pytest_testmon",
-                "-p", "pytest_impact", "--testmon", "-q", name,
+            result = subprocess.run([sys.executable, "-m", "pytest", "-p", "pytest_impact",
+                "-p", "pytest-testmon", "--testmon", "-q", name,
                 "--junitxml=" + str(self.root / report_name)],
                 cwd=self.root, env=self.env, text=True, capture_output=True)
             self.assertEqual(result.returncode, expected, (result.stdout + result.stderr)[-6000:])
@@ -137,7 +270,7 @@ def test_env():
 
     def test_unread_runner_identities_do_not_invalidate_tests(self):
         names = ("INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
-                 "MEMORY_PRESSURE_WATCH", "MEMORY_PRESSURE_WRITE", "NODE_TEST_WORKER_ID")
+                 "MEMORY_PRESSURE_WATCH", "MEMORY_PRESSURE_WRITE", "NODE_TEST_WORKER_ID", "CODEX_TOOL_CALL_ID")
         self.env.update({key: "first-run" for key in names})
         self.run_tests()
         self.env.update({key: "second-run" for key in names})
@@ -152,7 +285,7 @@ def test_env():
 
     def test_each_runner_identity_read_always_executes(self):
         names = ("INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
-                 "MEMORY_PRESSURE_WATCH", "MEMORY_PRESSURE_WRITE", "NODE_TEST_WORKER_ID")
+                 "MEMORY_PRESSURE_WATCH", "MEMORY_PRESSURE_WRITE", "NODE_TEST_WORKER_ID", "CODEX_TOOL_CALL_ID")
         self.env.update({key: "first-run" for key in names})
         self.write("test_example.py", "import os\n" + "\n".join(
             f"def test_{key}():\n    assert os.environ[{key!r}] == 'first-run'\n"
@@ -169,6 +302,7 @@ def test_env():
         self.write("conftest.py", """import os
 import pytest
 VALUE = os.environ['GITHUB_REF']
+KEYS = list(os.environ)
 @pytest.fixture
 def setting():
     return VALUE

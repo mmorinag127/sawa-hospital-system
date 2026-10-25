@@ -23,6 +23,16 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class ReceiptContractTest(unittest.TestCase):
+    def test_missing_or_unknown_tracker_version_stops_before_backend_execution(self):
+        for value in ('unknown', None):
+            with self.subTest(value=value), patch.object(BACKEND_RUNNER, 'version') as installed:
+                if value is None:
+                    installed.side_effect = BACKEND_RUNNER.PackageNotFoundError('pytest-testmon')
+                else:
+                    installed.return_value = value
+                with self.assertRaisesRegex(ValueError, 'requirements-local-tests.txt'):
+                    BACKEND_RUNNER.require_impact_dependencies()
+
     def test_missing_frontend_dependency_stops_before_any_command(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -87,15 +97,22 @@ class ReceiptContractTest(unittest.TestCase):
         self.assertIn('test_live_schema_adoption.py', ' '.join(BACKEND_RUNNER.DEDICATED_MODULES['live-schema-adoption']))
         self.assertEqual(BACKEND_RUNNER.DEDICATED_MODULES['modernization-pg-output'],
                          BACKEND_RUNNER.MODULES['output'] + BACKEND_RUNNER.MODULES['formal'])
+        def execute_backend(argv, *, cwd, env):
+            state = Path(env['SAWA_IMPACT_STATE'])
+            (state / 'selection.json').write_text(json.dumps({
+                'selected': ['test_example.py::test_case'], 'reused': [],
+                'exitstatus': 0, 'source_sha': 'a' * 40, 'baseline': None}))
+            return subprocess.CompletedProcess(argv, 0)
+
         with tempfile.TemporaryDirectory() as directory, \
              patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': directory, 'DB_HOST': 'foreign',
                                     'DB_URI': 'foreign', 'DATABASE_URL': 'foreign', 'ALEMBIC_DB_URI': 'foreign',
                                     'PYTEST_ADDOPTS': '-k foreign', 'PYTEST_PLUGINS': 'foreign_selector',
                                     'CI': '', 'GITHUB_ACTIONS': ''}), \
              patch.object(BACKEND_RUNNER, 'clean_tree', return_value=True), \
-             patch.object(BACKEND_RUNNER, 'git', return_value='a' * 40), \
+             patch.object(BACKEND_RUNNER, 'git', side_effect=lambda *args: str(Path(directory) / 'git') if '--absolute-git-dir' in args else 'a' * 40), \
              patch.object(BACKEND_RUNNER.sys, 'argv', ['runner']), \
-             patch.object(BACKEND_RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as execute:
+             patch.object(BACKEND_RUNNER.subprocess, 'run', side_effect=execute_backend) as execute:
             self.assertEqual(BACKEND_RUNNER.main(), 0)
             argv = execute.call_args.args[0]
             self.assertIn('backend/tests', argv)
@@ -106,7 +123,9 @@ class ReceiptContractTest(unittest.TestCase):
             self.assertNotIn('PYTEST_ADDOPTS', execute.call_args.kwargs['env'])
             self.assertNotIn('PYTEST_PLUGINS', execute.call_args.kwargs['env'])
             self.assertEqual(execute.call_args.kwargs['env']['SAWA_IMPACT_FULL'], '1')
-            self.assertEqual(execute.call_args.kwargs['env']['DB_URI'], 'sqlite:///' + directory + '/backend-tests/runtime.sqlite')
+            self.assertIn('--testmon', argv)
+            self.assertTrue((Path(directory) / 'backend-tests/selection.json').is_file())
+            self.assertEqual(execute.call_args.kwargs['env']['DB_URI'], 'sqlite:///' + directory + '/git/sawa-local-impact/backend-runtime.sqlite')
 
     def test_agent_cleanup_attempts_database_even_when_test_container_cannot_be_stopped(self):
         for failure in ('stop', 'owner'):
@@ -299,7 +318,7 @@ class ReceiptContractTest(unittest.TestCase):
                 with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': ''}), \
                      patch.object(RUNNER, 'MANIFEST', manifest), patch.object(RUNNER, 'clean_tree', return_value=True), \
                      patch.object(RUNNER, 'require_frontend_dependencies'), \
-                     patch.object(RUNNER, 'git', side_effect=['a' * 40, ('c' if changed else 'a') * 40, ('c' if changed else 'a') * 40]), \
+                     patch.object(RUNNER, 'git', side_effect=['a' * 40, 'codex/fix', ('c' if changed else 'a') * 40, ('c' if changed else 'a') * 40]), \
                      patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], code)):
                     self.assertEqual(RUNNER.run(output), 1)
                 self.assertFalse((output / 'receipt.json').exists())
@@ -337,13 +356,28 @@ class ReceiptContractTest(unittest.TestCase):
                  patch.object(RUNNER, 'clean_tree', return_value=True), \
                  patch.object(RUNNER, 'git', return_value='a' * 40), \
                  patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)) as execute:
-                self.assertEqual(RUNNER.run(Path(directory) / 'evidence'), 1)
+                self.assertEqual(RUNNER.run(Path(directory) / 'evidence', full=True), 1)
                 environment = execute.call_args.kwargs['env']
                 self.assertNotIn('PYTEST_ADDOPTS', environment)
                 self.assertNotIn('PYTEST_PLUGINS', environment)
                 self.assertEqual(environment['SAWA_IMPACT_FULL'], '1')
+                self.assertEqual(environment['SAWA_LOCAL_TEST_MODE'], 'full')
                 self.assertEqual(os.environ['PYTEST_ADDOPTS'], '-k hidden --last-failed')
                 self.assertEqual(os.environ['SAWA_IMPACT_FULL'], '0')
+
+    def test_default_impact_and_release_full_are_controlled_by_runner(self):
+        for branch, expected in [('codex/fix', 'impact'), ('release/prod-reviewed', 'full'), ('', 'full')]:
+            with self.subTest(branch=branch), tempfile.TemporaryDirectory() as directory:
+                manifest = Path(directory) / 'manifest.json'
+                manifest.write_text(json.dumps({'version': 1, 'commands': [{'name': 'only', 'command': 'true'}]}))
+                with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': '', 'SAWA_LOCAL_TEST_MODE': 'foreign'}), \
+                     patch.object(RUNNER, 'MANIFEST', manifest), \
+                     patch.object(RUNNER, 'require_frontend_dependencies'), \
+                     patch.object(RUNNER, 'clean_tree', return_value=True), \
+                     patch.object(RUNNER, 'git', side_effect=lambda *args: branch if args[0] == 'branch' else 'a' * 40), \
+                     patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)) as execute:
+                    self.assertEqual(RUNNER.run(Path(directory) / 'evidence'), 1)
+                    self.assertEqual(execute.call_args.kwargs['env']['SAWA_LOCAL_TEST_MODE'], expected)
 
     def test_source_change_stops_remaining_groups_and_never_signs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -372,7 +406,7 @@ class ReceiptContractTest(unittest.TestCase):
                  patch.object(RUNNER, 'MANIFEST', manifest), \
                  patch.object(RUNNER, 'require_frontend_dependencies'), \
                  patch.object(RUNNER, 'clean_tree', return_value=True), \
-                 patch.object(RUNNER, 'git', side_effect=['a' * 40, 'c' * 40, 'a' * 40]), \
+                 patch.object(RUNNER, 'git', side_effect=['a' * 40, 'codex/fix', 'c' * 40, 'a' * 40]), \
                  patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
                 self.assertEqual(RUNNER.run(output), 1)
             self.assertTrue((output / 'failed-run.json').exists())
@@ -397,8 +431,15 @@ class ReceiptContractTest(unittest.TestCase):
                 'SAWA_LOCAL_TEST_SIGNING_KEY': str(self.key)}):
             payload = self.receipt()
             payload['definition_sha256'] = RUNNER.digest(RUNNER.MANIFEST)
+            payload['receipt_version'] = 2
+            payload['backend_selection'] = {'source_sha': 'a' * 40, 'mode': 'impact',
+                'executed': 2, 'reused': 10, 'report_sha256': 'e' * 64}
             envelope = sign(payload)
             for filename in ('deploy-dev.yml', 'deploy-stg.yml', 'deploy-prod.yml'):
+                selected_payload = json.loads(json.dumps(payload))
+                if filename == 'deploy-prod.yml':
+                    selected_payload['backend_selection'].update(mode='full', executed=12, reused=0)
+                envelope = sign(selected_payload)
                 workflow = yaml.safe_load((RUNNER.ROOT / '.github/workflows' / filename).read_text())
                 job = workflow['jobs'].get('source-gate', workflow['jobs'].get('deploy-dev'))
                 gate = next(s['run'] for s in job['steps'] if 'local_hospital_test_runner.py --validate' in s.get('run', ''))
@@ -414,6 +455,8 @@ class ReceiptContractTest(unittest.TestCase):
                                           env={**env, **overrides}, capture_output=True).returncode
                 with self.subTest(workflow=filename):
                     self.assertEqual(run({}), 0)
+                    if filename == 'deploy-prod.yml':
+                        self.assertNotEqual(run({'LOCAL_TEST_RECEIPT': json.dumps(sign(payload))}), 0)
                     for overrides in ({'GITHUB_EVENT_NAME': 'push'}, {'GITHUB_ACTOR': 'foreign'},
                                       {'GITHUB_TRIGGERING_ACTOR': 'foreign'}, {'GITHUB_SHA': 'c' * 40},
                                       {'SAWA_LOCAL_TEST_PUBLIC_KEY': ''}, {'LOCAL_TEST_RECEIPT': json.dumps(payload)}):
@@ -437,6 +480,19 @@ class ReceiptContractTest(unittest.TestCase):
     def test_accepts_manual_local_receipt(self):
         receipt = self.receipt()
         RUNNER.validate_receipt(json.loads(json.dumps(receipt)), "a" * 40, "b" * 64)
+
+    def test_signed_selection_rejects_wrong_source_invalid_count_and_full_reuse(self):
+        receipt = self.receipt()
+        receipt['receipt_version'] = 2
+        receipt['backend_selection'] = {'source_sha': 'a' * 40, 'mode': 'impact',
+            'executed': 2, 'reused': 10, 'report_sha256': 'e' * 64}
+        RUNNER.validate_receipt(receipt, 'a' * 40, 'b' * 64)
+        for key, value in [('source_sha', 'c' * 40), ('executed', True),
+                           ('reused', -1), ('report_sha256', 'x' * 64), ('mode', 'full')]:
+            changed = json.loads(json.dumps(receipt))
+            changed['backend_selection'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                RUNNER.validate_receipt(changed, 'a' * 40, 'b' * 64)
 
     def test_rejects_false_clean_flag_invalid_hash_and_changed_head(self):
         receipt = self.receipt()

@@ -14,6 +14,7 @@ import platform
 import sqlite3
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -36,6 +37,7 @@ INPUTS = {}
 UNSAFE = set()
 GLOBAL_INPUTS = {}
 GLOBAL_UNSAFE = set()
+UNSAFE_PATHS = set()
 OUTCOMES = {}
 SELECTED = []
 OMITTED = []
@@ -45,6 +47,7 @@ FIXTURE_STACK = []
 DISABLED_COLLECTOR = None
 STDLIB = str(Path(os.__file__).resolve().parent) + os.sep
 RUNTIME_PATHS = tuple({Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()})
+MAIN_THREAD = threading.get_ident()
 
 
 def digest(path):
@@ -52,6 +55,102 @@ def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+def tracking_digest():
+    try:
+        with sqlite3.connect(f"file:{DB}?mode=ro", uri=True) as connection:
+            return hashlib.sha256("\n".join(connection.iterdump()).encode()).hexdigest()
+    except sqlite3.Error:
+        return None
+
+
+def input_digest(name):
+    if name.startswith('source-link:'):
+        path = Path(os.path.abspath(ROOT / name.removeprefix('source-link:')))
+        return resolution_digest(path) if path.is_relative_to(ROOT) else None
+    if name.startswith('runtime-link:'):
+        return runtime_link_digest(Path(name.removeprefix('runtime-link:')))
+    if name.startswith('runtime:'):
+        path = Path(name.removeprefix('runtime:'))
+        return digest(path) if immutable_runtime_file(path) else None
+    if name.startswith('environment:'):
+        key = name.removeprefix('environment:')
+        try:
+            value = _environment_getitem(os.environ, key)
+        except KeyError:
+            value = None
+        return hashlib.sha256(json.dumps(value).encode()).hexdigest()
+    if not name.startswith('directory:'):
+        return digest(ROOT / name)
+    path = (ROOT / name.removeprefix('directory:')).resolve()
+    if not path.is_relative_to(ROOT):
+        return None
+    try:
+        entries = []
+        for child in path.iterdir():
+            info = child.lstat()
+            attributes = {key: getattr(info, key) for key in dir(info) if key.startswith('st_')}
+            entries.append((child.name, attributes, os.readlink(child) if child.is_symlink() else None))
+        return hashlib.sha256(json.dumps(sorted(entries), sort_keys=True).encode()).hexdigest()
+    except OSError:
+        return None
+
+
+def immutable_runtime_file(path):
+    roots = tuple(Path(value) for value in (
+        '/usr/share', '/etc', '/private/etc', '/System/Library', '/private/var/db/timezone'))
+    try:
+        return (path.resolve() == path and any(path.is_relative_to(root) for root in roots)
+                and all(item.stat().st_uid == 0 and not os.access(item, os.W_OK)
+                        for item in (path, *path.parents)))
+    except OSError:
+        return False
+
+
+def root_owned_path(path):
+    try:
+        return all(item.lstat().st_uid == 0 and not os.access(item, os.W_OK)
+                   for item in (path, *path.parents))
+    except OSError:
+        return False
+
+
+def runtime_link_digest(path):
+    try:
+        target = path.resolve(strict=True)
+        if not path.is_absolute() or not immutable_runtime_file(target) or not root_owned_path(path):
+            return None
+        return resolution_digest(path)
+    except OSError:
+        return None
+
+
+def resolution_digest(path):
+    try:
+        target = path.resolve(strict=True)
+        links = [(str(item), os.readlink(item)) for item in (path, *path.parents) if item.is_symlink()]
+        return hashlib.sha256(json.dumps([str(target), links]).encode()).hexdigest()
+    except (OSError, RuntimeError):
+        return None
+
+
+def valid_input_record(name, value):
+    if (not isinstance(name, str) or not isinstance(value, str) or len(value) != 64
+            or any(char not in '0123456789abcdef' for char in value)):
+        return False
+    if name in TRACKED:
+        return True
+    kind, separator, path = name.partition(':')
+    if not separator or not path or '\0' in path:
+        return False
+    if kind == 'environment':
+        return True
+    if '..' in Path(path).parts:
+        return False
+    if kind in ('directory', 'source-link'):
+        return not Path(path).is_absolute()
+    return kind in ('runtime', 'runtime-link') and Path(path).is_absolute()
 
 
 def tracked_files():
@@ -65,13 +164,17 @@ TRACKED = tracked_files()
 VOLATILE_ENV = {
     "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID", "MEMORY_PRESSURE_WATCH",
     "MEMORY_PRESSURE_WRITE", "NODE_TEST_WORKER_ID",
+    "CODEX_TOOL_CALL_ID",
     "HOME", "PWD", "OLDPWD", "PATH", "TMPDIR", "TMP", "TEMP", "VIRTUAL_ENV",
     "SHLVL", "_", "TESTMON_DATAFILE", "SAWA_IMPACT_ROOT", "SAWA_IMPACT_STATE",
     "SAWA_IMPACT_FULL", "PYTEST_CURRENT_TEST", "PYTHONPATH",
+    "SAWA_LOCAL_RUN_ID", "SAWA_LOCAL_EVIDENCE_DIR", "SAWA_LOCAL_TEST_MODE",
+    "SAWA_LOCAL_SOURCE_SHA",
 }
 
 
 def context():
+    global CONTEXT_PARTS
     # CI run identifiers and temp paths are not application settings.
     env = {
         key: value for key, value in os.environ.items()
@@ -91,36 +194,61 @@ def context():
         "packages": sorted((d.metadata["Name"], d.version) for d in importlib.metadata.distributions()
                            if d.metadata["Name"]),
     }
+    CONTEXT_PARTS = {key: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+                     for key, value in payload.items() if key != 'env'}
+    CONTEXT_PARTS['env'] = {key: hashlib.sha256(value.encode()).hexdigest() for key, value in env.items()}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 CONTEXT = context()
+BASELINE_STATUS = 'missing-or-invalid'
+CONTEXT_CHANGES = []
 
 
 def load_previous():
+    global BASELINE_STATUS, CONTEXT_CHANGES
     try:
         previous = json.loads(META.read_text())
+        if not isinstance(previous, dict):
+            return {}
+        if os.environ.get('SAWA_LOCAL_SOURCE_SHA'):
+            source = previous.get('source_sha')
+            if not isinstance(source, str) or len(source) != 40 or any(char not in '0123456789abcdef' for char in source):
+                return {}
         if previous["context"] != CONTEXT or not isinstance(previous["tests"], dict):
+            BASELINE_STATUS = 'context-changed'
+            before = previous.get('context_parts', {})
+            before = before if isinstance(before, dict) else {}
+            CONTEXT_CHANGES = [key for key in CONTEXT_PARTS if key != 'env' and before.get(key) != CONTEXT_PARTS[key]]
+            old_env = before.get('env', {})
+            old_env = old_env if isinstance(old_env, dict) else {}
+            CONTEXT_CHANGES += ['env:' + key for key in set(old_env) | set(CONTEXT_PARTS['env'])
+                                if old_env.get(key) != CONTEXT_PARTS['env'].get(key)]
+            return {}
+        if previous.get("tracking_sha256") != tracking_digest():
+            BASELINE_STATUS = 'tracking-data-changed'
             return {}
         for node, entry in previous["tests"].items():
             if not isinstance(node, str) or not isinstance(entry, dict):
                 return {}
             if not isinstance(entry.get("passed"), bool) or not isinstance(entry.get("inputs"), dict):
                 return {}
-            if not isinstance(entry.get("unsafe"), list):
+            if not isinstance(entry.get("unsafe"), list) or not all(isinstance(reason, str) for reason in entry['unsafe']):
                 return {}
-            if any(name not in TRACKED or not isinstance(value, str) or len(value) != 64
-                   for name, value in entry["inputs"].items()):
+            if any(not valid_input_record(name, value) for name, value in entry["inputs"].items()):
                 return {}
         with sqlite3.connect(f"file:{DB}?mode=ro", uri=True) as conn:
             if conn.execute("PRAGMA quick_check").fetchone() != ("ok",):
                 return {}
+        BASELINE_STATUS = 'verified'
         return previous["tests"]
-    except (OSError, ValueError, KeyError, sqlite3.Error):
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
         return {}
 
 
 PREVIOUS = load_previous()
+BASELINE = {"inputs_sha256": digest(META), "tracking_sha256": tracking_digest(),
+            "source_sha": json.loads(META.read_text()).get("source_sha")} if PREVIOUS else None
 FULL = os.environ.get("SAWA_IMPACT_FULL") == "1" or not PREVIOUS
 if FULL:
     STATE.mkdir(parents=True, exist_ok=True)
@@ -157,8 +285,27 @@ def record_unsafe(reason):
         fixture["unsafe"].add(reason)
 
 
+def record_input(name, value):
+    if value is None:
+        record_unsafe('unreadable-input')
+        return
+    target = GLOBAL_INPUTS if ACTIVE is None else INPUTS
+    if name in target and target[name] != value:
+        record_unsafe('changing-file-input')
+    target.setdefault(name, value)
+    for fixture in FIXTURE_STACK:
+        if name in fixture['inputs'] and fixture['inputs'][name] != value:
+            fixture['unsafe'].add('changing-file-input')
+        fixture['inputs'].setdefault(name, value)
+
+
 def audit(event, args):
     global BUSY
+    if threading.get_ident() != MAIN_THREAD and event in {
+        'open', 'os.listdir', 'os.scandir', 'subprocess.Popen', 'os.system', 'socket.connect', 'socket.getaddrinfo',
+    }:
+        record_unsafe('threaded-input')
+        return
     # Once reuse is forbidden, further hashing cannot change the decision.
     # Still record shared fixture inputs for their other consumers.
     if BUSY or GLOBAL_UNSAFE or (UNSAFE and ACTIVE is not None and not FIXTURE_STACK) or event not in {
@@ -177,15 +324,27 @@ def audit(event, args):
         return
     BUSY = True
     try:
-        path = Path(os.fsdecode(args[0])).resolve()
+        original_path = Path(os.path.abspath(os.fsdecode(args[0])))
+        path = original_path.resolve()
+        if original_path != path and original_path.is_relative_to(ROOT):
+            name = 'source-link:' + str(original_path.relative_to(ROOT))
+            record_input(name, input_digest(name))
         if path.is_relative_to(STATE):
             return
         if any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
             return  # Installed versions are in the context, including in-repo venvs.
         if event != "open":
-            # Directory membership may include untracked or externally generated inputs.
             if path.is_relative_to(ROOT) and path.name not in {"__pycache__", ".pytest_cache"}:
-                record_unsafe("directory-input")
+                name = 'directory:' + str(path.relative_to(ROOT))
+                value = input_digest(name)
+                if value is None:
+                    UNSAFE_PATHS.add(str(path.relative_to(ROOT)))
+                    record_unsafe("directory-input")
+                else:
+                    record_input(name, value)
+            elif not path.is_relative_to(ROOT):
+                UNSAFE_PATHS.add(str(path))
+                record_unsafe('external-directory-input')
             return
         mode = args[1]
         flags = args[2] if len(args) > 2 else 0
@@ -210,7 +369,15 @@ def audit(event, args):
                 record_unsafe("untracked-file-input")
         else:
             if str(path) not in {"/dev/null", "/dev/urandom"}:
-                record_unsafe("external-file-input")
+                if not immutable_runtime_file(path):
+                    UNSAFE_PATHS.add(str(path))
+                    record_unsafe("external-file-input")
+                else:
+                    if original_path != path:
+                        name = 'runtime-link:' + str(original_path)
+                        record_input(name, input_digest(name))
+                    name = 'runtime:' + str(path)
+                    record_input(name, input_digest(name))
     finally:
         BUSY = False
 
@@ -260,7 +427,7 @@ def pytest_collection_modifyitems(session, config, items):
             reason = "untracked-input"
         elif item.nodeid not in candidates:
             reason = "python-dependency-changed"
-        elif any(digest(ROOT / name) != value for name, value in previous["inputs"].items()):
+        elif any(input_digest(name) != value for name, value in previous["inputs"].items()):
             reason = "file-input-changed"
         if reason:
             REASONS[item.nodeid] = reason
@@ -278,15 +445,23 @@ def pytest_collection_modifyitems(session, config, items):
     BUSY = False
     yield
     SELECTED.extend(item.nodeid for item in items)
+    executed = set(SELECTED)
+    OMITTED[:] = [node for node in OMITTED if node not in executed]
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_protocol(item, nextitem):
-    global ACTIVE, INPUTS, UNSAFE
+    global ACTIVE, INPUTS, UNSAFE, BUSY
     ACTIVE = item.nodeid
     INPUTS = dict(GLOBAL_INPUTS)
     UNSAFE = set(GLOBAL_UNSAFE)
     yield
+    BUSY = True
+    try:
+        if any(input_digest(name) != value for name, value in INPUTS.items()):
+            UNSAFE.add('changing-file-input')
+    finally:
+        BUSY = False
     reports = OUTCOMES.get(item.nodeid, {})
     PREVIOUS[item.nodeid] = {
         "passed": all(reports.get(phase) == "passed" for phase in ("setup", "call", "teardown")),
@@ -321,20 +496,34 @@ def pytest_runtest_setup(item):
                 UNSAFE.update(record["unsafe"])
 
 
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_sessionfinish(session, exitstatus):
     global BUSY
+    yield
+    exitstatus = session.exitstatus
     BUSY = True
     if DISABLED_COLLECTOR is not None:
         DISABLED_COLLECTOR.pytest_sessionfinish(session)
     STATE.mkdir(parents=True, exist_ok=True)
     for entry in PREVIOUS.values():
         entry["unsafe"] = sorted(set(entry["unsafe"]) | GLOBAL_UNSAFE)
-    META.write_text(json.dumps({"context": CONTEXT, "tests": PREVIOUS}, sort_keys=True))
+    if int(exitstatus) == 0:
+        META.write_text(json.dumps({"context": CONTEXT, "tests": PREVIOUS,
+            "context_parts": CONTEXT_PARTS,
+            "tracking_sha256": tracking_digest(), "source_sha": os.environ.get("SAWA_LOCAL_SOURCE_SHA")}, sort_keys=True))
+    else:
+        META.unlink(missing_ok=True)
     REPORT.write_text(json.dumps({
         "selected": SELECTED, "reused": OMITTED, "reasons": REASONS,
         "untracked": {node: value["unsafe"] for node, value in PREVIOUS.items() if value.get("unsafe")},
         "full": FULL, "exitstatus": int(exitstatus),
         "code_tracking_disabled": DISABLED_COLLECTOR is not None,
+        "unsafe_paths": sorted(UNSAFE_PATHS),
+        "context_sha256": CONTEXT, "baseline": BASELINE,
+        "baseline_status": BASELINE_STATUS,
+        "context_changes": sorted(CONTEXT_CHANGES),
+        "source_sha": os.environ.get("SAWA_LOCAL_SOURCE_SHA"),
+        "inputs_sha256": digest(META), "tracking_sha256": tracking_digest(),
     }, indent=2))
     BUSY = False
 
@@ -352,10 +541,17 @@ _environment_iter = os._Environ.__iter__
 
 
 def observed_environment(self, key):
+    global BUSY
     if (not BUSY and not GLOBAL_UNSAFE and isinstance(key, str)
             and (key in VOLATILE_ENV or key.startswith(("GITHUB_", "RUNNER_", "ACTIONS_", "INPUT_")))
             and not framework_read()):
-        record_unsafe("volatile-environment")
+        BUSY = True
+        try:
+            name = 'environment:' + key
+            value = input_digest(name)
+            record_input(name, value)
+        finally:
+            BUSY = False
     return _environment_getitem(self, key)
 
 
@@ -369,3 +565,14 @@ def observed_environment_iter(self):
 
 
 os._Environ.__iter__ = observed_environment_iter
+
+_thread_start = threading.Thread.start
+
+
+def observed_thread_start(self, *args, **kwargs):
+    if not framework_read():
+        record_unsafe('threaded-input')
+    return _thread_start(self, *args, **kwargs)
+
+
+threading.Thread.start = observed_thread_start

@@ -42,12 +42,29 @@ def require_frontend_dependencies() -> None:
                          + ", ".join(missing))
 
 
-def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash: str) -> None:
+def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash: str, *, require_full: bool = False) -> None:
+    if type(receipt) is not dict:
+        raise ValueError("receipt fields do not match the local receipt contract")
     required = {"receipt_version", "owner_attestation", "source_sha_start", "source_sha_end", "clean_before", "clean_after", "definition_sha256", "commands"}
+    if receipt.get("receipt_version") == 2:
+        required.add("backend_selection")
     if type(receipt) is not dict or set(receipt) != required:
         raise ValueError("receipt fields do not match the local receipt contract")
-    if type(receipt["receipt_version"]) is not int or receipt["receipt_version"] != 1 or receipt["owner_attestation"] != "manual":
-        raise ValueError("receipt must be a version 1 manual owner attestation")
+    if type(receipt["receipt_version"]) is not int or receipt["receipt_version"] not in (1, 2) or receipt["owner_attestation"] != "manual":
+        raise ValueError("receipt must be a supported manual owner attestation")
+    if receipt["receipt_version"] == 2:
+        selection = receipt["backend_selection"]
+        if require_full and (not isinstance(selection, dict) or selection.get("mode") != "full"):
+            raise ValueError("production requires full backend execution")
+        if (not isinstance(selection, dict) or set(selection) != {"source_sha", "mode", "executed", "reused", "report_sha256"}
+                or selection["source_sha"] != expected_sha or selection["mode"] not in ("full", "impact")
+                or any(type(selection[key]) is not int or selection[key] < 0 for key in ("executed", "reused"))
+                or not selection["executed"] + selection["reused"]
+                or (selection["mode"] == "full" and selection["reused"])
+                or not isinstance(selection["report_sha256"], str)
+                or len(selection["report_sha256"]) != 64
+                or any(char not in "0123456789abcdef" for char in selection["report_sha256"])):
+            raise ValueError("invalid signed backend selection evidence")
     if receipt["source_sha_start"] != expected_sha or receipt["source_sha_end"] != expected_sha or receipt["definition_sha256"] != expected_definition_hash:
         raise ValueError("receipt source SHA or command definition hash does not match")
     if receipt["clean_before"] is not True or receipt["clean_after"] is not True:
@@ -78,7 +95,7 @@ def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash:
             raise ValueError("receipt command does not match the local test manifest")
 
 
-def run(output: Path) -> int:
+def run(output: Path, *, full: bool = False) -> int:
     reject_hosted_runner()
     os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     if not clean_tree():
@@ -97,6 +114,8 @@ def run(output: Path) -> int:
     for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         environment.pop(key, None)
     environment["SAWA_IMPACT_FULL"] = "1"
+    branch = git("branch", "--show-current")
+    environment["SAWA_LOCAL_TEST_MODE"] = "full" if full or not branch or branch.startswith("release/prod-") else "impact"
     records = []
     source_stable = True
     for index, item in enumerate(commands):
@@ -124,6 +143,16 @@ def run(output: Path) -> int:
         (output / "failed-run.json").write_text(json.dumps(receipt, indent=2) + "\n")
         return 1
     validate_receipt(receipt, source_sha_start, receipt["definition_sha256"])
+    if any(item["name"] == "backend-tests" for item in commands):
+        report_path = output / "backend-tests" / "selection.json"
+        report = json.loads(report_path.read_text())
+        if report["source_sha"] != source_sha_start or report["exitstatus"] != 0:
+            raise ValueError("backend selection does not match successful source")
+        receipt["receipt_version"] = 2
+        receipt["backend_selection"] = {"source_sha": source_sha_start,
+            "mode": environment["SAWA_LOCAL_TEST_MODE"], "executed": len(report["selected"]),
+            "reused": len(report["reused"]), "report_sha256": digest(report_path)}
+        validate_receipt(receipt, source_sha_start, receipt["definition_sha256"])
     (output / "receipt.json").write_text(json.dumps(sign(receipt), indent=2) + "\n")
     return 0 if receipt["clean_after"] and len(records) == len(commands) and all(x["exit_code"] == 0 for x in records) else 1
 
@@ -134,15 +163,18 @@ def main() -> int:
     parser.add_argument("--validate", type=Path)
     parser.add_argument("--expected-source-sha")
     parser.add_argument("--expected-definition-sha256")
+    parser.add_argument("--full", action="store_true", help="Execute every backend case instead of dependency-tracked selection")
+    parser.add_argument("--require-full", action="store_true")
     args = parser.parse_args()
     if args.validate:
         if not args.expected_source_sha or not args.expected_definition_sha256:
             parser.error("--validate requires expected source and definition hashes")
-        validate_receipt(verify_signed(json.loads(args.validate.read_text())), args.expected_source_sha, args.expected_definition_sha256)
+        validate_receipt(verify_signed(json.loads(args.validate.read_text())), args.expected_source_sha, args.expected_definition_sha256,
+                         require_full=args.require_full)
         return 0
     if args.output is None:
         parser.error("--output is required when creating a receipt")
-    return run(args.output)
+    return run(args.output, full=args.full)
 
 
 if __name__ == "__main__":
