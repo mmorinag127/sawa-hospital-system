@@ -150,3 +150,9 @@ The correction has selection contract regressions and 27 receipt contract tests.
 It does not establish the 15-minute ceiling. A complete successful exact-source
 receipt, Linux image checks and staging verification are still required before
 claiming release completion. Interrupted or failed batches are not receipts.
+
+Runner-generated SAWA_LOCAL_* identifiers, image selectors and PostgreSQL tool
+locations do not invalidate tests that never read them. Python records actual
+reads; Node keeps readers non-reusable. Both implementations use the same
+identity regression fixtures. Runtime options such as NODE_OPTIONS remain part
+of the Node context rather than being mistaken for an unrelated run identifier.

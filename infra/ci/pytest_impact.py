@@ -208,9 +208,9 @@ VOLATILE_ENV = {
     "HOME", "PWD", "OLDPWD", "PATH", "TMPDIR", "TMP", "TEMP", "VIRTUAL_ENV",
     "SHLVL", "_", "TESTMON_DATAFILE", "SAWA_IMPACT_ROOT", "SAWA_IMPACT_STATE",
     "SAWA_IMPACT_FULL", "PYTEST_CURRENT_TEST", "PYTHONPATH",
-    "SAWA_LOCAL_RUN_ID", "SAWA_LOCAL_EVIDENCE_DIR", "SAWA_LOCAL_TEST_MODE",
-    "SAWA_LOCAL_SOURCE_SHA",
+    "PG_BIN", "REFRESH_TEST_PG_BIN",
 }
+RUNNER_PREFIXES = ("GITHUB_", "RUNNER_", "ACTIONS_", "INPUT_", "SAWA_LOCAL_")
 
 
 def context():
@@ -219,7 +219,7 @@ def context():
     env = {
         key: value for key, value in os.environ.items()
         if key not in VOLATILE_ENV
-        and not key.startswith(("GITHUB_", "RUNNER_", "ACTIONS_", "INPUT_"))
+        and not key.startswith(RUNNER_PREFIXES)
     }
     configs = {
         name: digest(ROOT / name) for name in sorted(TRACKED)
@@ -720,7 +720,7 @@ _environment_iter = os._Environ.__iter__
 def observed_environment(self, key):
     global BUSY
     if (not BUSY and not GLOBAL_UNSAFE and isinstance(key, str)
-            and (key in VOLATILE_ENV or key.startswith(("GITHUB_", "RUNNER_", "ACTIONS_", "INPUT_")))
+            and (key in VOLATILE_ENV or key.startswith(RUNNER_PREFIXES))
             and not framework_read() and not progress_environment_read()):
         BUSY = True
         try:

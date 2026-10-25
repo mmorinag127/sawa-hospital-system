@@ -24,9 +24,11 @@ const fileHash = (file) => {
 const volatile = new Set(['HOME', 'PWD', 'OLDPWD', 'PATH', 'TMP', 'TEMP', 'TMPDIR', 'SHLVL', '_',
   'INVOCATION_ID', 'JOURNAL_STREAM', 'SYSTEMD_EXEC_PID', 'MEMORY_PRESSURE_WATCH',
   'MEMORY_PRESSURE_WRITE', 'NODE_TEST_WORKER_ID',
-  'NODE_OPTIONS', 'NODE_TEST_CONTEXT', 'SAWA_IMPACT_ROOT', 'SAWA_NODE_IMPACT_STATE', 'SAWA_IMPACT_FULL']);
+  'CODEX_TOOL_CALL_ID', 'PG_BIN', 'REFRESH_TEST_PG_BIN',
+  'NODE_TEST_CONTEXT', 'SAWA_IMPACT_ROOT', 'SAWA_NODE_IMPACT_STATE', 'SAWA_IMPACT_FULL']);
+const runnerEnvironmentKey = (key) => volatile.has(key) || /^(GITHUB_|RUNNER_|ACTIONS_|INPUT_|SAWA_LOCAL_)/.test(key);
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-  !volatile.has(key) && !/^(GITHUB_|RUNNER_|ACTIONS_|INPUT_)/.test(key)).sort());
+  !runnerEnvironmentKey(key)).sort());
 const configs = Object.fromEntries([...tracked].sort().filter((name) =>
   /\.(toml|ini|cfg|ya?ml|lock)$/.test(name) ||
   /(^|\/)(package(-lock)?|tsconfig[^/]*)\.json$/.test(name) || name.startsWith('infra/ci/'))
@@ -121,7 +123,7 @@ syncBuiltinESMExports();
 const environment = process.env;
 function observeEnvironment(key) {
   if (!busy && !globalUnsafe.size && typeof key === 'string' &&
-      (volatile.has(key) || /^(GITHUB_|RUNNER_|ACTIONS_|INPUT_)/.test(key))) {
+      runnerEnvironmentKey(key)) {
     const caller = new Error().stack?.split('\n')[3] || '';
     if (!caller.includes('(node:') && !caller.includes('at node:')) unsafe('volatile-environment');
   }

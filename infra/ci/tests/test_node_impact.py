@@ -4,11 +4,10 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from runner_identity_cases import RUN_IDENTITIES, runner_values
 
 
 REGISTER = Path(__file__).resolve().parents[1] / "node-impact/register.mjs"
-RUN_IDENTITIES = ("INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
-                  "MEMORY_PRESSURE_WATCH", "MEMORY_PRESSURE_WRITE", "NODE_TEST_WORKER_ID")
 
 
 class NodeImpact(unittest.TestCase):
@@ -94,22 +93,29 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
         self.assertIn("example.test.mjs::environment#0", self.run_tests(1)["selected"])
 
     def test_unread_runner_identities_do_not_invalidate_tests(self):
-        self.env.update({key: "first-run" for key in RUN_IDENTITIES})
+        self.env.update(runner_values())
         self.run_tests()
-        self.env.update({key: "second-run" for key in RUN_IDENTITIES})
+        self.env.update(runner_values(second=True))
         self.assertEqual(len(self.run_tests()["reused"]), 2)
 
     def test_each_runner_identity_read_always_executes(self):
+        expected = runner_values()
         with (self.root / "example.test.mjs").open("a") as stream:
             for key in RUN_IDENTITIES:
-                stream.write(f"\ntest('{key}', () => assert.equal(process.env.{key}, 'first-run'));\n")
-        self.env.update({key: "first-run" for key in RUN_IDENTITIES})
+                stream.write(f"\ntest('{key}', () => assert.equal(process.env.{key}, {json.dumps(expected[key])}));\n")
+        self.env.update(expected)
         self.run_tests(isolated=False)
-        self.env.update({key: "second-run" for key in RUN_IDENTITIES})
+        self.env.update(runner_values(second=True))
         report = self.run_tests(1, isolated=False)
         for key in RUN_IDENTITIES:
             self.assertIn(f"example.test.mjs::{key}#0", report["selected"])
             self.assertIn("volatile-environment", report["untracked"][f"example.test.mjs::{key}#0"])
+
+    def test_node_startup_options_remain_part_of_context(self):
+        self.env['NODE_OPTIONS'] = '--max-old-space-size=256'
+        self.run_tests()
+        self.env['NODE_OPTIONS'] = '--max-old-space-size=384'
+        self.assertEqual(len(self.run_tests()['selected']), 2)
 
     def test_native_worker_identity_read_always_executes(self):
         self.env["NODE_TEST_WORKER_ID"] = "inherited-worker"

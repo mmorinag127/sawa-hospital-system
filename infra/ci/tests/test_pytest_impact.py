@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from runner_identity_cases import RUN_IDENTITIES, runner_values
 
 
 PLUGIN = Path(__file__).resolve().parents[1]
@@ -435,11 +436,9 @@ def test_env():
         self.assertIn("test_example.py::test_env", self.run_tests(1)["selected"])
 
     def test_unread_runner_identities_do_not_invalidate_tests(self):
-        names = ("INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
-                 "MEMORY_PRESSURE_WATCH", "MEMORY_PRESSURE_WRITE", "NODE_TEST_WORKER_ID", "CODEX_TOOL_CALL_ID")
-        self.env.update({key: "first-run" for key in names})
+        self.env.update(runner_values())
         self.run_tests()
-        self.env.update({key: "second-run" for key in names})
+        self.env.update(runner_values(second=True))
         self.assertEqual(len(self.run_tests()["reused"]), 3)
 
     def test_environment_key_enumeration_always_executes(self):
@@ -450,16 +449,15 @@ def test_env():
         self.assertIn("test_example.py::test_keys", self.run_tests(1)["selected"])
 
     def test_each_runner_identity_read_always_executes(self):
-        names = ("INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
-                 "MEMORY_PRESSURE_WATCH", "MEMORY_PRESSURE_WRITE", "NODE_TEST_WORKER_ID", "CODEX_TOOL_CALL_ID")
-        self.env.update({key: "first-run" for key in names})
+        expected = runner_values()
+        self.env.update(expected)
         self.write("test_example.py", "import os\n" + "\n".join(
-            f"def test_{key}():\n    assert os.environ[{key!r}] == 'first-run'\n"
-            for key in names))
+            f"def test_{key}():\n    assert os.environ[{key!r}] == {expected[key]!r}\n"
+            for key in RUN_IDENTITIES))
         self.run_tests()
-        self.env.update({key: "second-run" for key in names})
+        self.env.update(runner_values(second=True))
         report = self.run_tests(1)
-        for key in names:
+        for key in RUN_IDENTITIES:
             self.assertIn(f"test_example.py::test_{key}", report["selected"])
 
 
