@@ -79,15 +79,19 @@ def test_verified_copy_rejects_partial_copy_before_engine_creation(tmp_path, mon
         helper.sqlite_engine_from_template(template, tmp_path / "case", expected_digest=expected)
 
 
-def test_formal_fixture_rejects_changed_migration_source_before_copy(request, tmp_path, monkeypatch):
+@pytest.mark.parametrize("changed_source", ["catalog", "migration"])
+def test_formal_fixture_rejects_changed_migration_source_before_copy(request, tmp_path, monkeypatch, changed_source):
     _, _, expected = request.getfixturevalue("verified_formal_sqlite_template")
     root = Path(helper.__file__).resolve().parents[2]
     copied = tmp_path / "schema-source"
     shutil.copytree(root / "alembic", copied / "alembic", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(root / "migrations", copied / "migrations", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copyfile(root / "alembic.ini", copied / "alembic.ini")
     monkeypatch.setattr(helper, "__file__", str(copied / "tests/integration/helper.py"))
     assert helper.formal_schema_source_digest() == expected
-    (copied / "alembic/catalog_contracts.json").write_text("changed source")
+    changed = (copied / "alembic/catalog_contracts.json" if changed_source == "catalog"
+               else next((copied / "migrations").rglob("*.py")))
+    changed.write_text("changed source")
     assert helper.formal_schema_source_digest() != expected
     monkeypatch.delenv("C2_ISOLATED_PG_URI", raising=False)
     monkeypatch.setattr(helper, "sqlite_engine_from_template",

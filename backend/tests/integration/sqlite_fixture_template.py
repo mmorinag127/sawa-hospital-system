@@ -13,7 +13,8 @@ import sqlalchemy as sa
 def formal_schema_source_digest() -> str:
     root = Path(__file__).resolve().parents[2]
     paths = [root / "alembic.ini", root / "alembic/catalog_contracts.json",
-             *sorted((root / "alembic").rglob("*.py"))]
+             *sorted((root / "alembic").rglob("*.py")),
+             *sorted((root / "migrations").rglob("*.py"))]
     digest = sha256()
     for path in paths:
         digest.update(str(path.relative_to(root)).encode() + b"\0")
