@@ -29,7 +29,7 @@ from src.services import workflow_attempt_guard_service as guard
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
+def store(tmp_path, monkeypatch, delivery_sqlite_template):
     def foreign_keys(connection, _record):
         assert isinstance(connection, sqlite3.Connection)
         connection.execute("PRAGMA foreign_keys=ON")
@@ -39,7 +39,7 @@ def store(tmp_path, monkeypatch):
 
     event.listen(Engine, "connect", foreign_keys)
     # Delegate registration/setup to the unchanged shared fixture.
-    generator = original_store.__wrapped__(tmp_path, monkeypatch)
+    generator = original_store.__wrapped__(tmp_path, monkeypatch, delivery_sqlite_template)
     try:
         factory = next(generator)
         monkeypatch.setattr(menu_service, "get_engine", lambda: factory.kw["bind"])

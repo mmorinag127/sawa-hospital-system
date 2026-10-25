@@ -481,7 +481,12 @@ def pytest_fixture_setup(fixturedef, request):
     try:
         yield
     finally:
-        FIXTURE_STACK.remove(record)
+        for index, active_record in enumerate(FIXTURE_STACK):
+            if active_record is record:
+                del FIXTURE_STACK[index]
+                break
+        else:
+            raise RuntimeError("Fixture tracking record is missing")
         FIXTURES[id(fixturedef)] = record
 
 

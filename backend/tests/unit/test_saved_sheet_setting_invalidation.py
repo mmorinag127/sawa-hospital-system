@@ -43,7 +43,7 @@ def saved(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
+def store(tmp_path, monkeypatch, delivery_sqlite_template):
     monkeypatch.setenv("OCR_ARTIFACT_DIR", str((tmp_path / "artifacts").absolute()))
     monkeypatch.delenv("OCR_OUTPUT_BUCKET", raising=False)
     def enforce(connection, _record):
@@ -53,7 +53,7 @@ def store(tmp_path, monkeypatch):
         for _, _, filename in connection.execute("PRAGMA database_list"):
             assert not filename or Path(filename).resolve().is_relative_to(tmp_path.resolve())
     event.listen(Engine, "connect", enforce)
-    generator = original_store.__wrapped__(tmp_path, monkeypatch)
+    generator = original_store.__wrapped__(tmp_path, monkeypatch, delivery_sqlite_template)
     try:
         factory = next(generator)
         monkeypatch.setattr(menu_service, "get_engine", lambda: factory.kw["bind"])

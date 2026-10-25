@@ -68,6 +68,37 @@ def test_data():
         self.assertNotIn("test_example.py::test_second", changed["selected"])
         self.assertNotIn("test_example.py::test_data", changed["selected"])
 
+    def test_equal_nested_fixture_records_are_removed_by_identity(self):
+        self.write("test_example.py", """
+from types import SimpleNamespace
+import pytest_impact as impact
+
+def test_nested_tracking():
+    parent = SimpleNamespace()
+    child = SimpleNamespace()
+    outer = impact.pytest_fixture_setup(parent, None)
+    inner = impact.pytest_fixture_setup(child, None)
+    next(outer)
+    outer_record = impact.FIXTURE_STACK[-1]
+    next(inner)
+    inner_record = impact.FIXTURE_STACK[-1]
+    assert outer_record == inner_record and outer_record is not inner_record
+    try:
+        next(inner)
+    except StopIteration:
+        pass
+    assert impact.FIXTURE_STACK[-1] is outer_record
+    outer_record['unsafe'].add('outer-only')
+    try:
+        next(outer)
+    except StopIteration:
+        pass
+    assert impact.FIXTURES[id(parent)]['unsafe'] == {'outer-only'}
+    assert impact.FIXTURES[id(child)]['unsafe'] == set()
+""")
+        report = self.run_tests()
+        self.assertEqual(report["selected"], ["test_example.py::test_nested_tracking"])
+
     def test_file_input_change_is_not_hidden(self):
         self.run_tests()
         self.write("data.txt", "changed")

@@ -29,7 +29,7 @@ from src.services import workflow_ocr_delivery_service as workflow_delivery
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
+def store(tmp_path, monkeypatch, delivery_sqlite_template):
     def fk(connection, _record):
         assert isinstance(connection, sqlite3.Connection)
         connection.execute("PRAGMA foreign_keys=ON")
@@ -38,7 +38,7 @@ def store(tmp_path, monkeypatch):
                    for row in connection.execute("PRAGMA database_list"))
     event.listen(Engine, "connect", fk)
     try:
-        yield from original_store.__wrapped__(tmp_path, monkeypatch)
+        yield from original_store.__wrapped__(tmp_path, monkeypatch, delivery_sqlite_template)
     finally:
         event.remove(Engine, "connect", fk)
 
