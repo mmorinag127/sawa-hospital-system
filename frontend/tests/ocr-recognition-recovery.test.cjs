@@ -52,3 +52,17 @@ test('recognition save retains authored value and refuses stale revision', async
   await assert.rejects(handler('saveRecognitionReview', f.context)(), /入力版/);
   assert.equal(f.calls.length, count);
 });
+
+test('output refusal explains invalid quantities without replacing or accepting them', () => {
+  const describeWorkflowBlocker = handler('describeWorkflowBlocker', {});
+  const message = describeWorkflowBlocker('sheet_ocr_review_required');
+  assert.match(message, /保存済みシートの数量欄/);
+  assert.match(message, /文字・記号/);
+  assert.match(message, /Step3/);
+  assert.match(message, /手動修正して保存/);
+  assert.match(message, /OCR原文と保存履歴は保持/);
+  assert.equal(handler('formatApiError', {describeWorkflowBlocker})(
+    {response: {data: {detail: 'sheet_ocr_review_required'}}}, 'failed'), message);
+  assert.match(describeWorkflowBlocker('sheet_identity_review_required'), /日付・食事区分・献立名/);
+  assert.equal(describeWorkflowBlocker('unknown_future_error'), 'unknown_future_error');
+});

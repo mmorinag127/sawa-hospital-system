@@ -917,6 +917,8 @@ const describeWorkflowBlocker = (code: string) => {
     ocr_recorded_job_pdf_mismatch: "OCRジョブのFAX文書・保存先・ハッシュが原本と一致しません。",
     ocr_recorded_job_version_changed: "OCRジョブが参照するFAXの版が元の記録と一致しません。",
     sheet_ocr_execution_missing: "保存済みシートの元OCR実行を特定できません。",
+    sheet_ocr_review_required: "保存済みシートの数量欄に、数値として扱えない文字・記号が残っています。Step3で該当欄を手動修正して保存してください。OCR原文と保存履歴は保持しています。",
+    sheet_identity_review_required: "保存済みシートの日付・食事区分・献立名を特定できない行があります。Step3で該当行を確認してください。数量や対象日を推測して出力は作成しません。",
     recognition_resume_source_required: "手動修正を再開する元の実行情報が不足しています。保存済みの入力内容は保持しています。",
     menu_entries_missing: "対象週の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
     monthly_menu_object_missing: "対象月の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
