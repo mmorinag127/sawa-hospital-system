@@ -10,6 +10,17 @@ from alembic.config import Config
 import sqlalchemy as sa
 
 
+def formal_schema_source_digest() -> str:
+    root = Path(__file__).resolve().parents[2]
+    paths = [root / "alembic.ini", root / "alembic/catalog_contracts.json",
+             *sorted((root / "alembic").rglob("*.py"))]
+    digest = sha256()
+    for path in paths:
+        digest.update(str(path.relative_to(root)).encode() + b"\0")
+        digest.update(sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 def migrated_sqlite_template(tmp_path_factory, *, alembic_ini: Path, name: str) -> Path:
     template = tmp_path_factory.mktemp(name) / "formal-empty.sqlite3"
     engine = sa.create_engine(f"sqlite:///{template}")
@@ -33,10 +44,14 @@ def migrated_sqlite_template(tmp_path_factory, *, alembic_ini: Path, name: str) 
     return template
 
 
-def sqlite_engine_from_template(template: Path, destination: Path, **kwargs) -> sa.Engine:
+def sqlite_engine_from_template(template: Path, destination: Path, *, expected_digest=None, **kwargs) -> sa.Engine:
     if destination.exists():
         raise RuntimeError("SQLite fixture destination must be a new per-case path")
+    if expected_digest is not None and file_digest(template) != expected_digest:
+        raise RuntimeError("SQLite fixture template differs from its verified schema")
     shutil.copyfile(template, destination)
+    if expected_digest is not None and file_digest(destination) != expected_digest:
+        raise RuntimeError("SQLite fixture copy differs from its verified schema")
     return sa.create_engine(f"sqlite:///{destination}", **kwargs)
 
 

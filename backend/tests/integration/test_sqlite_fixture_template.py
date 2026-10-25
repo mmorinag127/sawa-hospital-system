@@ -1,10 +1,11 @@
 from pathlib import Path
+import shutil
 from unittest.mock import MagicMock
 
 import pytest
 import sqlalchemy as sa
 
-import sqlite_fixture_template as helper
+from tests.integration import sqlite_fixture_template as helper
 
 
 def test_migration_failure_restores_environment_and_disposes_engine(monkeypatch, tmp_path_factory):
@@ -55,6 +56,85 @@ def test_existing_destination_is_not_overwritten(tmp_path):
     with pytest.raises(RuntimeError, match="new per-case path"):
         helper.sqlite_engine_from_template(template, destination)
     assert destination.read_bytes() == b"existing"
+
+
+def test_verified_copy_rejects_changed_template_before_copy(tmp_path):
+    template = tmp_path / "template"
+    template.write_bytes(b"verified")
+    expected = helper.file_digest(template)
+    template.write_bytes(b"changed")
+    destination = tmp_path / "case"
+    with pytest.raises(RuntimeError, match="template differs"):
+        helper.sqlite_engine_from_template(template, destination, expected_digest=expected)
+    assert not destination.exists()
+
+
+def test_verified_copy_rejects_partial_copy_before_engine_creation(tmp_path, monkeypatch):
+    template = tmp_path / "template"
+    template.write_bytes(b"verified")
+    expected = helper.file_digest(template)
+    monkeypatch.setattr(helper.shutil, "copyfile", lambda source, target: target.write_bytes(b"partial"))
+    monkeypatch.setattr(helper.sa, "create_engine", lambda *a, **k: pytest.fail("corrupt copy connected"))
+    with pytest.raises(RuntimeError, match="copy differs"):
+        helper.sqlite_engine_from_template(template, tmp_path / "case", expected_digest=expected)
+
+
+def test_formal_fixture_rejects_changed_migration_source_before_copy(request, tmp_path, monkeypatch):
+    _, _, expected = request.getfixturevalue("verified_formal_sqlite_template")
+    root = Path(helper.__file__).resolve().parents[2]
+    copied = tmp_path / "schema-source"
+    shutil.copytree(root / "alembic", copied / "alembic", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copyfile(root / "alembic.ini", copied / "alembic.ini")
+    monkeypatch.setattr(helper, "__file__", str(copied / "tests/integration/helper.py"))
+    assert helper.formal_schema_source_digest() == expected
+    (copied / "alembic/catalog_contracts.json").write_text("changed source")
+    assert helper.formal_schema_source_digest() != expected
+    monkeypatch.delenv("C2_ISOLATED_PG_URI", raising=False)
+    monkeypatch.setattr(helper, "sqlite_engine_from_template",
+                        lambda *a, **k: pytest.fail("changed schema source copied"))
+    with pytest.raises(RuntimeError, match="Formal migration source changed"):
+        request.getfixturevalue("isolated_formal_schema")
+
+
+def test_verified_template_identity_matches_real_formal_schema(request):
+    from src.maintenance.formal_migration_schema import require_formal_head
+
+    template, digest, schema_source = request.getfixturevalue("verified_formal_sqlite_template")
+    assert helper.file_digest(template) == digest
+    assert helper.formal_schema_source_digest() == schema_source
+    verifier = sa.create_engine(f"sqlite:///{template}")
+    try:
+        with verifier.connect() as connection:
+            require_formal_head(connection)
+    finally:
+        verifier.dispose()
+    assert helper.file_digest(template) == digest
+
+
+def test_delivery_template_copies_keep_schema_and_data_independent(delivery_sqlite_template, tmp_path):
+    from src import db
+
+    template, digest = delivery_sqlite_template
+    first = helper.sqlite_engine_from_template(template, tmp_path / "delivery-first.sqlite3", expected_digest=digest)
+    second = helper.sqlite_engine_from_template(template, tmp_path / "delivery-second.sqlite3", expected_digest=digest)
+    reference = sa.create_engine("sqlite://")
+    try:
+        db.Base.metadata.create_all(reference)
+        def schema(engine):
+            with engine.connect() as connection:
+                return connection.exec_driver_sql(
+                    "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name"
+                ).all()
+        assert schema(first) == schema(second) == schema(reference)
+        with first.begin() as connection:
+            connection.exec_driver_sql("CREATE TABLE case_only (value INTEGER)")
+            connection.exec_driver_sql("INSERT INTO case_only VALUES (7)")
+        assert "case_only" not in sa.inspect(second).get_table_names()
+        assert helper.file_digest(template) == digest
+    finally:
+        first.dispose()
+        second.dispose()
+        reference.dispose()
 
 
 @pytest.mark.parametrize("case_value", [41, 73])

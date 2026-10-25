@@ -17,12 +17,19 @@ from src.services import ocr_job_service, order_service, workflow_attempt_guard_
 
 
 @pytest.fixture
-def workflow_database(tmp_path, monkeypatch):
-    database = sa.create_engine(f"sqlite:///{tmp_path / 'workflow-ocr.sqlite3'}", future=True)
-    db.Base.metadata.create_all(database)
+def workflow_database(tmp_path, monkeypatch, delivery_sqlite_template):
+    from tests.integration.sqlite_fixture_template import file_digest, sqlite_engine_from_template
+
+    template, expected = delivery_sqlite_template
+    database = sqlite_engine_from_template(template, tmp_path / "workflow-ocr.sqlite3",
+                                           expected_digest=expected, future=True)
     factory = sessionmaker(database, autoflush=False, future=True)
     monkeypatch.setattr(db, "SessionLocal", factory)
-    return database, factory
+    try:
+        yield database, factory
+    finally:
+        database.dispose()
+        assert file_digest(template) == expected, "workflow SQLite template was modified"
 
 
 def _add_order_and_workflow(factory, *, order_id: str, revision: int = 7) -> None:

@@ -96,3 +96,35 @@ the staging source gate. Version 1 full-run receipts remain readable.
 
 The first tracking run is full. A reported all-test run is not evidence of a
 speed improvement: real backend reuse and timing must be measured separately.
+
+## Cold-run preparation reduction
+
+The requested ceiling is approximately 15 minutes, including a cold/full run.
+This is an acceptance target, not a measured result or a timeout that makes an
+unfinished run successful. Do not run timing measurements without authorization.
+
+The formal SQLite fixture validates its migrated empty template against the
+complete catalog once per session. Every case checks the migration source digest,
+the verified template digest and the copied database digest before connecting.
+PostgreSQL still performs its complete per-case migration/catalog checks. Tests
+of migrations, schema mutation and runtime schema validation are not replaced.
+
+Delivery and workflow reservation fixtures build their empty metadata schema
+once per session and give every case an independently verified database copy.
+Their SQL behavior, assertions and case combinations remain unchanged. Neither
+business data nor engines/connections are shared between cases. The general
+suite still runs every required case on a cold/full run; these changes do not
+prove that the complete run fits the requested ceiling.
+
+The preparation change was functionally checked with the three complete modules
+`backend/tests/integration/test_sqlite_fixture_template.py`,
+`backend/tests/unit/test_ingest_delivery_contract.py`, and
+`backend/tests/integration/test_workflow_ocr_enqueue_transaction.py`: 114 cases
+passed in one serial invocation, using a new temporary bootstrap SQLite database,
+the existing local Python runtime and `pytest -qq --tb=short`. No duration
+comparison or full-suite timing run was performed. This is not a full release
+receipt or proof of the 15-minute ceiling.
+Review then added an actual migration-source mutation refusal case. Its first
+run exposed a duplicate short-name helper import in the test; the import was
+aligned with the fixture's canonical package import. All 10 helper-module cases
+then passed. Neither the failed probe nor this functional rerun measured speed.

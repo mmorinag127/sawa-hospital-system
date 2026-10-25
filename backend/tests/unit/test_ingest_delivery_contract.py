@@ -6,7 +6,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from src import db, models
@@ -22,9 +22,12 @@ from src.services import workflow_ocr_delivery_execution_service as exclusion
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    engine = create_engine(f"sqlite:///{tmp_path / 'delivery-source-case.sqlite'}")
-    models.Base.metadata.create_all(engine)
+def store(tmp_path, monkeypatch, delivery_sqlite_template):
+    from tests.integration.sqlite_fixture_template import file_digest, sqlite_engine_from_template
+
+    template, expected = delivery_sqlite_template
+    engine = sqlite_engine_from_template(template, tmp_path / "delivery-source-case.sqlite",
+                                         expected_digest=expected)
     factory = sessionmaker(engine, autoflush=False, expire_on_commit=True)
     monkeypatch.setattr(db, "SessionLocal", factory)
     monkeypatch.setattr(exclusion, "get_engine", lambda: engine)
@@ -41,6 +44,7 @@ def store(tmp_path, monkeypatch):
         yield factory
     finally:
         engine.dispose()
+        assert file_digest(template) == expected, "delivery SQLite template was modified"
 
 
 @pytest.fixture

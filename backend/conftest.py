@@ -75,6 +75,19 @@ def isolated_formal_sqlite_template(tmp_path_factory):
         name="isolated-formal-schema")
 
 
+@pytest.fixture(scope="session")
+def delivery_sqlite_template(tmp_path_factory):
+    from tests.integration.sqlite_fixture_template import file_digest
+
+    template = tmp_path_factory.mktemp("delivery-empty-schema") / "empty.sqlite3"
+    builder = sa.create_engine(f"sqlite:///{template}")
+    try:
+        runtime_db.Base.metadata.create_all(builder)
+    finally:
+        builder.dispose()
+    return template, file_digest(template)
+
+
 @pytest.fixture
 def isolated_formal_schema(tmp_path, monkeypatch, request):
     """Own every row/schema per case; never clear another test's retained history."""
@@ -86,10 +99,14 @@ def isolated_formal_schema(tmp_path, monkeypatch, request):
     try:
         if uri is None:
             url = sa.URL.create("sqlite", database=str(tmp_path / "isolated-formal.sqlite3"))
-            from tests.integration.sqlite_fixture_template import file_digest, sqlite_engine_from_template
-            template = request.getfixturevalue("isolated_formal_sqlite_template")
-            template_digest = file_digest(template)
-            isolated = sqlite_engine_from_template(template, Path(url.database))
+            from tests.integration.sqlite_fixture_template import (
+                file_digest, formal_schema_source_digest, sqlite_engine_from_template,
+            )
+            template, template_digest, schema_source = request.getfixturevalue("verified_formal_sqlite_template")
+            if formal_schema_source_digest() != schema_source:
+                raise RuntimeError("Formal migration source changed after template verification")
+            isolated = sqlite_engine_from_template(template, Path(url.database),
+                                                  expected_digest=template_digest)
         else:
             if not uri.strip() or uri != uri.strip():
                 raise RuntimeError("C2_ISOLATED_PG_URI must be explicit and nonblank")
@@ -132,9 +149,10 @@ def isolated_formal_schema(tmp_path, monkeypatch, request):
             with isolated.connect() as connection:
                 config.attributes["connection"] = connection
                 command.upgrade(config, "head")
-        from src.maintenance.formal_migration_schema import require_formal_head
-        with isolated.connect() as connection:
-            require_formal_head(connection)
+        if uri is not None:
+            from src.maintenance.formal_migration_schema import require_formal_head
+            with isolated.connect() as connection:
+                require_formal_head(connection)
         if isolated.dialect.name == "sqlite":
             isolated.dispose()
             @sa.event.listens_for(isolated, "connect")
@@ -168,3 +186,25 @@ def isolated_formal_schema(tmp_path, monkeypatch, request):
                         connection.exec_driver_sql('DROP DATABASE "' + database + '"')
             finally:
                 admin.dispose()
+
+
+@pytest.fixture(scope="session")
+def verified_formal_sqlite_template(isolated_formal_sqlite_template):
+    """Validate once; each case must receive these exact verified database bytes."""
+    from tests.integration.sqlite_fixture_template import file_digest, formal_schema_source_digest
+    from src.maintenance.formal_migration_schema import require_formal_head
+
+    template = isolated_formal_sqlite_template
+    before = file_digest(template)
+    schema_source = formal_schema_source_digest()
+    verifier = sa.create_engine(f"sqlite:///{template}")
+    try:
+        with verifier.connect() as connection:
+            require_formal_head(connection)
+    finally:
+        verifier.dispose()
+    if file_digest(template) != before:
+        raise RuntimeError("Formal schema verification modified the SQLite template")
+    if formal_schema_source_digest() != schema_source:
+        raise RuntimeError("Formal migration source changed during template verification")
+    return template, before, schema_source
