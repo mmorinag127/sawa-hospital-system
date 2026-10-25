@@ -4,6 +4,8 @@ Run sequentially on the exact clean commit that will be deployed:
 
 Prepare dependencies once before starting the runner. Keep the hospital backend
 environment and the gateway lock separate; they do not share a FastAPI pin.
+Install the pinned test-only tracker in the backend test interpreter with
+`python -m pip install -r infra/ci/requirements-local-tests.txt`.
 Set `SAWA_LOCAL_TEST_IMAGE_AGENT_RUNTIME` to the prepared Linux/amd64 serving
 agent image labelled with this exact clean commit. The native test runner checks
 the image source, derives an explicitly recorded test-only gateway image, and
@@ -79,3 +81,18 @@ Node contract files and Playwright workers run one at a time on the local PC.
 Playwright copies tracked frontend source and installed dependencies into an
 independent evidence workspace. Private ignored `.env.local` files and inherited
 cloud credentials are excluded; Next-generated source stays in that workspace.
+
+## Backend impact selection
+
+The local batch defaults to dependency-tracked backend selection. `--full` and
+`release/prod-*` execute every case. Unknown inputs, missing or corrupt tracking,
+and failed tracking runs do not authorize reuse. Only the runner's built-in
+testmon/input tracker may select cases; inherited pytest selectors are removed.
+
+Each backend run retains `backend-tests/selection.json`, including executed and
+reused node IDs, reasons, context, baseline identity and tracking hashes. Its hash,
+source SHA and counts are included in the version 2 signed receipt accepted by
+the staging source gate. Version 1 full-run receipts remain readable.
+
+The first tracking run is full. A reported all-test run is not evidence of a
+speed improvement: real backend reuse and timing must be measured separately.

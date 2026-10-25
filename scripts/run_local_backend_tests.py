@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import fcntl
+from importlib.metadata import PackageNotFoundError, version
 
 from local_hospital_test_runner import ROOT, clean_tree, git, reject_hosted_runner
 from run_readonly_pg_tests import MODULES
@@ -21,10 +23,21 @@ DEDICATED_MODULES = {
 }
 
 
+def require_impact_dependencies():
+    try:
+        matches = all(version(name) == expected for name, expected in (
+            ('pytest-testmon', '2.2.0'), ('coverage', '7.17.0')))
+    except PackageNotFoundError:
+        matches = False
+    if not matches:
+        raise ValueError('Prepare local test dependencies: python -m pip install -r infra/ci/requirements-local-tests.txt')
+
+
 def main():
     reject_hosted_runner()
     if not clean_tree():
         raise ValueError("Backend tests require a fixed clean source")
+    require_impact_dependencies()
     source = git("rev-parse", "HEAD")
     evidence = Path(os.environ["SAWA_LOCAL_EVIDENCE_DIR"]) / "backend-tests"
     evidence.mkdir(exist_ok=False)
@@ -36,14 +49,50 @@ def main():
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("DB_")
            and key not in ("DATABASE_URL", "ALEMBIC_DB_URI", "PYTEST_ADDOPTS", "PYTEST_PLUGINS")}
-    env["SAWA_IMPACT_FULL"] = "1"
-    env["DB_URI"] = "sqlite:///" + str(evidence / "runtime.sqlite")
-    env["PYTHONPATH"] = str(ROOT / "backend") + os.pathsep + str(ROOT / "backend/tests/unit")
+    mode = os.environ.get("SAWA_LOCAL_TEST_MODE", "full")
+    state = Path(git("rev-parse", "--absolute-git-dir")) / "sawa-local-impact" / "backend"
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    env = {key: value for key, value in env.items()
+           if not key.startswith("SAWA_IMPACT_") and key != "TESTMON_DATAFILE"}
+    env.update(SAWA_IMPACT_FULL="1" if mode != "impact" else "0",
+               SAWA_IMPACT_ROOT=str(ROOT), SAWA_IMPACT_STATE=str(state),
+               TESTMON_DATAFILE=str(state / "testmon.sqlite"), SAWA_LOCAL_SOURCE_SHA=source)
+    argv[3:3] = ["-p", "pytest_impact", "-p", "pytest-testmon", "--testmon"]
+    runtime = state.parent / "backend-runtime.sqlite"
+    env["DB_URI"] = "sqlite:///" + str(runtime)
+    env["PYTHONPATH"] = os.pathsep.join(str(ROOT / path) for path in ("backend", "backend/tests/unit", "infra/ci"))
     (evidence / "partition.json").write_text(json.dumps({
         "source_sha": source, "dedicated_modules": DEDICATED_MODULES,
         "general_argv": argv, "database_uri": env["DB_URI"],
     }, indent=2))
-    result = subprocess.run(argv, cwd=ROOT, env=env)
+    with (state / "run.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        (state / "selection.json").unlink(missing_ok=True)
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            owned = Path(str(runtime) + suffix)
+            if owned.is_symlink():
+                raise ValueError("Owned test database must not be a symlink")
+            owned.unlink(missing_ok=True)
+        runtime.touch(mode=0o600)
+        result = subprocess.run(argv, cwd=ROOT, env=env)
+        selection = json.loads((state / "selection.json").read_text())
+        selected, reused = selection["selected"], selection["reused"]
+        if (not isinstance(selected, list) or not isinstance(reused, list)
+                or not all(isinstance(node, str) for node in selected + reused)
+                or len(set(selected + reused)) != len(selected + reused)
+                or not selected + reused
+                or selection["exitstatus"] != result.returncode
+                or selection["source_sha"] != source
+                or (reused and not selection["baseline"])
+                or (reused and (not isinstance(selection["baseline"].get("source_sha"), str)
+                    or len(selection["baseline"]["source_sha"]) != 40))
+                or (mode != "impact" and reused)):
+            raise ValueError("Invalid backend dependency selection evidence")
+        (evidence / "selection.json").write_text(json.dumps(selection, indent=2))
+        from local_hospital_test_runner import digest
+        print(json.dumps({"backend_selection": {"source_sha": source,
+            "mode": mode, "executed": len(selected), "reused": len(reused),
+            "report_sha256": digest(evidence / "selection.json")}}), flush=True)
     if not clean_tree() or git("rev-parse", "HEAD") != source:
         raise ValueError("Backend tests changed their fixed source")
     return result.returncode
