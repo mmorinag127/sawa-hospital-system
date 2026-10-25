@@ -45,9 +45,22 @@ REASONS = {}
 FIXTURES = {}
 FIXTURE_STACK = []
 DISABLED_COLLECTOR = None
+BOOTSTRAP_DATABASE = None
+BOOTSTRAP_DATABASE_DIGEST = None
+COLLECTION_COMPLETE = False
 STDLIB = str(Path(os.__file__).resolve().parent) + os.sep
 RUNTIME_PATHS = tuple({Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()})
 MAIN_THREAD = threading.get_ident()
+STAT_READERS = {name: getattr(os, name) for name in ('stat', 'lstat')}
+
+
+def metadata_digest(path, method):
+    try:
+        info = STAT_READERS[method](path)
+        value = {name: getattr(info, name) for name in dir(info) if name.startswith('st_')}
+    except OSError as error:
+        value = {'error': type(error).__name__, 'errno': error.errno}
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def digest(path):
@@ -66,6 +79,21 @@ def tracking_digest():
 
 
 def input_digest(name):
+    for method in ('stat', 'lstat'):
+        prefix = method + ':'
+        if name.startswith(prefix):
+            path = Path(os.path.abspath(ROOT / name.removeprefix(prefix)))
+            return metadata_digest(path, method) if path.is_relative_to(ROOT) else None
+    if name.startswith('absent:'):
+        return absent_digest(Path(name.removeprefix('absent:')))
+    for method in ('exists', 'is_file', 'is_dir'):
+        prefix = 'path-' + method + ':'
+        if name.startswith(prefix):
+            path = Path(os.path.abspath(ROOT / name.removeprefix(prefix)))
+            try:
+                return hashlib.sha256(json.dumps(getattr(path, method)()).encode()).hexdigest()
+            except OSError:
+                return None
     if name.startswith('source-link:'):
         path = Path(os.path.abspath(ROOT / name.removeprefix('source-link:')))
         return resolution_digest(path) if path.is_relative_to(ROOT) else None
@@ -128,11 +156,21 @@ def runtime_link_digest(path):
 
 def resolution_digest(path):
     try:
-        target = path.resolve(strict=True)
+        target = path.resolve(strict=False)
         links = [(str(item), os.readlink(item)) for item in (path, *path.parents) if item.is_symlink()]
         return hashlib.sha256(json.dumps([str(target), links]).encode()).hexdigest()
     except (OSError, RuntimeError):
         return None
+
+
+def absent_digest(path):
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return hashlib.sha256(b'absent').hexdigest()
+    except OSError:
+        pass
+    return None
 
 
 def valid_input_record(name, value):
@@ -148,9 +186,11 @@ def valid_input_record(name, value):
         return True
     if '..' in Path(path).parts:
         return False
-    if kind in ('directory', 'source-link'):
+    if kind in ('path-exists', 'path-is_file', 'path-is_dir'):
+        return True
+    if kind in ('directory', 'source-link', 'stat', 'lstat'):
         return not Path(path).is_absolute()
-    return kind in ('runtime', 'runtime-link') and Path(path).is_absolute()
+    return kind in ('runtime', 'runtime-link', 'absent') and Path(path).is_absolute()
 
 
 def tracked_files():
@@ -186,6 +226,8 @@ def context():
         if Path(name).suffix in {".toml", ".ini", ".cfg", ".yaml", ".yml", ".lock"}
         or name.endswith(("requirements.txt", "package.json", "package-lock.json"))
         or name.endswith("conftest.py") or name.startswith("infra/ci/")
+        or name.startswith(('backend/alembic/', 'backend/migrations/', 'backend/src/models/', 'backend/src/maintenance/'))
+        or name in {'backend/src/db.py', 'backend/src/monthly_menu_identity.py', 'backend/src/services/monthly_menu_identity_schema.py'}
     }
     payload = {
         "schema": SCHEMA, "python": platform.python_version(),
@@ -263,6 +305,10 @@ def framework_read():
         return True
     while frame:
         filename = frame.f_code.co_filename
+        if (filename == importlib.metadata.__file__
+                and frame.f_code.co_name in {"mtime", "children"}):
+            # Distribution discovery is covered by the installed package catalog.
+            return True
         if filename == __file__ or (
             filename.startswith(STDLIB) and "/site-packages/" not in filename
         ):
@@ -285,6 +331,44 @@ def record_unsafe(reason):
         fixture["unsafe"].add(reason)
 
 
+def progress_environment_read():
+    frame = sys._getframe(1)
+    while frame:
+        if (frame.f_code.co_name == 'envwrap' and frame.f_code.co_filename.endswith('/tqdm/utils.py')
+                and frame.f_locals.get('prefix') == 'TQDM_'
+                and any(Path(frame.f_code.co_filename).is_relative_to(prefix) for prefix in RUNTIME_PATHS)):
+            # tqdm selects only TQDM_* settings, all included in CONTEXT.
+            return True
+        frame = frame.f_back
+    return False
+
+
+def bootstrap_origin():
+    frame = sys._getframe(1)
+    while frame:
+        if frame.f_code.co_filename == str(ROOT / 'backend/conftest.py') and frame.f_code.co_name == '<module>':
+            return True
+        frame = frame.f_back
+    return False
+
+
+def empty_database_bootstrap(database):
+    global BOOTSTRAP_DATABASE
+    if ACTIVE is not None or BOOTSTRAP_DATABASE is not None or not isinstance(database, str):
+        return False
+    path = Path(database)
+    if path != STATE.parent / 'backend-runtime.sqlite' or not bootstrap_origin():
+        return False
+    try:
+        empty = not path.is_symlink() and path.is_file() and path.stat().st_size == 0
+    except OSError:
+        empty = False
+    if not empty:
+        return False
+    BOOTSTRAP_DATABASE = path
+    return True
+
+
 def record_input(name, value):
     if value is None:
         record_unsafe('unreadable-input')
@@ -302,7 +386,7 @@ def record_input(name, value):
 def audit(event, args):
     global BUSY
     if threading.get_ident() != MAIN_THREAD and event in {
-        'open', 'os.listdir', 'os.scandir', 'subprocess.Popen', 'os.system', 'socket.connect', 'socket.getaddrinfo',
+        'open', 'os.listdir', 'os.scandir', 'subprocess.Popen', 'os.system', 'socket.connect', 'socket.getaddrinfo', 'sqlite3.connect', 'sawa.test.database-checkout',
     }:
         record_unsafe('threaded-input')
         return
@@ -310,10 +394,25 @@ def audit(event, args):
     # Still record shared fixture inputs for their other consumers.
     if BUSY or GLOBAL_UNSAFE or (UNSAFE and ACTIVE is not None and not FIXTURE_STACK) or event not in {
         "open", "os.listdir", "os.scandir", "subprocess.Popen",
-        "os.system", "socket.connect", "socket.getaddrinfo",
+        "os.system", "socket.connect", "socket.getaddrinfo", "sqlite3.connect", "sawa.test.database-checkout",
     }:
         return
     if framework_read():
+        return
+    if event == 'sqlite3.connect':
+        BUSY = True
+        try:
+            if args and empty_database_bootstrap(args[0]):
+                return
+        finally:
+            BUSY = False
+        record_unsafe(event)
+        return
+    if event == 'sawa.test.database-checkout':
+        if (ACTIVE is None and BOOTSTRAP_DATABASE is not None and args
+                and args[0] == str(BOOTSTRAP_DATABASE) and not COLLECTION_COMPLETE and bootstrap_origin()):
+            return
+        record_unsafe(event)
         return
     if event in {"subprocess.Popen", "os.system", "socket.connect", "socket.getaddrinfo"}:
         record_unsafe(event)
@@ -369,7 +468,10 @@ def audit(event, args):
                 record_unsafe("untracked-file-input")
         else:
             if str(path) not in {"/dev/null", "/dev/urandom"}:
-                if not immutable_runtime_file(path):
+                missing = absent_digest(original_path)
+                if missing is not None:
+                    record_input('absent:' + str(original_path), missing)
+                elif not immutable_runtime_file(path):
                     UNSAFE_PATHS.add(str(path))
                     record_unsafe("external-file-input")
                 else:
@@ -389,19 +491,81 @@ def pytest_sessionstart(session):
     # Always collect node IDs: sidecar inputs cannot be checked if a whole file
     # is skipped by testmon before collection.
     selector.deselected_files = []
-    # stat/exists have no Python audit event. Metadata, permissions and absent
-    # external files cannot be proven unchanged by content hashes.
+    def observe_resolution(original):
+        def observed(path, *args, **kwargs):
+            global BUSY
+            if BUSY or GLOBAL_UNSAFE or framework_read():
+                return original(path, *args, **kwargs)
+            BUSY = True
+            try:
+                resolved = original(path, *args, **kwargs)
+                original_path = Path(os.path.abspath(os.fsdecode(path)))
+                if original_path.is_relative_to(ROOT):
+                    name = 'source-link:' + str(original_path.relative_to(ROOT))
+                    record_input(name, resolution_digest(original_path))
+                    if kwargs.get('strict') or (args and args[0]):
+                        name = 'path-exists:' + str(original_path.relative_to(ROOT))
+                        record_input(name, input_digest(name))
+                elif not any(original_path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
+                    record_unsafe('external-path-resolution')
+                return resolved
+            except (OSError, RuntimeError):
+                record_unsafe('unresolved-path-input')
+                raise
+            finally:
+                BUSY = False
+        return observed
+
+    Path.resolve = observe_resolution(Path.resolve)
+    os.path.realpath = observe_resolution(os.path.realpath)
+    def observe_predicate(original, method):
+        def observed(path, *args, **kwargs):
+            global BUSY
+            if BUSY or GLOBAL_UNSAFE or framework_read():
+                return original(path, *args, **kwargs)
+            BUSY = True
+            try:
+                result = original(path, *args, **kwargs)
+                if args or kwargs:
+                    record_unsafe('file-predicate-options')
+                    return result
+                if isinstance(path, (str, bytes, os.PathLike)):
+                    original_path = Path(os.path.abspath(os.fsdecode(path)))
+                    name = 'path-' + method + ':' + str(original_path.relative_to(ROOT) if original_path.is_relative_to(ROOT) else original_path)
+                    record_input(name, hashlib.sha256(json.dumps(result).encode()).hexdigest())
+                else:
+                    record_unsafe('file-predicate-descriptor')
+                return result
+            except OSError:
+                record_unsafe('unreadable-file-metadata')
+                raise
+            finally:
+                BUSY = False
+        return observed
+
+    for method, os_method in (('exists', 'exists'), ('is_file', 'isfile'), ('is_dir', 'isdir')):
+        setattr(Path, method, observe_predicate(getattr(Path, method), method))
+        setattr(os.path, os_method, observe_predicate(getattr(os.path, os_method), method))
+    # Direct metadata reads need the complete stat result, not a content hash.
     for name in ("stat", "lstat"):
         original = getattr(os, name)
 
-        def observed_stat(*args, _original=original, **kwargs):
+        def observed_stat(*args, _original=original, _method=name, **kwargs):
+            global BUSY
             if not BUSY and not GLOBAL_UNSAFE and not framework_read():
                 value = args[0] if args else kwargs.get("path")
-                runtime = isinstance(value, (str, bytes, os.PathLike)) and any(
-                    Path(os.path.abspath(os.fsdecode(value))).is_relative_to(prefix) for prefix in RUNTIME_PATHS
-                )
-                if not runtime:
-                    record_unsafe("file-metadata")
+                BUSY = True
+                try:
+                    if isinstance(value, (str, bytes, os.PathLike)) and len(args) <= 1 and not kwargs:
+                        path = Path(os.path.abspath(os.fsdecode(value)))
+                        if path.is_relative_to(ROOT):
+                            record_input(_method + ':' + str(path.relative_to(ROOT)), metadata_digest(path, _method))
+                        elif not any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
+                            record_unsafe('file-metadata')
+                    else:
+                        record_unsafe('file-metadata')
+                finally:
+                    BUSY = False
             return _original(*args, **kwargs)
 
         setattr(os, name, observed_stat)
@@ -409,8 +573,13 @@ def pytest_sessionstart(session):
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_collection_modifyitems(session, config, items):
-    global BUSY, DISABLED_COLLECTOR
+    global BUSY, DISABLED_COLLECTOR, COLLECTION_COMPLETE, BOOTSTRAP_DATABASE_DIGEST
     BUSY = True
+    if BOOTSTRAP_DATABASE is not None:
+        BOOTSTRAP_DATABASE_DIGEST = digest(BOOTSTRAP_DATABASE)
+        if BOOTSTRAP_DATABASE_DIGEST is None:
+            record_unsafe('unreadable-bootstrap-database')
+    COLLECTION_COMPLETE = True
     selector = config.pluginmanager.get_plugin("TestmonSelect")
     candidates = set(selector.deselected_tests)
     stable = []
@@ -425,6 +594,8 @@ def pytest_collection_modifyitems(session, config, items):
             reason = "new-failed-or-missing-input-record"
         elif previous.get("unsafe"):
             reason = "untracked-input"
+        elif any(previous['inputs'].get(name) != value for name, value in GLOBAL_INPUTS.items()):
+            reason = 'collection-input-changed'
         elif item.nodeid not in candidates:
             reason = "python-dependency-changed"
         elif any(input_digest(name) != value for name, value in previous["inputs"].items()):
@@ -458,7 +629,7 @@ def pytest_runtest_protocol(item, nextitem):
     yield
     BUSY = True
     try:
-        if any(input_digest(name) != value for name, value in INPUTS.items()):
+        if not UNSAFE and any(input_digest(name) != value for name, value in INPUTS.items()):
             UNSAFE.add('changing-file-input')
     finally:
         BUSY = False
@@ -528,6 +699,7 @@ def pytest_sessionfinish(session, exitstatus):
         "baseline_status": BASELINE_STATUS,
         "context_changes": sorted(CONTEXT_CHANGES),
         "source_sha": os.environ.get("SAWA_LOCAL_SOURCE_SHA"),
+        "bootstrap_database": {"path": str(BOOTSTRAP_DATABASE), "sha256": BOOTSTRAP_DATABASE_DIGEST} if BOOTSTRAP_DATABASE is not None else None,
         "inputs_sha256": digest(META), "tracking_sha256": tracking_digest(),
     }, indent=2))
     BUSY = False
@@ -549,7 +721,7 @@ def observed_environment(self, key):
     global BUSY
     if (not BUSY and not GLOBAL_UNSAFE and isinstance(key, str)
             and (key in VOLATILE_ENV or key.startswith(("GITHUB_", "RUNNER_", "ACTIONS_", "INPUT_")))
-            and not framework_read()):
+            and not framework_read() and not progress_environment_read()):
         BUSY = True
         try:
             name = 'environment:' + key
@@ -564,7 +736,7 @@ os._Environ.__getitem__ = observed_environment
 
 
 def observed_environment_iter(self):
-    if not BUSY and not GLOBAL_UNSAFE and not framework_read():
+    if not BUSY and not GLOBAL_UNSAFE and not framework_read() and not progress_environment_read():
         record_unsafe("volatile-environment")
     return _environment_iter(self)
 

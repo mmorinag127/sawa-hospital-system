@@ -24,7 +24,9 @@ from src.services.order_operational_cleanup_service import (
 )
 
 
-Base.metadata.create_all(bind=engine)
+@pytest.fixture(scope="module", autouse=True)
+def prepare_cleanup_schema():
+    Base.metadata.create_all(bind=engine)
 
 
 def _id(prefix: str) -> str:

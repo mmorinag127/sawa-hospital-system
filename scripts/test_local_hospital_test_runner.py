@@ -104,11 +104,15 @@ class ReceiptContractTest(unittest.TestCase):
                 'exitstatus': 0, 'source_sha': 'a' * 40, 'baseline': None}))
             return subprocess.CompletedProcess(argv, 0)
 
-        with tempfile.TemporaryDirectory() as directory, \
+        for mode, full_flag in (('full', '1'), ('impact', '0')):
+            self.check_backend_partition(mode, full_flag, seen, execute_backend)
+
+    def check_backend_partition(self, mode, full_flag, seen, execute_backend):
+        with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory, \
              patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': directory, 'DB_HOST': 'foreign',
                                     'DB_URI': 'foreign', 'DATABASE_URL': 'foreign', 'ALEMBIC_DB_URI': 'foreign',
                                     'PYTEST_ADDOPTS': '-k foreign', 'PYTEST_PLUGINS': 'foreign_selector',
-                                    'CI': '', 'GITHUB_ACTIONS': ''}), \
+                                    'CI': '', 'GITHUB_ACTIONS': '', 'SAWA_LOCAL_TEST_MODE': mode}), \
              patch.object(BACKEND_RUNNER, 'clean_tree', return_value=True), \
              patch.object(BACKEND_RUNNER, 'git', side_effect=lambda *args: str(Path(directory) / 'git') if '--absolute-git-dir' in args else 'a' * 40), \
              patch.object(BACKEND_RUNNER.sys, 'argv', ['runner']), \
@@ -122,7 +126,7 @@ class ReceiptContractTest(unittest.TestCase):
             self.assertNotIn('ALEMBIC_DB_URI', execute.call_args.kwargs['env'])
             self.assertNotIn('PYTEST_ADDOPTS', execute.call_args.kwargs['env'])
             self.assertNotIn('PYTEST_PLUGINS', execute.call_args.kwargs['env'])
-            self.assertEqual(execute.call_args.kwargs['env']['SAWA_IMPACT_FULL'], '1')
+            self.assertEqual(execute.call_args.kwargs['env']['SAWA_IMPACT_FULL'], full_flag)
             self.assertIn('--testmon', argv)
             self.assertTrue((Path(directory) / 'backend-tests/selection.json').is_file())
             self.assertEqual(execute.call_args.kwargs['env']['DB_URI'], 'sqlite:///' + directory + '/git/sawa-local-impact/backend-runtime.sqlite')

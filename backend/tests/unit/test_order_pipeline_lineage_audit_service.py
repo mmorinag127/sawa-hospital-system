@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import uuid4
 
+import pytest
+
 from src.db import Base, engine, session_scope
 from src.models.order import Order
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
@@ -13,7 +15,9 @@ from src.services.order_pipeline_lineage_audit_service import audit_order_pipeli
 from tests.unit.test_order_pipeline_lineage_repair_service import confirmed_order
 
 
-Base.metadata.create_all(bind=engine)
+@pytest.fixture(scope="module", autouse=True)
+def prepare_lineage_schema():
+    Base.metadata.create_all(bind=engine)
 
 
 def _id(prefix: str) -> str:

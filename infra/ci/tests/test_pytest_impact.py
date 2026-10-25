@@ -282,12 +282,147 @@ def setting():
         self.assertIn("test_example.py::test_setting", self.run_tests(1)["selected"])
 
     def test_external_file_metadata_never_reused(self):
-        self.write("test_example.py", """import os
-def test_metadata():
-    assert os.path.exists('data.txt')
+        with tempfile.TemporaryDirectory() as external:
+            path = Path(external) / 'metadata.txt'
+            path.write_text('first')
+            self.write('test_example.py', f"import os\ndef test_metadata():\n    assert os.stat({str(path)!r}).st_size == 5\n")
+            self.run_tests()
+            self.assertIn("test_example.py::test_metadata", self.run_tests()["selected"])
+
+    def test_repository_metadata_change_executes_without_content_change(self):
+        (self.root / 'data.txt').chmod(0o644)
+        self.write('test_example.py', "import os\ndef test_mode():\n    assert os.stat('data.txt').st_mode & 0o777 == 0o644\n")
+        self.run_tests()
+        self.assertEqual(self.run_tests()['selected'], [])
+        (self.root / 'data.txt').chmod(0o600)
+        self.assertIn('test_example.py::test_mode', self.run_tests(1)['selected'])
+
+    def test_collection_source_resolution_does_not_disable_reuse(self):
+        self.write('conftest.py', "from pathlib import Path\nimport os\nROOT = Path(__file__).resolve().parent\nassert os.path.realpath(__file__) == str(ROOT / 'conftest.py')\n")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        first = self.run_tests()
+        self.assertEqual(first['untracked'], {})
+        self.assertEqual(len(self.run_tests()['reused']), 3)
+
+    def test_path_predicates_track_presence_and_kind(self):
+        self.write('test_example.py', """from pathlib import Path
+import os
+def test_predicates():
+    assert Path('data.txt').exists() and Path('data.txt').is_file()
+    assert not Path('data.txt').is_dir()
+    assert os.path.exists('data.txt') and os.path.isfile('data.txt')
+    assert not os.path.isdir('data.txt')
 """)
         self.run_tests()
-        self.assertIn("test_example.py::test_metadata", self.run_tests()["selected"])
+        self.assertEqual(self.run_tests()['selected'], [])
+        (self.root / 'data.txt').unlink()
+        self.assertIn('test_example.py::test_predicates', self.run_tests(1)['selected'])
+
+    def test_strict_resolution_rechecks_existence(self):
+        self.write('test_example.py', "from pathlib import Path\ndef test_strict():\n    assert Path('data.txt').resolve(strict=True).name == 'data.txt'\n")
+        self.run_tests()
+        self.assertEqual(self.run_tests()['selected'], [])
+        (self.root / 'data.txt').unlink()
+        self.assertIn('test_example.py::test_strict', self.run_tests(1)['selected'])
+
+    def test_missing_path_resolution_tracks_a_new_symlink(self):
+        self.write('test_example.py', "from pathlib import Path\ndef test_resolve():\n    assert Path('future.txt').resolve().name == 'future.txt'\n")
+        self.run_tests()
+        self.assertEqual(self.run_tests()['selected'], [])
+        (self.root / 'future.txt').symlink_to(self.root / 'data.txt')
+        self.assertIn('test_example.py::test_resolve', self.run_tests(1)['selected'])
+
+    def test_package_catalog_discovery_does_not_disable_reuse(self):
+        self.write('conftest.py', "from importlib.metadata import version\nPYTEST_VERSION = version('pytest')\n")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.assertEqual(self.run_tests()['untracked'], {})
+        self.assertEqual(len(self.run_tests()['reused']), 3)
+
+    def test_missing_collection_input_record_cannot_authorize_reuse(self):
+        self.write('conftest.py', "from pathlib import Path\nVALUE = Path('data.txt').read_text()\n")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        path = self.state / 'inputs.json'
+        history = json.loads(path.read_text())
+        for entry in history['tests'].values():
+            self.assertIn('data.txt', entry['inputs'])
+            del entry['inputs']['data.txt']
+        path.write_text(json.dumps(history))
+        report = self.run_tests()
+        self.assertEqual(len(report['selected']), 3)
+        self.assertEqual(set(report['reasons'].values()), {'collection-input-changed'})
+
+    def test_absent_external_read_is_rechecked_before_reuse(self):
+        with tempfile.TemporaryDirectory() as external:
+            path = Path(external) / 'optional.txt'
+            self.write('test_example.py', f"""def test_optional():
+    try:
+        with open({str(path)!r}) as stream:
+            value = stream.read()
+    except FileNotFoundError:
+        value = 'absent'
+    assert value == 'absent'
+""")
+            self.run_tests()
+            self.assertEqual(self.run_tests()['selected'], [])
+            path.write_text('now present')
+            self.assertIn('test_example.py::test_optional', self.run_tests(1)['selected'])
+
+    def test_database_reads_cannot_reuse_stale_rows(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as external:
+            path = Path(external) / 'inputs.sqlite'
+            with sqlite3.connect(path) as connection:
+                connection.execute('CREATE TABLE inputs(value INTEGER)')
+                connection.execute('INSERT INTO inputs VALUES (1)')
+            self.write('test_example.py', f"import sqlite3\ndef test_database():\n    with sqlite3.connect({str(path)!r}) as connection:\n        assert connection.execute('SELECT value FROM inputs').fetchone() == (1,)\n")
+            self.run_tests()
+            with sqlite3.connect(path) as connection:
+                connection.execute('UPDATE inputs SET value = 2')
+            self.assertIn('test_example.py::test_database', self.run_tests(1)['selected'])
+
+    def test_only_empty_owned_bootstrap_is_reusable_and_checkouts_always_execute(self):
+        (self.root / 'backend').mkdir()
+        self.write('backend/conftest.py', """from pathlib import Path
+import sqlite3
+import sys
+connection = sqlite3.connect(str(Path('backend-runtime.sqlite').resolve()))
+try:
+    sys.audit('sawa.test.database-checkout', str(Path('backend-runtime.sqlite').resolve()))
+    connection.execute('CREATE TABLE IF NOT EXISTS seeded(value INTEGER)')
+finally:
+    connection.close()
+""")
+        self.write('conftest.py', "from pathlib import Path\nimport runpy\nrunpy.run_path(str(Path('backend/conftest.py').resolve()))\n")
+        self.write('test_example.py', "import sys\ndef test_plain():\n    assert True\ndef test_checkout():\n    sys.audit('sawa.test.database-checkout')\n    assert True\n")
+        database = self.root / 'backend-runtime.sqlite'
+        database.touch()
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        first = self.run_tests()
+        self.assertFalse(first['code_tracking_disabled'])
+        database.write_bytes(b'')
+        same = self.run_tests()
+        self.assertEqual(same['reused'], ['test_example.py::test_plain'])
+        self.assertEqual(same['selected'], ['test_example.py::test_checkout'])
+        retained_database = self.run_tests()
+        self.assertTrue(retained_database['code_tracking_disabled'])
+        self.assertEqual(retained_database['reused'], [])
+        bootstrap = (self.root / 'backend/conftest.py').read_text()
+        for arguments in ('', ", 'foreign-database'"):
+            self.write('backend/conftest.py', bootstrap + f"\nsys.audit('sawa.test.database-checkout'{arguments})\n")
+            database.write_bytes(b'')
+            foreign_checkout = self.run_tests()
+            self.assertTrue(foreign_checkout['code_tracking_disabled'])
+            self.assertEqual(foreign_checkout['reused'], [])
+
+    def test_tqdm_settings_remain_in_context_without_volatile_run_identity(self):
+        self.write('test_example.py', "from tqdm import tqdm\ndef test_progress():\n    assert callable(tqdm)\n")
+        self.env['SAWA_LOCAL_RUN_ID'] = 'first-run'
+        self.run_tests()
+        self.env['SAWA_LOCAL_RUN_ID'] = 'second-run'
+        self.assertEqual(self.run_tests()['selected'], [])
+        self.env['TQDM_DISABLE'] = '1'
+        self.assertIn('test_example.py::test_progress', self.run_tests()['selected'])
 
     def test_ci_environment_dependency_never_reused(self):
         self.env["GITHUB_REF"] = "main"

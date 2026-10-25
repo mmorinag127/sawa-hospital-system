@@ -128,3 +128,25 @@ Review then added an actual migration-source mutation refusal case. Its first
 run exposed a duplicate short-name helper import in the test; the import was
 aligned with the fixture's canonical package import. All 10 helper-module cases
 then passed. Neither the failed probe nor this functional rerun measured speed.
+
+## Collection input tracking correction
+
+Path resolution, existence/type predicates and direct repository stat results are
+tracked separately. Changes to symlink targets, file presence, permissions or
+other stat attributes invalidate the corresponding input. An absent external
+read is reusable only while that path remains absent; real external reads retain
+their conservative execution requirement. Package discovery uses the installed
+package catalog, and tqdm's fixed TQDM_ settings remain in the environment context.
+
+Only the runner's initially empty, regular, non-symlink backend-runtime.sqlite
+may be identified as collection bootstrap, from backend/conftest.py itself.
+The collected database hash is retained as provenance, not as an input for
+non-database cases. Bootstrap schema sources are part of the context. Pool checkout events carry the owning
+connection record's database identity; unknown, foreign and case-time checkouts
+remain non-reusable. Module-level test schema writes run in their own preparation
+fixtures instead of contaminating collection for unrelated tests.
+
+The correction has selection contract regressions and 27 receipt contract tests.
+It does not establish the 15-minute ceiling. A complete successful exact-source
+receipt, Linux image checks and staging verification are still required before
+claiming release completion. Interrupted or failed batches are not receipts.

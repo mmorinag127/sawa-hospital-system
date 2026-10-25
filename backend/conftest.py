@@ -15,6 +15,16 @@ from src import db as runtime_db
 import src.models  # noqa: F401
 
 
+@sa.event.listens_for(engine, 'connect')
+def identify_test_bootstrap_connection(_connection, record):
+    record.info['sawa_impact_bootstrap_database'] = engine.url.database
+
+
+@sa.event.listens_for(sa.pool.Pool, 'checkout')
+def audit_test_database_checkout(_connection, _record, _proxy):
+    sys.audit('sawa.test.database-checkout', _record.info.get('sawa_impact_bootstrap_database'))
+
+
 _TESTS_ROOT = (Path(__file__).resolve().parent / "tests").resolve()
 
 

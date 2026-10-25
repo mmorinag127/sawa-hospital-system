@@ -8,7 +8,9 @@ from src.models.menu import MonthlyMenuItem
 from src.services.read_only_request_guard_service import read_only_request_guard
 
 
-Base.metadata.create_all(bind=engine)
+@pytest.fixture(scope="module", autouse=True)
+def prepare_guard_schema():
+    Base.metadata.create_all(bind=engine)
 
 
 def test_read_only_guard_blocks_canonical_insert() -> None:
