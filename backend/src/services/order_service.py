@@ -179,7 +179,7 @@ def _capture_selected_order_config(session: Any, order: Order) -> dict[str, Any]
     return _order_execution_input(session, order, lock=True)["configured_input"]
 
 
-def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any = None, for_materialization: bool = False) -> dict[str, Any] | None:
+def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any = None, for_materialization: bool = False, _analysis=None) -> dict[str, Any] | None:
     """Capture the exact operator-read inputs required for a later cache CAS."""
     with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
         from src.services.initial_saved_import_service import get_binding, execution_input, processing_input
@@ -207,7 +207,7 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
         evidence = session.get(OrderOcrEvidenceRun, evidence_run_id) if evidence_run_id else None
         if evidence is None or evidence.order_id != order_id:
             return None
-        rejection = ocr_evidence_service.evidence_run_selectability_error(evidence)
+        rejection = ocr_evidence_service.evidence_run_selectability_error(evidence, _analysis=_analysis)
         if rejection == "evidence_unusable":
             return None
         if rejection is not None:
@@ -247,7 +247,7 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
             "cache_exists": cache is not None,
             "cache_updated_at": cache.updated_at if cache is not None else None,
             "input_versions": input_versions,
-            "evidence": deepcopy(ocr_evidence_service._serialize_evidence_run(evidence, include_payload=True)),
+            "evidence": deepcopy(ocr_evidence_service._serialize_evidence_run(evidence, include_payload=True, _analysis=_analysis)),
             "draft": deepcopy(draft_sheet_service._serialize_draft(draft)) if draft is not None else None,
             "selected_pdf_receipt": pdf_receipt,
             "configured_input": _capture_selected_order_config(session, order),

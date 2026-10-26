@@ -1694,7 +1694,7 @@ def _selected_workflow_template_error(session, order, workflow):
     return error
 
 
-def _workflow_menu_amount_resolution(session, order, workflow):
+def _workflow_menu_amount_resolution(session, order, workflow, *, _analysis=None):
     from src.services.initial_saved_import_service import get_binding
     imported = get_binding(session, order.id, template_version_id=order.template_version_id)
     if imported is not None:
@@ -1718,7 +1718,7 @@ def _workflow_menu_amount_resolution(session, order, workflow):
             error = "saved_sheet_template_mismatch"
     if error is None:
         try:
-            candidate = _build_materialization_candidate_for_saved_sheet(session=session, order=order, saved_sheet=draft)
+            candidate = _build_materialization_candidate_for_saved_sheet(session=session, order=order, saved_sheet=draft, _analysis=_analysis)
         except SelectedPdfReceiptError as exc:
             error = str(exc)
         else:
@@ -1745,7 +1745,7 @@ def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflo
         serialized = _serialize_workflow_checked(
             session, order=order, workflow=workflow, ocr_job=ocr_job, _analysis=_analysis,
         )
-    resolution = _workflow_menu_amount_resolution(session, order, workflow)
+    resolution = _workflow_menu_amount_resolution(session, order, workflow, _analysis=_analysis)
     serialized["menu_amount_resolution"] = resolution
     if resolution["status"] == "unresolved" and resolution["blocker"] not in serialized.get("blockers", []):
         serialized["blockers"] = list(serialized.get("blockers") or []) + [resolution["blocker"]]
@@ -4040,6 +4040,7 @@ def _build_materialization_candidate_for_saved_sheet(
     session: Any,
     order: Order,
     saved_sheet: OrderSheetDraft,
+    _analysis=None,
 ) -> dict[str, Any]:
     workflow = _get_workflow_readonly(session, order.id)
     if workflow is None:
@@ -4053,7 +4054,7 @@ def _build_materialization_candidate_for_saved_sheet(
         return {"error": "saved_sheet_template_mismatch", "lines": []}
     order_service_module = _get_order_service_module()
     try:
-        captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session, for_materialization=True)
+        captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session, for_materialization=True, _analysis=_analysis)
     except SelectedPdfReceiptError:
         raise
     except ValueError as exc:

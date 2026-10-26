@@ -130,6 +130,39 @@ def test_valid_saved_quantities_and_readonly_http_resolution_are_unchanged(saved
     assert database_snapshot(f) == before
 
 
+def test_resolution_shares_analysis_without_skipping_capture_validation(saved_receipt, monkeypatch):
+    from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
+
+    f = saved_receipt
+    expected = read_resolution(f)
+    before = database_snapshot(f)
+    analysis = _EvidenceAnalysis()
+    calls = []
+    original_select = orders.ocr_evidence_service.evidence_run_selectability_error
+    original_serialize = orders.ocr_evidence_service._serialize_evidence_run
+
+    def select(row, **kwargs):
+        calls.append(("select", kwargs.get("_analysis")))
+        return original_select(row, **kwargs)
+
+    def serialize(row, **kwargs):
+        calls.append(("serialize", kwargs.get("_analysis")))
+        return original_serialize(row, **kwargs)
+
+    monkeypatch.setattr(orders.ocr_evidence_service, "evidence_run_selectability_error", select)
+    monkeypatch.setattr(orders.ocr_evidence_service, "_serialize_evidence_run", serialize)
+    with f.session_scope() as session:
+        actual = workflow._workflow_menu_amount_resolution(
+            session, session.get(Order, f.order_id),
+            session.get(OrderWorkflowState, f.order_id), _analysis=analysis,
+        )
+    assert actual == expected
+    assert any(name == "select" for name, _ in calls)
+    assert any(name == "serialize" for name, _ in calls)
+    assert all(value is analysis for _, value in calls)
+    assert database_snapshot(f) == before
+
+
 @pytest.mark.parametrize("fault,code", FAULTS)
 def test_invalid_receipt_is_typed_unresolved_and_readonly_without_old_lines(saved_receipt, fault, code):
     f = saved_receipt
