@@ -411,14 +411,22 @@ def record_unsafe(reason):
 
 
 def inherit_generated_fixture(record):
-    if record.get('input_set') is not None:
-        ACTIVE_INPUT_SETS.add(record['input_set'])
+    key = record.get('input_set')
+    already_inherited = key is not None and key in ACTIVE_INPUT_SETS
+    if key is not None:
+        ACTIVE_INPUT_SETS.add(key)
     UNSAFE.update(record['unsafe'])
+    if already_inherited and not FIXTURE_STACK:
+        return
     for name, value in record['inputs'].items():
-        if name in ACTIVE_SHARED_INPUTS and ACTIVE_SHARED_INPUTS[name] != value:
+        if ((name in ACTIVE_SHARED_INPUTS and ACTIVE_SHARED_INPUTS[name] != value)
+                or (name in INPUTS and INPUTS[name] != value)):
             UNSAFE.add('changing-file-input')
         ACTIVE_SHARED_INPUTS.setdefault(name, value)
-        record_input(name, value)
+        for fixture in FIXTURE_STACK:
+            if name in fixture['inputs'] and fixture['inputs'][name] != value:
+                fixture['unsafe'].add('changing-file-input')
+            fixture['inputs'].setdefault(name, value)
 
 
 def generated_input(path, *, write=False, database=False, readonly=False):
@@ -442,11 +450,15 @@ def record_fixture_sources(function):
             return
         path = Path(code.co_filename).resolve()
         if str(path) in SOURCE_GRAPH.paths:
-            if path not in SOURCE_INPUTS:
-                SOURCE_INPUTS[path] = {str(Path(name).relative_to(ROOT)): digest(Path(name))
-                                       for name in SOURCE_GRAPH.dependencies(path)}
-            for name, value in SOURCE_INPUTS[path].items():
-                record_input(name, value)
+            key = path
+            if key not in SOURCE_INPUTS:
+                SOURCE_INPUTS[key] = {str(Path(name).relative_to(ROOT)): digest(Path(name))
+                                     for name in SOURCE_GRAPH.dependencies(path)}
+            for name, value in SOURCE_INPUTS[key].items():
+                for fixture in FIXTURE_STACK:
+                    if name in fixture['inputs'] and fixture['inputs'][name] != value:
+                        fixture['unsafe'].add('changing-file-input')
+                    fixture['inputs'].setdefault(name, value)
         elif not any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
             record_unsafe('fixture-source-untracked')
         function = getattr(function, '__wrapped__', None)

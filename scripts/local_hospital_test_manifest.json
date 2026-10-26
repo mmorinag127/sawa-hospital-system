@@ -209,7 +209,7 @@
     },
     {
       "name": "impact-contracts",
-      "command": "python3 -m unittest discover -s infra/ci/tests -p 'test_*impact.py' -v",
+      "command": "python3 -m unittest discover -s infra/ci/tests -p 'test_*impact*.py' -v",
       "legacy_steps": [
         {
           "workflow": "ci.yml",

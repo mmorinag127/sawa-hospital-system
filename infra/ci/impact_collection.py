@@ -2,6 +2,11 @@
 import ast
 import sys
 
+if __package__:
+    from .impact_fixed_loads import fixed_file_loads
+else:
+    from impact_fixed_loads import fixed_file_loads
+
 
 class CollectionInputs:
     def __init__(self, root, tracked, *, include_production=False):
@@ -41,6 +46,9 @@ class CollectionInputs:
                 for length in range(1, len(parts) + 1):
                     self.edges[path].update(modules.get('.'.join(parts[:length]), ()))
 
+            fixed, executions = fixed_file_loads(tree, path, self.paths)
+            self.edges[path].update(fixed.values())
+            calls = {id(node.func): node for node in ast.walk(tree) if isinstance(node, ast.Call)}
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
@@ -51,6 +59,16 @@ class CollectionInputs:
                     add(module)
                     for alias in node.names:
                         add(module + '.' + alias.name)
+                        if alias.asname and alias.asname != alias.name and alias.name in {
+                                'import_module', '__import__', 'spec_from_file_location', 'module_from_spec'}:
+                            self.unknown.add(path)
+                elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in {
+                        'import_module', '__import__', 'spec_from_file_location', 'module_from_spec'}:
+                    if id(node) not in calls:
+                        self.unknown.add(path)
+                elif isinstance(node, ast.Attribute) and node.attr == 'exec_module':
+                    if id(node) not in calls or id(calls[id(node)]) not in executions:
+                        self.unknown.add(path)
                 elif isinstance(node, ast.Call):
                     function = node.func
                     function_name = function.id if isinstance(function, ast.Name) else function.attr if isinstance(function, ast.Attribute) else ''
@@ -59,8 +77,9 @@ class CollectionInputs:
                             add(node.args[0].value)
                         else:
                             self.unknown.add(path)
-                    elif function_name in {'spec_from_file_location', 'exec_module'}:
-                        self.unknown.add(path)
+                    elif function_name in {'spec_from_file_location', 'module_from_spec', 'exec_module'}:
+                        if id(node) not in fixed and id(node) not in executions:
+                            self.unknown.add(path)
 
     def owner(self):
         frame = sys._getframe(1)

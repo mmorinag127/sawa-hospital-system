@@ -521,6 +521,12 @@ def test_unrelated():
         subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
         self.run_tests()
         self.assertEqual(self.run_tests()['selected'], [])
+        history = json.loads((self.state / 'inputs.json').read_text())
+        for name in ('first', 'second'):
+            entry = history['tests']['test_example.py::test_' + name]
+            self.assertNotIn('leaf.py', entry['inputs'])
+            self.assertTrue(any('leaf.py' in history['input_sets'][key]
+                                for key in entry['input_sets']))
         self.write('leaf.py', 'def value():\n    return 3\n')
         report = self.run_tests()
         self.assertCountEqual(report['selected'], ['test_example.py::test_first', 'test_example.py::test_second'])
