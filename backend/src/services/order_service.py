@@ -262,7 +262,8 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
                 read_payload = deepcopy(payload)
             else:
                 read_payload = ocr_evidence_service._extract_evidence_payload(
-                    {key: value for key, value in payload.items() if key != "diagnostic_pipeline_output"},
+                    {key: value for key, value in payload.items()
+                     if key not in {"diagnostic_pipeline_output", "_ocr_execution"}},
                     _analysis=_analysis,
                 )
             captured_evidence = {"id": evidence.id, "payload_json": read_payload}

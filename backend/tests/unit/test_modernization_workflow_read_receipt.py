@@ -188,6 +188,8 @@ def test_read_candidate_omits_write_snapshots_but_preserves_output_and_rejects_w
         assert proof["read_projection_only"] is True
         assert proof["input_versions"] is None
         assert set(proof["evidence"]) == {"id", "payload_json"}
+        assert "diagnostic_pipeline_output" not in proof["evidence"]["payload_json"]
+        assert "_ocr_execution" not in proof["evidence"]["payload_json"]
         assert orders._synchronous_cache_write_fence(session, f.order_id, proof) is False
         with pytest.raises(ValueError, match="revision_write_ownership_conflict"):
             ocr_revision_store.append_revision(
