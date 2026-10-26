@@ -283,6 +283,7 @@ type OcrResult = {
 
 type InspectionPayload = {
   order_id?: string;
+  order_header?: OrderDetail;
   ocr_candidates?: {
     order_id: string;
     selected_ocr_result_id: string | null;
@@ -563,6 +564,7 @@ const workflowRevisionTokenFromRead = (workflow: WorkflowV2): WorkflowRevisionTo
 };
 
 const CANONICAL_SOURCE_READ_TIMEOUT_MS = 180000;
+const WORKFLOW_READ_PENDING_MESSAGE = "注文情報を取得しています。取得完了後に操作してください。";
 
 const formatApiError = (err: any, fallback: string) => {
   const reviewError = err?.response?.data?.detail;
@@ -1681,6 +1683,7 @@ export default function OrderWorkflowV2Page() {
   const confirmWorkflowReplacement = (preservedEditor?: string) => !hasUnsavedWorkflowInput(preservedEditor)
     || window.confirm("未保存の変更を破棄して処理を続けますか？");
   const beginWorkflowEditorEdit = (editor: string, command = false) => {
+    if (workflowRevisionRef.current === null) throw new Error(WORKFLOW_READ_PENDING_MESSAGE);
     retireOutput("download"); retireOutput("preview");
     if (!command) {
       ++workingInputGenerationRef.current;
@@ -2408,16 +2411,12 @@ export default function OrderWorkflowV2Page() {
     ocrDetailAbortRef.current?.abort();
     rawInspectionRequestRef.current += 1;
     rawInspectionAbortRef.current?.abort();
-    const responses = await Promise.all([
-      apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?include_ocr_results=true&history_details=false`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}),
-      apiClient.get<OrderDetail>(`/orders/${orderId}`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}),
-    ]).catch(err=>{
+    const inspectionRes = await apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}).catch(err=>{
       if (refreshGeneration===refreshGenerationRef.current && requestedOrderId===activeOrderIdRef.current
         && ownsPageInput(own) && callerCurrent()) throw err;
       return null;
     });
-    if (!responses) return;
-    const [inspectionRes, orderRes]=responses;
+    if (!inspectionRes) return;
     const workflowRes = {data: inspectionRes.data.workflow};
     const staleRead = refreshGeneration !== refreshGenerationRef.current
       || requestedOrderId !== activeOrderIdRef.current
@@ -2426,6 +2425,10 @@ export default function OrderWorkflowV2Page() {
     if (!workflowRes.data) throw new Error("workflow 読取応答が不正です。");
     if (workflowRes.data.order_id !== requestedOrderId) {
       throw new Error("workflow 読取応答の注文が一致しません。");
+    }
+    const orderHeader = inspectionRes.data.order_header;
+    if (!orderHeader || orderHeader.id !== requestedOrderId) {
+      throw new Error("注文ヘッダーの読取応答が不正です。");
     }
     if (expectedJob!==null) {
       if ("executionKind" in expectedJob) {
@@ -2450,7 +2453,7 @@ export default function OrderWorkflowV2Page() {
     }
     const adopted = adopt(() => {
       adoptReadWorkflow(workflowRes.data);
-      setOrderDetail(orderRes.data);
+      setOrderDetail(orderHeader);
       applyPreSaveState(
         inspectionRes.data.pre_save_checks || workflowRes.data.pre_save_checks || {},
         inspectionRes.data.pre_save_status || null,
@@ -3015,6 +3018,10 @@ export default function OrderWorkflowV2Page() {
     }) => Promise<void>,
     options: { successMessage?: string; nextStep?: number; refreshAfter?: boolean; replacesInput?: boolean; preservedEditor?: string } = {},
   ) => {
+    if (workflowRevisionRef.current === null) {
+      setError(WORKFLOW_READ_PENDING_MESSAGE);
+      return;
+    }
     if (options.replacesInput && !confirmWorkflowReplacement(options.preservedEditor)) return;
     const own=capturePageOwner(), operation=++pageOperationGenerationRef.current;
     if (!ownsPageInput(own)) { setError("注文・PDF・認証を確認してから操作してください。"); return; }
@@ -4628,6 +4635,8 @@ export default function OrderWorkflowV2Page() {
     ? `FAX v${selectedDocumentVersion.version_no}${selectedDocumentVersion.is_current ? " (現行)" : ""}`
     : "現行FAX";
 
+  const workflowInputReady = Boolean(workflow && workflow.order_id === orderId && workflowRevisionTokenFromRead(workflow));
+
   return (
     <ThemeProvider theme={sawaTheme}>
     <main className="page workflow-v2-page">
@@ -4828,7 +4837,7 @@ export default function OrderWorkflowV2Page() {
         ))}
       </nav>
 
-      <section className="step-page">
+      {workflowInputReady ? <section className="step-page">
         {visibleStep === 1 ? (
         <section className="panel">
           <p className="step-tag">Step1</p>
@@ -6591,7 +6600,9 @@ export default function OrderWorkflowV2Page() {
           )}
         </section>
         ) : null}
-      </section>
+      </section> : <p role={workflow ? "alert" : "status"}>
+        {workflow ? "注文情報の版を確認できません。再読込してください。" : WORKFLOW_READ_PENDING_MESSAGE}
+      </p>}
 
       {typeof workflow?.output_bundle_id === "string" && workflow.output_bundle_id.trim()
         && workflow.output_bundle_id === workflow.output_bundle_id.trim()

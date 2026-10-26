@@ -15,7 +15,7 @@ test('Step2 preserves raw prediction and requires explicit approval after openin
     {ocr_result_id: 'ready-result', selectable: true},
     {ocr_result_id: 'unknown-result'},
   ];
-  t.on('get', `${root}/workflow-v2/inspection?include_ocr_results=true&history_details=false`, () => ({data: {
+  t.onWorkflowInspection(`${root}/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => ({data: {
     workflow, saved_sheet: null, ocr_candidates: require('./helpers/ocr-candidates.cjs')(order, results, workflow),
   }}));
   t.on('get', root, () => ({data: {id: order, current_version: {document_id: 'pdf'},

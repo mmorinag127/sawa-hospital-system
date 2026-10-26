@@ -25,6 +25,7 @@ function harness(){
     selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},sheetDirtyRef:{current:false},unsavedSessionRef:{current:null},sheetPayload:null,
     window:{confirm:()=>state.confirmReplacement},AbortController,
     CANONICAL_SOURCE_READ_TIMEOUT_MS:actual('CANONICAL_SOURCE_READ_TIMEOUT_MS',{}),
+    WORKFLOW_READ_PENDING_MESSAGE:actual('WORKFLOW_READ_PENDING_MESSAGE',{}),
     rawInspectionRequestRef:{current:0},setRawInspection:()=>{},
     setSheetPayload:value=>{if(value===null)state.discard++;state.sheetPayload=value;context.sheetPayload=value;context.sheetPayloadRef.current=value;},setSheetDirty:value=>{state.sheetDirty=value;},setSheetJson:value=>{state.sheetJson=value;},setSheetJsonStale:value=>{state.sheetJsonStale=value;},
     workflow:null,outputGenerationsRef:{current:{download:0,preview:0}},outputOwnersRef:{current:{}},

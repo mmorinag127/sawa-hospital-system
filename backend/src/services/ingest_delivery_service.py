@@ -221,14 +221,16 @@ def fence_original_write(session, lease, *, read_only=False):
     return row.state == "ACKNOWLEDGED" and row.handoff_receipt is not None
 
 
-def _receipt(session, row, job, *, validate_pipeline=True):
+def _receipt(session, row, job, *, validate_pipeline=True, _read_evidence=None):
+    if _read_evidence is not None and validate_pipeline:
+        raise ValueError("terminal_read_evidence_is_not_pipeline_write_proof")
     captured = (job.metrics or {}).get("nonworkflow_execution")
     if not isinstance(captured, dict) or not _same(captured.get("ingest_lease"), row.owner_lease):
         raise ValueError("ingest_delivery_capture_owner_mismatch")
     if captured.get("job_id") != job.id or captured.get("input_reference") != job.input_reference:
         raise ValueError("ingest_delivery_capture_input_mismatch")
     from src.services.ingest_job_service import ingest_terminal_receipt
-    terminal = ingest_terminal_receipt(session, job, captured)
+    terminal = ingest_terminal_receipt(session, job, captured, _read_evidence=_read_evidence) if _read_evidence is not None else ingest_terminal_receipt(session, job, captured)
     if job.status in {"done", "failed"}:
         if terminal is None:
             return None, None

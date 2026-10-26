@@ -36,11 +36,11 @@ async function mount({initial=null,targets,adminView=false,beforeGet,beforePost,
  const rawGet=api.get,rawPost=api.post;
  api.get=async(...args)=>{const result=await rawGet(...args);return {...result,data:Array.isArray(result.data)?result.data.map(businessResponse):businessResponse(result.data)};};
  api.post=async(...args)=>{const result=await rawPost(...args);return {...result,data:businessResponse(result.data)};};
- function load(file){if(cache.has(file))return cache.get(file);const exports={};cache.set(file,exports);const source=fs.readFileSync(file,'utf8');const code=ts.transpileModule(source,{fileName:file,compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;vm.runInNewContext(code,{exports,require(name){if(name==='next/link')return {__esModule:true,default:({href,children,...props})=>React.createElement('a',{href,...props},children)};if(name.endsWith('/apiClient'))return {apiClient:api};if(name.startsWith('.'))return load(path.resolve(path.dirname(file),name)+'.tsx');return require(name);},setTimeout(fn,delay){if(delay===5000){timeouts.push(fn);return 0;}const timer=setTimeout(fn,delay);if(delay>=60000)timer.unref();return timer;},clearTimeout,setInterval(fn){intervals.push(fn);return intervals.length;},clearInterval(){},crypto:require('node:crypto').webcrypto,URL,FormData:dom.window.FormData,console});return exports;}
+ function load(file){if(cache.has(file))return cache.get(file);const exports={};cache.set(file,exports);const source=fs.readFileSync(file,'utf8');const code=ts.transpileModule(source,{fileName:file,compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;vm.runInNewContext(code,{exports,require(name){if(name==='next/link')return {__esModule:true,default:({href,children,...props})=>React.createElement('a',{href,...props},children)};if(name.endsWith('/apiClient'))return {apiClient:api};if(name.startsWith('.'))return load(path.resolve(path.dirname(file),name)+'.tsx');return require(name);},setTimeout(fn,delay){if(delay===5000){timeouts.push(fn);return 0;}const timer=setTimeout(fn,delay);if(delay>=60000)timer.unref();return timer;},clearTimeout,setInterval(fn,delay){intervals.push({fn,delay,active:true});return intervals.length;},clearInterval(id){if(intervals[id-1])intervals[id-1].active=false;},crypto:require('node:crypto').webcrypto,URL,FormData:dom.window.FormData,console});return exports;}
  const screen=load(path.resolve(__dirname,'../src/pages/assistant.tsx'));const root=createRoot(document.getElementById('root'));const settle=async(fn=()=>{})=>React.act(async()=>{await fn();await new Promise(r=>setTimeout(r,0));});
  api.put=async(url,body)=>{calls.push({method:'put',url,body:JSON.parse(JSON.stringify(body))});if(url.endsWith('/provider'))config.provider_id=body.provider;return {data:config};};
  await settle(()=>root.render(React.createElement(screen.AssistantScreen,{adminView})));
- const h={document:dom.window.document,calls,retryLoad:()=>settle(()=>timeouts.shift()()),tick:()=>intervals.at(-1)(),get run(){return run},setRun(value){run=value},settle,async poll(){await settle(()=>intervals.at(-1)());},button(text){const found=[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()===text);assert.equal(found.length,1,`button ${text}: ${document.body.textContent}`);return found[0];},async click(button){await settle(()=>button.click())},async change(input,value){await settle(()=>{Object.getOwnPropertyDescriptor(input.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:input.tagName==='SELECT'?window.HTMLSelectElement.prototype:window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new window.Event('input',{bubbles:true}));input.dispatchEvent(new window.Event('change',{bubbles:true}));});},async wait(predicate){const end=Date.now()+3000;while(!predicate()){assert.ok(Date.now()<end,document.body.textContent);await settle(()=>new Promise(r=>setTimeout(r,20)));}},async close(){await settle(()=>root.unmount());dom.window.close();for(const[key,d]of saved){if(d)Object.defineProperty(global,key,d);else delete global[key];}}};
+ const h={document:dom.window.document,calls,retryLoad:()=>settle(()=>timeouts.shift()()),tick:()=>intervals.findLast(t=>t.active&&t.delay===2500)?.fn(),get run(){return run},setRun(value){run=value},settle,async poll(delay=2500){const timer=intervals.findLast(t=>t.active&&t.delay===delay);assert.ok(timer,"active polling timer");await settle(()=>timer.fn());},button(text){const found=[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()===text);assert.equal(found.length,1,`button ${text}: ${document.body.textContent}`);return found[0];},async click(button){await settle(()=>button.click())},async change(input,value){await settle(()=>{Object.getOwnPropertyDescriptor(input.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:input.tagName==='SELECT'?window.HTMLSelectElement.prototype:window.HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new window.Event('input',{bubbles:true}));input.dispatchEvent(new window.Event('change',{bubbles:true}));});},async wait(predicate){const end=Date.now()+3000;while(!predicate()){assert.ok(Date.now()<end,document.body.textContent);await settle(()=>new Promise(r=>setTimeout(r,20)));}},async close(){await settle(()=>root.unmount());dom.window.close();for(const[key,d]of saved){if(d)Object.defineProperty(global,key,d);else delete global[key];}}};
  // Existing run-detail scenarios explicitly enter through history, as an operator does.
  if(initial && openInitial && !['completed','stopped','rolled_back','failed'].includes(initial.status)) {
   await h.click(h.document.querySelector('.history-row'));
@@ -375,7 +375,7 @@ test('pending FAX runs without selection targets render and retain stop and roll
 });
 
 test('stop uses a control deadline and stopping never promises business progress',async()=>{
- const h=await mount({adminView:true,initial:makeRun('running')});try{
+ const h=await mount({adminView:true,initial:makeRun('running'),beforePost:async url=>url.endsWith('/stop') ? {data:makeRun('stopping')} : undefined});try{
   await h.click(h.button('作業を停止する'));
   assert.equal(h.calls.find(c=>c.url.endsWith('/stop')).options.timeout,300000);
   h.setRun({...h.run,status:'stopping'});await h.poll();
@@ -499,7 +499,7 @@ test('unknown creation waits for its exact request in history and never adopts a
   assert.match(h.document.body.textContent,/同じ依頼は再送していません/);
   assert.equal(h.document.querySelector('.active-work'),null);
   assert.equal(h.button('この内容で始める').disabled,true);
-  h.setRun({...makeRun(),request_key:key});await h.poll();
+  h.setRun({...makeRun(),request_key:key});await h.poll(5000);
   assert.ok(h.document.querySelector('.active-work'));
   assert.equal(h.document.querySelector('.assistant-error'),null);
   assert.equal(h.calls.filter(c=>c.method==='post'&&c.url===base+'/runs').length,1);
@@ -525,7 +525,7 @@ test('creation reconciliation never overlaps a slow initial history lookup with 
   await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('未処理FAX')));
   await h.wait(()=>!h.button('この内容で始める').disabled);await h.click(h.button('この内容で始める'));
   assert.equal(reads,1);
-  await h.poll();await h.poll();assert.equal(reads,1);
+  await h.poll(5000);await h.poll(5000);assert.equal(reads,1);
   created=false;release();await h.wait(()=>h.document.querySelector('.active-work'));
   assert.equal(h.calls.filter(c=>c.method==='post'&&c.url===base+'/runs').length,1);
  }finally{if(release)release();await h.close();}

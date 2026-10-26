@@ -1086,12 +1086,13 @@ def _apply_seed_fields_if_blank(target, seed_fields: dict[str, object] | None) -
             setattr(target, field, value)
 
 
-def _find_menu_master_candidates(session, name: str, *, limit: int = 8) -> list[dict]:
+def _find_menu_master_candidates(session, name: str, *, limit: int = 8, masters: list[MenuMaster] | None = None) -> list[dict]:
     normalized_name = _normalize_menu_name(name)
     match_key = _normalize_menu_match_key(name)
     if not normalized_name or not match_key:
         return []
-    masters = session.execute(select(MenuMaster).order_by(MenuMaster.name.asc())).scalars().all()
+    if masters is None:
+        masters = session.execute(select(MenuMaster).order_by(MenuMaster.name.asc())).scalars().all()
     scored: list[tuple[int, int, str, MenuMaster, str]] = []
     for master in masters:
         master_normalized = master.normalized_name or _normalize_menu_name(master.name or "")
@@ -1545,16 +1546,23 @@ def _build_menu_master_check_issue(
     session,
     item: MonthlyMenuItem,
     entries: list[MonthlyMenuEntry],
+    *,
+    masters: list[MenuMaster] | None = None,
+    master_by_id: dict | None = None,
+    master_by_name: dict | None = None,
 ) -> dict | None:
     item_name = (item.name or "").strip()
     if not item_name:
         return None
     patch = _derive_monthly_item_patch(item, entries)
-    linked_master = session.get(MenuMaster, item.menu_master_id) if item.menu_master_id else None
-    exact_master = _find_menu_master_by_normalized(session, _normalize_menu_name(item_name))
+    linked_master = (master_by_id.get(item.menu_master_id) if master_by_id is not None
+                     else session.get(MenuMaster, item.menu_master_id) if item.menu_master_id else None)
+    normalized_name = _normalize_menu_name(item_name)
+    exact_master = (master_by_name.get(normalized_name) if master_by_name is not None
+                    else _find_menu_master_by_normalized(session, normalized_name))
     target_master = linked_master or exact_master
     if target_master is None:
-        candidates = _find_menu_master_candidates(session, item_name)
+        candidates = _find_menu_master_candidates(session, item_name, masters=masters)
         bagging_issue = _build_bagging_setting_issue(session, item_name, patch, None, item_id=item.id)
         if bagging_issue:
             bagging_issue.update(
@@ -1625,8 +1633,15 @@ def _build_menu_master_update_body(
 
 def _build_menu_master_checks(session, items: list[MonthlyMenuItem], entries: list[MonthlyMenuEntry]) -> dict:
     issues: list[dict] = []
+    masters = list(session.execute(select(MenuMaster).order_by(MenuMaster.name.asc())).scalars()) if items else []
+    master_by_id = {master.id: master for master in masters}
+    master_by_name = {master.normalized_name: master for master in masters if master.normalized_name}
+    for pending in session.new:
+        if isinstance(pending, MenuMaster) and pending.normalized_name:
+            master_by_name[pending.normalized_name] = pending
     for item in sorted(items, key=lambda row: ((row.facility_override or ""), (row.name or ""), (row.id or ""))):
-        issue = _build_menu_master_check_issue(session, item, entries)
+        issue = _build_menu_master_check_issue(session, item, entries, masters=masters,
+                                               master_by_id=master_by_id, master_by_name=master_by_name)
         if issue:
             issues.append(issue)
     return {
@@ -2070,9 +2085,13 @@ def _monthly_snapshot_body(session, month_id):
         .where(or_(MonthlyMenuEntry.facility_override.is_(None), MonthlyMenuEntry.facility_override == ""))
         .order_by(MonthlyMenuEntry.menu_date, MonthlyMenuEntry.daypart, MonthlyMenuEntry.slot_index, MonthlyMenuEntry.id)).scalars().all()
     payloads = []
+    master_ids = {item.menu_master_id for item in items if item.menu_master_id}
+    masters = {master.id: master for master in session.execute(
+        select(MenuMaster).where(MenuMaster.id.in_(master_ids)),
+    ).scalars()} if master_ids else {}
     for item in items:
         payload = serialize_item(item)
-        master = session.get(MenuMaster, item.menu_master_id) if item.menu_master_id else None
+        master = masters.get(item.menu_master_id)
         if item.menu_master_id and master is None:
             raise ValueError("recorded monthly menu master is missing")
         if master is not None and item.master_resolution_mode != "month_only":
@@ -4023,22 +4042,26 @@ def list_recent_menus(limit: int = 12) -> list[dict]:
             .all()
         )
         results: list[dict] = []
+        month_ids = [row.id for row in rows]
+        base_items = set(session.execute(select(MonthlyMenuItem.monthly_menu_id).where(
+            MonthlyMenuItem.monthly_menu_id.in_(month_ids),
+            or_(MonthlyMenuItem.facility_override.is_(None), MonthlyMenuItem.facility_override == ""),
+        ).distinct()).scalars()) if month_ids else set()
+        base_entries = set(session.execute(select(MonthlyMenuEntry.monthly_menu_id).where(
+            MonthlyMenuEntry.monthly_menu_id.in_(month_ids),
+            or_(MonthlyMenuEntry.facility_override.is_(None), MonthlyMenuEntry.facility_override == ""),
+        ).distinct()).scalars()) if month_ids else set()
+        latest_uploads = {}
+        if month_ids:
+            for log in session.execute(select(AuditLog).where(
+                AuditLog.action == "menu_upload", AuditLog.target.in_(month_ids),
+            ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc())).scalars():
+                if log.target not in latest_uploads and not _is_scoped_menu_upload_log(log):
+                    latest_uploads[log.target] = log
         for row in rows:
-            latest_upload_log = _get_latest_menu_upload_log(session, row.id)
-            has_base_item = (
-                session.query(MonthlyMenuItem.id)
-                .filter(MonthlyMenuItem.monthly_menu_id == row.id)
-                .filter(or_(MonthlyMenuItem.facility_override.is_(None), MonthlyMenuItem.facility_override == ""))
-                .first()
-                is not None
-            )
-            has_base_entry = (
-                session.query(MonthlyMenuEntry.id)
-                .filter(MonthlyMenuEntry.monthly_menu_id == row.id)
-                .filter(or_(MonthlyMenuEntry.facility_override.is_(None), MonthlyMenuEntry.facility_override == ""))
-                .first()
-                is not None
-            )
+            latest_upload_log = latest_uploads.get(row.id)
+            has_base_item = row.id in base_items
+            has_base_entry = row.id in base_entries
             if not latest_upload_log and not has_base_item and not has_base_entry and not row.month_start:
                 continue
             results.append(serialize_menu(row, latest_upload_log))
@@ -4047,19 +4070,23 @@ def list_recent_menus(limit: int = 12) -> list[dict]:
         return results
 
 
+def get_latest_menu_identity() -> dict | None:
+    ensure_menu_schema()
+    with _menu_read_session() as session:
+        ident = session.execute(select(MonthlyMenu.id).order_by(
+            MonthlyMenu.month_start.desc().nullslast(), MonthlyMenu.id.desc(),
+        ).limit(1)).scalar_one_or_none()
+        return {"menu": {"id": ident}} if ident is not None else None
+
+
 def get_latest_menu(*, allow_unresolved: bool = False) -> dict | None:
     ensure_menu_schema()
     with _menu_read_session() as session:
-        menus = session.query(MonthlyMenu).all()
-        if not menus:
+        latest = session.query(MonthlyMenu).order_by(
+            MonthlyMenu.month_start.desc().nullslast(), MonthlyMenu.id.desc(),
+        ).first()
+        if latest is None:
             return None
-        latest = max(
-            menus,
-            key=lambda row: (
-                row.month_start.isoformat() if row.month_start else "",
-                str(row.id or ""),
-            ),
-        )
         latest_upload_log = _get_latest_menu_upload_log(session, latest.id)
         items = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.monthly_menu_id == latest.id).all()
         entries = (

@@ -1,5 +1,5 @@
 import { Button } from "@mui/material";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "../services/apiClient";
 import { classifyDashboardMenuRead, type MenuInfo } from "../services/dashboardMenuInfo";
@@ -14,6 +14,8 @@ import {
 } from "../services/facilityData";
 
 type Order = {
+  source_kind?: string;
+  uploaded_pdf_id?: string;
   id?: string;
   status: string;
   facility?: string | null;
@@ -61,6 +63,13 @@ type SystemStatus = {
     inflight?: number | null;
     max_inflight?: number | null;
   };
+};
+
+type OrderDashboard = {
+  stats: {counts: Record<string, number>; unresolved: number; latestReceived: string | null; total: number};
+  weeks: Array<{week: string; counts: Record<string, number>; unresolved: number}>;
+  week_ids: string[];
+  pending_orders: Order[];
 };
 
 type ShippingTodayItem = {
@@ -146,7 +155,7 @@ const inlineFacilityHint = (order: Order): FacilityHint | null => {
 };
 
 export default function HomePage() {
-  const [orders, setOrders] = useState<Order[]>([]);
+  const [orderDashboard, setOrderDashboard] = useState<OrderDashboard | null>(null);
   const [menuInfo, setMenuInfo] = useState<Record<string, MenuInfo>>({});
   const [error, setError] = useState("");
   const [ordersLoading, setOrdersLoading] = useState(false);
@@ -162,9 +171,9 @@ export default function HomePage() {
       const maxAttempts = 2;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
-          const res = await apiClient.get("/orders", { params: { include_ocr: false } });
+          const res = await apiClient.get<OrderDashboard>("/orders/dashboard");
           if (cancelled) return;
-          setOrders(res.data.orders || []);
+          setOrderDashboard(res.data);
           setError("");
           setOrdersLoading(false);
           return;
@@ -190,7 +199,7 @@ export default function HomePage() {
 
   useEffect(() => {
     apiClient
-      .get("/system/status")
+      .get("/system/status", {params: {view: "operations"}})
       .then((res) => {
         setSystemStatus(res.data || null);
       })
@@ -224,65 +233,9 @@ export default function HomePage() {
     };
   }, []);
 
-  const stats = useMemo(() => {
-    const counts: Record<string, number> = {};
-    STATUS_KEYS.forEach((key) => {
-      counts[key] = 0;
-    });
-    let unresolved = 0;
-    let latestReceived = "";
-    orders.forEach((order) => {
-      if (counts[order.status] != null) {
-        counts[order.status] += 1;
-      }
-      if (!order.facility) {
-        unresolved += 1;
-      }
-      if (order.received_at && (!latestReceived || order.received_at > latestReceived)) {
-        latestReceived = order.received_at;
-      }
-    });
-    return {
-      counts,
-      unresolved,
-      latestReceived,
-      total: orders.length,
-    };
-  }, [orders]);
-
-  const weekRows = useMemo(() => {
-    const map = new Map<
-      string,
-      { week: string; counts: Record<string, number>; unresolved: number }
-    >();
-    orders.forEach((order) => {
-      const week = order.week || "未確定";
-      const current =
-        map.get(week) || {
-          week,
-          counts: { 未着: 0, 要確認: 0, 確定: 0, エラー: 0 },
-          unresolved: 0,
-        };
-      if (current.counts[order.status] != null) {
-        current.counts[order.status] += 1;
-      }
-      if (!order.facility) {
-        current.unresolved += 1;
-      }
-      map.set(week, current);
-    });
-    return Array.from(map.values()).sort((a, b) => a.week.localeCompare(b.week));
-  }, [orders]);
-
-  const weekList = useMemo(() => {
-    const weeks = new Set<string>();
-    orders.forEach((order) => {
-      if (order.week) {
-        weeks.add(order.week);
-      }
-    });
-    return Array.from(weeks).sort();
-  }, [orders]);
+  const stats = orderDashboard?.stats || {counts: Object.fromEntries(STATUS_KEYS.map(key => [key, 0])), unresolved: 0, latestReceived: null, total: 0};
+  const weekRows = orderDashboard?.weeks || [];
+  const weekList = orderDashboard?.week_ids || [];
 
   useEffect(() => {
     if (weekList.length === 0) {
@@ -319,14 +272,12 @@ export default function HomePage() {
     };
   }, [weekList.join("|")]);
 
-  const pendingOrders = useMemo(() => {
-    return orders.filter((order) => order.status === "要確認" || !order.facility).slice(0, 8);
-  }, [orders]);
+  const pendingOrders = orderDashboard?.pending_orders || [];
 
   useEffect(() => {
     let cancelled = false;
     const unresolved = pendingOrders
-      .filter((order) => !order.facility && order.id && !inlineFacilityHint(order))
+      .filter((order) => order.source_kind !== "uploaded_pdf" && !order.facility && order.id && !inlineFacilityHint(order))
       .map((order) => String(order.id || ""))
       .filter((orderId) => orderId && !facilityHints[orderId]);
 
@@ -591,7 +542,7 @@ export default function HomePage() {
               <p className="subtle">未確定申請はありません。</p>
             ) : (
               pendingOrders.map((order) => (
-                <Link key={order.id} href={`/orders/${order.id}`} className="pending-item">
+                <Link key={order.id} href={order.source_kind === "uploaded_pdf" ? `/pdf-upload?uploaded_pdf_id=${encodeURIComponent(order.uploaded_pdf_id || "")}` : `/orders/${order.id}`} className="pending-item">
                   <div>
                     <p className="pending-title">{order.id}</p>
                     <p className="pending-meta">

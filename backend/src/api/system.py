@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -19,7 +20,7 @@ from src.services.system_maintenance_service import (
     get_sqlite_db_path,
 )
 from src.services.notification_service import record_event
-from src.services.system_process_log_service import list_process_logs
+from src.services.system_process_log_service import get_process_log, list_process_logs
 
 router = APIRouter()
 
@@ -31,7 +32,20 @@ def _is_production_runtime() -> bool:
 
 
 @router.get("/system/status", dependencies=[Depends(require_role("operator"))])
-def system_status():
+def system_status(view: Literal["full", "operations"] = "full"):
+    if view == "operations":
+        operations = get_operations()
+        ingest_summary = summarize_ingest_jobs()
+        uploaded_pdf_summary = summarize_uploaded_pdfs()
+        operations["intake"] = {"uploaded_pdfs": uploaded_pdf_summary, "ingest_jobs": ingest_summary}
+        return {
+            "intake": get_intake_status(),
+            "oauth_config": {"configured": bool(GOOGLE_OAUTH_CLIENT_IDS), "google_client_id_count": len(GOOGLE_OAUTH_CLIENT_IDS)},
+            "ocr_operations": operations,
+            "ocr_pipeline": {**operations["summary"], "source": operations["source"]},
+            "ingest_jobs": ingest_summary,
+            "uploaded_pdfs": uploaded_pdf_summary,
+        }
     try:
         pipeline_state = load_pipeline_state() or {}
     except Exception as exc:  # noqa: BLE001
@@ -80,8 +94,16 @@ def get_db_quota():
 
 
 @router.get("/system/process-logs", dependencies=[Depends(require_role("operator"))])
-def get_process_logs(limit: int = 100):
-    return list_process_logs(limit=limit)
+def get_process_logs(limit: int = 100, include_details: bool = True):
+    return list_process_logs(limit=limit, include_details=include_details)
+
+
+@router.get("/system/process-logs/{log_id}", dependencies=[Depends(require_role("operator"))])
+def get_process_log_detail(log_id: str):
+    item = get_process_log(log_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="process_log_not_found")
+    return item
 
 
 @router.get("/system/db/download", dependencies=[Depends(require_role("admin"))])

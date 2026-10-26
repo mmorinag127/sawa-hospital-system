@@ -130,6 +130,77 @@ def test_valid_saved_quantities_and_readonly_http_resolution_are_unchanged(saved
     assert database_snapshot(f) == before
 
 
+def test_resolution_shares_analysis_without_skipping_capture_validation(saved_receipt, monkeypatch):
+    from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
+
+    f = saved_receipt
+    expected = read_resolution(f)
+    before = database_snapshot(f)
+    analysis = _EvidenceAnalysis()
+    calls = []
+    original_select = orders.ocr_evidence_service.evidence_run_selectability_error
+    original_serialize = orders.ocr_evidence_service._serialize_evidence_run
+
+    def select(row, **kwargs):
+        calls.append(("select", kwargs.get("_analysis")))
+        return original_select(row, **kwargs)
+
+    def serialize(row, **kwargs):
+        calls.append(("serialize", kwargs.get("_analysis")))
+        return original_serialize(row, **kwargs)
+
+    monkeypatch.setattr(orders.ocr_evidence_service, "evidence_run_selectability_error", select)
+    monkeypatch.setattr(orders.ocr_evidence_service, "_serialize_evidence_run", serialize)
+    with f.session_scope() as session:
+        actual = workflow._workflow_menu_amount_resolution(
+            session, session.get(Order, f.order_id),
+            session.get(OrderWorkflowState, f.order_id), _analysis=analysis,
+        )
+    assert actual == expected
+    assert any(name == "select" for name, _ in calls)
+    assert any(name == "serialize" for name, _ in calls)
+    assert all(value is analysis for _, value in calls)
+    assert database_snapshot(f) == before
+
+
+def test_read_candidate_omits_write_snapshots_but_preserves_output_and_rejects_writes(saved_receipt, monkeypatch):
+    from src.services import workflow_attempt_guard_service as guard, ocr_revision_store, draft_sheet_service
+
+    f = saved_receipt
+    before = database_snapshot(f)
+    with f.session_scope() as session:
+        kwargs = dict(session=session, order=session.get(Order, f.order_id),
+                      saved_sheet=session.get(OrderSheetDraft, f.draft_id))
+        expected = workflow._build_materialization_candidate_for_saved_sheet(**kwargs)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("read projection built a complete execution/write snapshot")
+
+        monkeypatch.setattr(orders, "synchronous_input_versions", forbidden)
+        monkeypatch.setattr(guard, "_order_execution_input", forbidden)
+        actual = workflow._build_materialization_candidate_for_saved_sheet(
+            **kwargs, _for_read_projection=True,
+        )
+        proof = actual.pop("synchronous_write_input")
+        expected.pop("synchronous_write_input")
+        assert actual == expected
+        assert proof["read_projection_only"] is True
+        assert proof["input_versions"] is None
+        assert orders._synchronous_cache_write_fence(session, f.order_id, proof) is False
+        with pytest.raises(ValueError, match="revision_write_ownership_conflict"):
+            ocr_revision_store.append_revision(
+                f.order_id, {"revision_id": "read-proof-must-not-write",
+                             "base_evidence_run_id": proof["evidence_run_id"]},
+                session=session, synchronous_write_input=proof,
+            )
+        assert draft_sheet_service.persist_sheet_draft(
+            order_id=f.order_id, draft_sheet_json=f.saved(),
+            base_evidence_run_id=proof["evidence_run_id"],
+            synchronous_write_input=proof, write_session=session,
+        ) is None
+    assert database_snapshot(f) == before
+
+
 @pytest.mark.parametrize("fault,code", FAULTS)
 def test_invalid_receipt_is_typed_unresolved_and_readonly_without_old_lines(saved_receipt, fault, code):
     f = saved_receipt

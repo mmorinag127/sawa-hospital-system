@@ -61,7 +61,7 @@ function fixture(selected, mutate = () => {}, failure = null,
     let data = inspection();
     if (reloaded) mutate(data, evidence);
     respond(base, {id: identity.orderId, current_version: {document_id: identity.documentId}});
-    respond(base + '/workflow-v2/inspection?include_ocr_results=true&history_details=false', data);
+    respond(base + '/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true', data);
   }
   const text = () => `${evidence.recognition_acceptance ? '確認済み' : '要確認'}: 1セル ${identity.evidenceId}`;
   function locator(name = '') {

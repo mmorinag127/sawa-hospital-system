@@ -17,7 +17,7 @@ async function setup({ normal = false, quantityEditable = false, job = null, ini
   t.on('get', '/facilities', () => ({data: {source: 'canonical_json', revision: 'synthetic', facilities: []}}));
   t.on('get', BASE, () => ({data: current()}));
   t.on('get', `${BASE}/ocr-results`, () => ({data: require('./helpers/ocr-candidates.cjs')(ORDER, [result()], current())}));
-  t.on('get', `${BASE}/inspection?include_ocr_results=true&history_details=false`, () => ({data: {workflow: current(), ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER, [result()], current()), saved_sheet: null, pre_save_checks: {}}}));
+  t.onWorkflowInspection(`${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => ({data: {workflow: current(), ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER, [result()], current()), saved_sheet: null, pre_save_checks: {}}}));
   t.on('get', `/orders/${ORDER}`, () => ({data: {id: ORDER, current_version: {document_id: 'pdf-A'}, versions: [{document_id: 'pdf-A', is_current: true}, {document_id: 'pdf-B', is_current: false}]}}));
   t.on('get', `/orders/${ORDER}/week-options`, () => ({data: {options: []}}));
   t.on('get', `/orders/${ORDER}/document`, () => ({data: new Blob(['synthetic component only'])}));

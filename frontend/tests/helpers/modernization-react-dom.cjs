@@ -21,7 +21,21 @@ function transport() {
     if (!handler) return Promise.reject(new Error(`Unhandled mocked transport ${method} ${url}`));
     try { return Promise.resolve(handler(call)); } catch (reason) { return Promise.reject(reason); }
   };
-  return { api, calls, on(method, url, handler) { handlers.set(`${method} ${url}`, handler); } };
+  return { api, calls, on(method, url, handler) { handlers.set(`${method} ${url}`, handler); },
+    onWorkflowInspection(url, handler) {
+      assert.ok(url.includes('include_order_header=true'));
+      const orderUrl = url.slice(0, url.indexOf('/workflow-v2/inspection'));
+      handlers.set(`get ${url}`, async call => {
+        const response = await handler(call);
+        // Compose the new single-response fixture from the same explicitly
+        // authored header input; this is not another request by the page.
+        const headerFixture = handlers.get(`get ${orderUrl}`);
+        assert.equal(typeof headerFixture, 'function', `header fixture ${orderUrl}`);
+        const header = await headerFixture({method: 'get', url: orderUrl, config: call.config});
+        return {...response, data: {...response.data, order_header: header.data}};
+      });
+    },
+  };
 }
 
 async function mount(file, { api, props = {}, probe, route, routerState, component } = {}) {

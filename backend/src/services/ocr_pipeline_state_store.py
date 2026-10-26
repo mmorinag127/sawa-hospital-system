@@ -8,6 +8,7 @@ from loguru import logger
 from src.services.storage_uri import parse_gcs_uri
 
 try:
+    from google.api_core.exceptions import NotFound
     from google.cloud import storage  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     storage = None
@@ -51,9 +52,10 @@ def _load_gs(bucket: str, object_name: str) -> dict | None:
         raise OCRPipelineStateConfigError("pipeline state GCS storage SDK is unavailable")
     client = storage.Client()
     blob = client.bucket(bucket).blob(object_name)
-    if not blob.exists():
+    try:
+        payload = blob.download_as_bytes()
+    except NotFound:
         return None
-    payload = blob.download_as_bytes()
     return json.loads(payload.decode("utf-8"))
 
 

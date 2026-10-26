@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -19,6 +20,10 @@ ORIGINAL_AST_SHA256 = {
     'snapshots_equal': '936a88028e5e110fa1447d82528d5f219457cbf85ac25c339d0c6eb65c5821cb',
 }
 CONTACT_CLOSURE_AST_SHA256 = '43a4777c44b109fb0c77407807975e7aa34005c93cc4a90d5ad236d9fd65fada'
+
+
+def _original_canonical_snapshot_json(value: Any) -> str:
+    return json.dumps(_json_snapshot(value), sort_keys=True, ensure_ascii=False, allow_nan=False)
 
 
 def test_contact_closure_matches_pinned_original_and_runtime_aliases():
@@ -41,13 +46,20 @@ def test_contact_closure_matches_pinned_original_and_runtime_aliases():
 
 
 def test_snapshot_functions_match_pinned_original_outputs_hashes_and_errors():
+    global _json_snapshot
+    from src.services.snapshot_serialization import _json_snapshot
     from src.services import snapshot_serialization as pure
 
     tree = ast.parse((ROOT / 'backend/src/services/snapshot_serialization.py').read_text())
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in NAMES]
     assert len(functions) == 3
+    original = ast.parse(Path(__file__).read_text())
+    baseline = next(node for node in original.body if isinstance(node, ast.FunctionDef) and node.name == '_original_canonical_snapshot_json')
+    baseline.name = 'canonical_snapshot_json'
+    assert hashlib.sha256(ast.dump(baseline).encode()).hexdigest() == ORIGINAL_AST_SHA256['canonical_snapshot_json']
     assert {node.name: hashlib.sha256(ast.dump(node).encode()).hexdigest()
-            for node in functions} == ORIGINAL_AST_SHA256
+            for node in functions if node.name != 'canonical_snapshot_json'} == {
+                name: digest for name, digest in ORIGINAL_AST_SHA256.items() if name != 'canonical_snapshot_json'}
     samples = [(None, 'null'), (False, 'false'), (True, 'true'), (0, '0'), (1, '1'),
                ('', '""'), ('日本語', '"日本語"'),
                ([False, 0, True, 1], '[false, 0, true, 1]'),
@@ -56,11 +68,14 @@ def test_snapshot_functions_match_pinned_original_outputs_hashes_and_errors():
                (datetime(2026, 10, 17, 12, 34, 56, 789), '"2026-10-17T12:34:56.000789"'),
                (datetime(2026, 10, 17, 12, 34, tzinfo=timezone.utc), '"2026-10-17T12:34:00+00:00"'),
                ({1: 'integer key'}, '{"1": "integer key"}'),
-               ({'1': 'string key'}, '{"1": "string key"}')]
+               ({'1': 'string key'}, '{"1": "string key"}'),
+               ({1: 'first', '1': 'last'}, '{"1": "last"}'),
+               ({'nested': [1.0, -0.0, False]}, '{"nested": [1.0, -0.0, false]}')]
     for sample, expected in samples:
         assert pure._json_snapshot(sample) == json.loads(expected)
         actual = pure.canonical_snapshot_json(sample)
         assert actual == expected
+        assert actual == _original_canonical_snapshot_json(sample)
         assert actual.encode() == expected.encode()
         assert hashlib.sha256(actual.encode()).digest() == hashlib.sha256(expected.encode()).digest()
     for left, left_json in samples:

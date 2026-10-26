@@ -139,6 +139,9 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             await managed.client.close()
         if managed.gemini.client is not None:
             await managed.gemini.client.aclose()
+        close_store = getattr(store, "close", None)
+        if close_store is not None:
+            await asyncio.to_thread(close_store)
 
     app = FastAPI(title="SAWA 業務アシスタント試用", lifespan=lifespan)
     app.state.store, app.state.sandbox, app.state.tools = store, sandbox, tools
@@ -192,8 +195,11 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             domains[name] = {"configured": bool(cfg), "baseline_ready": (baseline / "trial-manifest.json").is_file() and (baseline / "database.sqlite3").is_file(),
                              "data": "registered_staging_snapshot" if cfg.get('registered_source') else json.loads((baseline / "trial-manifest.json").read_text()).get("data") if (baseline / "trial-manifest.json").is_file() else None,
                              "ocr_pipeline_configured": bool(cfg.get("env", {}).get("OCR_PIPELINE_BUCKET")) if name == "hospital" else None}
-        return {"trial": True, "provider_id": store.provider(), "provider": LABELS[store.provider()], "providers": managed.choices(), "missing": managed.missing(), "domains": domains,
-                "budget": store.budget(), "notice": "専用コピーを使用。既存環境への反映はありません。"}
+        with store.snapshot():
+            provider = store.provider()
+            budget = store.budget()
+        return {"trial": True, "provider_id": provider, "provider": LABELS[provider], "providers": managed.choices(), "missing": managed.missing(), "domains": domains,
+                "budget": budget, "notice": "専用コピーを使用。既存環境への反映はありません。"}
 
     @app.put('/provider')
     def select_provider(payload: ProviderChoice):
@@ -247,11 +253,14 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
 
     @app.get("/runs")
     async def runs(request: Request):
-        listing = store.listing(owner)
-        for run in listing:
-            if owned(run):
-                business.kick(run['id'], request.headers.get('authorization', ''))
-        return [{**run, 'business': business.projection(run, tools.flow.review(run['id']), tools.faxes.items(run['id']) if tools.faxes.active(run) else [])} for run in listing]
+        def read_response():
+            with store.snapshot():
+                listing = store.listing(owner)
+                return listing, [{**run, 'business': business.projection(run, tools.flow.review(run['id']), tools.faxes.items(run['id']) if tools.faxes.active(run) else [])} for run in listing]
+
+        listing, response = await asyncio.to_thread(read_response)
+        await business.kick_many([run['id'] for run in listing if owned(run)], request.headers.get('authorization', ''))
+        return response
 
     @app.post("/runs", status_code=201)
     async def create_run(payload: NewRun, request: Request):

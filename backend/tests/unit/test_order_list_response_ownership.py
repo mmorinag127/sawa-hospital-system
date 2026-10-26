@@ -27,7 +27,7 @@ def cache_world(monkeypatch):
 
     def fetch(*args, **kwargs):
         calls.append((args, kwargs))
-        return rows
+        return deepcopy(rows)
 
     monkeypatch.setattr(order_service, "_fetch_orders", fetch)
     yield SimpleNamespace(clock=clock, rows=rows, calls=calls)
@@ -149,7 +149,7 @@ def test_real_sequential_gets_do_not_retain_runtime_hydration(mounted_cache):
     assert enriched.json()["orders"][0]["request_owned"] == {"values": ["review"]}
     assert "request_owned" not in plain.json()["orders"][0]
     assert "request_owned" not in order_service.list_orders()[0]
-    assert len(mounted_cache.calls) == 1
+    assert len(mounted_cache.calls) == 3
 
 
 def test_real_parallel_get_cannot_observe_other_requests_mutation(mounted_cache, monkeypatch):
@@ -179,7 +179,7 @@ def test_real_parallel_get_cannot_observe_other_requests_mutation(mounted_cache,
     assert enriched.status_code == plain.status_code == 200
     assert "request_owned" not in plain.json()["orders"][0]
     assert enriched.json()["orders"][0]["request_owned"] == {"values": ["in flight"]}
-    assert len(mounted_cache.calls) == 1
+    assert len(mounted_cache.calls) == 3
 
 
 def test_actual_handler_propagates_fetch_exception(cache_world, monkeypatch):

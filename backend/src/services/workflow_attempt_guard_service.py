@@ -289,23 +289,28 @@ def validate_current_sheet_input(session: Any, order_id: str, context: Any, *, w
     return order
 
 
-def _order_execution_input(session: Any, order: Any, *, lock: bool = False, original_input: dict[str, Any] | None = None) -> dict[str, Any]:
-    from src.services.initial_saved_import_service import get_binding, execution_input
-    imported = get_binding(session, order.id, template_version_id=order.template_version_id)
-    if imported is not None:
-        return execution_input(session, imported)
+def selected_order_template_input(session: Any, order: Any, *, lock: bool = False):
     from src.services import canonical_facility_lineage as lineage
-    from src.models.facility_template_version import FacilityTemplateVersion
-    from src.services.config_service import capture_authored_processing_config, captured_processing_config_matches
-    from src.services.order_service import _build_position_menu_entries_safe
     selected_id = str(order.template_version_id or "").strip()
     projection = lineage.read_projection(session, selected_id, lock=lock) if selected_id else None
     if projection is None:
         raise ValueError("original_template_projection_missing")
     receipt = lineage.verify_projection(projection)
-    authored = receipt["authored_version"]
     if receipt["facility_id"] != order.facility_code:
         raise ValueError("original_template_configured_source_mismatch")
+    return projection, receipt
+
+
+def _order_execution_input(session: Any, order: Any, *, lock: bool = False, original_input: dict[str, Any] | None = None) -> dict[str, Any]:
+    from src.services.initial_saved_import_service import get_binding, execution_input
+    imported = get_binding(session, order.id, template_version_id=order.template_version_id)
+    if imported is not None:
+        return execution_input(session, imported)
+    from src.models.facility_template_version import FacilityTemplateVersion
+    from src.services.config_service import capture_authored_processing_config, captured_processing_config_matches
+    from src.services.order_service import _build_position_menu_entries_safe
+    projection, receipt = selected_order_template_input(session, order, lock=lock)
+    authored = receipt["authored_version"]
     if original_input is None:
         configured_input = capture_authored_processing_config(order.facility_code, selected_authored_version=authored)
     else:

@@ -63,8 +63,8 @@ def get_menu_scope_options():
 
 
 @router.get("/latest", dependencies=[Depends(require_role("operator"))])
-def get_latest_menu():
-    menu = menu_service.get_latest_menu(allow_unresolved=True)
+def get_latest_menu(identity_only: bool = False):
+    menu = menu_service.get_latest_menu_identity() if identity_only else menu_service.get_latest_menu(allow_unresolved=True)
     if not menu:
         raise HTTPException(status_code=404, detail="not found")
     return menu

@@ -73,7 +73,7 @@ def configure(web,worker,config,frontend_image,agent_image,token,*,school,portal
     # No additional identity, IAM grant, public endpoint, or business DB migration.
     agent={'name':'agent-runtime','image':agent_image,'env':env,
         'resources':{'limits':{'cpu':'4','memory':'8Gi'}},
-        'startupProbe':{'tcpSocket':{'port':8128},'initialDelaySeconds':5,'periodSeconds':5,'failureThreshold':48}}
+        'startupProbe':{'tcpSocket':{'port':8128},'periodSeconds':1,'failureThreshold':240}}
     others=[c for c in containers[1:] if c.get('name')!='agent-runtime']
     spec['containers']=[front,*others,agent]
     annotations=web['spec']['template'].setdefault('metadata',{}).setdefault('annotations',{})
@@ -84,7 +84,15 @@ def configure(web,worker,config,frontend_image,agent_image,token,*,school,portal
     annotations['run.googleapis.com/cpu-throttling']='false'
     annotations['autoscaling.knative.dev/minScale']='0'
     annotations['autoscaling.knative.dev/maxScale']='1'
-    annotations['run.googleapis.com/container-dependencies']=json.dumps({front['name']:['agent-runtime']})
+    dependencies=json.loads(annotations.get('run.googleapis.com/container-dependencies','{}'))
+    if front['name'] in dependencies:
+        dependencies[front['name']]=[name for name in dependencies[front['name']] if name!='agent-runtime']
+        if not dependencies[front['name']]:
+            del dependencies[front['name']]
+    if dependencies:
+        annotations['run.googleapis.com/container-dependencies']=json.dumps(dependencies)
+    else:
+        annotations.pop('run.googleapis.com/container-dependencies',None)
     web['spec']['template']['metadata'].pop('name',None)
     # Preserve existing service identity, mounts, secret refs, ingress, and traffic.
     clean={'apiVersion':'serving.knative.dev/v1','kind':'Service',

@@ -10,7 +10,6 @@ from src.models.document import OrderDocument
 from src.models.ingest_delivery import IngestDelivery
 from src.models.ocr_job import OcrJob
 from src.models.order import Order
-from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_workflow_state import OrderWorkflowState
 from src.models.uploaded_pdf import UploadedPdf
 from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
@@ -19,6 +18,7 @@ from src.services import ocr_job_service
 from src.services import order_workflow_v2_service as workflow
 from src.services import workflow_ocr_delivery_service as workflow_delivery
 from src.services import workflow_attempt_guard_service as execution_guard
+from src.services.ocr_terminal_evidence_read import read_terminal_evidence
 
 
 def _iso(value):
@@ -59,7 +59,7 @@ def _source(session, order, job, receipt, *, native, selected=None):
             raise ValueError("ocr_job_source_columns_changed")
 
 
-def _owner(session, order, state, job, meta, native_deliveries):
+def _owner(session, order, state, job, meta, native_deliveries, evidence_reads):
     if job.order_id != order.id or meta.get("ocr_job_id") != job.id:
         raise ValueError("ocr_workflow_job_owner_changed")
     if not isinstance(job.metrics, dict):
@@ -109,7 +109,7 @@ def _owner(session, order, state, job, meta, native_deliveries):
         with execution_guard.nonworkflow_execution_context(capture):
             execution_guard.processing_start_read_input()
         if job.status in {"done", "failed"}:
-            kind, terminal = ingest_delivery._receipt(session, delivery, job, validate_pipeline=False)
+            kind, terminal = ingest_delivery._receipt(session, delivery, job, validate_pipeline=False, _read_evidence=evidence_reads)
             if kind != "terminal" or terminal != delivery.terminal_receipt:
                 raise ValueError("ocr_native_terminal_changed")
             if original.status != ("done" if job.status == "done" else "error"):
@@ -146,7 +146,7 @@ def _owner(session, order, state, job, meta, native_deliveries):
     return "workflow", attempt, delivery.delivery_generation, delivery.selected_pdf_receipt
 
 
-def _entry(session, order, state, job, meta, native_deliveries):
+def _entry(session, order, state, job, meta, native_deliveries, evidence_reads):
     result = {"order_id": order.id, "document_id": order.current_document_id,
               "job_id": meta.get("ocr_job_id") if isinstance(meta.get("ocr_job_id"), str) else None,
               "workflow_revision": state.revision,
@@ -164,7 +164,7 @@ def _entry(session, order, state, job, meta, native_deliveries):
         if (isinstance(terminal, dict) and terminal.get("evidence_run_id") is not None
                 and not isinstance(terminal["evidence_run_id"], str)):
             raise ValueError("ocr_terminal_evidence_identity_invalid")
-        kind, execution, generation, pdf = _owner(session, order, state, job, meta, native_deliveries)
+        kind, execution, generation, pdf = _owner(session, order, state, job, meta, native_deliveries, evidence_reads)
         common = workflow._recorded_workflow_job_status(state, meta, job)
         if common is None or common.get("attemptIdentity") != execution:
             raise ValueError("ocr_recorded_status_owner_changed")
@@ -181,17 +181,16 @@ def _entry(session, order, state, job, meta, native_deliveries):
         terminal = job.metrics.get("rerun_terminal_receipt")
         if job.status in {"done", "failed"} and isinstance(terminal, dict):
             evidence_id = terminal.get("evidence_run_id")
-            evidence = session.get(OrderOcrEvidenceRun, evidence_id) if evidence_id else None
+            evidence = evidence_reads.get(evidence_id) if evidence_id else None
             if evidence_id:
-                payload = evidence.payload_json if evidence is not None else None
-                lineage = payload.get("_ocr_execution") if isinstance(payload, dict) else None
+                lineage = evidence.execution if evidence is not None else None
                 if (evidence is None or evidence.order_id != order.id or not isinstance(lineage, dict)
                         or lineage.get("job_id") != job.id or lineage.get("evidence_run_id") != evidence_id
                         or lineage.get("selected_pdf_receipt") != pdf
                         or lineage.get("workflow_attempt_id") != job.metrics.get("workflow_attempt_id")
                         or (kind == "native_ingest_v2" and lineage.get("nonworkflow_execution_id") != execution)):
                     raise ValueError("ocr_terminal_evidence_owner_changed")
-                review = payload.get("hakodate_recognition_review")
+                review = evidence.recognition_review
                 if evidence.status == "diagnostic_only" or isinstance(review, dict) and review.get("count", 0):
                     result["status"] = "review_required"
             elif job.status == "done":
@@ -250,9 +249,10 @@ def read_operations(session):
     # populate_existing reads still execute; no fence or refresh is intercepted.
     canonical_rows = []
     for model, identities in ((OrderDocument, document_ids), (UploadedPdf, upload_ids),
-                              (OrderOcrEvidenceRun, evidence_ids), (WorkflowOcrDelivery, delivery_ids)):
+                              (WorkflowOcrDelivery, delivery_ids)):
         for chunk in _chunks(identities):
             canonical_rows.extend(session.scalars(select(model).where(model.id.in_(chunk))))
+    evidence_reads = read_terminal_evidence(session, evidence_ids)
     native_deliveries = {}
     for chunk in _chunks(native_ids):
         for row in session.scalars(select(IngestDelivery).where(IngestDelivery.job_id.in_(chunk))):
@@ -265,10 +265,10 @@ def read_operations(session):
         if job_id is not None:
             if isinstance(job_id, str):
                 referenced.add(job_id)
-            items.append(_entry(session, order, state, jobs.get(job_id) if isinstance(job_id, str) else None, meta, native_deliveries))
+            items.append(_entry(session, order, state, jobs.get(job_id) if isinstance(job_id, str) else None, meta, native_deliveries, evidence_reads))
         elif state is not None and (state.state in {"ocr_running", "ocr_failed"}
                 or order.id in orders_with_jobs):
-            items.append(_entry(session, order, state, None, meta, native_deliveries))
+            items.append(_entry(session, order, state, None, meta, native_deliveries, evidence_reads))
     # Non-current jobs remain dated history. An unowned active job is additionally
     # visible as a blocker, not silently counted as idle or claimed by an order.
     history = []

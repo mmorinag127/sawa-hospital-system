@@ -22,7 +22,7 @@ function MonthlyMenuIndexScreen({ authenticated }: { authenticated: boolean }) {
       const auth = browserSessionKey();
       const current = owner.capture("latest");
       try {
-        const res = await apiClient.get("/monthly-menus/latest");
+        const res = await apiClient.get("/monthly-menus/latest", {params: {identity_only: true}});
         const monthId = String(res.data?.menu?.id || "").trim();
         if (!monthId) {
           throw new Error("missing_month_id");

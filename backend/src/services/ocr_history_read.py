@@ -41,19 +41,24 @@ def read_history(session, order_id: str) -> list[SimpleNamespace]:
     return _read_rows(session, history_statement(order_id))
 
 
+def history_row_view(row: OrderOcrEvidenceRun) -> SimpleNamespace:
+    values = {column.name: getattr(row, column.name) for column in OrderOcrEvidenceRun.__table__.columns}
+    return _history_view(values)
+
+
+def _history_view(values):
+    payload = values["payload_json"]
+    if isinstance(payload, dict):
+        values["payload_json"] = {key: value for key, value in payload.items() if key != "diagnostic_pipeline_output"}
+    return SimpleNamespace(**values)
+
+
 def _read_rows(session, statement) -> list[SimpleNamespace]:
     rows = []
     result = session.execute(statement)
     try:
         for source in result.mappings():
-            values = dict(source)
-            payload = values["payload_json"]
-            if isinstance(payload, dict):
-                values["payload_json"] = {
-                    key: value for key, value in payload.items()
-                    if key != "diagnostic_pipeline_output"
-                }
-            rows.append(SimpleNamespace(**values))
+            rows.append(_history_view(dict(source)))
     finally:
         result.close()
     return rows
