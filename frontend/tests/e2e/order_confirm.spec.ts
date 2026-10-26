@@ -120,7 +120,7 @@ for (const failPostConfirmRead of [false, true]) test(`successful confirmation r
   const mounted = await mountWorkflowV2SheetPage(page, { workflowState: "output_review",
     workflow: { saved_sheet_id: "SHEET-E2E-001", bagging_result_id: "BAG-E2E-001", output_bundle_id: "BUNDLE-E2E-001" } });
   let confirmations = 0, postConfirmReads = 0;
-  await page.route("**/workflow-v2/inspection", async route => {
+  await page.route(/\/workflow-v2\/inspection(?:\?|$)/, async route => {
     if (confirmations) {
       postConfirmReads++;
       return route.fulfill({ status: failPostConfirmRead ? 500 : 200, json: failPostConfirmRead

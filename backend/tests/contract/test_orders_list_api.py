@@ -17,8 +17,8 @@ client = TestClient(app)
 def test_list_orders_default_is_lightweight_without_runtime(monkeypatch) -> None:
     monkeypatch.setattr(
         orders_api.order_service,
-        "list_orders",
-        lambda status=None, include_archived=False, limit=None: [
+        "list_orders_page",
+        lambda **kwargs: {"orders": [
             {
                 "id": "ORD-LIST-DEFAULT-001",
                 "status": "要確認",
@@ -26,7 +26,7 @@ def test_list_orders_default_is_lightweight_without_runtime(monkeypatch) -> None
                 "message_id": "msg-list-default-001",
                 "received_at": datetime(2026, 3, 24, 9, 0, 0).isoformat(),
             }
-        ],
+        ], "has_more": False, "next_cursor": None},
     )
     monkeypatch.setattr(
         orders_api.order_service,
@@ -61,6 +61,7 @@ def test_list_orders_passes_limit_and_cursor_to_service(monkeypatch) -> None:
         limit=None,
         before_received_at=None,
         before_id=None,
+        job_bindings_out=None,
     ):
         calls.append(
             {
@@ -173,8 +174,8 @@ def test_list_orders_without_ocr_uses_lightweight_summary(monkeypatch) -> None:
     monkeypatch.setattr(orders_api.uploaded_pdf_service, "build_ingest_payload", selected_input)
     monkeypatch.setattr(
         orders_api.order_service,
-        "list_orders",
-        lambda status=None, include_archived=False, limit=None: [
+        "list_orders_page",
+        lambda **kwargs: {"orders": [
             {
                 "id": "ORD-LIST-001",
                 "facility": None,
@@ -187,7 +188,7 @@ def test_list_orders_without_ocr_uses_lightweight_summary(monkeypatch) -> None:
                 "received_at": datetime(2026, 3, 24, 9, 0, 0).isoformat(),
                 "ocr_job_id": "OCR-ORD-LIST-001",
             }
-        ],
+        ], "has_more": False, "next_cursor": None},
     )
     monkeypatch.setattr(
         orders_api.order_service,
@@ -272,8 +273,8 @@ def test_list_orders_without_ocr_uses_lightweight_summary(monkeypatch) -> None:
 def test_list_orders_without_ocr_skips_candidate_resolution_by_default(monkeypatch) -> None:
     monkeypatch.setattr(
         orders_api.order_service,
-        "list_orders",
-        lambda status=None, include_archived=False, limit=None: [
+        "list_orders_page",
+        lambda **kwargs: {"orders": [
             {
                 "id": "ORD-LIST-NO-CANDIDATE-001",
                 "facility": None,
@@ -284,7 +285,7 @@ def test_list_orders_without_ocr_skips_candidate_resolution_by_default(monkeypat
                 "message_id": "msg-list-no-candidate-001",
                 "received_at": datetime(2026, 3, 24, 9, 0, 0).isoformat(),
             }
-        ],
+        ], "has_more": False, "next_cursor": None},
     )
     monkeypatch.setattr(
         orders_api.order_service,
@@ -313,8 +314,8 @@ def test_list_orders_without_ocr_skips_candidate_resolution_by_default(monkeypat
 def test_list_orders_without_ocr_refuses_filename_week_without_owned_selection(monkeypatch) -> None:
     monkeypatch.setattr(
         orders_api.order_service,
-        "list_orders",
-        lambda status=None, include_archived=False, limit=None: [
+        "list_orders_page",
+        lambda **kwargs: {"orders": [
             {
                 "id": "ORD-LIST-002",
                 "facility": None,
@@ -327,7 +328,7 @@ def test_list_orders_without_ocr_refuses_filename_week_without_owned_selection(m
                 "received_at": datetime(2026, 4, 6, 9, 0, 0),
                 "ocr_job_id": "OCR-ORD-LIST-002",
             }
-        ],
+        ], "has_more": False, "next_cursor": None},
     )
     monkeypatch.setattr(orders_api.order_service, "_load_order_ocr_cache_map", lambda order_ids: {})
     monkeypatch.setattr(orders_api.workflow_state_service, "list_workflow_states", lambda order_ids: {})

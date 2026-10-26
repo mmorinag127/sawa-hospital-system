@@ -18,6 +18,7 @@ for (const latestResolved of [false, true]) {
       let json: object = {};
       if (path.endsWith(`/orders/${orderId}/workflow-v2/inspection`)) {
         json = {
+          order_header: { id: orderId, versions: [], menu_amount_resolution: resolution(!latestResolved) },
           workflow: { order_id: orderId, revision: 7, source: "workflow_v2",
             state: "output_review", headline: "Owned recovery loaded", blockers: [],
             saved_sheet_id: "owned-draft", output_bundle_id: "owned-bundle", menu_amount_resolution: resolution(latestResolved) },

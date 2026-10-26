@@ -8,6 +8,15 @@ from src.api import orders as api
 from src.main import app
 
 
+def stub_page_reader(monkeypatch, page):
+    def read(*, job_bindings_out, **kwargs):
+        result = deepcopy(page)
+        job_bindings_out.update(api.order_service.get_recorded_order_job_bindings(
+            [row['id'] for row in result['orders']]))
+        return result
+    monkeypatch.setattr(api.order_service, 'list_orders_page', read)
+
+
 @pytest.mark.parametrize('runtime', [True, False])
 def test_monitor_keeps_visible_fields_pagination_without_unused_review(monkeypatch, runtime):
     fields = ('id', 'facility', 'week', 'status', 'received_at', 'ocr_status', 'ocr_error')
@@ -19,10 +28,10 @@ def test_monitor_keeps_visible_fields_pagination_without_unused_review(monkeypat
         for i, state in enumerate(('pending', 'running', 'done', 'failed', 'stalled'))
     ], 'has_more': True, 'next_cursor': {'id': 'O4', 'received_at': '2026-10-20T00:00:00'}}
     calls = []
-    monkeypatch.setattr(api.order_service, 'list_orders_page', lambda **kw: deepcopy(original))
+    stub_page_reader(monkeypatch, original)
     monkeypatch.setattr(api.order_service, '_load_order_ocr_cache_map', lambda ids: {})
     monkeypatch.setattr(api.workflow_state_service, 'list_workflow_states', lambda ids: {})
-    monkeypatch.setattr(api, 'get_recorded_order_job_bindings', lambda ids: {
+    monkeypatch.setattr(api.order_service, 'get_recorded_order_job_bindings', lambda ids: {
         row['id']: {'job_id': row['ocr_job_id'], 'job': {'id': row['ocr_job_id'], 'status': 'done'}, 'error': None}
         for row in original['orders'] if row['id'] in ids})
     def status(order, job):
@@ -82,8 +91,8 @@ def test_monitor_current_job_values_match_full_list(monkeypatch, state):
     ], 'has_more': False, 'next_cursor': None}
     jobs = {'J1': {'id': 'J1', 'status': state, 'error_message': 'job error',
                    'metrics': {'error': 'metrics error'}, 'updated_at': datetime.utcnow() - timedelta(days=1)}}
-    monkeypatch.setattr(api.order_service, 'list_orders_page', lambda **kw: deepcopy(page))
-    monkeypatch.setattr(api, 'get_recorded_order_job_bindings', lambda ids: {
+    stub_page_reader(monkeypatch, page)
+    monkeypatch.setattr(api.order_service, 'get_recorded_order_job_bindings', lambda ids: {
         row['id']: {'job_id': row.get('ocr_job_id'), 'job': deepcopy(jobs.get(row.get('ocr_job_id'))), 'error': None}
         for row in page['orders'] if row['id'] in ids})
     monkeypatch.setattr(api.order_service, '_load_order_ocr_cache_map', lambda ids: {})
@@ -104,11 +113,11 @@ def test_monitor_current_job_values_match_full_list(monkeypatch, state):
 
 
 def test_monitor_source_failure_stops_and_full_review_still_validates(monkeypatch):
-    monkeypatch.setattr(api.order_service, 'list_orders_page', lambda **kw: {
+    stub_page_reader(monkeypatch, {
         'orders': [{'id': 'O1', 'ocr_job_id': 'J1'}], 'has_more': False, 'next_cursor': None})
     monkeypatch.setattr(api.order_service, '_load_order_ocr_cache_map', lambda ids: {})
     monkeypatch.setattr(api.workflow_state_service, 'list_workflow_states', lambda ids: {})
-    monkeypatch.setattr(api, 'get_recorded_order_job_bindings', lambda ids: {
+    monkeypatch.setattr(api.order_service, 'get_recorded_order_job_bindings', lambda ids: {
         'O1': {'job_id': 'J1', 'job': {'id': 'J1', 'status': 'done'}, 'error': None}})
     def failed(*a, **kw):
         raise RuntimeError('source unavailable')
@@ -116,7 +125,7 @@ def test_monitor_source_failure_stops_and_full_review_still_validates(monkeypatc
     client = TestClient(app, raise_server_exceptions=False)
     assert client.get('/orders?include_ocr=true').status_code == 500
     assert client.get('/orders?include_ocr=true&response_view=ocr_monitor').status_code == 200
-    monkeypatch.setattr(api, 'get_recorded_order_job_bindings', failed)
+    monkeypatch.setattr(api.order_service, 'get_recorded_order_job_bindings', failed)
     assert client.get('/orders?include_ocr=true&response_view=ocr_monitor').status_code == 500
     monkeypatch.setattr(api.order_service, 'list_orders_page', failed)
     assert client.get('/orders?include_ocr=false&response_view=ocr_monitor').status_code == 500

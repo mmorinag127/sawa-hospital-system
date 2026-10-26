@@ -372,7 +372,7 @@ function refreshHarness(){
   h.response=url=>{
     const workflow={order_id:'order-A',revision:8,state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt',status:'queued',attempt_count:0}};
     return {data:url.endsWith('/ocr-progress')?{...workflow,workflow_revision:8}:
-      url.includes('/inspection?')?{workflow,saved_sheet:null,ocr_candidates:require('./helpers/ocr-candidates.cjs')('order-A')}:
+      url.includes('/inspection?')?{order_header:{id:'order-A'},workflow,saved_sheet:null,ocr_candidates:require('./helpers/ocr-candidates.cjs')('order-A')}:
       url.endsWith('/workflow-v2')?workflow:{id:'order-A'}};
   };
   return h;
@@ -449,7 +449,7 @@ for(const edit of ['manual','sheet'])for(const outcome of ['success','error'])te
     if(workflow){workflow.revision=9;workflow.ocr_job.status='running';workflow.ocr_job.progress_step=2;}
     return response;
   };
-  h.timer.tick();await settle();assert.equal(calls,4);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);
+  h.timer.tick();await settle();assert.equal(calls,3);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);
   assert.equal(h.state.discard,0);assert.equal(h.context.pendingSheetCellEditsRef.current.get('own-cell').quantity,0);
   assert.equal(h.context.editorVersion(editor).dirty,true);assert.equal(h.context.editorVersion(editor).baseRevision,base);
   assert.equal(h.context.captureWorkflowInputVersion(editor).revision,base);assert.equal(h.context.workflowRevisionRef.current.revision,9);

@@ -48,7 +48,10 @@ def test_actual_list_get_never_completes_stale_job(monkeypatch, readonly_jobs, i
     job = readonly_jobs
     before = deepcopy(job)
     order = {"id": "order", "ocr_job_id": job["id"], "lines": [{"quantity": 0}]}
-    monkeypatch.setattr(orders.order_service, "list_orders_page", lambda **kwargs: {"orders": [order]})
+    def page(*, job_bindings_out, **kwargs):
+        job_bindings_out[order["id"]] = {"job_id": job["id"], "job": job, "error": None}
+        return {"orders": [order]}
+    monkeypatch.setattr(orders.order_service, "list_orders_page", page)
     monkeypatch.setattr(orders.order_service, "_load_order_ocr_cache_map", lambda ids: {})
     monkeypatch.setattr(orders.order_service, "get_cached_ocr_payload", lambda order_id: None)
     monkeypatch.setattr(orders.workflow_state_service, "list_workflow_states", lambda ids: {})
