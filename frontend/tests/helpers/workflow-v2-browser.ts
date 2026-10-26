@@ -11,6 +11,7 @@ export type WorkflowMountOptions = {
   facilities?: Array<{ id: string; name: string }>;
   workflowFacilityId?: string;
   workflowRevision?: number;
+  beforeInspectionRead?: () => Promise<void>;
   workflowSource?: string;
   workflowState?: string;
   polledWorkflow?: Partial<Record<string, unknown>>;
@@ -162,6 +163,7 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
       return;
     }
     if (path.endsWith(`/orders/${orderId}/workflow-v2/inspection`) && method === "GET") {
+      await options.beforeInspectionRead?.();
       await route.fulfill({
         status: 200,
         json: {

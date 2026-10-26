@@ -164,6 +164,28 @@ test('canonical source reads retain validation budget and show pending generatio
   } finally {await f.h.close();}
 });
 
+test('missing revision cannot poison editor bases before a later valid read', async () => {
+  const f = await setup();
+  try {
+    const token = f.probe.current.workflowRevisionRef.current;
+    const context = clone(f.probe.current.editorVersion('context'));
+    const mutations = f.t.calls.filter(call => call.method !== 'get').length;
+    f.probe.current.workflowRevisionRef.current = null;
+    assert.throws(() => f.probe.current.applyWeekValue('2026-03@2026-03-02~2026-03-08'), /注文情報を取得しています/);
+    assert.deepEqual(f.probe.current.editorVersion('context'), context);
+    for (const action of ['confirmContext', 'showSheetReview', 'runAnomalyReview', 'runBagging']) {
+      await f.h.settle(() => f.probe.current[action]());
+      assert.equal(f.probe.current.busy, '');
+    }
+    assert.deepEqual(f.probe.current.editorVersion('context'), context);
+    assert.equal(f.probe.current.editorVersion('sheet').dirty, false);
+    assert.equal(f.t.calls.filter(call => call.method !== 'get').length, mutations);
+    f.probe.current.workflowRevisionRef.current = token;
+    await f.h.settle(() => f.probe.current.confirmContext());
+    assert.equal(calls(f, 'post', `${BASE}/context`).at(-1).config.headers['If-Match'], '"7"');
+  } finally { await f.h.close(); }
+});
+
 test('canonical save preserves the original If-Match and shares the finite source validation budget', async () => {
   const f = await setup();
   try {

@@ -120,12 +120,33 @@ test("workflow-v2 adopts a polled context revision before a clean editor starts"
 });
 
 test("workflow-v2 stops commands when a read workflow revision is zero", async ({ page }) => {
-  await mountWorkflowV2SheetPage(page, { workflowRevision: 0 });
+  const mounted = await mountWorkflowV2SheetPage(page, { workflowRevision: 0 });
 
   await page.getByRole("button", { name: /Step1\s.*施設/ }).click();
   await expect(page.getByText("workflow revision が不正です。再読込してから操作してください。")).toBeVisible();
+  await expect(page.getByText("注文情報の版を確認できません。再読込してください。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "設定を保存" })).toHaveCount(0);
+  expect(mounted.getWorkflowMutationHeaders()).toEqual([]);
+});
+
+test("workflow-v2 exposes editors only after the canonical revision arrives", async ({ page }) => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const mounted = await mountWorkflowV2SheetPage(page, { beforeInspectionRead: () => pending });
+  await expect(page.getByText("注文情報を取得しています。取得完了後に操作してください。")).toBeVisible();
+  await expect(page.getByLabel("施設 (Step1 必須)")).toHaveCount(0);
+  await page.getByRole("button", { name: /Step3\s.*シート編集/ }).click();
+  await expect(page.getByRole("button", { name: "シートを保存" })).toHaveCount(0);
+  expect(mounted.getWorkflowMutationHeaders()).toEqual([]);
+  release();
+  await expect(page.getByText("注文情報を取得しています。取得完了後に操作してください。")).toHaveCount(0);
+  await page.getByRole("button", { name: /Step1\s.*施設/ }).click();
   await page.getByRole("button", { name: "設定を保存" }).click();
-  await expect(page.getByText("workflow revision を取得できません。再読込してから操作してください。")).toBeVisible();
+  await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(1);
+  expect(mounted.getWorkflowMutationHeaders()[0]).toEqual({
+    path: `/api/orders/${mounted.orderId}/workflow-v2/context`, ifMatch: '"7"',
+  });
+  await expect(page.getByText("workflow revision を取得できません。再読込してから操作してください。")).toHaveCount(0);
 });
 
 test("workflow-v2 uses revision zero only for the explicit uninitialized creation token", async ({ page }) => {

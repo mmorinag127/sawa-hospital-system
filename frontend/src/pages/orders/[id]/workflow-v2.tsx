@@ -563,6 +563,7 @@ const workflowRevisionTokenFromRead = (workflow: WorkflowV2): WorkflowRevisionTo
 };
 
 const CANONICAL_SOURCE_READ_TIMEOUT_MS = 180000;
+const WORKFLOW_READ_PENDING_MESSAGE = "注文情報を取得しています。取得完了後に操作してください。";
 
 const formatApiError = (err: any, fallback: string) => {
   const reviewError = err?.response?.data?.detail;
@@ -1681,6 +1682,7 @@ export default function OrderWorkflowV2Page() {
   const confirmWorkflowReplacement = (preservedEditor?: string) => !hasUnsavedWorkflowInput(preservedEditor)
     || window.confirm("未保存の変更を破棄して処理を続けますか？");
   const beginWorkflowEditorEdit = (editor: string, command = false) => {
+    if (workflowRevisionRef.current === null) throw new Error(WORKFLOW_READ_PENDING_MESSAGE);
     retireOutput("download"); retireOutput("preview");
     if (!command) {
       ++workingInputGenerationRef.current;
@@ -3015,6 +3017,10 @@ export default function OrderWorkflowV2Page() {
     }) => Promise<void>,
     options: { successMessage?: string; nextStep?: number; refreshAfter?: boolean; replacesInput?: boolean; preservedEditor?: string } = {},
   ) => {
+    if (workflowRevisionRef.current === null) {
+      setError(WORKFLOW_READ_PENDING_MESSAGE);
+      return;
+    }
     if (options.replacesInput && !confirmWorkflowReplacement(options.preservedEditor)) return;
     const own=capturePageOwner(), operation=++pageOperationGenerationRef.current;
     if (!ownsPageInput(own)) { setError("注文・PDF・認証を確認してから操作してください。"); return; }
@@ -4628,6 +4634,8 @@ export default function OrderWorkflowV2Page() {
     ? `FAX v${selectedDocumentVersion.version_no}${selectedDocumentVersion.is_current ? " (現行)" : ""}`
     : "現行FAX";
 
+  const workflowInputReady = Boolean(workflow && workflow.order_id === orderId && workflowRevisionTokenFromRead(workflow));
+
   return (
     <ThemeProvider theme={sawaTheme}>
     <main className="page workflow-v2-page">
@@ -4828,7 +4836,7 @@ export default function OrderWorkflowV2Page() {
         ))}
       </nav>
 
-      <section className="step-page">
+      {workflowInputReady ? <section className="step-page">
         {visibleStep === 1 ? (
         <section className="panel">
           <p className="step-tag">Step1</p>
@@ -6591,7 +6599,9 @@ export default function OrderWorkflowV2Page() {
           )}
         </section>
         ) : null}
-      </section>
+      </section> : <p role={workflow ? "alert" : "status"}>
+        {workflow ? "注文情報の版を確認できません。再読込してください。" : WORKFLOW_READ_PENDING_MESSAGE}
+      </p>}
 
       {typeof workflow?.output_bundle_id === "string" && workflow.output_bundle_id.trim()
         && workflow.output_bundle_id === workflow.output_bundle_id.trim()
