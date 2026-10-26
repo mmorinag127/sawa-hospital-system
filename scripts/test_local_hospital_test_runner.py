@@ -108,11 +108,12 @@ class ReceiptContractTest(unittest.TestCase):
                 'exitstatus': 0, 'source_sha': 'a' * 40, 'baseline': None}))
             return subprocess.CompletedProcess(argv, 0)
 
-        for mode, full_flag in (('full', '1'), ('impact', '0')):
+        for mode, full_flag in (('full', '1'), ('impact', '0'), ('focused', '0')):
             self.check_backend_partition(mode, full_flag, seen, execute_backend)
         for branch, full_flag in (('codex/owned', '0'), ('release/prod-owned', '1'), ('', '1')):
             self.check_backend_partition(None, full_flag, seen, execute_backend, branch=branch)
         self.check_backend_partition('impact', '1', seen, execute_backend, branch='release/prod-owned')
+        self.check_backend_partition('focused', '1', seen, execute_backend, branch='release/prod-owned')
 
     def check_backend_partition(self, mode, full_flag, seen, execute_backend, *, branch='codex/owned'):
         with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory, \
@@ -128,7 +129,16 @@ class ReceiptContractTest(unittest.TestCase):
                 os.environ.pop('SAWA_LOCAL_TEST_MODE')
             self.assertEqual(BACKEND_RUNNER.main(), 0)
             argv = execute.call_args.args[0]
-            self.assertIn('backend/tests', argv)
+            focused = (mode == 'focused' or mode is None) and bool(branch) and not branch.startswith('release/prod-')
+            if focused:
+                self.assertNotIn('backend/tests', argv)
+                scope, modules = BACKEND_RUNNER.staging_scope()
+                self.assertTrue(all(module in argv for module in modules))
+                partition = json.loads((Path(directory) / 'backend-tests/partition.json').read_text())
+                self.assertEqual(partition['scope'], scope)
+                self.assertIn('not selected', partition['outside_scope'])
+            else:
+                self.assertIn('backend/tests', argv)
             self.assertEqual({item.removeprefix('--ignore=') for item in argv if item.startswith('--ignore=')}, seen)
             env = execute.call_args.args[1]
             self.assertNotIn('DB_HOST', env)
@@ -139,7 +149,55 @@ class ReceiptContractTest(unittest.TestCase):
             self.assertEqual(env['SAWA_IMPACT_FULL'], full_flag)
             self.assertIn('--testmon', argv)
             self.assertTrue((Path(directory) / 'backend-tests/selection.json').is_file())
-            self.assertEqual(env['DB_URI'], 'sqlite:///' + str(Path(directory).resolve() / 'git/sawa-local-impact/backend-runtime.sqlite'))
+            runtime = 'backend-focused-runtime.sqlite' if focused else 'backend-runtime.sqlite'
+            self.assertEqual(env['DB_URI'], 'sqlite:///' + str(Path(directory).resolve() / 'git/sawa-local-impact' / runtime))
+
+    def test_staging_scope_preserves_critical_boundaries_without_a_cold_full_suite(self):
+        scope, modules = BACKEND_RUNNER.staging_scope()
+        self.assertEqual(len(modules), len(set(modules)))
+        self.assertLess(len(modules), len(list((RUNNER.ROOT / 'backend/tests').rglob('test_*.py'))))
+        for name in ('test_order_list_response_ownership.py', 'test_ocr_read_projection_ownership.py',
+                     'test_inspection_demand_read.py', 'test_workflow_demand_parity.py',
+                     'test_rerun_atomic_receipt.py', 'test_modernization_facility_workbook_storage_source.py',
+                     'test_native_quantity_projection_contract.py', 'test_portal_session.py',
+                     'test_portal_session_catalog.py', 'test_cross_month_week_support.py',
+                     'test_saved_sheet_quantity_schema.py', 'test_orders_ocr_sheet_history_api.py',
+                     'test_modernization_saved_sheet_export.py', 'test_shipping_output_isolation.py',
+                     'test_monthly_menus_api.py', 'test_shipping_api.py',
+                     'test_acceptance_validation_dataflow.py',
+                     'test_auth_guardrails.py', 'test_portal_google_auth.py',
+                     'test_order_workflow_revision_contract.py', 'test_original_source_dataflow.py',
+                     'test_modernization_canonical_ocr_artifacts.py', 'test_ocr_quantity_content_editable_sheet.py',
+                     'test_ocr_history_projection.py', 'test_page_performance_projections.py'):
+            self.assertTrue(any(Path(module).name == name for module in modules), name)
+        dedicated = {name for names in BACKEND_RUNNER.DEDICATED_MODULES.values() for name in names}
+        self.assertFalse(set(modules) & dedicated)
+
+    def test_focused_scope_retains_known_failures_and_interruptions_not_unstarted_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / 'selection.json').write_text(json.dumps({
+                'failed': ['tests/unit/test_order_workflow_revision_contract.py::failed'],
+                'incomplete': ['tests/contract/test_current_sheet_source_parity.py::interrupted'],
+                'not_started': ['tests/unit/test_unused.py::unstarted']}))
+            self.assertEqual(BACKEND_RUNNER.retained_failure_modules(state), [
+                'backend/tests/contract/test_current_sheet_source_parity.py',
+                'backend/tests/unit/test_order_workflow_revision_contract.py'])
+            (state / 'failed-tests.json').write_text(json.dumps(['../../outside.py::test']))
+            with self.assertRaisesRegex(ValueError, 'explicit current test mapping'):
+                BACKEND_RUNNER.retained_failure_modules(state)
+
+    def test_invalid_focused_scope_cannot_fall_back_to_a_full_or_empty_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'infra/ci/staging_backend_scope.json'
+            target.parent.mkdir(parents=True)
+            for groups, version in [({}, 1), ({'invalid': ['../../outside.py']}, 1),
+                                    ({'invalid': ['backend/tests/missing.py']}, 1), ({}, True)]:
+                target.write_text(json.dumps({'version': version, 'scope': 'staging-core-and-page-repair', 'groups': groups}))
+                with self.subTest(groups=groups, version=version), patch.object(BACKEND_RUNNER, 'ROOT', root):
+                    with self.assertRaises(ValueError):
+                        BACKEND_RUNNER.staging_scope()
 
     def test_failed_attempt_restores_consistent_database_and_metadata(self):
         import sqlite3
@@ -486,8 +544,8 @@ class ReceiptContractTest(unittest.TestCase):
                 self.assertEqual(os.environ['PYTEST_ADDOPTS'], '-k hidden --last-failed')
                 self.assertEqual(os.environ['SAWA_IMPACT_FULL'], '0')
 
-    def test_default_impact_and_release_full_are_controlled_by_runner(self):
-        for branch, expected in [('codex/fix', 'impact'), ('release/prod-reviewed', 'full'), ('', 'full')]:
+    def test_default_focused_and_release_full_are_controlled_by_runner(self):
+        for branch, expected in [('codex/fix', 'focused'), ('release/prod-reviewed', 'full'), ('', 'full')]:
             with self.subTest(branch=branch), tempfile.TemporaryDirectory() as directory:
                 manifest = Path(directory) / 'manifest.json'
                 manifest.write_text(json.dumps({'version': 1, 'commands': [{'name': 'only', 'command': 'true'}]}))
@@ -601,6 +659,15 @@ class ReceiptContractTest(unittest.TestCase):
     def test_accepts_manual_local_receipt(self):
         receipt = self.receipt()
         RUNNER.validate_receipt(json.loads(json.dumps(receipt)), "a" * 40, "b" * 64)
+
+    def test_focused_receipt_is_explicit_and_cannot_satisfy_production_full(self):
+        receipt = self.receipt()
+        receipt['receipt_version'] = 2
+        receipt['backend_selection'] = {'source_sha': 'a' * 40, 'mode': 'focused',
+            'executed': 2, 'reused': 0, 'report_sha256': 'e' * 64}
+        RUNNER.validate_receipt(receipt, 'a' * 40, 'b' * 64)
+        with self.assertRaisesRegex(ValueError, 'production requires full'):
+            RUNNER.validate_receipt(receipt, 'a' * 40, 'b' * 64, require_full=True)
 
     def test_signed_selection_rejects_wrong_source_invalid_count_and_full_reuse(self):
         receipt = self.receipt()

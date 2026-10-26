@@ -84,7 +84,10 @@ cloud credentials are excluded; Next-generated source stays in that workspace.
 
 ## Backend impact selection
 
-The local batch defaults to dependency-tracked backend selection. `--full` and
+The local batch defaults to explicitly scoped staging core/backend repair tests,
+with dependency tracking within that scope. Modules outside the scope are not
+passed or reused. `infra/ci/staging_backend_scope.json` records the exact scope;
+known failed or interrupted modules are additionally retained. `--full` and
 `release/prod-*` execute every case. Unknown inputs, missing or corrupt tracking,
 and failed tracking runs do not authorize reuse. Only the runner's built-in
 testmon/input tracker may select cases; inherited pytest selectors are removed.
@@ -94,7 +97,8 @@ reused node IDs, reasons, context, baseline identity and tracking hashes. Its ha
 source SHA and counts are included in the version 2 signed receipt accepted by
 the staging source gate. Version 1 full-run receipts remain readable.
 
-The first tracking run is full. A reported all-test run is not evidence of a
+The first tracking run executes every case in the selected scope. Explicit full
+mode still executes the whole backend suite. A reported all-test run is not evidence of a
 speed improvement: real backend reuse and timing must be measured separately.
 
 ## Cold-run preparation reduction

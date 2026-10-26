@@ -8,6 +8,28 @@ No TTL substitution, additional billing, automatic CI/deployment or local deploy
 Implement all known changes before updating tests and running one serial local
 verification batch. Delivery and live verification follow that batch.
 
+## Staging verification scope (2026-10-27)
+
+The previous cold general suite selected 10,217 cases. Historical successful
+full runs took 4,053-7,496 seconds, so falling back to that suite for every small
+staging change cannot satisfy the requested roughly fifteen-minute budget.
+
+- Normal named staging/feature branches now use explicit `focused` backend
+  coverage from `infra/ci/staging_backend_scope.json`: page-read parity/ownership,
+  canonical OCR artifacts and operator values, authentication/session,
+  revision/history/output isolation, and changed upload routes.
+- Prior wide-suite failures or interrupted cases retain their current modules
+  in the focused selection. Not-started cases are not mislabeled as failures.
+- Outside-scope legacy cases are **not run**, not passed and not reused.
+  The partition report and signed receipt identify `focused` mode explicitly.
+- General cases remain available through `SAWA_LOCAL_TEST_MODE=impact` or
+  `--full` on the parent runner. Production `release/prod-*` and detached sources still
+  force full backend execution; a focused receipt cannot satisfy production.
+- Frontend, owned PostgreSQL, agent/native image, trust and receipt checks remain
+  required by the existing local manifest. No Actions tests replace local work.
+- The duration and selected count still require measurement. This scope change
+  is not a claim that the full legacy suite or staging behavior has passed.
+
 ## Ordered backlog
 
 Source investigation: /Users/mmorinag/Sawa/2025.12/tmp/page-navigation-20261026/complete-action-report.md

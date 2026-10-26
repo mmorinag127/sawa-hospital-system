@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "scope": "staging-core-and-page-repair",
+  "groups": {
+    "page-read-results-and-response-ownership": [
+      "backend/tests/unit/test_page_performance_projections.py",
+      "backend/tests/unit/test_order_list_response_ownership.py",
+      "backend/tests/unit/test_ocr_read_projection_ownership.py",
+      "backend/tests/unit/test_inspection_demand_read.py",
+      "backend/tests/unit/test_workflow_demand_parity.py"
+    ],
+    "ocr-original-targets-artifacts-and-operator-values": [
+      "backend/tests/unit/test_acceptance_validation_dataflow.py",
+      "backend/tests/unit/test_original_source_dataflow.py",
+      "backend/tests/unit/test_rerun_atomic_receipt.py",
+      "backend/tests/unit/test_modernization_canonical_ocr_artifacts.py",
+      "backend/tests/unit/test_modernization_facility_workbook_storage_source.py",
+      "backend/tests/unit/test_ocr_quantity_content_editable_sheet.py",
+      "backend/tests/unit/test_native_quantity_projection_contract.py"
+    ],
+    "authentication-and-session": [
+      "backend/tests/contract/test_auth_guardrails.py",
+      "backend/tests/contract/test_portal_google_auth.py",
+      "backend/tests/unit/test_portal_session.py",
+      "backend/tests/unit/test_portal_session_catalog.py"
+    ],
+    "revision-history-and-output-isolation": [
+      "backend/tests/unit/test_order_workflow_revision_contract.py",
+      "backend/tests/integration/test_cross_month_week_support.py",
+      "backend/tests/unit/test_ocr_history_projection.py",
+      "backend/tests/contract/test_saved_sheet_quantity_schema.py",
+      "backend/tests/contract/test_orders_ocr_sheet_history_api.py",
+      "backend/tests/unit/test_modernization_saved_sheet_export.py",
+      "backend/tests/unit/test_shipping_output_isolation.py"
+    ],
+    "upload-route-contracts": [
+      "backend/tests/contract/test_monthly_menus_api.py",
+      "backend/tests/contract/test_shipping_api.py"
+    ]
+  }
+}

@@ -57,7 +57,7 @@ def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash:
         if require_full and (not isinstance(selection, dict) or selection.get("mode") != "full"):
             raise ValueError("production requires full backend execution")
         if (not isinstance(selection, dict) or set(selection) != {"source_sha", "mode", "executed", "reused", "report_sha256"}
-                or selection["source_sha"] != expected_sha or selection["mode"] not in ("full", "impact")
+                or selection["source_sha"] != expected_sha or selection["mode"] not in ("full", "impact", "focused")
                 or any(type(selection[key]) is not int or selection[key] < 0 for key in ("executed", "reused"))
                 or not selection["executed"] + selection["reused"]
                 or (selection["mode"] == "full" and selection["reused"])
@@ -115,7 +115,7 @@ def run(output: Path, *, full: bool = False) -> int:
         environment.pop(key, None)
     environment["SAWA_IMPACT_FULL"] = "1"
     branch = git("branch", "--show-current")
-    environment["SAWA_LOCAL_TEST_MODE"] = "full" if full or not branch or branch.startswith("release/prod-") else "impact"
+    environment["SAWA_LOCAL_TEST_MODE"] = "full" if full or not branch or branch.startswith("release/prod-") else "focused"
     records = []
     source_stable = True
     for index, item in enumerate(commands):

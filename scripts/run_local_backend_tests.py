@@ -1,4 +1,4 @@
-"""Run general cases once; owned PostgreSQL modules have dedicated runners."""
+"""Run staging core or explicit wide suites; PostgreSQL retains dedicated runners."""
 import json
 import os
 from pathlib import Path
@@ -27,6 +27,54 @@ DEDICATED_MODULES = {
                              "backend/tests/unit/test_prepare_stg_saved_import.py",
                              "backend/tests/integration/test_stg_saved_import_transport.py"],
 }
+
+
+def staging_scope():
+    path = ROOT / 'infra/ci/staging_backend_scope.json'
+    value = json.loads(path.read_text())
+    if (not isinstance(value, dict) or set(value) != {'version', 'scope', 'groups'}
+            or type(value['version']) is not int or value['version'] != 1
+            or value['scope'] != 'staging-core-and-page-repair'
+            or not isinstance(value['groups'], dict) or not value['groups']):
+        raise ValueError('Invalid staging backend scope')
+    modules = []
+    dedicated = {name for names in DEDICATED_MODULES.values() for name in names}
+    for group, names in value['groups'].items():
+        if not isinstance(group, str) or not group or not isinstance(names, list) or not names:
+            raise ValueError('Invalid staging backend scope group')
+        for name in names:
+            if (not isinstance(name, str) or not name.startswith('backend/tests/')
+                    or not name.endswith('.py') or '..' in Path(name).parts
+                    or name in modules or name in dedicated or not (ROOT / name).is_file()):
+                raise ValueError('Invalid staging backend scope module')
+            modules.append(name)
+    return value, modules
+
+
+def retained_failure_modules(state):
+    path = state / 'failed-tests.json'
+    if path.exists():
+        values = json.loads(path.read_text())
+    elif (state / 'selection.json').exists():
+        report = json.loads((state / 'selection.json').read_text())
+        failed, incomplete = report.get('failed'), report.get('incomplete')
+        if not isinstance(failed, list) or not isinstance(incomplete, list):
+            raise ValueError('Invalid retained backend execution report')
+        values = failed + incomplete
+    else:
+        return []
+    if not isinstance(values, list) or any(not isinstance(node, str) for node in values):
+        raise ValueError('Invalid retained backend failure identities')
+    modules = set()
+    for node in values:
+        module = node.split('::', 1)[0]
+        if module.startswith('tests/'):
+            module = 'backend/' + module
+        if (not module.startswith('backend/tests/') or not module.endswith('.py')
+                or '..' in Path(module).parts or not (ROOT / module).is_file()):
+            raise ValueError('Retained backend failure needs an explicit current test mapping')
+        modules.add(module)
+    return sorted(modules)
 
 
 def require_impact_dependencies():
@@ -176,31 +224,45 @@ def main():
     branch = git("branch", "--show-current")
     mode = os.environ.get("SAWA_LOCAL_TEST_MODE")
     if mode is None:
-        mode = "full" if not branch or branch.startswith("release/prod-") else "impact"
-    if mode not in {"full", "impact"}:
-        raise ValueError("Local backend test mode must be full or impact")
+        mode = "full" if not branch or branch.startswith("release/prod-") else "focused"
+    if mode not in {"full", "impact", "focused"}:
+        raise ValueError("Local backend test mode must be full, impact or focused")
     if not branch or branch.startswith("release/prod-"):
         mode = "full"
+    scope = None
+    if mode == 'focused':
+        scope, modules = staging_scope()
+        argv[3:4] = modules
     common = Path(git("rev-parse", "--git-common-dir"))
     if not common.is_absolute():
         common = ROOT / common
+    retained = []
+    if mode == 'focused':
+        retained = [name for name in retained_failure_modules(common.resolve() / 'sawa-local-impact/backend')
+                    if name not in modules]
+        if any(name in excluded for name in retained):
+            raise ValueError('Retained dedicated PostgreSQL failure must use its owned runner')
+        argv[3:3] = retained
     # A new worktree must not discard the same repository's verified inputs.
     # The existing exclusive lock and per-case dependency checks still apply.
-    state = common.resolve() / "sawa-local-impact" / "backend"
+    state = common.resolve() / "sawa-local-impact" / ('backend-focused' if mode == 'focused' else 'backend')
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     env = {key: value for key, value in env.items()
            if not key.startswith("SAWA_IMPACT_") and key != "TESTMON_DATAFILE"}
-    env.update(SAWA_IMPACT_FULL="1" if mode != "impact" else "0",
+    env.update(SAWA_IMPACT_FULL="1" if mode == "full" else "0",
                SAWA_IMPACT_ROOT=str(ROOT), SAWA_IMPACT_STATE=str(state),
                TESTMON_DATAFILE=str(state / "testmon.sqlite"), SAWA_LOCAL_SOURCE_SHA=source)
     argv[3:3] = ["-p", "pytest_impact", "-p", "pytest-testmon", "--testmon"]
-    runtime = state.parent / "backend-runtime.sqlite"
+    runtime = state.parent / (state.name + '-runtime.sqlite')
     env["DB_URI"] = "sqlite:///" + str(runtime)
     env["PYTHONPATH"] = os.pathsep.join(str(ROOT / path) for path in ("backend", "backend/tests/unit", "infra/ci"))
     (evidence / "partition.json").write_text(json.dumps({
         "source_sha": source, "dedicated_modules": DEDICATED_MODULES,
         "general_argv": argv, "database_uri": env["DB_URI"],
         "dependency_state": str(state),
+        "scope": scope,
+        "retained_failure_modules": retained,
+        "outside_scope": "Other general backend modules were not selected or claimed as passed/reused" if scope else None,
     }, indent=2))
     with (state / "run.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -240,7 +302,7 @@ def main():
                     or (reused and not selection["baseline"])
                     or (reused and (not isinstance(selection["baseline"].get("source_sha"), str)
                         or len(selection["baseline"]["source_sha"]) != 40))
-                    or (mode != "impact" and reused)):
+                    or (mode == "full" and reused)):
                 raise ValueError("Invalid backend dependency selection evidence")
             (evidence / "selection.json").write_text(json.dumps(selection, indent=2))
             retain_failures(state, checkpoint.directory, selection.get('failed', []),
