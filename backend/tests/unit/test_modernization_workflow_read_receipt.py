@@ -139,18 +139,18 @@ def test_resolution_shares_analysis_without_skipping_capture_validation(saved_re
     analysis = _EvidenceAnalysis()
     calls = []
     original_select = orders.ocr_evidence_service.evidence_run_selectability_error
-    original_serialize = orders.ocr_evidence_service._serialize_evidence_run
+    original_extract = orders.ocr_evidence_service._extract_evidence_payload
 
     def select(row, **kwargs):
         calls.append(("select", kwargs.get("_analysis")))
         return original_select(row, **kwargs)
 
-    def serialize(row, **kwargs):
-        calls.append(("serialize", kwargs.get("_analysis")))
-        return original_serialize(row, **kwargs)
+    def extract(payload, **kwargs):
+        calls.append(("extract", kwargs.get("_analysis")))
+        return original_extract(payload, **kwargs)
 
     monkeypatch.setattr(orders.ocr_evidence_service, "evidence_run_selectability_error", select)
-    monkeypatch.setattr(orders.ocr_evidence_service, "_serialize_evidence_run", serialize)
+    monkeypatch.setattr(orders.ocr_evidence_service, "_extract_evidence_payload", extract)
     with f.session_scope() as session:
         actual = workflow._workflow_menu_amount_resolution(
             session, session.get(Order, f.order_id),
@@ -158,7 +158,7 @@ def test_resolution_shares_analysis_without_skipping_capture_validation(saved_re
         )
     assert actual == expected
     assert any(name == "select" for name, _ in calls)
-    assert any(name == "serialize" for name, _ in calls)
+    assert any(name == "extract" for name, _ in calls)
     assert all(value is analysis for _, value in calls)
     assert database_snapshot(f) == before
 

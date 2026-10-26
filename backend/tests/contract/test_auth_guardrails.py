@@ -105,10 +105,18 @@ def test_staging_deploy_has_no_basic_admin_credentials():
 
 
 def test_predeploy_status_payload_uses_bearer_authorization_header():
+    import shlex
+
     source = (ROOT.parent / "scripts" / "predeploy_env_checks.sh").read_text(
         encoding="utf-8"
     )
-    assert 'status_json=$(curl -sS -H "Authorization: ${AUTHORIZATION_HEADER}"' in source
+    line = next(line for line in source.splitlines() if line.startswith("status_json=$("))
+    arguments = shlex.split(line[len("status_json=$("):].split(" || ")[0])
+    assert arguments[0] == "curl"
+    assert arguments[arguments.index("-H") + 1] == "Authorization: ${AUTHORIZATION_HEADER}"
+    assert "-fsS" in arguments
+    assert arguments[arguments.index("--max-time") + 1] == "60"
+    assert "-u" not in arguments
     assert 'curl -sS -u "$AUTHORIZATION_HEADER"' not in source
 
 

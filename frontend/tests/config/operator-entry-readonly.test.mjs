@@ -133,7 +133,11 @@ test('source routes, lifecycle and no-action boundary remain grounded in current
   assert.ok(pdf.includes('初期表示では重い一覧取得を行いません。'));
   const helper = read('../../scripts/operator-entry-readonly-pages.mjs');
   assert.doesNotMatch(helper, /\.post\(|\.put\(|\.delete\(|setInputFiles|request\.get|fetch\(/);
-  assert.doesNotMatch(helper, /getByRole\('button'.*\.click\(/);
+  const qualityRead = "page.getByRole('button', { name: '品質を取得', exact: true }).click()";
+  assert.equal(helper.split(qualityRead).length - 1, 1);
+  assert.doesNotMatch(helper.replace(qualityRead, ''), /getByRole\('button'.*\.click\(/);
+  assert.ok(helper.includes("{ view: 'operations' }"));
+  assert.ok(helper.includes("{ view: 'quality' }"));
   const shared = read('../../scripts/hospital-readonly-pages.mjs');
   assert.ok(shared.indexOf('await verifyOperatorEntryPages') < shared.indexOf("await check('manual-library'"));
   for (const name of ['saved-workflow', 'ocr-admin']) assert.ok(shared.includes(name));
