@@ -4,6 +4,7 @@ import json
 from urllib.parse import quote
 
 from .store import Conflict, billing_month
+from .sandbox import run_blocking
 from .gemini import command_identity
 from .conversation import record_question_receipt
 from .catalog import OPERATIONS
@@ -19,12 +20,12 @@ class Recovery:
         self.store = providers.store
 
     async def resume(self, ident):
-        manager = self.providers.for_run(ident) or self.providers
+        manager = await run_blocking(self.providers.for_run, ident) or self.providers
         task = manager.tasks.get(ident)
         if task and not task.done():
             raise Conflict('既に処理中です')
         async with manager.tools.lock(ident):
-            run = self.store.get(ident)
+            run = await run_blocking(self.store.get, ident)
             if run['status'] != 'reconciliation_required':
                 raise Conflict('結果照合が必要な依頼だけ再開できます')
             if run['month'] != billing_month() or run['spent'] >= run['cap'] or run['reserved'] <= 0:
@@ -35,8 +36,10 @@ class Recovery:
                 await manager.tools.authorization_validator(run)
             # A provider call can outlive a process. Never infer that an unfinished
             # mutation failed merely because this process no longer owns its task.
-            with self.store.read() as db:
-                pending = list(db.execute("SELECT id,request FROM commands WHERE run_id=? AND status!='done'", (ident,)))
+            def pending_commands():
+                with self.store.read() as db:
+                    return list(db.execute("SELECT id,request FROM commands WHERE run_id=? AND status!='done'", (ident,)))
+            pending = await run_blocking(pending_commands)
             safe_waits = [row for row in pending if json.loads(row['request']).get('name') in
                           ('wait_for_task_decision', 'wait_for_native_job')]
             safe_reads = [row for row in pending if
@@ -45,7 +48,7 @@ class Recovery:
                 raise Conflict('実行結果が未確定の命令があります。業務更新を再送せず履歴を保持します')
             directory = manager.sandbox.path(ident)
             if manager.sandbox.durable_store is not None:
-                manager.sandbox.durable_store.require_working_copy(ident)
+                await run_blocking(manager.sandbox.durable_store.require_working_copy, ident)
             for domain in run['domains']:
                 if not (directory / 'data' / domain / 'database.sqlite3').is_file():
                     raise Conflict('保存済みの業務データがありません。初期データへの置換は行いません')
@@ -53,7 +56,7 @@ class Recovery:
                 plan = await self.gemini(manager, run)
             else:
                 plan = await self.claude(manager, run)
-            current = self.store.get(ident)
+            current = await run_blocking(self.store.get, ident)
             if current['generation'] != run['generation'] or current['status'] != 'reconciliation_required':
                 raise Conflict('照合中に依頼が停止または変更されました')
             if current['spent'] >= current['cap'] or current['reserved'] <= 0:
@@ -61,36 +64,38 @@ class Recovery:
             if plan['waiting']:
                 name, result = plan['question']
                 from .business_contracts import owned
-                replies = [event['payload'] for event in self.store.events(ident) if event['kind'] == 'operator_reply' and event['payload'].get('question_id') == result.get('command_id')]
+                replies = [event['payload'] for event in await run_blocking(self.store.events, ident) if event['kind'] == 'operator_reply' and event['payload'].get('question_id') == result.get('command_id')]
                 if owned(run) and replies:
                     # Provider history proves this tool call remains unanswered.
                     # Reuse the already accepted business answer, never ask again.
-                    self.store.update(ident, expected_generation=run['generation'], status='running')
-                    self.store.event(ident, 'business_answer_recovery', {'question_id': result['command_id']})
+                    await run_blocking(self.store.update, ident, expected_generation=run['generation'], status='running')
+                    await run_blocking(self.store.event, ident, 'business_answer_recovery', {'question_id': result['command_id']})
                     await manager.follow(ident, {'type': 'user.custom_tool_result', 'custom_tool_use_id': result['command_id'], 'content': [{'type': 'text', 'text': json.dumps({'previous_result': result, 'operator_reply': replies[-1]['message']}, ensure_ascii=False)}]})
-                    return self.store.get(ident)
-                record_question_receipt(self.store, ident, name, result)
-                self.store.update(ident, expected_generation=run['generation'], status='waiting_input')
-                self.store.event(ident, 'recovery', {'status': 'waiting_input', 'generation': run['generation']})
-                return self.store.get(ident)
+                    return await run_blocking(self.store.get, ident)
+                await run_blocking(record_question_receipt, self.store, ident, name, result)
+                await run_blocking(self.store.update, ident, expected_generation=run['generation'], status='waiting_input')
+                await run_blocking(self.store.event, ident, 'recovery', {'status': 'waiting_input', 'generation': run['generation']})
+                return await run_blocking(self.store.get, ident)
             await manager.sandbox.start(run)
-            current = self.store.get(ident)
+            current = await run_blocking(self.store.get, ident)
             if current['generation'] != run['generation'] or current['status'] != 'reconciliation_required':
                 await manager.sandbox.stop(ident, expected_generation=run['generation'])
                 raise Conflict('再開前に依頼が停止または変更されました')
-            with self.store.tx() as db:
-                for row in safe_waits:
-                    db.execute("UPDATE commands SET status='recoverable_wait' WHERE run_id=? AND id=? AND status!='done'", (ident, row['id']))
-                for row in safe_reads:
-                    db.execute("UPDATE commands SET status='recoverable_read' WHERE run_id=? AND id=? AND status!='done'", (ident, row['id']))
-            self.store.update(ident, expected_generation=run['generation'], status='running')
-            self.store.event(ident, 'recovery', {'status': 'running', 'generation': run['generation']})
+            def mark_recoverable():
+                with self.store.tx() as db:
+                    for row in safe_waits:
+                        db.execute("UPDATE commands SET status='recoverable_wait' WHERE run_id=? AND id=? AND status!='done'", (ident, row['id']))
+                    for row in safe_reads:
+                        db.execute("UPDATE commands SET status='recoverable_read' WHERE run_id=? AND id=? AND status!='done'", (ident, row['id']))
+            await run_blocking(mark_recoverable)
+            await run_blocking(self.store.update, ident, expected_generation=run['generation'], status='running')
+            await run_blocking(self.store.event, ident, 'recovery', {'status': 'running', 'generation': run['generation']})
             if run['provider'] == 'gemini':
-                manager.checkpoint(ident, plan['state'])
+                await run_blocking(manager.checkpoint, ident, plan['state'])
                 manager.tasks[ident] = asyncio.create_task(manager.consume_gemini(ident, run['generation'], plan['state'], None))
             else:
                 manager.tasks[ident] = asyncio.create_task(manager.consume(ident, plan['stream'], replay=plan['replay']))
-            return self.store.get(ident)
+            return await run_blocking(self.store.get, ident)
 
     def waiting(self, ident, command):
         events = self.store.events(ident)
@@ -153,9 +158,9 @@ class Recovery:
                 raise Conflict('質問の処理位置が不正です')
             call = calls[state['index']]
             command = command_identity(value['id'], call['id'])
-            if command != state['pending'] or not self.waiting(ident, command):
+            if command != state['pending'] or not await run_blocking(self.waiting, ident, command):
                 raise Conflict('保存済みの質問と接続先の命令が一致しません')
-            result = self.verify_receipt(ident, command, call['name'], call['arguments'])
+            result = await run_blocking(self.verify_receipt, ident, command, call['name'], call['arguments'])
             return {'waiting': True, 'question': (call['name'], result)}
         return {'waiting': False, 'state': state}
 
@@ -170,7 +175,7 @@ class Recovery:
             raise RecoveryPending('Claudeの処理を照合中です')
         if session.usage is None:
             raise RecoveryPending('Claudeの利用料金が未確定です。予約額を保持します')
-        self.store.usage(run['id'], session.usage.model_dump(mode='json'))
+        await run_blocking(self.store.usage, run['id'], session.usage.model_dump(mode='json'))
         history = [e async for e in api.events.list(run['session_id'], order='asc')]
         values = [e.model_dump(mode='json') for e in history]
         sent = {e['custom_tool_use_id'] for e in values if e['type'] == 'user.custom_tool_result'}
@@ -179,8 +184,8 @@ class Recovery:
             raise Conflict('未応答の命令が複数あります。接続先の履歴を確認してください')
         if not calls:
             raise Conflict('再開対象の命令がありません。未確定の送信を再送せず履歴を保持します')
-        if self.waiting(run['id'], calls[0]['id']):
-            result = self.verify_receipt(run['id'], calls[0]['id'], calls[0]['name'], calls[0]['input'])
+        if await run_blocking(self.waiting, run['id'], calls[0]['id']):
+            result = await run_blocking(self.verify_receipt, run['id'], calls[0]['id'], calls[0]['name'], calls[0]['input'])
             return {'waiting': True, 'question': (calls[0]['name'], result)}
         class RecoveredStream:
             async def __aenter__(self):

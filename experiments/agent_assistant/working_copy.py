@@ -31,7 +31,7 @@ def files(directory):
         yield relative.as_posix(), content
 
 
-def checkpoint(root, ident, cursor, encode_blob):
+def checkpoint(root, ident, cursor, encode_blob, *, known=None):
     data = root / 'runs' / ident / 'data'
     if not data.is_dir():
         return None
@@ -39,8 +39,11 @@ def checkpoint(root, ident, cursor, encode_blob):
     for relative, content in files(data):
         digest = hashlib.sha256(content).hexdigest()
         key = f'runs/{ident}/checkpoints/{digest}'
-        cursor.execute('INSERT INTO sawa_agent_trial.files VALUES (%s,%s,%s) ON CONFLICT DO NOTHING',
-                       (key, digest, encode_blob(content)))
+        if known is None or key not in known:
+            cursor.execute('INSERT INTO sawa_agent_trial.files VALUES (%s,%s,%s) ON CONFLICT DO NOTHING',
+                           (key, digest, encode_blob(content)))
+            if known is not None:
+                known[key] = digest
         manifest[relative] = digest
     return json.dumps(manifest, sort_keys=True)
 

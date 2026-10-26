@@ -2,9 +2,6 @@
 import hashlib
 from copy import deepcopy
 from io import BytesIO
-import cv2
-import numpy as np
-from PIL import Image
 from fastapi import HTTPException
 from src.models.route_diagram import KitchenLayout, RouteDiagram, RouteSourceSession
 from src.services import route_diagram_service as routes
@@ -15,6 +12,10 @@ def sha(content):
 
 
 def detect(image_bytes, settings):
+    import cv2
+    import numpy as np
+    from PIL import Image
+
     image = np.array(Image.open(BytesIO(image_bytes)).convert("RGB"))
     height, width = image.shape[:2]
     x0, y0, x1, y1 = settings["roi"]

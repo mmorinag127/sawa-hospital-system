@@ -77,6 +77,71 @@ def test_completed_artifacts_survive_without_claiming_active_work_resumed(tmp_pa
     assert b.get(run['id'])['spent']==12
 
 
+def test_file_digests_are_batched_without_allowing_original_overwrites(tmp_path, database):
+    import psycopg2
+    from psycopg2.extensions import cursor
+
+    with database() as connection:
+        dsn = connection.dsn
+    statements = []
+
+    class ObservedCursor(cursor):
+        def execute(self, query, parameters=None):
+            statements.append(query)
+            return super().execute(query, parameters)
+
+    store = PostgresStore(tmp_path, lambda: psycopg2.connect(dsn, cursor_factory=ObservedCursor))
+    store.set_budget(1000)
+    run, _ = store.create('operator', 'batched-originals', 'synthetic persistence', ['hospital'], 100)
+    directory = tmp_path / 'runs' / run['id'] / 'before'
+    directory.mkdir(parents=True)
+    for index in range(20):
+        (directory / str(index)).write_bytes(('synthetic original ' + str(index)).encode())
+    store.persist_files(run['id'])
+    statements.clear()
+    store.persist_files(run['id'])
+    assert sum('SELECT path,digest FROM sawa_agent_trial.files WHERE path=ANY' in sql for sql in statements) == 1
+    assert not any('SELECT digest FROM sawa_agent_trial.files' in sql for sql in statements)
+    assert not any(sql.startswith('INSERT INTO sawa_agent_trial.files') for sql in statements)
+    (directory / '0').write_bytes(b'changed original')
+    with pytest.raises(Conflict, match='上書き'):
+        store.persist_files(run['id'])
+    with database() as connection, connection.cursor() as query:
+        query.execute('SELECT digest FROM sawa_agent_trial.files WHERE path=%s', (f"runs/{run['id']}/before/0",))
+        assert query.fetchone()[0] == hashlib.sha256(b'synthetic original 0').hexdigest()
+
+
+def test_unchanged_checkpoints_skip_compression_but_changed_bytes_are_saved(tmp_path, database, monkeypatch):
+    from experiments.agent_assistant import durable
+
+    store = PostgresStore(tmp_path, database)
+    store.set_budget(1000)
+    run, _ = store.create('operator', 'checkpoint-reuse', 'synthetic persistence', ['hospital'], 100)
+    path = tmp_path / 'runs' / run['id'] / 'data' / 'hospital' / 'owned.txt'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'owned working original')
+    real_encode = durable.encode_blob
+    encoded = []
+
+    def encode(content):
+        encoded.append(content)
+        return real_encode(content)
+
+    monkeypatch.setattr(durable, 'encode_blob', encode)
+    store.event(run['id'], 'notice', {'step': 1})
+    store.event(run['id'], 'notice', {'step': 2})
+    assert encoded.count(b'owned working original') == 1
+    path.write_bytes(b'owned working changed')
+    store.event(run['id'], 'notice', {'step': 3})
+    assert encoded.count(b'owned working changed') == 1
+    with database() as connection, connection.cursor() as query:
+        query.execute('SELECT digest,payload FROM sawa_agent_trial.files WHERE path LIKE %s',
+                      (f"runs/{run['id']}/checkpoints/%",))
+        contents = {digest: durable.decode_blob(payload, expected=digest) for digest, payload in query}
+    assert contents == {hashlib.sha256(content).hexdigest(): content
+                        for content in (b'owned working original', b'owned working changed')}
+
+
 def test_indexed_views_preserve_results_without_decoding_entire_ledger(tmp_path, database, monkeypatch):
     from experiments.agent_assistant import durable
     store = PostgresStore(tmp_path, database)

@@ -120,6 +120,43 @@ def retain_failures(state, scratch, failed, *, successful=False):
     os.replace(temporary, previous_path)
 
 
+def interrupted_tests(state, source):
+    plan_path = state / 'selection-plan.json'
+    if not plan_path.exists():
+        return []
+    plan = json.loads(plan_path.read_text())
+    selected = plan.get('selected')
+    if (plan.get('source_sha') != source or not isinstance(selected, list)
+            or any(not isinstance(node, str) for node in selected)):
+        raise ValueError('Interrupted test plan has the wrong source or identities')
+    planned = set(selected)
+    report_path = state / 'selection.json'
+    if report_path.exists():
+        report = json.loads(report_path.read_text())
+        if report.get('source_sha') != source or report.get('selected') != selected:
+            raise ValueError('Interrupted test report does not match its plan')
+        fields = [report.get('failed'), report.get('incomplete')]
+        if any(not isinstance(nodes, list) or any(
+                not isinstance(node, str) or node not in planned for node in nodes)
+                for nodes in fields):
+            raise ValueError('Invalid interrupted test report identities')
+        return sorted(set(fields[0]) | set(fields[1]))
+    journal = state / 'started-tests.jsonl'
+    if not journal.exists():
+        raise ValueError('Interrupted test plan has no execution journal')
+    started = set()
+    with journal.open(encoding='utf-8') as stream:
+        if json.loads(stream.readline()) != {'source_sha': source}:
+            raise ValueError('Interrupted execution journal has the wrong source')
+        for line in stream:
+            event = json.loads(line)
+            if (set(event) != {'nodeid'} or not isinstance(event['nodeid'], str)
+                    or event['nodeid'] not in planned):
+                raise ValueError('Invalid interrupted execution identity')
+            started.add(event['nodeid'])
+    return sorted(started)
+
+
 def main():
     reject_hosted_runner()
     if not clean_tree():
@@ -136,8 +173,20 @@ def main():
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("DB_")
            and key not in ("DATABASE_URL", "ALEMBIC_DB_URI", "PYTEST_ADDOPTS", "PYTEST_PLUGINS")}
-    mode = os.environ.get("SAWA_LOCAL_TEST_MODE", "full")
-    state = Path(git("rev-parse", "--absolute-git-dir")) / "sawa-local-impact" / "backend"
+    branch = git("branch", "--show-current")
+    mode = os.environ.get("SAWA_LOCAL_TEST_MODE")
+    if mode is None:
+        mode = "full" if not branch or branch.startswith("release/prod-") else "impact"
+    if mode not in {"full", "impact"}:
+        raise ValueError("Local backend test mode must be full or impact")
+    if not branch or branch.startswith("release/prod-"):
+        mode = "full"
+    common = Path(git("rev-parse", "--git-common-dir"))
+    if not common.is_absolute():
+        common = ROOT / common
+    # A new worktree must not discard the same repository's verified inputs.
+    # The existing exclusive lock and per-case dependency checks still apply.
+    state = common.resolve() / "sawa-local-impact" / "backend"
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     env = {key: value for key, value in env.items()
            if not key.startswith("SAWA_IMPACT_") and key != "TESTMON_DATAFILE"}
@@ -151,11 +200,16 @@ def main():
     (evidence / "partition.json").write_text(json.dumps({
         "source_sha": source, "dedicated_modules": DEDICATED_MODULES,
         "general_argv": argv, "database_uri": env["DB_URI"],
+        "dependency_state": str(state),
     }, indent=2))
     with (state / "run.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         (state / "selection.json").unlink(missing_ok=True)
         (state / 'selection-plan.json').unlink(missing_ok=True)
+        journal = state / 'started-tests.jsonl'
+        if journal.is_symlink():
+            raise ValueError('Execution journal must not be a symlink')
+        journal.unlink(missing_ok=True)
         for suffix in ("", "-wal", "-shm", "-journal"):
             owned = Path(str(runtime) + suffix)
             if owned.is_symlink():
@@ -166,18 +220,20 @@ def main():
             try:
                 result = run_pytest(argv, env)
             except BaseException:
-                plan_path = state / 'selection-plan.json'
-                if plan_path.exists():
-                    plan = json.loads(plan_path.read_text())
-                    if plan.get('source_sha') != source:
-                        raise ValueError('Interrupted test plan has the wrong source')
-                    retain_failures(state, checkpoint.directory, plan.get('selected'))
+                retain_failures(state, checkpoint.directory, interrupted_tests(state, source))
                 raise
             selection = json.loads((state / "selection.json").read_text())
             selected, reused = selection["selected"], selection["reused"]
+            executed, completed = selection["executed"], selection["completed"]
             if (not isinstance(selected, list) or not isinstance(reused, list)
+                    or not isinstance(executed, list) or not isinstance(completed, list)
                     or not all(isinstance(node, str) for node in selected + reused)
+                    or not all(isinstance(node, str) for node in executed + completed)
                     or len(set(selected + reused)) != len(selected + reused)
+                    or len(set(executed)) != len(executed)
+                    or len(set(completed)) != len(completed)
+                    or not set(completed) <= set(executed) <= set(selected)
+                    or (result.returncode == 0 and set(completed) != set(selected))
                     or not selected + reused
                     or selection["exitstatus"] != result.returncode
                     or selection["source_sha"] != source
@@ -194,7 +250,7 @@ def main():
             checkpoint.accepted = result.returncode == 0
             from local_hospital_test_runner import digest
             print(json.dumps({"backend_selection": {"source_sha": source,
-                "mode": mode, "executed": len(selected), "reused": len(reused),
+                "mode": mode, "executed": len(executed), "reused": len(reused),
                 "report_sha256": digest(evidence / "selection.json")}}), flush=True)
     if not clean_tree() or git("rev-parse", "HEAD") != source:
         raise ValueError("Backend tests changed their fixed source")

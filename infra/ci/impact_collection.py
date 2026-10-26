@@ -4,11 +4,12 @@ import sys
 
 
 class CollectionInputs:
-    def __init__(self, root, tracked):
+    def __init__(self, root, tracked, *, include_production=False):
         self.root = str(root) + '/'
         self.paths = {}
         for name in tracked:
-            if name.startswith('backend/tests/') and name.endswith('.py'):
+            if name.endswith('.py') and (name.startswith('backend/tests/') or
+                    include_production and not name.startswith('agent_runtime/native/')):
                 path = root / name
                 parts = name.removeprefix('backend/').removesuffix('.py').split('/')
                 if parts[-1] == '__init__':

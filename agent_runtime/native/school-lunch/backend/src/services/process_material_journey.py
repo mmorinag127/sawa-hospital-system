@@ -30,9 +30,11 @@ def _receipt_connections(svg, manifest_json):
     from src.services.kitchen_wall_geometry import (
         routing_network, endpoint_geometry, route_regions, storage_obstacles,
     )
-    from src.services.process_route_network_service import _route
+    from src.services.process_route_network_service import _route, fixed_wall_geometry
     manifest = json.loads(manifest_json)
     network = routing_network(ET.fromstring(svg), manifest['flow_network'], manifest)
+    walls = fixed_wall_geometry(network['barriers'])
+    regions = None
     points = {p['id']: p for p in manifest['points']
               if p['id'] in manifest.get('supply_area_ids', [])}
     inspections = [p for p in points.values() if p['name'] == '検品室']
@@ -43,13 +45,15 @@ def _receipt_connections(svg, manifest_json):
         failures = {}
         for source in inspections:
             try:
+                if regions is None:
+                    regions = route_regions(network, receipt=True)
                 boxes = [supply_area_bounds(p, network) for p in (source, target)]
                 start, end = [((l+r)/2, (t+b)/2) for l,t,r,b in boxes]
                 cells, gates = endpoint_geometry(network, start, end)
                 forbidden = storage_obstacles(network, {'area:'+source['id'], 'area:'+target['id']}, receipt=True)
-                _route(start, end, route_regions(network, receipt=True)+cells+boxes,
+                _route(start, end, regions+cells+boxes,
                        network['barriers'], gates, [], 0, forbidden=forbidden,
-                       candidate_geometry=True)
+                       candidate_geometry=True, wall_geometry=walls)
             except ValueError:
                 failures[source['id']] = (source['name']+'から'+target['name']+
                     'への搬入経路を図面の登録通路・出入口で確認できません。施設の搬入経路設定を確認してください。')

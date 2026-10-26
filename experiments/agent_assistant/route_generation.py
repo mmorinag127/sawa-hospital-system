@@ -1,6 +1,7 @@
 """Bind native optimistic concurrency to observed state, never model-authored versions."""
 from datetime import date
 from .store import Conflict
+from .sandbox import run_blocking
 
 
 async def bind_version(tools, run, args):
@@ -14,7 +15,7 @@ async def bind_version(tools, run, args):
     day = body.get('service_date')
     if not isinstance(day,str) or date.fromisoformat(day).isoformat()!=day:
         raise ValueError('対象日をYYYY-MM-DDで指定してください')
-    bindings = [event['payload'] for event in tools.store.events(run['id'])
+    bindings = [event['payload'] for event in await run_blocking(tools.store.events, run['id'])
                 if event['kind']=='route_generation_binding' and event['payload']['facility_id']==facility and event['payload']['service_date']==day]
     if len(bindings)>1: raise Conflict('動線図の保存版の記録が重複しています')
     if bindings:
@@ -37,7 +38,7 @@ async def bind_version(tools, run, args):
         binding={'facility_id':facility,'service_date':day,'layout_id':layout,
                  'diagram_id':matches[0]['id'] if matches else None,
                  'version':matches[0]['version'] if matches else 0}
-        tools.store.event(run['id'],'route_generation_binding',binding)
+        await run_blocking(tools.store.event, run['id'],'route_generation_binding',binding)
     body['version']=binding['version']
     body.pop('replace_confirmed_source',None)
     return args.model_copy(update={'body':body})

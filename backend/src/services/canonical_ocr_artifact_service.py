@@ -2,15 +2,17 @@
 
 from copy import deepcopy
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextvars import copy_context
 import hashlib
 import json
 import math
 import mimetypes
+import os
 import pickle
 from pathlib import Path
 import re
+import threading
 from uuid import uuid4
 
 from src.services import storage_service
@@ -23,12 +25,35 @@ REQUIRED_OUTPUTS = (
 CONTRACT = "hakodate_best_method_outputs/v1"
 
 
+def _reset_transfer_pool():
+    global _TRANSFER_POOL, _TRANSFER_SLOTS
+    _TRANSFER_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix='artifact-verify')
+    _TRANSFER_SLOTS = threading.BoundedSemaphore(6)
+
+
+_reset_transfer_pool()
+if hasattr(os, 'register_at_fork'):
+    os.register_at_fork(after_in_child=_reset_transfer_pool)
+
+
+def _submit_transfer(function, *args):
+    _TRANSFER_SLOTS.acquire()
+    try:
+        future = _TRANSFER_POOL.submit(function, *args)
+    except BaseException:
+        _TRANSFER_SLOTS.release()
+        raise
+    future.add_done_callback(lambda _future, slots=_TRANSFER_SLOTS: slots.release())
+    return future
+
+
 class _EvidenceAnalysis:
     """Successful pure work owned by one evidence operation, never a read cache."""
 
     def __init__(self):
         self.recognition_review = None
         self.assignment = None
+        self.target_plan = None
 
     def accepted_values(self, payload):
         from src.services.recognition_acceptance_service import accepted_values
@@ -217,20 +242,22 @@ def validate_packet(packet, *, source_receipt, outputs, expected_sheet_cells, pr
     verified_inputs = {}
     remaining = iter(receipts.items())
     # Bound both in-flight transfers and retained bodies; preserve rejection order.
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        pending = deque()
-
+    pending = deque()
+    current_transfer = None
+    try:
         def queue_next():
             item = next(remaining, None)
             if item is not None:
                 key, receipt = item
-                pending.append((key, executor.submit(copy_context().run, verify_output, key, receipt)))
+                pending.append((key, _submit_transfer(copy_context().run, verify_output, key, receipt)))
 
         for _ in range(3):
             queue_next()
         while pending:
             key, future = pending.popleft()
+            current_transfer = future
             data = future.result()
+            current_transfer = None
             if key in ("records", "ocr_regions") and not isinstance(json.loads(data), list):
                 raise ValueError("canonical_artifact_content_invalid")
             if key == "sheet_values" and not isinstance(json.loads(data), dict):
@@ -244,6 +271,11 @@ def validate_packet(packet, *, source_receipt, outputs, expected_sheet_cells, pr
             if key == 'preprocess_observation':
                 verified_inputs[key] = data
             queue_next()
+    finally:
+        outstanding = [future for _key, future in pending]
+        if current_transfer is not None:
+            outstanding.append(current_transfer)
+        wait(outstanding)
     original_records = json.loads(verified_inputs['records'])
     has_observation = any(isinstance(row,dict) and 'recognizer_preprocess_observation' in row for row in original_records)
     if has_observation != ('preprocess_observation' in verified_inputs):

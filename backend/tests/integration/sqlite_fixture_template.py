@@ -4,6 +4,7 @@ from pathlib import Path
 from hashlib import sha256
 import os
 import shutil
+import sys
 
 from alembic import command
 from alembic.config import Config
@@ -24,6 +25,7 @@ def formal_schema_source_digest() -> str:
 
 def migrated_sqlite_template(tmp_path_factory, *, alembic_ini: Path, name: str) -> Path:
     template = tmp_path_factory.mktemp(name) / "formal-empty.sqlite3"
+    sys.audit('sawa.test.generated-sqlite-template', str(template.parent))
     engine = sa.create_engine(f"sqlite:///{template}")
     names = ("ALEMBIC_DB_URI", "DB_URI", "DATABASE_URL")
     previous_uris = {key: os.environ.get(key) for key in names}

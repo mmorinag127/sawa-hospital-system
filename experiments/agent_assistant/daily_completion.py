@@ -1,6 +1,7 @@
 """Daily school workflow receipts belong to the server, not model-authored IDs."""
 import json
 from .store import Conflict
+from .sandbox import run_blocking
 
 
 class DailyCompletion:
@@ -13,7 +14,7 @@ class DailyCompletion:
         return run
 
     async def save_schedule(self,ident,generation,raw,command):
-        run=self.current(ident,generation)
+        run=await run_blocking(self.current, ident,generation)
         fields={'plating_start','plating_end','timeline_ticks','delivery_assignees'}
         if set(raw)!=fields:raise ValueError('盛付開始・終了、8個の時刻目盛、配送担当を回答してください')
         if not isinstance(raw['timeline_ticks'],list) or len(raw['timeline_ticks'])!=8:raise ValueError('原本に使う8個の時刻目盛を指定してください')
@@ -21,7 +22,7 @@ class DailyCompletion:
         names={target['data']['facility']['name'] for target in run['task_inputs']['targets']}
         if len(names)!=1:raise Conflict('選択した学校名が一意ではありません')
         school=next(iter(names));query={'facility_id':inputs['facility_id'],'month':inputs['month']}
-        bindings=[e['payload'] for e in self.tools.store.events(ident) if e['kind']=='daily_schedule_binding']
+        bindings=[e['payload'] for e in await run_blocking(self.tools.store.events, ident) if e['kind']=='daily_schedule_binding']
         if bindings:
             binding=bindings[-1]
         else:
@@ -30,14 +31,14 @@ class DailyCompletion:
             draft=result['data']
             if draft.get('pattern_missing') or not draft.get('rows'):raise Conflict('工程表の元になる保存済み工程が不足しています')
             binding={'id':draft['id'],'body':self.schedule_body(draft,school,inputs['service_date'])}
-            self.tools.store.event(ident,'daily_schedule_binding',binding)
+            await run_blocking(self.tools.store.event, ident,'daily_schedule_binding',binding)
         body={**binding['body'],**raw}
         operation='lunch_create_schedule' if binding['id'] is None else 'lunch_save_schedule'
         parameters={'ids':{} if binding['id'] is None else {'schedule_id':binding['id']},'query':query,'body':body,'reason':'利用者が回答した盛付時刻・時間目盛・配送担当を、保存済みの当日工程表案へ設定'}
         result=await self.tools.execute(ident,generation,operation,{'parameters':parameters},command)
         if result.get('ok'):
             saved=result['data']
-            self.tools.store.event(ident,'daily_schedule_binding',{'id':saved['id'],'body':self.schedule_body(saved,school,inputs['service_date'])})
+            await run_blocking(self.tools.store.event, ident,'daily_schedule_binding',{'id':saved['id'],'body':self.schedule_body(saved,school,inputs['service_date'])})
         return result
 
     @staticmethod
@@ -49,12 +50,12 @@ class DailyCompletion:
 
     async def read(self,run,command):
         inputs=run['task_inputs']['inputs'];query={'facility_id':inputs['facility_id'],'month':inputs['month']}
-        saved={c['result']['data']['draft_id'] for c in self.tools.flow.commands(run['id'])
+        saved={c['result']['data']['draft_id'] for c in (await run_blocking(self.tools.flow.commands, run['id']))
                if c['request']['name']=='lunch_save_price_source' and c['result'].get('ok') and c['result'].get('data',{}).get('draft_id')}
-        bindings=[event['payload'] for event in self.tools.store.events(run['id']) if event['kind']=='daily_price_binding']
+        bindings=[event['payload'] for event in await run_blocking(self.tools.store.events, run['id']) if event['kind']=='daily_price_binding']
         if bindings:
             binding=bindings[-1]
-            commands={entry['id']:entry for entry in self.tools.flow.commands(run['id'])}
+            commands={entry['id']:entry for entry in (await run_blocking(self.tools.flow.commands, run['id']))}
             receipt=commands.get(binding['command_id'])
             if (not receipt or receipt['request']['name']!='lunch_save_price_source'
                     or not receipt['result'].get('ok') or receipt['result'].get('data',{}).get('draft_id')!=binding['draft_id']):
@@ -76,11 +77,11 @@ class DailyCompletion:
 
     async def prepare(self,ident,generation,raw,command):
         if raw: raise ValueError('入力項目はありません')
-        run=self.current(ident,generation)
+        run=await run_blocking(self.current, ident,generation)
         from .canonical_route_layout import prepare
         run=await prepare(self.tools,run)
         inputs=run['task_inputs']['inputs']
-        generated=[c for c in self.tools.flow.commands(ident) if c['request']['name'] in ('lunch_generate_route','lunch_save_route')
+        generated=[c for c in (await run_blocking(self.tools.flow.commands, ident)) if c['request']['name'] in ('lunch_generate_route','lunch_save_route')
                    and c['result'].get('ok') and c['request']['arguments'].get('parameters',{}).get('body',{}).get('service_date')==inputs['service_date'] and c['request']['arguments'].get('parameters',{}).get('body',{}).get('layout_id')==inputs['layout_id']]
         if not generated:
             result=await self.tools.execute(ident,generation,'lunch_generate_route',{'parameters':{
@@ -89,7 +90,7 @@ class DailyCompletion:
                 'reason':'利用者が選択した日次一括作成。回答済みの当日工程と選択済み図面から動線図を作成'}},command+':route')
             if not result.get('ok'):raise Conflict('回答済み工程から動線図を作成できません：'+str(result.get('error',result.get('detail',''))))
         evidence=await self.read(run,command)
-        schedules=[c['result']['data'] for c in self.tools.flow.commands(ident)
+        schedules=[c['result']['data'] for c in (await run_blocking(self.tools.flow.commands, ident))
                    if c['id'] in evidence and c['request']['name']=='lunch_get_schedules']
         selected=[row for rows in schedules for row in rows if row['service_date']==run['task_inputs']['inputs']['service_date']]
         if len(selected)!=1:raise Conflict('対象日の工程表を一つに確定してください')
@@ -101,7 +102,7 @@ class DailyCompletion:
 
     async def complete(self,ident,generation,raw,command):
         if raw: raise ValueError('入力項目はありません')
-        run=self.current(ident,generation);review=self.tools.flow.review(ident)
+        run=await run_blocking(self.current, ident,generation);review=(await run_blocking(self.tools.flow.review, ident))
         if not review or review['state']!='approved': raise Conflict('三帳票の内容を利用者が承認していません')
         await self.tools.flow.recheck(run,review)
         inputs=run['task_inputs']['inputs'];query={'facility_id':inputs['facility_id'],'month':inputs['month']}

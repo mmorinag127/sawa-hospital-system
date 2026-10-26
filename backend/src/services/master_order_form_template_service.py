@@ -4,6 +4,7 @@ from copy import copy, deepcopy
 from datetime import UTC, date, datetime
 import hashlib
 import json
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -1352,14 +1353,15 @@ def _append_schema_sheet(wb, *, facility_config: dict[str, Any], generated_colum
         )
 
 
-def _logical_master_workbook(master_path: Path):
+def _logical_master_workbook(master_path: Path, *, source_bytes: bytes | None = None):
     """Read authored values/merges without materializing print-only cell styles."""
-    source = load_workbook(master_path, read_only=True)
+    raw = master_path.read_bytes() if source_bytes is None else source_bytes
+    source = load_workbook(BytesIO(raw), read_only=True)
     try:
         if MASTER_SHEET_NAME not in source.sheetnames:
             raise FacilityTemplateBuildError(f"master_sheet_not_found:{MASTER_SHEET_NAME}")
         original = source[MASTER_SHEET_NAME]
-        with ZipFile(master_path) as archive:
+        with ZipFile(BytesIO(raw)) as archive:
             tree = ElementTree.fromstring(archive.read(original._worksheet_path))
         # Use actual authored cells, not an optional/stale XLSX dimension hint.
         coordinates = [coordinate_to_tuple(cell.attrib['r'])
@@ -1388,6 +1390,7 @@ def build_facility_template_workbook(
     week_value: object | None = None,
     week_menu_entries: Any | None = None,
     logical_only: bool = False,
+    _source_bytes: bytes | None = None,
 ):
     master_path = Path(master_template_path)
     if not master_path.exists():
@@ -1397,7 +1400,8 @@ def build_facility_template_workbook(
     if not generated_columns:
         raise FacilityTemplateBuildError("facility_template_generated_columns_missing")
 
-    wb = _logical_master_workbook(master_path) if logical_only else load_workbook(master_path)
+    wb = (_logical_master_workbook(master_path, source_bytes=_source_bytes) if logical_only
+          else load_workbook(master_path if _source_bytes is None else BytesIO(_source_bytes)))
     if MASTER_SHEET_NAME not in wb.sheetnames:
         raise FacilityTemplateBuildError(f"master_sheet_not_found:{MASTER_SHEET_NAME}")
     ws = wb[MASTER_SHEET_NAME]

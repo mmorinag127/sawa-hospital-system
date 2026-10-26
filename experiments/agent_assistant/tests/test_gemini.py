@@ -252,8 +252,16 @@ def test_stop_during_create_keeps_receipt_without_executing_late_tools(tmp_path,
     tools.execute=forbidden
     async def scenario():
         await agent.start(run);await entered.wait()
+        fenced = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        real_fence = store.fence
+        def observed_fence(*args, **kwargs):
+            result = real_fence(*args, **kwargs)
+            loop.call_soon_threadsafe(fenced.set)
+            return result
+        monkeypatch.setattr(store, 'fence', observed_fence)
         stop=asyncio.create_task(agent.stop(run['id']))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(fenced.wait(), 5)
         assert store.get(run['id'])['generation']>run['generation']
         release.set();await stop
         assert not native and len(posts)==1

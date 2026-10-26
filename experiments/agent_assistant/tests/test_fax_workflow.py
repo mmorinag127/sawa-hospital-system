@@ -214,9 +214,9 @@ def test_task_api_owns_instruction_and_rejects_prompt_override(tmp_path, monkeyp
     app.state.store.set_budget(100)
     monkeypatch.setattr(app.state.sandbox, 'prepare', lambda run: None)
     started = []
-    def start(ident, authorization=None):
-        started.append(app.state.store.get(ident))
-    monkeypatch.setattr(app.state.business, 'kick', start)
+    async def start(identities, authorization=None):
+        started.extend(app.state.store.get(ident) for ident in identities)
+    monkeypatch.setattr(app.state.business, 'kick_many', start)
     with TestClient(app) as web:
         web.get('/')
         tasks = web.get('/tasks').json()

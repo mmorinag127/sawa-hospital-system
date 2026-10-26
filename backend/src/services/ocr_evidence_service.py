@@ -235,7 +235,7 @@ def _summarize_hakodate_payload(payload: dict[str, Any], *, expected_source: dic
     }
 
 
-def _has_meaningful_evidence(payload: dict[str, Any]) -> bool:
+def _has_meaningful_evidence(payload: dict[str, Any], *, _analysis=None) -> bool:
     recognized = payload.get("_first_pass_recognizer")
     if isinstance(recognized, dict) and recognized.get("recognized_rows") and payload.get("table_rows") == recognized["recognized_rows"]:
         return True
@@ -253,7 +253,7 @@ def _has_meaningful_evidence(payload: dict[str, Any]) -> bool:
         return True
     if isinstance(payload.get("page_correction_artifacts"), dict):
         return True
-    hakodate_state = _summarize_hakodate_payload(payload)
+    hakodate_state = _summarize_hakodate_payload(payload, _analysis=_analysis)
     if isinstance(hakodate_state, dict) and int(hakodate_state.get("evidence_record_count") or 0) > 0:
         return True
     return False
@@ -263,7 +263,8 @@ def _has_failed_evidence_status(*values: object) -> bool:
     return any(str(value or "").strip().lower() in {"failed", "error"} for value in values)
 
 
-def classify_evidence_payload(payload: object, *, expected_hakodate_source: dict | None = None) -> dict[str, Any]:
+def classify_evidence_payload(payload: object, *, expected_hakodate_source: dict | None = None,
+                              _analysis=None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {
             "persistable": False,
@@ -282,7 +283,10 @@ def classify_evidence_payload(payload: object, *, expected_hakodate_source: dict
             "status": status or None,
             "stage": stage or None,
         }
-    hakodate_state = _summarize_hakodate_payload(payload, expected_source=expected_hakodate_source)
+    from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
+    if _analysis is None:
+        _analysis = _EvidenceAnalysis()
+    hakodate_state = _summarize_hakodate_payload(payload, expected_source=expected_hakodate_source, _analysis=_analysis)
     if isinstance(hakodate_state, dict):
         blockers = [str(item).strip() for item in (hakodate_state.get("blockers") or []) if str(item).strip()]
         if blockers:
@@ -299,7 +303,7 @@ def classify_evidence_payload(payload: object, *, expected_hakodate_source: dict
                 "status": status or None,
                 "stage": stage or None,
             }
-    if not _has_meaningful_evidence(payload):
+    if not _has_meaningful_evidence(payload, _analysis=_analysis):
         return {
             "persistable": False,
             "error": "evidence_unusable",
@@ -516,22 +520,24 @@ def build_evidence_run_record(
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return None
-    payload_state = classify_evidence_payload(payload)
+    from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
+    analysis = _EvidenceAnalysis()
+    payload_state = classify_evidence_payload(payload, _analysis=analysis)
     if not isinstance(payload, dict):
         return None
     if not payload_state.get("persistable") and status != "diagnostic_only":
         return None
-    extracted = _extract_evidence_payload(payload)
+    extracted = _extract_evidence_payload(payload, _analysis=analysis)
     manifest = extracted.get("evidence_manifest")
     if not isinstance(manifest, dict):
-        manifest = evidence_manifest_service.build_evidence_manifest(extracted)
+        manifest = evidence_manifest_service.build_evidence_manifest(extracted, _analysis=analysis)
         extracted["evidence_manifest"] = manifest
-    capabilities = _build_capabilities(extracted)
+    capabilities = _build_capabilities(extracted, _analysis=analysis)
     if status == "diagnostic_only":
         extracted["diagnostic_pipeline_output"] = copy.deepcopy(payload)
         capabilities = {key: False for key in capabilities}
     capabilities["legacy_editable"] = bool(str(schema_version or "").startswith("v1_legacy"))
-    degraded_reasons = _build_degraded_reasons(extracted, capabilities)
+    degraded_reasons = _build_degraded_reasons(extracted, capabilities, _analysis=analysis)
     artifact_digest = _digest(extracted)
     normalized_source = str(source or "unknown").strip() or "unknown"
     resolved_status = str(status or extracted.get("status") or "ready").strip() or "ready"
@@ -750,6 +756,7 @@ def get_evidence_run(evidence_run_id: str) -> dict[str, Any] | None:
 
 def get_selected_evidence_run(order_id: str, *, require_selectable: bool = True) -> dict[str, Any] | None:
     from src.models.order_workflow_state import OrderWorkflowState
+    from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
 
     with session_scope() as session:
         workflow = session.get(OrderWorkflowState, order_id)
@@ -759,13 +766,14 @@ def get_selected_evidence_run(order_id: str, *, require_selectable: bool = True)
             or row.template_version_id != workflow.template_version_id
         ):
             return None
-        if not evidence_run_is_selectable(row):
+        analysis = _EvidenceAnalysis()
+        if not evidence_run_is_selectable(row, _analysis=analysis):
             if require_selectable:
                 return None
             # Recovery diagnostics retain the selected identity, never its unusable payload.
             return {"id": row.id, "order_id": row.order_id,
                     "template_version_id": row.template_version_id, "selectable": False}
-        return _serialize_evidence_run(row, include_payload=True)
+        return _serialize_evidence_run(row, include_payload=True, _analysis=analysis)
 
 
 class SelectedEvidenceRejected(ValueError):

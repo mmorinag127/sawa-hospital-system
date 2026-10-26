@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import text, select, delete, update, func
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -54,6 +55,10 @@ async def google_callback(request: Request):
     raw = await request.body()
     if len(raw) > 16384:
         raise HTTPException(400, "Invalid Google response")
+    return await run_in_threadpool(_complete_google_callback, request, raw)
+
+
+def _complete_google_callback(request: Request, raw: bytes):
     try:
         body = parse_qs(raw.decode("utf-8"), strict_parsing=True)
     except (UnicodeError, ValueError):

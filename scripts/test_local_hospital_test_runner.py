@@ -104,22 +104,28 @@ class ReceiptContractTest(unittest.TestCase):
             state = Path(env['SAWA_IMPACT_STATE'])
             (state / 'selection.json').write_text(json.dumps({
                 'selected': ['test_example.py::test_case'], 'reused': [],
+                'executed': ['test_example.py::test_case'], 'completed': ['test_example.py::test_case'],
                 'exitstatus': 0, 'source_sha': 'a' * 40, 'baseline': None}))
             return subprocess.CompletedProcess(argv, 0)
 
         for mode, full_flag in (('full', '1'), ('impact', '0')):
             self.check_backend_partition(mode, full_flag, seen, execute_backend)
+        for branch, full_flag in (('codex/owned', '0'), ('release/prod-owned', '1'), ('', '1')):
+            self.check_backend_partition(None, full_flag, seen, execute_backend, branch=branch)
+        self.check_backend_partition('impact', '1', seen, execute_backend, branch='release/prod-owned')
 
-    def check_backend_partition(self, mode, full_flag, seen, execute_backend):
+    def check_backend_partition(self, mode, full_flag, seen, execute_backend, *, branch='codex/owned'):
         with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory, \
              patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': directory, 'DB_HOST': 'foreign',
                                     'DB_URI': 'foreign', 'DATABASE_URL': 'foreign', 'ALEMBIC_DB_URI': 'foreign',
                                     'PYTEST_ADDOPTS': '-k foreign', 'PYTEST_PLUGINS': 'foreign_selector',
-                                    'CI': '', 'GITHUB_ACTIONS': '', 'SAWA_LOCAL_TEST_MODE': mode}), \
+                                    'CI': '', 'GITHUB_ACTIONS': '', 'SAWA_LOCAL_TEST_MODE': mode or 'impact'}), \
              patch.object(BACKEND_RUNNER, 'clean_tree', return_value=True), \
-             patch.object(BACKEND_RUNNER, 'git', side_effect=lambda *args: str(Path(directory) / 'git') if '--absolute-git-dir' in args else 'a' * 40), \
+             patch.object(BACKEND_RUNNER, 'git', side_effect=lambda *args: str(Path(directory) / 'git') if '--git-common-dir' in args else branch if args == ('branch', '--show-current') else 'a' * 40), \
              patch.object(BACKEND_RUNNER.sys, 'argv', ['runner']), \
              patch.object(BACKEND_RUNNER, 'run_pytest', side_effect=execute_backend) as execute:
+            if mode is None:
+                os.environ.pop('SAWA_LOCAL_TEST_MODE')
             self.assertEqual(BACKEND_RUNNER.main(), 0)
             argv = execute.call_args.args[0]
             self.assertIn('backend/tests', argv)
@@ -133,7 +139,7 @@ class ReceiptContractTest(unittest.TestCase):
             self.assertEqual(env['SAWA_IMPACT_FULL'], full_flag)
             self.assertIn('--testmon', argv)
             self.assertTrue((Path(directory) / 'backend-tests/selection.json').is_file())
-            self.assertEqual(env['DB_URI'], 'sqlite:///' + directory + '/git/sawa-local-impact/backend-runtime.sqlite')
+            self.assertEqual(env['DB_URI'], 'sqlite:///' + str(Path(directory).resolve() / 'git/sawa-local-impact/backend-runtime.sqlite'))
 
     def test_failed_attempt_restores_consistent_database_and_metadata(self):
         import sqlite3
@@ -156,6 +162,32 @@ class ReceiptContractTest(unittest.TestCase):
             with sqlite3.connect(database) as connection:
                 self.assertEqual(connection.execute('SELECT value FROM original').fetchall(), [(7,)])
             self.assertEqual(json.loads((state / 'failed-tests.json').read_text()), ['case::failed'])
+
+    def test_interruption_retains_only_failed_or_incomplete_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            source = 'a' * 40
+            selected = ['case::passed', 'case::failed', 'case::active', 'case::unstarted']
+            (state / 'selection-plan.json').write_text(json.dumps({'source_sha': source, 'selected': selected}))
+            (state / 'selection.json').write_text(json.dumps({
+                'source_sha': source, 'selected': selected,
+                'failed': ['case::failed'], 'incomplete': ['case::active']}))
+            self.assertEqual(BACKEND_RUNNER.interrupted_tests(state, source), ['case::active', 'case::failed'])
+            (state / 'selection.json').unlink()
+            journal = state / 'started-tests.jsonl'
+            journal.write_text(json.dumps({'source_sha': source}) + '\n'
+                               + json.dumps({'nodeid': 'case::passed'}) + '\n'
+                               + json.dumps({'nodeid': 'case::active'}) + '\n')
+            # Without a completed report, started cases are conservative retries;
+            # never-started cases are not fabricated as failed executions.
+            self.assertEqual(BACKEND_RUNNER.interrupted_tests(state, source), ['case::active', 'case::passed'])
+            journal.write_text(json.dumps({'source_sha': source}) + '\n'
+                               + json.dumps({'nodeid': 'foreign::case'}) + '\n')
+            with self.assertRaisesRegex(ValueError, 'identity'):
+                BACKEND_RUNNER.interrupted_tests(state, source)
+            journal.write_text(json.dumps({'source_sha': 'b' * 40}) + '\n')
+            with self.assertRaisesRegex(ValueError, 'source'):
+                BACKEND_RUNNER.interrupted_tests(state, source)
 
     def test_accepted_attempt_keeps_new_history_and_symlinks_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

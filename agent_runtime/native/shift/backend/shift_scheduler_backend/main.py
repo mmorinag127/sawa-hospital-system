@@ -7,9 +7,10 @@ from io import BytesIO, StringIO
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, StrictInt, StrictStr
 from sqlalchemy.exc import SQLAlchemyError
@@ -2157,22 +2158,63 @@ def _get_solve_run_snapshot(solve_run_id, session, candidate_id, prior_for_start
     }
 
 
+@app.get("/solve-run-periods")
+def list_solve_run_periods(session: Session = Depends(get_session)) -> list[dict]:
+    from sqlalchemy import func, select
+    config_type = (func.json_type(SolveRun.config_json) if session.get_bind().dialect.name == "sqlite"
+                   else func.json_typeof(SolveRun.config_json))
+    mode_present = (func.json_type(SolveRun.config_json, "$.period_mode").is_not(None)
+                    if session.get_bind().dialect.name == "sqlite" else SolveRun.config_json["period_mode"].is_not(None))
+    rows = session.execute(select(
+        SolveRun.id, SolveRun.target_month, SolveRun.status, SolveRun.started_at, SolveRun.finished_at,
+        config_type.label("config_type"),
+        mode_present.label("mode_present"),
+        SolveRun.config_json["start_date"].label("start_date"),
+        SolveRun.config_json["end_date_exclusive"].label("end_date_exclusive"),
+        SolveRun.config_json["end_date"].label("end_date"),
+        SolveRun.config_json["period_mode"].label("period_mode"),
+    ).order_by(SolveRun.id.desc())).mappings().all()
+    confirmed_ids = {ident for ident, in session.query(ScheduleConfirmation.solve_run_id)}
+    result = []
+    for row in rows:
+        if row["config_type"] not in (None, "null", "object"):
+            raise HTTPException(409, "保存済みのシフト期間を確認できません。")
+        config = {key: row[key] for key in ("start_date", "end_date_exclusive", "end_date", "period_mode") if row[key] is not None}
+        if row["mode_present"]:
+            config["period_mode"] = row["period_mode"]
+        result.append({"id": row["id"], "status": row["status"],
+                       **_solve_run_period_payload(SimpleNamespace(target_month=row["target_month"], config_json=config)),
+                       "confirmed": row["id"] in confirmed_ids,
+                       "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+                       "finished_at": row["finished_at"].isoformat() if row["finished_at"] else None})
+    return result
+
+
 @app.get("/solve-runs", responses={200: {"model": list[SolveRunSummary]}})
-def list_solve_runs(session: Session = Depends(get_session)) -> list[dict]:
+def list_solve_runs(session: Session = Depends(get_session), limit: int | None = Query(default=None, ge=1, le=200), before_id: int | None = Query(default=None, ge=1)) -> list[dict]:
     from sqlalchemy import func
     from .jobs import load_job_status_sources, serialize_job_status_from_sources
 
-    rows = session.query(SolveRun).order_by(SolveRun.id.desc()).all()
+    query = session.query(SolveRun)
+    if isinstance(before_id, int):
+        query = query.filter(SolveRun.id < before_id)
+    query = query.order_by(SolveRun.id.desc())
+    if isinstance(limit, int):
+        query = query.limit(limit)
+    rows = query.all()
     if not rows:
         return []
     job_status_sources = load_job_status_sources(session, rows)
+    run_ids = [row.id for row in rows]
     assignment_counts = dict(
         session.query(CandidateSchedule.solve_run_id, func.count(Assignment.id))
         .join(Assignment, Assignment.candidate_id == CandidateSchedule.id)
         .filter(CandidateSchedule.candidate_no == 1)
+        .filter(CandidateSchedule.solve_run_id.in_(run_ids))
         .group_by(CandidateSchedule.solve_run_id).all()
     )
-    confirmed_ids = {run_id for (run_id,) in session.query(ScheduleConfirmation.solve_run_id).all()}
+    confirmed_ids = {run_id for (run_id,) in session.query(ScheduleConfirmation.solve_run_id).filter(
+        ScheduleConfirmation.solve_run_id.in_(run_ids)).all()}
     return [
         {
             "id": row.id,

@@ -266,9 +266,9 @@ def test_handoff_and_real_source_callee_chain_are_read_only(packet_row, analysis
         assert payload is handoff["payload"]
         assert (payload, handoff["accepted"]) == handoff["before"]
 
-    def source(payload):
+    def source(payload, **kwargs):
         unchanged(payload)
-        result = real_source(payload)
+        result = real_source(payload, **kwargs)
         unchanged(payload)
         boundaries.append("source")
         return result

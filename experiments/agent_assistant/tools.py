@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .catalog import OPERATIONS, build_path, public_intake_data
 from .conversation import question_result
 from .store import Conflict
+from .sandbox import run_blocking
 from .fax_workflow import FaxWorkflow
 from .task_flow import TaskFlow
 from .tasks import TASKS
@@ -98,16 +99,18 @@ class Tools:
             return await self._execute(run_id, generation, name, raw, command_id)
         finally:
             if getattr(self.sandbox, "durable_store", None) is not None:
-                self.sandbox.durable_store.persist_files(run_id)
+                await run_blocking(self.sandbox.durable_store.persist_files, run_id)
 
     async def _execute(self, run_id, generation, name, raw, command_id):
         from .business_contracts import require_server
-        require_server(self.store.get(run_id), name)
+        require_server(await run_blocking(self.store.get, run_id), name)
         from .business_contracts import owned
         operation = OPERATIONS.get(name)
-        if owned(self.store.get(run_id)) and operation and operation.method != 'GET':
-            with self.store.read() as db:
-                pending = [json.loads(row['request']) for row in db.execute("SELECT request FROM commands WHERE run_id=? AND status NOT IN ('done','recoverable_wait')", (run_id,))]
+        if owned(await run_blocking(self.store.get, run_id)) and operation and operation.method != 'GET':
+            def pending_commands():
+                with self.store.read() as db:
+                    return [json.loads(row['request']) for row in db.execute("SELECT request FROM commands WHERE run_id=? AND status NOT IN ('done','recoverable_wait')", (run_id,))]
+            pending = await run_blocking(pending_commands)
             if any(OPERATIONS.get(item['name']) and OPERATIONS[item['name']].method != 'GET' for item in pending):
                 raise Conflict('保存結果を照合中です。未確定の業務更新は再実行しません')
         if name in ('prepare_shift_review','complete_shift_work','prepare_fax_review','complete_fax_work'):
@@ -115,32 +118,36 @@ class Tools:
             workflow = WorkflowCompletion(self)
             method = {'prepare_shift_review':workflow.prepare_shift,'complete_shift_work':workflow.complete_shift,'prepare_fax_review':workflow.prepare_fax,'complete_fax_work':workflow.complete_faxes}[name]
             async with self.workflow_locks.setdefault(run_id,asyncio.Lock()):
-                current=self.store.get(run_id)
+                current=await run_blocking(self.store.get, run_id)
                 if current['generation']!=generation or current['status']!='running': raise Conflict('依頼は停止または変更されました')
                 request={'name':name,'arguments':raw}
                 encoded=json.dumps(request,sort_keys=True,ensure_ascii=False)
-                with self.store.read() as db:
-                    previous=db.execute('SELECT request,result,status FROM commands WHERE run_id=? AND id=?',(run_id,command_id)).fetchone()
+                def previous_command():
+                    with self.store.read() as db:
+                        return db.execute('SELECT request,result,status FROM commands WHERE run_id=? AND id=?',(run_id,command_id)).fetchone()
+                previous = await run_blocking(previous_command)
                 if previous:
                     if previous['request']!=encoded or previous['status']!='done': raise Conflict('命令IDの内容または結果が一致しません')
                     return json.loads(previous['result'])
                 try:
                     result=await method(run_id,generation,raw,command_id)
                 except OperatorWait as exc:
-                    current=self.store.get(run_id)
+                    current=await run_blocking(self.store.get, run_id)
                     if current['generation']!=generation or current['status'] not in ('running','waiting_input'): raise Conflict('依頼は停止または変更されました')
                     result=exc.result
                 except (ValueError,Conflict) as exc:
-                    current=self.store.get(run_id)
+                    current=await run_blocking(self.store.get, run_id)
                     if current['generation']!=generation or current['status']!='running': raise
                     result={'error':str(exc)}
                 result={**result,'command_id':command_id}
                 # Children own mutation idempotency and unknown-outcome fences.
                 # A wrapper is recorded only after returning, so finish_work never
                 # sees its own still-running wrapper as an unresolved mutation.
-                with self.store.tx() as db:
-                    db.execute("INSERT INTO commands VALUES(?,?,?,'done',?)",(run_id,command_id,encoded,json.dumps(result,ensure_ascii=False)))
-                self.store.event(run_id,'tool_result',{'tool':name,'result':result})
+                def record_command():
+                    with self.store.tx() as db:
+                        db.execute("INSERT INTO commands VALUES(?,?,?,'done',?)",(run_id,command_id,encoded,json.dumps(result,ensure_ascii=False)))
+                await run_blocking(record_command)
+                await run_blocking(self.store.event, run_id,'tool_result',{'tool':name,'result':result})
                 return result
         if name in ('save_lunch_daily_schedule','prepare_lunch_daily_review','complete_lunch_daily_work'):
             from .daily_completion import DailyCompletion
@@ -149,10 +156,10 @@ class Tools:
                 method={'save_lunch_daily_schedule':workflow.save_schedule,'prepare_lunch_daily_review':workflow.prepare,'complete_lunch_daily_work':workflow.complete}[name]
                 return await method(run_id,generation,raw,command_id)
             except (ValueError,Conflict) as exc:
-                current=self.store.get(run_id)
+                current=await run_blocking(self.store.get, run_id)
                 if current['generation']!=generation or current['status']!='running': raise
                 result={'error':str(exc),'command_id':command_id}
-                self.store.event(run_id,'tool_result',{'tool':name,'result':result})
+                await run_blocking(self.store.event, run_id,'tool_result',{'tool':name,'result':result})
                 return result
         if name == 'save_lunch_process_answers':
             return await self.save_lunch_answers(run_id, generation, raw, command_id)
@@ -161,10 +168,10 @@ class Tools:
         if name == "wait_for_fax_work":
             return await self.wait_fax(run_id, generation, raw, command_id)
         async with self.lock(run_id):
-            run = self.store.get(run_id)
+            run = await run_blocking(self.store.get, run_id)
             if run["generation"] != generation or run["status"] != "running":
                 raise Conflict("この依頼は停止または変更されました。遅延した命令は実行しません")
-            previous = self.store.command(run_id, command_id, {"name": name, "arguments": raw})
+            previous = await run_blocking(self.store.command, run_id, command_id, {"name": name, "arguments": raw})
             if previous is not None:
                 return previous
             try:
@@ -172,14 +179,14 @@ class Tools:
                     try:
                         await self.authorization_validator(run)
                     except Conflict as exc:
-                        if self.store.get(run_id)["generation"] != generation:
+                        if (await run_blocking(self.store.get, run_id))["generation"] != generation:
                             raise Conflict("依頼は停止されました")
-                        self.store.update(run_id, expected_generation=generation, status="waiting_input")
+                        await run_blocking(self.store.update, run_id, expected_generation=generation, status="waiting_input")
                         result = {"ok": False, "needs_operator_confirmation": True, "question": str(exc), "command_id": command_id}
-                        self.store.finish_command(run_id, command_id, result)
-                        self.store.event(run_id, "tool_result", {"tool": name, "result": result})
+                        await run_blocking(self.store.finish_command, run_id, command_id, result)
+                        await run_blocking(self.store.event, run_id, "tool_result", {"tool": name, "result": result})
                         return result
-                    if self.store.get(run_id)["generation"] != generation:
+                    if (await run_blocking(self.store.get, run_id))["generation"] != generation:
                         raise Conflict("依頼は停止されました")
                 if not isinstance(raw, dict):
                     raise ValueError("ツールの入力はオブジェクトが必要です")
@@ -193,13 +200,13 @@ class Tools:
                         if re.search(r'(?:[a-z]+_(?:id|revision|version)|If-Match|APIキー|接続設定|停止を再確認|照合して再開|予算上限|（ID:)', text, re.IGNORECASE):
                             raise ValueError('内部操作・ID・版・接続設定を利用者へ質問できません。原本や登録済みデータから必要な業務情報だけを質問してください')
                     result = question_result(raw, command_id)
-                    self.store.update(run_id, expected_generation=generation, status="waiting_input")
+                    await run_blocking(self.store.update, run_id, expected_generation=generation, status="waiting_input")
                 elif name == "ask_lunch_process_question":
                     if set(raw) - {"restart"} or ("restart" in raw and type(raw["restart"]) is not bool): raise ValueError("再質問指定が不正です")
                     result = await self.flow.questions.ask(run, command_id, raw.get("restart", False))
-                    if result.get("waiting_input"): self.store.update(run_id, expected_generation=generation, status="waiting_input")
+                    if result.get("waiting_input"): await run_blocking(self.store.update, run_id, expected_generation=generation, status="waiting_input")
                 elif name == "read_artifact_page":
-                    result = self.read_page(run_id, raw)
+                    result = await run_blocking(self.read_page, run_id, raw)
                 elif name == "describe_operation":
                     result = await self.describe(run, raw)
                 elif name == "get_trial_jobs":
@@ -208,10 +215,10 @@ class Tools:
                     result = {"ok": True, "jobs": self.sandbox.local_jobs(run)}
                 elif name == "choose_task_layout":
                     if set(raw)!={"layout_id"} or type(raw["layout_id"]) is not int: raise ValueError("図面IDが必要です")
-                    result=self.flow.choose_layout(run,raw["layout_id"])
+                    result=(await run_blocking(self.flow.choose_layout, run, raw['layout_id']))
                 elif name == "get_task_context":
                     if raw: raise ValueError("入力項目はありません")
-                    result = self.flow.context(run)
+                    result = (await run_blocking(self.flow.context, run))
                 elif name == "request_task_approval":
                     if set(raw) != {"summary","evidence_commands","actions"}: raise ValueError("確認結果・再取得命令・確定操作が必要です")
                     result = await self.flow.submit(run, **raw)
@@ -228,30 +235,30 @@ class Tools:
                     if self.faxes.active(run):
                         await self.faxes.refresh(run)
                     checks = await self.verify_hospital_outputs(run, raw.get("artifact_ids", []))
-                    result = self.finish(run_id, raw, command_id, hospital_checks=checks, expected_generation=generation)
+                    result = await run_blocking(self.finish, run_id, raw, command_id, hospital_checks=checks, expected_generation=generation)
                 else:
                     result = await self.native(run, name, Arguments.model_validate(raw.get("parameters", {})), command_id=command_id)
                 if name=='lunch_save_price_source' and run.get('task_id')=='lunch_daily_bundle' and result.get('ok'):
                     draft_id=result.get('data',{}).get('draft_id')
                     if not isinstance(draft_id,str) or not draft_id: raise Conflict('保存した実施価格のIDを照合できません')
-                    self.store.event(run_id,'daily_price_binding',{'command_id':command_id,'draft_id':draft_id})
+                    await run_blocking(self.store.event, run_id,'daily_price_binding',{'command_id':command_id,'draft_id':draft_id})
                 result["command_id"] = command_id
-                self.store.finish_command(run_id, command_id, result)
-                self.store.event(run_id, "tool_result", {"tool": name, "result": {k: v for k, v in result.items() if k != "_content"}})
+                await run_blocking(self.store.finish_command, run_id, command_id, result)
+                await run_blocking(self.store.event, run_id, "tool_result", {"tool": name, "result": {k: v for k, v in result.items() if k != "_content"}})
                 return result
             except (ValueError, Conflict) as exc:
                 result = {"error": str(exc), "command_id": command_id}
-                self.store.finish_command(run_id, command_id, result)
+                await run_blocking(self.store.finish_command, run_id, command_id, result)
                 return result
             # Transport/crash failures remain executing, blocking automatic replay.
 
     async def save_lunch_answers(self, run_id, generation, raw, command_id):
         if raw: raise ValueError('入力項目はありません')
         async with self.lock(run_id):
-            run = self.store.get(run_id)
+            run = await run_blocking(self.store.get, run_id)
             if run['generation'] != generation or run['status'] != 'running': raise Conflict('依頼は停止されました')
             if not self.flow.questions.active(run): raise Conflict('日次給食業務専用の操作です')
-            previous = self.store.command(run_id, command_id, {'name':'save_lunch_process_answers','arguments':{}})
+            previous = await run_blocking(self.store.command, run_id, command_id, {'name':'save_lunch_process_answers','arguments':{}})
             if previous is not None: return previous
             try:
                 state = await self.flow.questions.checked(run)
@@ -262,7 +269,7 @@ class Tools:
                     raise Conflict('工程の開始・終了時刻、担当者、汚染区分、作業段階への回答が必要です')
             except (ValueError, Conflict) as exc:
                 result={'error':str(exc),'command_id':command_id}
-                self.store.finish_command(run_id,command_id,result)
+                await run_blocking(self.store.finish_command, run_id,command_id,result)
                 return result
             saves = [self.flow.questions.payload(state,item) for item in state['documents'] if not item['saved']]
         saved=[]
@@ -271,36 +278,36 @@ class Tools:
             saved.append(result)
             if not result.get('ok'):
                 result={**result,'command_id':command_id}
-                self.store.finish_command(run_id,command_id,result)
+                await run_blocking(self.store.finish_command, run_id,command_id,result)
                 return result
         result={'ok':True,'saved':saved,'command_id':command_id}
-        self.store.finish_command(run_id,command_id,result)
-        self.store.event(run_id,'tool_result',{'tool':'save_lunch_process_answers','result':result})
+        await run_blocking(self.store.finish_command, run_id,command_id,result)
+        await run_blocking(self.store.event, run_id,'tool_result',{'tool':'save_lunch_process_answers','result':result})
         return result
     async def wait_task(self, run_id, generation, name, raw, command_id):
         async with self.lock(run_id):
-            run = self.store.get(run_id)
+            run = await run_blocking(self.store.get, run_id)
             if not self.flow.active(run): raise ValueError("選択式業務の待機専用です")
             if run["generation"] != generation or run["status"] != "running": raise Conflict("依頼は停止されました")
             if name == "wait_for_task_decision" and raw: raise ValueError("入力項目はありません")
             if name == "wait_for_native_job" and (set(raw) != {"operation","parameters"} or raw["operation"] not in ("shift_get_run","lunch_get_import_job")):
                 raise ValueError("待機できる対象ジョブではありません")
-            previous = self.store.command(run_id, command_id, {"name":name,"arguments":raw})
+            previous = await run_blocking(self.store.command, run_id, command_id, {"name":name,"arguments":raw})
             if previous is not None: return previous
         while True:
             async with self.lock(run_id):
-                run = self.store.get(run_id)
+                run = await run_blocking(self.store.get, run_id)
                 if run["generation"] != generation or run["status"] != "running": raise Conflict("依頼は停止されました")
                 if self.authorization_validator is not None:
                     try: await self.authorization_validator(run)
                     except Conflict as exc:
-                        if self.store.get(run_id)["generation"] != generation: raise Conflict("依頼は停止されました")
-                        self.store.update(run_id,expected_generation=generation,status="waiting_input")
+                        if (await run_blocking(self.store.get, run_id))["generation"] != generation: raise Conflict("依頼は停止されました")
+                        await run_blocking(self.store.update, run_id,expected_generation=generation,status="waiting_input")
                         result={"ok":False,"needs_operator_confirmation":True,"question":str(exc),"command_id":command_id}
-                        self.store.finish_command(run_id,command_id,result)
+                        await run_blocking(self.store.finish_command, run_id,command_id,result)
                         return result
                 if name == "wait_for_task_decision":
-                    review=self.flow.review(run_id)
+                    review=(await run_blocking(self.flow.review, run_id))
                     if not review: raise ValueError("確認結果を先に提出してください")
                     ready=review["state"] != "awaiting_approval"
                     result={"ok":True,"review_id":review["id"],"state":review["state"],"decision":review["decision"]}
@@ -312,11 +319,11 @@ class Tools:
                     if not isinstance(status,str): raise Conflict("ジョブの実行状態を取得できません")
                     ready=status not in ("pending","queued","preparing","dispatching","running","processing","retry_wait")
                     result={"ok":True,"data":data}
-                if self.store.get(run_id)["generation"] != generation: raise Conflict("依頼は停止されました")
+                if (await run_blocking(self.store.get, run_id))["generation"] != generation: raise Conflict("依頼は停止されました")
                 if ready:
                     result["command_id"]=command_id
-                    self.store.finish_command(run_id,command_id,result)
-                    self.store.event(run_id,"tool_result",{"tool":name,"result":result})
+                    await run_blocking(self.store.finish_command, run_id,command_id,result)
+                    await run_blocking(self.store.event, run_id,"tool_result",{"tool":name,"result":result})
                     return result
             await asyncio.sleep(1)
 
@@ -324,41 +331,41 @@ class Tools:
         # Do not hold the write lock while sleeping: human answers and stop must
         # remain possible while a provider custom tool is waiting.
         async with self.lock(run_id):
-            run = self.store.get(run_id)
+            run = await run_blocking(self.store.get, run_id)
             if raw or not self.faxes.active(run):
                 raise ValueError("未処理FAX業務の待機専用です")
             if run["generation"] != generation or run["status"] != "running":
                 raise Conflict("依頼は停止されました")
-            previous = self.store.command(run_id, command_id, {"name": "wait_for_fax_work", "arguments": raw})
+            previous = await run_blocking(self.store.command, run_id, command_id, {"name": "wait_for_fax_work", "arguments": raw})
             if previous is not None:
                 return previous
         initial = None
         while True:
             async with self.lock(run_id):
-                run = self.store.get(run_id)
+                run = await run_blocking(self.store.get, run_id)
                 if run["generation"] != generation or run["status"] != "running":
                     raise Conflict("依頼は停止されました")
                 if self.authorization_validator is not None:
                     try:
                         await self.authorization_validator(run)
                     except Conflict as exc:
-                        if self.store.get(run_id)["generation"] != generation:
+                        if (await run_blocking(self.store.get, run_id))["generation"] != generation:
                             raise Conflict("依頼は停止されました")
-                        self.store.update(run_id, expected_generation=generation, status="waiting_input")
+                        await run_blocking(self.store.update, run_id, expected_generation=generation, status="waiting_input")
                         result = {"ok": False, "needs_operator_confirmation": True, "question": str(exc), "command_id": command_id}
-                        self.store.finish_command(run_id, command_id, result)
+                        await run_blocking(self.store.finish_command, run_id, command_id, result)
                         return result
-                if self.store.get(run_id)["generation"] != generation:
+                if (await run_blocking(self.store.get, run_id))["generation"] != generation:
                     raise Conflict("依頼は停止されました")
                 result = await self.faxes.refresh(run)
-                if self.store.get(run_id)["generation"] != generation:
+                if (await run_blocking(self.store.get, run_id))["generation"] != generation:
                     raise Conflict("依頼は停止されました")
                 marker = json.dumps(result, sort_keys=True, ensure_ascii=False)
                 actionable = not result["items"] or any(x["state"] in ("ready", "approved", "needs_correction", "pending", "blocked") for x in result["items"]) or all(x["state"] == "completed" for x in result["items"])
                 if actionable or (initial is not None and marker != initial):
                     result["command_id"] = command_id
-                    self.store.finish_command(run_id, command_id, result)
-                    self.store.event(run_id, "tool_result", {"tool": "wait_for_fax_work", "result": result})
+                    await run_blocking(self.store.finish_command, run_id, command_id, result)
+                    await run_blocking(self.store.event, run_id, "tool_result", {"tool": "wait_for_fax_work", "result": result})
                     return result
                 initial = marker
             await asyncio.sleep(1)
@@ -457,7 +464,7 @@ class Tools:
             if not args.source_id or not re.fullmatch(r"[0-9a-f]{32}", args.source_id):
                 raise ValueError("利用者が施設・期間を確認した添付原本が必要です")
             source = self.sandbox.path(run["id"]) / "sources" / args.source_id
-            metadata = json.loads(source.with_suffix(".json").read_text())
+            metadata = await run_blocking(lambda: json.loads(source.with_suffix(".json").read_text()))
             if metadata["domain"] != op.domain:
                 raise ValueError("原本と業務が一致しません")
             for key, value in metadata["binding"].items():
@@ -465,7 +472,7 @@ class Tools:
                 if str(binding_input.get(key, "")) != value:
                     raise ValueError("原本の確認済み施設・期間と取込指定が一致しません")
             field = "pdf_file" if op.domain == "hospital" else "file"
-            files = {field: (metadata["name"], source.read_bytes(), metadata["mime"])}
+            files = {field: (metadata["name"], await run_blocking(source.read_bytes), metadata["mime"])}
         if name == 'shift_solve':
             await self.flow.capture_shift_reference(run)
         response = await self.sandbox.request(
@@ -487,19 +494,21 @@ class Tools:
             if response.status_code == 422 or known_price_format_error:
                 return {"ok":False,"status":response.status_code,"detail":response.text[:12000],
                         "input_validation_failed":True,"next_step":"describe_operationで現行の入力形式を確認する。利用者の選択・確認済み回答だけで修正し、不足する業務情報はask_operatorで質問する。競合や正本を変更して回避しない。"}
-            self.store.update(run["id"], expected_generation=run['generation'], status="waiting_input")
+            await run_blocking(self.store.update, run["id"], expected_generation=run['generation'], status="waiting_input")
             return {"ok": False, "status": response.status_code, "detail": response.text[:12000],
                     "needs_operator_confirmation": True,
                     "question": "業務APIが処理を拒否しました。履歴の理由を確認し、対象・入力・設定の修正内容を回答してください。競合を自動上書きしません。"}
         from .business_contracts import owned
         if owned(run) and op.method != "GET" and command_id:
-            with self.store.read() as db:
-                request=db.execute('SELECT request FROM commands WHERE run_id=? AND id=?',(run['id'],command_id)).fetchone()
+            def command_request():
+                with self.store.read() as db:
+                    return db.execute('SELECT request FROM commands WHERE run_id=? AND id=?',(run['id'],command_id)).fetchone()
+            request = await run_blocking(command_request)
             if not request or 'application/json' not in response.headers.get('content-type',''):
                 raise Conflict('業務更新の保存結果を照合できません')
             # CloudStore commits the working-copy snapshot and ledger together.
             # Keep the response before any projection/recheck that could disconnect.
-            self.store.event(run['id'],'native_response_receipt',{'command_id':command_id,'generation':run['generation'],
+            await run_blocking(self.store.event, run['id'],'native_response_receipt',{'command_id':command_id,'generation':run['generation'],
                 'name':name,'request_sha256':hashlib.sha256(request['request'].encode()).hexdigest(),
                 'parameters':args.model_dump(mode='json'),'status':response.status_code,'data':response.json()})
         return await self.native_result(run,name,args,response)
@@ -522,7 +531,7 @@ class Tools:
         label = EXPORT_LABELS.get(name)
         target = args.query.get("order_id") or args.query.get("candidate_id") or args.ids.get("schedule_id") or args.ids.get("diagram_id") or args.query.get("month") or args.ids.get("draft_id")
         display_name = (label+("-"+str(target) if target is not None else "")+extension) if label else (Path(filename.group(1)).name if filename else name+extension)
-        artifact = self.artifact(run["id"], response.content, display_name)
+        artifact = await run_blocking(self.artifact, run["id"], response.content, display_name)
         return {"ok": True, "status": response.status_code, "artifact": artifact}
 
     def read_page(self, run_id, args):
@@ -564,14 +573,18 @@ class Tools:
 
     async def verify_hospital_outputs(self, run, artifact_ids):
         checks = {}
-        for artifact_id, target in self.hospital_output_commands(run["id"], artifact_ids).items():
-            with self.store.read() as db:
-                row = db.execute("SELECT * FROM artifacts WHERE id=? AND run_id=?", (artifact_id, run["id"])).fetchone()
-            if row is None:
-                raise Conflict("検査対象の帳票がありません")
-            content = Path(row["path"]).read_bytes()
-            if hashlib.sha256(content).hexdigest() != target["sha256"] or len(content) != row["size"]:
-                raise Conflict("帳票が変更されています")
+        outputs = await run_blocking(self.hospital_output_commands, run["id"], artifact_ids)
+        for artifact_id, target in outputs.items():
+            def read_artifact():
+                with self.store.read() as db:
+                    row = db.execute("SELECT * FROM artifacts WHERE id=? AND run_id=?", (artifact_id, run["id"])).fetchone()
+                if row is None:
+                    raise Conflict("検査対象の帳票がありません")
+                content = Path(row["path"]).read_bytes()
+                if hashlib.sha256(content).hexdigest() != target["sha256"] or len(content) != row["size"]:
+                    raise Conflict("帳票が変更されています")
+                return row, content
+            row, content = await run_blocking(read_artifact)
             response = await self.sandbox.request(run, "hospital", "POST", "/outputs/validate-received",
                 body={"order_id": target["order_id"], "kind": target["kind"]},
                 files={"artifact_file": (row["name"], content, "application/octet-stream")},

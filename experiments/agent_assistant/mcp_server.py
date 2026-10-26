@@ -6,6 +6,7 @@ from mcp.server.fastmcp import FastMCP, Context
 from mcp.types import ToolAnnotations
 
 from .catalog import OPERATIONS
+from .sandbox import run_blocking
 from .tools import Arguments
 from .tool_projection import project
 from mcp.server.fastmcp.exceptions import ToolError
@@ -177,12 +178,12 @@ async def call_local(server, tools, run_id, generation, name, arguments, command
             cause = exc.__cause__
             if not isinstance(cause, ValidationError):
                 raise
-            current = tools.store.get(run_id)
+            current = await run_blocking(tools.store.get, run_id)
             if current['generation'] != generation or current['status'] != 'running':
                 from .store import Conflict
                 raise Conflict('依頼は停止または変更されました')
             result = {'ok':False,'input_validation_failed':True,'executed':False,'error':str(cause),'command_id':command_id,'next_step':'提示されたツール入力形式を修正して呼び直す。parameters直下はids/query/body/expected_revision/source_id/reasonのみ。業務値を変更して回避しない。'}
-            tools.store.event(run_id,'tool_input_rejected',{'tool':name,'result':result})
+            await run_blocking(tools.store.event, run_id,'tool_input_rejected',{'tool':name,'result':result})
             return result
         if isinstance(result, dict):
             return result

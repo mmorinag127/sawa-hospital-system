@@ -102,7 +102,7 @@ def published(tmp_path, local_storage):
 
 def test_packet_reads_bound_parallelism_and_preserve_pinned_dataset(published, monkeypatch):
     from collections import Counter
-    from threading import Barrier, Lock
+    from threading import Barrier, Lock, current_thread
     from src import staging_data as datasets
 
     packet, arguments, _ = published
@@ -114,6 +114,8 @@ def test_packet_reads_bound_parallelism_and_preserve_pinned_dataset(published, m
     barrier, lock = Barrier(3), Lock()
     active = peak = 0
     calls = []
+    workers = [set(), set()]
+    phase = 0
 
     def observed(uri, **kwargs):
         nonlocal active, peak
@@ -124,6 +126,8 @@ def test_packet_reads_bound_parallelism_and_preserve_pinned_dataset(published, m
             active += 1
             peak = max(peak, active)
             calls.append(uri)
+            if uri != packet['metadata']['uri']:
+                workers[phase].add(current_thread())
         try:
             if uri in first_batch:
                 barrier.wait(timeout=10)
@@ -137,13 +141,66 @@ def test_packet_reads_bound_parallelism_and_preserve_pinned_dataset(published, m
     monkeypatch.setattr(storage, "load_bytes_from_uri", observed)
     with datasets.dataset_context("replay-artifact-fixture"):
         first = artifacts.validate_packet(packet, **arguments)
+        phase = 1
         second = artifacts.validate_packet(packet, **arguments)
     expected = Counter(receipt["uri"] for receipt in packet["outputs"].values())
     expected[packet["metadata"]["uri"]] += 1
     assert Counter(calls) == expected + expected
     assert first == second
     assert peak == 3 and active == 0
+    assert len(workers[0]) == 3 and workers[0] == workers[1]
     assert datasets.current_dataset() == "test"
+
+
+def test_packet_transfers_share_process_bound_without_reusing_results(published, monkeypatch):
+    from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import ContextVar
+    from threading import Barrier, Lock
+
+    packet, arguments, _ = published
+    actor = ContextVar('synthetic_artifact_request', default=None)
+    barrier, lock = Barrier(3), Lock()
+    real_load = storage.load_bytes_from_uri
+    active = peak = 0
+    calls = Counter()
+    first_batch = {packet['outputs'][key]['uri'] for key in list(packet['outputs'])[:3]}
+
+    def observed(uri, **kwargs):
+        nonlocal active, peak
+        identity = actor.get()
+        assert identity in ('request-a', 'request-b', 'request-c')
+        transfer = uri != packet['metadata']['uri']
+        with lock:
+            calls[identity, uri] += 1
+            if transfer:
+                active += 1
+                peak = max(peak, active)
+        try:
+            if uri in first_batch:
+                barrier.wait(timeout=10)
+            return real_load(uri, **kwargs)
+        finally:
+            if transfer:
+                with lock:
+                    active -= 1
+
+    def validate(identity):
+        token = actor.set(identity)
+        try:
+            return artifacts.validate_packet(packet, **arguments)
+        finally:
+            actor.reset(token)
+
+    monkeypatch.setattr(storage, 'load_bytes_from_uri', observed)
+    with ThreadPoolExecutor(max_workers=3) as callers:
+        results = list(callers.map(validate, ('request-a', 'request-b', 'request-c')))
+    expected = Counter(receipt['uri'] for receipt in packet['outputs'].values())
+    expected[packet['metadata']['uri']] += 1
+    assert calls == Counter({(identity, uri): count for identity in ('request-a', 'request-b', 'request-c')
+                             for uri, count in expected.items()})
+    assert results[0] == results[1] == results[2]
+    assert peak == 3 and active == 0
 
 
 def test_packet_parallel_failures_preserve_first_error_and_join_workers(published, monkeypatch):

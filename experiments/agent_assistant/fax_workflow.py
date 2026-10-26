@@ -4,6 +4,7 @@ import json
 from uuid import uuid4
 
 from .store import Conflict
+from .sandbox import run_blocking
 
 
 def digest(value):
@@ -47,8 +48,10 @@ class FaxWorkflow:
                  encode(item['review']), encode(item['decision'])))
 
     async def initialize(self, run):
-        with self.store.read() as db:
-            exists = db.execute("SELECT 1 FROM fax_batches WHERE run_id=?", (run["id"],)).fetchone()
+        def batch_exists():
+            with self.store.read() as db:
+                return db.execute("SELECT 1 FROM fax_batches WHERE run_id=?", (run["id"],)).fetchone() is not None
+        exists = await run_blocking(batch_exists)
         if exists:
             return
         if run.get("task_id")=="hospital_review_faxes":
@@ -58,14 +61,18 @@ class FaxWorkflow:
             data = (await self.get(run, "/ingest/pending-faxes")).json()
         if not isinstance(data.get("items"), list) or data.get("total") != len(data["items"]):
             raise Conflict("未処理FAXの全件を取得できません")
-        with self.store.tx() as db:
-            if db.execute("SELECT 1 FROM fax_batches WHERE run_id=?", (run["id"],)).fetchone():
-                return
-            for item in data["items"]:
-                db.execute("INSERT INTO fax_items(run_id,fax_id,snapshot,state) VALUES(?,?,?,'processing')",
-                    (run["id"], str(item["id"]), json.dumps(item, ensure_ascii=False)))
-            db.execute("INSERT INTO fax_batches VALUES(?)", (run["id"],))
-        self.store.event(run["id"], "fax_batch", {"total": data["total"]})
+        def save_batch():
+            with self.store.tx() as db:
+                if db.execute("SELECT 1 FROM fax_batches WHERE run_id=?", (run["id"],)).fetchone():
+                    return False
+                for item in data["items"]:
+                    db.execute("INSERT INTO fax_items(run_id,fax_id,snapshot,state) VALUES(?,?,?,'processing')",
+                        (run["id"], str(item["id"]), json.dumps(item, ensure_ascii=False)))
+                db.execute("INSERT INTO fax_batches VALUES(?)", (run["id"],))
+            return True
+        if not await run_blocking(save_batch):
+            return
+        await run_blocking(self.store.event, run["id"], "fax_batch", {"total": data["total"]})
 
     async def current_source(self, run, item):
         source = (await self.get(run, f"/ingest/uploads/{item['fax_id']}")).json()
@@ -80,7 +87,7 @@ class FaxWorkflow:
                 raise Conflict("FAXと注文・原本の対応が変更されています")
             if source.get(actual):
                 snap[key] = source[actual]
-        self.set(run["id"], item["fax_id"], snapshot=snap)
+        await run_blocking(self.set, run["id"], item["fax_id"], snapshot=snap)
         return source
 
     def accepted_recovery(self, run, item):
@@ -96,7 +103,7 @@ class FaxWorkflow:
     async def capture(self, run, item, proposed_sheet=None):
         source = await self.current_source(run, item)
         order_id = source.get("current_order_id")
-        if (source.get("status") != "completed" and not self.accepted_recovery(run,item)) or not order_id or not source.get("current_document_id"):
+        if (source.get("status") != "completed" and not await run_blocking(self.accepted_recovery, run,item)) or not order_id or not source.get("current_document_id"):
             raise Conflict("このFAXのOCRは完了していません")
         workflow = (await self.get(run, f"/orders/{order_id}/workflow-v2")).json()
         if not workflow.get("selected_ocr_result_id"):
@@ -131,14 +138,14 @@ class FaxWorkflow:
         if not self.active(run):
             raise ValueError("未処理FAXの定型業務でのみ使用できます")
         await self.initialize(run)
-        for item in self.items(run["id"]):
+        for item in await run_blocking(self.items, run["id"]):
             try:
                 source = await self.current_source(run, item)
                 status = source.get("status")
                 state = item["state"]
                 if status in ("pending", "processing"):
                     state = status
-                elif status != "completed" and not self.accepted_recovery(run,item):
+                elif status != "completed" and not await run_blocking(self.accepted_recovery, run,item):
                     raise Conflict("FAX取込が要確認または失敗です。履歴を確認してください")
                 elif source.get("current_order_id"):
                     wf = (await self.get(run, f"/orders/{source['current_order_id']}/workflow-v2")).json()
@@ -148,13 +155,13 @@ class FaxWorkflow:
                         state = "ready"
                 else:
                     raise Conflict("OCR完了FAXに対応する注文がありません")
-                self.set_observed(run["id"], item, state=state)
+                await run_blocking(self.set_observed, run["id"], item, state=state)
             except Conflict as exc:
-                self.set_observed(run["id"], item, state="blocked", decision={"message": str(exc)})
-        return {"ok": True, "items": self.items(run["id"])}
+                await run_blocking(self.set_observed, run["id"], item, state="blocked", decision={"message": str(exc)})
+        return {"ok": True, "items": await run_blocking(self.items, run["id"])}
 
     async def submit(self, run, fax_id, summary, sheet=None):
-        item = next((x for x in self.items(run["id"]) if x["fax_id"] == fax_id), None)
+        item = next((x for x in await run_blocking(self.items, run["id"]) if x["fax_id"] == fax_id), None)
         if not item or not summary.strip() or len(summary) > 4000:
             raise ValueError("対象FAXと照合結果が必要です")
         captured = await self.capture(run, item, proposed_sheet=sheet)
@@ -172,14 +179,14 @@ class FaxWorkflow:
         artifact = self.tools.artifact(run["id"], original.content, f"FAX-{fax_id}.pdf")
         review = {"id": uuid4().hex, "signature": captured["signature"], "native_signature": basis["signature"], "revision": captured["revision"],
             "summary": summary, "sheet": captured["sheet"], "original": artifact, "order_id": order_id}
-        self.set(run["id"], fax_id, state="awaiting_approval", review=review, decision=None)
-        self.store.event(run["id"], "fax_review", {"fax_id": fax_id, "review_id": review["id"], "summary":summary})
+        await run_blocking(self.set, run["id"], fax_id, state="awaiting_approval", review=review, decision=None)
+        await run_blocking(self.store.event, run["id"], "fax_review", {"fax_id": fax_id, "review_id": review["id"], "summary":summary})
         return {"ok": True, "queued_for_human": True, "review": review}
 
     async def decide(self, run, fax_id, review_id, approve, message):
         if run["status"] != "running" or not self.active(run):
             raise Conflict("この依頼は回答を受け付けていません")
-        item = next((x for x in self.items(run["id"]) if x["fax_id"] == fax_id), None)
+        item = next((x for x in await run_blocking(self.items, run["id"]) if x["fax_id"] == fax_id), None)
         if not item or not item["review"] or item["review"]["id"] != review_id:
             raise Conflict("確認画面が古くなっています。最新の内容を開いてください")
         decision = {"review_id": review_id, "approve": approve, "message": message}
@@ -189,24 +196,24 @@ class FaxWorkflow:
             raise Conflict("この確認には既に回答済みです")
         current = await self.capture(run, item, proposed_sheet=item["review"]["sheet"])
         basis = await self.capture(run, item)
-        if self.store.get(run["id"])["generation"] != run["generation"] or self.store.get(run["id"])["status"] != "running":
+        if (await run_blocking(self.store.get, run["id"]))["generation"] != run["generation"] or (await run_blocking(self.store.get, run["id"]))["status"] != "running":
             raise Conflict("依頼は停止されました")
         if current["signature"] != item["review"]["signature"] or current["revision"] != item["review"]["revision"] or basis["signature"] != item["review"]["native_signature"] or basis["revision"] != current["revision"]:
-            self.set(run["id"], fax_id, state="ready", review=None, decision=None)
+            await run_blocking(self.set, run["id"], fax_id, state="ready", review=None, decision=None)
             raise Conflict("確認後に内容・版が変わりました。再確認が必要です")
         if not approve and not message.strip():
             raise ValueError("訂正してほしい箇所を入力してください")
         decision["approved_revision"] = current["revision"]
         decision["native_signature"] = basis["signature"]
-        self.set(run["id"], fax_id, state="approved" if approve else "needs_correction", decision=decision)
-        self.store.event(run["id"], "fax_decision", {"fax_id": fax_id, **decision})
+        await run_blocking(self.set, run["id"], fax_id, state="approved" if approve else "needs_correction", decision=decision)
+        await run_blocking(self.store.event, run["id"], "fax_decision", {"fax_id": fax_id, **decision})
         return {"ok": True}
 
     async def gate(self, run, name, args):
         if not self.active(run):
             return
         await self.initialize(run)
-        items = self.items(run["id"])
+        items = await run_blocking(self.items, run["id"])
         from .catalog import OPERATIONS
         op = OPERATIONS[name]
         if op.method == "GET":
@@ -225,7 +232,7 @@ class FaxWorkflow:
             basis = await self.capture(run, item)
             wf = basis["workflow"]
             if wf["revision"] != item["decision"].get("approved_revision") or basis["signature"] != item["decision"].get("native_signature"):
-                self.set(run["id"], item["fax_id"], state="ready", review=None, decision=None)
+                await run_blocking(self.set, run["id"], item["fax_id"], state="ready", review=None, decision=None)
                 raise Conflict("承認後に業務の版が変わりました。再確認が必要です")
         if name == "hospital_start_fax" and args.body != {"sha256": item["snapshot"]["sha256"]}:
             raise Conflict("依頼対象の原本ハッシュが必要です")
@@ -241,19 +248,19 @@ class FaxWorkflow:
             wf = (await self.get(run, f"/orders/{order_id}/workflow-v2")).json()
             current = await self.capture(run, item, proposed_sheet=item["review"]["sheet"] if not wf.get("saved_sheet_id") or name in ("hospital_review_sheet", "hospital_save_sheet") else None)
             if current["signature"] != item["review"]["signature"]:
-                self.set(run["id"], item["fax_id"], state="ready", review=None, decision=None)
+                await run_blocking(self.set, run["id"], item["fax_id"], state="ready", review=None, decision=None)
                 raise Conflict("承認後に原本・採用OCR・数量が変わりました。再承認が必要です")
 
     async def after_write(self, run, name, args, receipt):
         if self.active(run) and name=="hospital_retry_fax":
-            item=next((x for x in self.items(run["id"]) if x["fax_id"]==str(args.ids["uploaded_pdf_id"])),None)
+            item=next((x for x in await run_blocking(self.items, run["id"]) if x["fax_id"]==str(args.ids["uploaded_pdf_id"])),None)
             if item:
                 snap={**item["snapshot"],"order_id":None,"document_id":None}
-                self.set(run["id"],item["fax_id"],snapshot=snap,state="processing",review=None,decision=None)
+                await run_blocking(self.set, run["id"],item["fax_id"],snapshot=snap,state="processing",review=None,decision=None)
             return
         if not self.active(run) or "order_id" not in args.ids:
             return
-        item = next((x for x in self.items(run["id"]) if str(x["snapshot"].get("order_id")) == str(args.ids["order_id"])), None)
+        item = next((x for x in await run_blocking(self.items, run["id"]) if str(x["snapshot"].get("order_id")) == str(args.ids["order_id"])), None)
         if not item or item["state"] != "approved":
             return
         from .catalog import OPERATIONS
@@ -266,16 +273,16 @@ class FaxWorkflow:
         else:
             expected = item["decision"]["approved_revision"]
         if current["revision"] != expected:
-            self.set(run["id"], item["fax_id"], state="ready", review=None, decision=None)
+            await run_blocking(self.set, run["id"], item["fax_id"], state="ready", review=None, decision=None)
             raise Conflict("承認した操作の間に業務の版が変わりました。再確認が必要です")
         if current["signature"] != item["review"]["signature"]:
-            self.set(run["id"], item["fax_id"], state="ready", review=None, decision=None)
+            await run_blocking(self.set, run["id"], item["fax_id"], state="ready", review=None, decision=None)
             raise Conflict("承認した内容と保存結果が一致しません。再確認が必要です")
         basis = await self.capture(run, item)
         if basis["revision"] != current["revision"]:
             raise Conflict("保存結果の照合中に版が変わりました")
         decision = {**item["decision"], "approved_revision": current["revision"], "native_signature": basis["signature"]}
-        self.set(run["id"], item["fax_id"], decision=decision)
+        await run_blocking(self.set, run["id"], item["fax_id"], decision=decision)
 
     def finish_gate(self, run_id, artifact_ids):
         run = self.store.get(run_id)

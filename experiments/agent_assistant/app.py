@@ -1,6 +1,7 @@
 """Local trial API. Start with python -m experiments.agent_assistant.app."""
 import asyncio
 from contextlib import asynccontextmanager
+from functools import wraps
 import hashlib
 import hmac
 import json
@@ -17,11 +18,21 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from .providers import Providers, LABELS
 from .mcp_server import build_mcp
-from .sandbox import Sandbox
+from .sandbox import Sandbox, run_blocking, settle_process_task
 from .store import Store, Conflict
 from .tools import Tools
 from .tasks import TASKS, public_tasks
 from .conversation import conversation, pending_question
+
+
+def _complete_request(function):
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        result, cancelled = await settle_process_task(asyncio.create_task(function(*args, **kwargs)))
+        if cancelled is not None:
+            raise cancelled
+        return result
+    return wrapped
 
 
 def trial_cookie_name(request):
@@ -164,14 +175,16 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         if request.url.path.startswith("/mcp"):
             ident = request.headers.get("x-run-id", "")
             try:
-                run = store.get(ident, owner)
+                run = await asyncio.to_thread(store.get, ident, owner)
             except KeyError:
                 return JSONResponse({"detail": "Run required"}, status_code=403)
             request.state.trial_binding = (ident, run["generation"])
         response = await call_next(request)
         if sandbox.durable_store is not None and request.method not in ("GET", "HEAD", "OPTIONS") and '/target-lookups' not in request.url.path:
-            for run in store.listing(owner):
-                store.persist_files(run["id"])
+            def persist_response_files():
+                for run in store.listing(owner):
+                    store.persist_files(run["id"])
+            await run_blocking(persist_response_files)
         return response
 
     @app.exception_handler(Conflict)
@@ -218,12 +231,14 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         return await tools.flow.options(task_id, payload.inputs, owner, request.headers.get("authorization", ""))
 
     @app.post('/tasks/{task_id}/target-lookups', status_code=202)
+    @_complete_request
     async def start_target_lookup(task_id: str, payload: TargetLookupRequest, request: Request):
         if task_id not in CONTRACTS:
             raise ValueError('対象選択を行う作業を選択してください')
         authorization = request.headers.get('authorization', '')
         await authorize(authorization, [TASKS[task_id]['domain']])
-        return lookups.create(payload.request_key, owner, task_id, payload.inputs, authorization)
+        row = await run_blocking(lookups.prepare, payload.request_key, owner, task_id, payload.inputs)
+        return lookups.result(row, authorization)
 
     @app.get('/target-lookups/{ident}')
     async def target_lookup(ident: str, request: Request):
@@ -260,12 +275,14 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         return response
 
     @app.post("/runs", status_code=201)
+    @_complete_request
     async def create_run(payload: NewRun, request: Request):
-        injected = gemini_client if store.provider() == 'gemini' else managed_client
+        provider = await asyncio.to_thread(store.provider)
+        injected = gemini_client if provider == 'gemini' else managed_client
         task = TASKS.get(payload.task_id) if payload.task_id else None
         if payload.task_id and payload.task_id not in CONTRACTS:
             raise ValueError('画面に表示されている業務を選択してください')
-        if managed.missing() and injected is None and (not task or CONTRACTS[payload.task_id].prepare == 'agent'):
+        if await run_blocking(managed.missing) and injected is None and (not task or CONTRACTS[payload.task_id].prepare == 'agent'):
             raise Conflict("この業務の接続設定は管理者が確認しています。選択した内容は変更していません")
         if payload.task_id and (not task or payload.instruction or payload.domains):
             raise ValueError("定型業務は作業項目だけを指定してください")
@@ -276,41 +293,43 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await authorize(request.headers.get("authorization", ""), domains)
         task_inputs = {}
         if task and payload.task_id != "hospital_pending_faxes":
-            task_inputs = tools.flow.selection(payload.task_id, owner, payload.selection_id, payload.target_keys, payload.layout_id)
+            task_inputs = await asyncio.to_thread(tools.flow.selection, payload.task_id, owner, payload.selection_id, payload.target_keys, payload.layout_id)
         elif payload.selection_id or payload.target_keys or payload.layout_id is not None:
             raise ValueError("この作業では対象一覧の指定は使いません")
-        run, fresh = store.create(owner, payload.request_key, instruction, domains, payload.cap_cents if payload.cap_cents is not None else config.get("run_cap_cents", 100), task_id=payload.task_id, task_inputs=task_inputs, provider=store.provider())
+        provider = await asyncio.to_thread(store.provider)
+        run, fresh = await run_blocking(store.create, owner, payload.request_key, instruction, domains, payload.cap_cents if payload.cap_cents is not None else config.get("run_cap_cents", 100), task_id=payload.task_id, task_inputs=task_inputs, provider=provider)
         if fresh:
             tools.authorizations[run["id"]] = request.headers.get("authorization", "")
             if task:
-                business.initialize(run)
+                await run_blocking(business.initialize, run)
             try:
-                sandbox.prepare(run)
+                await run_blocking(sandbox.prepare, run)
             except Exception as exc:
-                store.update(run["id"], expected_generation=run['generation'], status="failed", reserved=0)
-                store.event(run["id"], "error", {"message": str(exc) if isinstance(exc, Conflict) else "試用データの準備に失敗しました"})
-                return store.get(run["id"], owner)
+                await run_blocking(store.update, run["id"], expected_generation=run['generation'], status="failed", reserved=0)
+                await run_blocking(store.event, run["id"], "error", {"message": str(exc) if isinstance(exc, Conflict) else "試用データの準備に失敗しました"})
+                return await asyncio.to_thread(store.get, run["id"], owner)
             if payload.task_id == "lunch_import":
-                store.update(run["id"], expected_generation=run['generation'], status="waiting_input")
-                store.event(run["id"], "notice", {"message":"選択した学校・対象月と一致する原本を添付してください。添付が終わるまでエージェントは開始しません。"})
-                return store.get(run["id"],owner)
+                await run_blocking(store.update, run["id"], expected_generation=run['generation'], status="waiting_input")
+                await run_blocking(store.event, run["id"], "notice", {"message":"選択した学校・対象月と一致する原本を添付してください。添付が終わるまでエージェントは開始しません。"})
+                return await asyncio.to_thread(store.get, run["id"], owner)
             if task:
-                business.kick(run['id'])
-                return store.get(run['id'], owner)
+                await business.kick_many([run['id']])
+                return await asyncio.to_thread(store.get, run['id'], owner)
             # Remote create/send must not be retried after an unknown outcome.
             try:
                 await managed.start(run)
             except asyncio.CancelledError:
-                if store.get(run["id"])["status"] in ("stopping", "stopped", "stop_pending", "rolled_back", "rollback_stop_pending"):
-                    return store.get(run["id"], owner)
+                current = await asyncio.to_thread(store.get, run["id"], owner)
+                if current["status"] in ("stopping", "stopped", "stop_pending", "rolled_back", "rollback_stop_pending"):
+                    return current
                 raise
             except Exception as exc:
-                current = store.get(run['id'])
+                current = await asyncio.to_thread(store.get, run['id'])
                 if current['generation'] != run['generation'] or current['status'] in ('completed', 'stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
                     return current
-                store.event(run["id"], "error", {"message": LABELS[run["provider"]]+"の開始に失敗しました。保存済み内容は保持しています。", "class": type(exc).__name__})
+                await run_blocking(store.event, run["id"], "error", {"message": LABELS[run["provider"]]+"の開始に失敗しました。保存済み内容は保持しています。", "class": type(exc).__name__})
                 await managed.stop(run["id"], expected_generation=run['generation'])
-        return store.get(run["id"], owner)
+        return await asyncio.to_thread(store.get, run["id"], owner)
 
     @app.get("/runs/{ident}")
     async def run_detail(ident: str, request: Request):
@@ -342,134 +361,157 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         return await asyncio.to_thread(read_response)
 
     @app.post("/runs/{ident}/faxes/{fax_id}/decision")
+    @_complete_request
     async def decide_fax(ident: str, fax_id: str, payload: FaxDecision, request: Request):
-        run = store.get(ident, owner)
+        run = await asyncio.to_thread(store.get, ident, owner)
         await authorize(request.headers.get("authorization", ""), run["domains"])
         tools.authorizations[ident] = request.headers.get("authorization", "")
         async with tools.lock(ident):
-            item = next((item for item in tools.faxes.items(ident) if item['fax_id'] == fax_id), None)
+            items = await asyncio.to_thread(tools.faxes.items, ident)
+            item = next((item for item in items if item['fax_id'] == fax_id), None)
             decision = {'review_id': payload.review_id, 'approve': payload.approve, 'message': payload.message}
             if owned(run) and item and item.get('decision') and all(item['decision'].get(key) == value for key, value in decision.items()):
                 result = {'ok': True, 'replayed': True}
             else:
-                result = await tools.faxes.decide(store.get(ident, owner), fax_id, payload.review_id, payload.approve, payload.message)
+                current = await asyncio.to_thread(store.get, ident, owner)
+                result = await tools.faxes.decide(current, fax_id, payload.review_id, payload.approve, payload.message)
         if owned(run):
-            business.decision_ready(ident, payload.approve)
+            if await run_blocking(business.decision_ready, ident, payload.approve, schedule=False):
+                await business.kick_many([ident])
         return result
 
     @app.post("/runs/{ident}/decision")
+    @_complete_request
     async def task_decision(ident: str, payload: FaxDecision, request: Request):
-        run=store.get(ident,owner)
+        run = await asyncio.to_thread(store.get, ident, owner)
         await authorize(request.headers.get("authorization", ""),run["domains"])
         tools.authorizations[ident]=request.headers.get("authorization", "")
         async with tools.lock(ident):
-            review = tools.flow.review(ident)
+            review = await asyncio.to_thread(tools.flow.review, ident)
             if review and review['id'] == payload.review_id and review.get('decision') == {'approve': payload.approve, 'message': payload.message}:
                 result = {'ok': True, 'replayed': True}
             else:
-                result = await tools.flow.decide(store.get(ident,owner),payload.review_id,payload.approve,payload.message)
+                current = await asyncio.to_thread(store.get, ident, owner)
+                result = await tools.flow.decide(current,payload.review_id,payload.approve,payload.message)
         if owned(run):
-            business.decision_ready(ident, payload.approve)
+            if await run_blocking(business.decision_ready, ident, payload.approve, schedule=False):
+                await business.kick_many([ident])
         return result
 
     @app.post("/runs/{ident}/reply")
+    @_complete_request
     async def reply(ident: str, payload: Reply, request: Request):
-        run=store.get(ident, owner)
+        run = await asyncio.to_thread(store.get, ident, owner)
         tools.authorizations[ident] = request.headers.get("authorization", "")
         await authorize(request.headers.get('authorization', ''), run['domains'])
         if owned(run):
-            replies = [event['payload'] for event in store.events(ident) if event['kind'] == 'operator_reply']
+            events = await asyncio.to_thread(store.events, ident)
+            replies = [event['payload'] for event in events if event['kind'] == 'operator_reply']
             if payload.question_id and any(item.get('question_id') == payload.question_id and item.get('message') == payload.message and item.get('option') == payload.option for item in replies):
-                return store.get(ident, owner)
-            if business.shift_questions.answer(run, payload.message, payload.question_id, payload.option) or business.answer_layout(run, payload.message, payload.question_id, payload.option):
-                return store.get(ident, owner)
-            if run['task_id'] == 'lunch_import' and business.state(ident)['phase'] == 'source':
-                if not any(event['kind'] == 'source' for event in store.events(ident)):
+                return await asyncio.to_thread(store.get, ident, owner)
+            answered = await run_blocking(business.shift_questions.answer, run, payload.message, payload.question_id, payload.option, schedule=False)
+            if not answered:
+                answered = await run_blocking(business.answer_layout, run, payload.message, payload.question_id, payload.option, schedule=False)
+            if answered:
+                await business.kick_many([ident])
+                return await asyncio.to_thread(store.get, ident, owner)
+            state = await asyncio.to_thread(business.state, ident) if run['task_id'] == 'lunch_import' else None
+            if state is not None and state['phase'] == 'source':
+                events = await asyncio.to_thread(store.events, ident)
+                if not any(event['kind'] == 'source' for event in events):
                     raise Conflict('選択した学校・月と一致する原本を添付してください')
-                business.source_ready(run)
-                return store.get(ident, owner)
+                await run_blocking(business.source_ready, run, schedule=False)
+                await business.kick_many([ident])
+                return await asyncio.to_thread(store.get, ident, owner)
             await managed.reply(ident, payload.message, payload.question_id, payload.option)
-            business.checkpoint(ident, phase='analysing')
-            business.kick(ident)
-            return store.get(ident, owner)
+            await run_blocking(business.checkpoint, ident, phase='analysing')
+            await business.kick_many([ident])
+            return await asyncio.to_thread(store.get, ident, owner)
         if run.get("task_id")=="lunch_import" and not run["session_id"]:
             await authorize(request.headers.get("authorization", ""),run["domains"])
-            if run["status"] != "waiting_input" or not any(e["kind"]=="source" for e in store.events(ident)):
+            events = await asyncio.to_thread(store.events, ident)
+            if run["status"] != "waiting_input" or not any(e["kind"]=="source" for e in events):
                 raise Conflict("原本を添付してから開始してください")
             async with control_lock(ident):
-                if store.get(ident)["status"] != "waiting_input" or store.get(ident)["session_id"]:
+                current = await asyncio.to_thread(store.get, ident)
+                if current["status"] != "waiting_input" or current["session_id"]:
                     raise Conflict("既に開始済み、または停止されています")
-                store.update(ident,expected_generation=run['generation'],status="preparing")
+                await run_blocking(store.update, ident,expected_generation=run['generation'],status="preparing")
             try:
-                await managed.start(store.get(ident))
+                await managed.start(await asyncio.to_thread(store.get, ident))
             except asyncio.CancelledError:
-                if store.get(ident)["status"] not in ("stopping","stopped","rolled_back","stop_pending","rollback_stop_pending"): raise
+                current = await asyncio.to_thread(store.get, ident)
+                if current["status"] not in ("stopping","stopped","rolled_back","stop_pending","rollback_stop_pending"): raise
             except Exception:
-                current = store.get(ident)
+                current = await asyncio.to_thread(store.get, ident)
                 if current['generation'] != run['generation'] or current['status'] in ('completed', 'stopping', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending'):
                     return current
-                store.event(ident,"error",{"message":"開始結果を照合してください。自動再送は行いません。"})
+                await run_blocking(store.event, ident,"error",{"message":"開始結果を照合してください。自動再送は行いません。"})
                 await managed.stop(ident, expected_generation=run['generation'])
-                return store.get(ident,owner)
-            return store.get(ident,owner)
+                return await asyncio.to_thread(store.get, ident, owner)
+            return await asyncio.to_thread(store.get, ident, owner)
         await managed.reply(ident, payload.message, payload.question_id, payload.option)
-        return store.get(ident, owner)
+        return await asyncio.to_thread(store.get, ident, owner)
 
     @app.post("/runs/{ident}/resume")
+    @_complete_request
     async def resume(ident: str, request: Request):
-        run = store.get(ident, owner)
+        run = await asyncio.to_thread(store.get, ident, owner)
         await authorize(request.headers.get('authorization', ''), run['domains'])
         async with control_lock(ident):
             tools.authorizations[ident] = request.headers.get('authorization', '')
             return await managed.resume(ident)
 
     @app.post('/runs/{ident}/reconcile-business')
+    @_complete_request
     async def reconcile_business(ident: str, request: Request):
-        run = store.get(ident, owner)
+        run = await asyncio.to_thread(store.get, ident, owner)
         await authorize(request.headers.get('authorization', ''), run['domains'])
         if not owned(run):
             raise Conflict('共通業務進行を利用している依頼ではありません')
-        business.checkpoint(ident, attempts=0, next_attempt=0)
-        business.kick(ident, request.headers.get('authorization', ''))
-        return store.get(ident, owner)
+        await run_blocking(business.checkpoint, ident, attempts=0, next_attempt=0)
+        await business.kick_many([ident], request.headers.get('authorization', ''))
+        return await asyncio.to_thread(store.get, ident, owner)
 
     @app.post("/runs/{ident}/stop")
     async def stop(ident: str):
-        store.get(ident, owner)
+        await asyncio.to_thread(store.get, ident, owner)
         async with control_lock(ident):
             await managed.stop(ident)
-        return store.get(ident, owner)
+        return await asyncio.to_thread(store.get, ident, owner)
 
     @app.post("/runs/{ident}/rollback")
+    @_complete_request
     async def rollback(ident: str):
         async with control_lock(ident):
             return await restore_run(ident)
 
     async def restore_run(ident):
-        run = store.get(ident, owner)
+        run = await asyncio.to_thread(store.get, ident, owner)
         if run["status"] == "rolled_back":
             return run
         if run["status"] == "rollback_stop_pending":
             await managed.stop(ident)
-            return store.get(ident, owner)
+            return await asyncio.to_thread(store.get, ident, owner)
         await managed.stop(ident)
         async with tools.lock(ident):
-            stopped = store.get(ident, owner)
+            stopped = await asyncio.to_thread(store.get, ident, owner)
             result = await sandbox.restore(stopped)
-            store.finish_rollback(ident, stopped['generation'], result)
-        return store.get(ident, owner)
+            await run_blocking(store.finish_rollback, ident, stopped['generation'], result)
+        return await asyncio.to_thread(store.get, ident, owner)
 
     @app.post("/runs/{ident}/refresh-usage")
     async def refresh(ident: str):
-        run = store.get(ident, owner)
+        run = await asyncio.to_thread(store.get, ident, owner)
         if run.get("task_id")=="lunch_import" and not run["session_id"] and run["status"] in ("waiting_input","stopped","rolled_back"):
-            return {"run":run,"budget":store.budget(),"notice":"モデル開始前のためモデル利用料金はありません。"}
+            return {"run":run,"budget":await asyncio.to_thread(store.budget),"notice":"モデル開始前のためモデル利用料金はありません。"}
         await managed.refresh_usage(ident)
-        return {"run": store.get(ident), "budget": store.budget()}
+        return {"run": await asyncio.to_thread(store.get, ident), "budget": await asyncio.to_thread(store.budget)}
 
     @app.post("/runs/{ident}/sources")
+    @_complete_request
     async def source(ident: str, request: Request, file: UploadFile = File(), domain: str = Form(), binding: str = Form()):
-        run = store.get(ident, owner)
+        run = await asyncio.to_thread(store.get, ident, owner)
         if run["status"] != "waiting_input":
             raise Conflict("確認待ちの依頼に原本を添付してください")
         if domain not in run["domains"]:
@@ -488,15 +530,18 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             raise ValueError("原本は20MB以下で指定してください")
         if domain == "hospital" and not content.startswith(b"%PDF-"):
             raise ValueError("病院注文はPDF原本が必要です")
-        source_id = secrets.token_hex(16)
-        folder = sandbox.path(ident) / "sources"
-        folder.mkdir(exist_ok=True)
-        (folder / source_id).write_bytes(content)
-        (folder / (source_id+".json")).write_text(json.dumps({"domain": domain, "binding": values,
-                "name": Path(file.filename or "source.pdf").name, "mime": file.content_type or "application/octet-stream"}))
-        artifact = tools.artifact(ident, content, Path(file.filename or "source.pdf").name)
-        store.event(ident, "source", {"source_id": source_id, "domain": domain, "binding": values, "artifact": artifact, "confirmed_by": owner})
-        return {"source_id": source_id, "artifact": artifact}
+        def save_source():
+            source_id = secrets.token_hex(16)
+            folder = sandbox.path(ident) / "sources"
+            folder.mkdir(exist_ok=True)
+            (folder / source_id).write_bytes(content)
+            (folder / (source_id+".json")).write_text(json.dumps({"domain": domain, "binding": values,
+                    "name": Path(file.filename or "source.pdf").name, "mime": file.content_type or "application/octet-stream"}))
+            artifact = tools.artifact(ident, content, Path(file.filename or "source.pdf").name)
+            store.event(ident, "source", {"source_id": source_id, "domain": domain, "binding": values, "artifact": artifact, "confirmed_by": owner})
+            return {"source_id": source_id, "artifact": artifact}
+
+        return await run_blocking(save_source)
 
     @app.get("/runs/{ident}/question-drawings/{digest}")
     def question_drawing(ident: str, digest: str, question_id: str):

@@ -174,6 +174,10 @@ class PostgresStore(Store):
                 indexed = indexed is True and isinstance(read_schema, dict)
                 if epoch != self.epoch:
                     raise Conflict('実行環境が交代しました。画面を再読み込みし、履歴から停止・巻き戻しを行ってください')
+                known_files = None
+                if not readonly:
+                    c.execute('SELECT path,digest FROM sawa_agent_trial.files')
+                    known_files = dict(c.fetchall())
                 db = sqlite3.connect(':memory:')
                 db.row_factory = sqlite3.Row
                 try:
@@ -190,7 +194,7 @@ class PostgresStore(Store):
                     if self.working_ready:
                         from .working_copy import checkpoint
                         for row in db.execute('SELECT id FROM runs').fetchall():
-                            manifest = checkpoint(self.root, row['id'], c, encode_blob)
+                            manifest = checkpoint(self.root, row['id'], c, encode_blob, known=known_files)
                             if manifest is not None:
                                 db.execute('INSERT INTO working_copies VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET manifest=excluded.manifest', (row['id'], manifest))
                             # A question receipt must never commit before the
@@ -198,12 +202,12 @@ class PostgresStore(Store):
                             for name in ('before','sources','question-drawings'):
                                 for path in sorted((self.root/'runs'/row['id']/name).rglob('*')):
                                     if path.is_file():
-                                        self._file(c, path)
+                                        self._file(c, path, known=known_files)
                     db.commit()
                     # Persist a sealed artifact before acknowledging its ledger row.
                     if db.execute("SELECT 1 FROM sqlite_master WHERE name='artifacts'").fetchone():
                         for row in db.execute('SELECT path,sha256 FROM artifacts'):
-                            self._file(c, Path(row['path']), expected=row['sha256'])
+                            self._file(c, Path(row['path']), expected=row['sha256'], known=known_files)
                     if indexed is not True:
                         c.execute('DELETE FROM sawa_agent_trial.read_rows')
                     indexed_after = ledger_reads.capture(db)
@@ -225,10 +229,13 @@ class PostgresStore(Store):
             raise Conflict('永続化する試用ファイルの保存先が不正です')
         return path, str(relative)
 
-    def _file(self, cursor, path, expected=None):
+    def _file(self, cursor, path, expected=None, *, known=None):
         path, relative = self._relative(path)
-        cursor.execute('SELECT digest FROM sawa_agent_trial.files WHERE path=%s', (relative,))
-        old = cursor.fetchone()
+        if known is None:
+            cursor.execute('SELECT digest FROM sawa_agent_trial.files WHERE path=%s', (relative,))
+            old = cursor.fetchone()
+        else:
+            old = (known[relative],) if relative in known else None
         if old and expected and old[0] == expected:
             return
         if path.is_symlink() or not path.is_file():
@@ -242,6 +249,8 @@ class PostgresStore(Store):
                 raise Conflict('保存済み原本・帳票の上書きは禁止されています')
             return
         cursor.execute('INSERT INTO sawa_agent_trial.files VALUES (%s,%s,%s)', (relative,digest,encode_blob(content)))
+        if known is not None:
+            known[relative] = digest
 
     def persist_files(self, ident):
         root = self.root / 'runs' / ident
@@ -250,11 +259,20 @@ class PostgresStore(Store):
                 c.execute('SELECT epoch FROM sawa_agent_trial.ledger WHERE id=1 FOR UPDATE')
                 if c.fetchone()[0] != self.epoch:
                     raise Conflict('実行環境が交代したため保存を停止しました')
+                paths = []
                 for name in ('before','artifacts','sources','question-drawings'):
                     directory = root / name
                     for path in sorted(directory.rglob('*')):
                         if path.is_file():
-                            self._file(c,path)
+                            paths.append(path)
+                relatives = [self._relative(path)[1] for path in paths]
+                known_files = {}
+                for offset in range(0, len(relatives), 500):
+                    c.execute('SELECT path,digest FROM sawa_agent_trial.files WHERE path=ANY(%s)',
+                              (relatives[offset:offset + 500],))
+                    known_files.update(c.fetchall())
+                for path in paths:
+                    self._file(c, path, known=known_files)
 
     def hydrate(self):
         with closing(self.connect()) as pg, pg:

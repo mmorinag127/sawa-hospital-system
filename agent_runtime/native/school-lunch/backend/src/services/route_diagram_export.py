@@ -2,13 +2,8 @@
 from io import BytesIO
 from zipfile import ZipFile, ZIP_DEFLATED
 from xml.etree import ElementTree as ET
-from openpyxl import Workbook
-from openpyxl.drawing.image import Image
-from openpyxl.styles import Font, Alignment
-from openpyxl.worksheet.page import PageMargins
 from src.services import route_diagram_service as service
 from src.models.route_diagram import KitchenLayout
-from PIL import Image as PILImage
 
 XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -91,6 +86,12 @@ def add_shapes(root, routes, layout, width, height):
 
 
 def export_editable(session, diagrams, layouts=None):
+    from openpyxl import Workbook
+    from openpyxl.drawing.image import Image
+    from openpyxl.styles import Font, Alignment
+    from openpyxl.worksheet.page import PageMargins
+    from PIL import Image as PILImage
+
     if layouts is None:
         from src.services.route_export_snapshot import begin_export_read, freeze_row
         begin_export_read(session)

@@ -3,6 +3,7 @@ import asyncio
 import json
 
 from .store import Conflict
+from .sandbox import run_blocking
 
 
 class TargetLookups:
@@ -11,6 +12,9 @@ class TargetLookups:
         self.jobs = {}
 
     def create(self, ident, owner, task_id, inputs, authorization):
+        return self.result(self.prepare(ident, owner, task_id, inputs), authorization)
+
+    def prepare(self, ident, owner, task_id, inputs):
         with self.store.tx() as db:
             row = db.execute('SELECT * FROM target_lookups WHERE id=?', (ident,)).fetchone()
             if row:
@@ -18,7 +22,7 @@ class TargetLookups:
                     raise Conflict('取得依頼の内容が一致しません')
             else:
                 db.execute("INSERT INTO target_lookups VALUES(?,?,?,?,'queued',NULL)", (ident, owner, task_id, json.dumps(inputs, sort_keys=True)))
-        return self.get(ident, owner, authorization)
+        return self.store.target_lookup(ident, owner)
 
     def get(self, ident, owner, authorization):
         row = self.store.target_lookup(ident, owner)
@@ -39,8 +43,10 @@ class TargetLookups:
         except Exception as exc:
             result = {'message': str(exc) if isinstance(exc, (ValueError, Conflict)) else '登録内容の取得をシステム側で確認しています。'}
             state = 'failed'
-        with self.store.tx() as db:
-            db.execute('UPDATE target_lookups SET state=?,payload=? WHERE id=?', (state, json.dumps(result, ensure_ascii=False), row['id']))
+        def save_result():
+            with self.store.tx() as db:
+                db.execute('UPDATE target_lookups SET state=?,payload=? WHERE id=?', (state, json.dumps(result, ensure_ascii=False), row['id']))
+        await run_blocking(save_result)
 
     async def close(self):
         for job in self.jobs.values():

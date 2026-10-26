@@ -168,10 +168,10 @@ def test_cloud_run_registered_endpoint_retains_missing_storage_503(
     upload = UploadFile(filename="authored.xlsx", file=BytesIO(data))
     try:
         with pytest.raises(HTTPException) as caught:
-            asyncio.run(facilities.upload_order_form_source_workbook(
+            facilities.upload_order_form_source_workbook(
                 "synthetic-storage", file=upload, month_id=None,
                 expected_revision=snapshot.revision,
-            ))
+            )
         assert caught.value.status_code == 503
         assert caught.value.detail == "source_workbook_gcs_storage_required"
         assert upload.file.tell() == 0

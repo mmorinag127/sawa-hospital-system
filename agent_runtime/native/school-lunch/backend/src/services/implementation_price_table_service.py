@@ -11,11 +11,10 @@ import math
 import re
 import unicodedata
 from uuid import uuid4
+from typing import TYPE_CHECKING
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.worksheet.page import PageMargins
-from openpyxl.utils import get_column_letter
+if TYPE_CHECKING:
+    from openpyxl import Workbook
 from sqlalchemy import select
 
 from src.db import session_scope
@@ -824,6 +823,11 @@ def _price_text_height(text: str, column_width: float, font_size: float = 11) ->
 
 
 def build_price_table_workbook(request: PriceTableRequest) -> Workbook:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.worksheet.page import PageMargins
+    from openpyxl.utils import get_column_letter
+
     workbook = Workbook()
     workbook.remove(workbook.active)
 

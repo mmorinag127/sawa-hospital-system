@@ -16,9 +16,6 @@ import unicodedata
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
-from openpyxl import load_workbook
-from openpyxl.cell.cell import MergedCell
-from openpyxl.utils.cell import range_boundaries
 
 from src.services import cooking_arrangement_service as upload
 
@@ -122,6 +119,10 @@ def _drawings(content):
 
 
 def extract_work_schedule_draft(*, filename: str, workbook_bytes: bytes) -> dict:
+    from openpyxl import load_workbook
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.utils.cell import range_boundaries
+
     suffix = upload.validate_upload(filename=filename, content=workbook_bytes)
     if suffix not in {".xlsx", ".xlsm"}:
         raise ValueError("work schedule import requires XLSX or XLSM")

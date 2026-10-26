@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from .conversation import question_result
 from .store import Conflict
+from .sandbox import run_blocking
 from . import lunch_execution_questions as execution
 
 MARKER = 'agent_daily_question'
@@ -76,7 +77,7 @@ class LunchQuestions:
         self.store.update(run['id'], task_inputs=context)
 
     async def sources(self, run):
-        context = self.store.get(run['id'])['task_inputs']; inputs = context['inputs']
+        context = (await run_blocking(self.store.get, run['id']))['task_inputs']; inputs = context['inputs']
         query = {'facility_id': inputs['facility_id'], 'month': inputs['month']}
         if not inputs.get('layout_id'): raise Conflict('使用する図面を先に回答してください')
         layouts = await self.flow.read(run, 'lunch_get_layouts', {'query': query})
@@ -97,7 +98,7 @@ class LunchQuestions:
         return {'layout': {k: layout[k] for k in ('id', 'version', 'locations')}, 'menus': result}
 
     async def drawing(self, run, menu_id, template_id):
-        inputs = self.store.get(run['id'])['task_inputs']['inputs']
+        inputs = (await run_blocking(self.store.get, run['id']))['task_inputs']['inputs']
         data = await self.flow.read(run, 'lunch_get_process_drawing', {'ids': {'menu_id': menu_id}, 'query': {'facility_id': inputs['facility_id'], 'template_id': template_id}})
         if data.get('template_id') != template_id:
             raise Conflict('質問の原本図面が使用する図面と一致しません')
@@ -118,21 +119,23 @@ class LunchQuestions:
             x, y, w, h = bounds
             if w <= 0 or h <= 0 or x < box[0] or y < box[1] or x+w > box[0]+box[2] or y+h > box[1]+box[3]:
                 raise Conflict('設備が原本図面の範囲外です')
-        folder = self.flow.tools.sandbox.path(run['id']) / 'question-drawings'
-        folder.mkdir(exist_ok=True)
-        target = folder / (checksum + '.svg')
-        if target.exists() and target.read_bytes() != content: raise Conflict('保存済み原本図面が変更されています')
-        if not target.exists(): target.write_bytes(content)
+        def save_drawing():
+            folder = self.flow.tools.sandbox.path(run['id']) / 'question-drawings'
+            folder.mkdir(exist_ok=True)
+            target = folder / (checksum + '.svg')
+            if target.exists() and target.read_bytes() != content: raise Conflict('保存済み原本図面が変更されています')
+            if not target.exists(): target.write_bytes(content)
+        await run_blocking(save_drawing)
         return {k: v for k, v in data.items() if k != 'svg_base64'}
 
     async def checked(self, run):
-        state = self.state(run)
+        state = await run_blocking(self.state, run)
         if not state: raise Conflict('食材ごとの作業場所・使用する釜を先に質問してください')
         if state.get('policy_version') != 2:
             raise Conflict('一緒・別々の確認を含む質問をやり直してください')
         if await self.sources(run) != state['sources']:
-            review = self.flow.review(run['id'])
-            if review: review['state'] = 'stale'; self.flow.save_review(run['id'], review)
+            review = (await run_blocking(self.flow.review, run['id']))
+            if review: review['state'] = 'stale'; (await run_blocking(self.flow.save_review, run['id'], review))
             raise Conflict('質問後に献立・工程・設備・図面が変更されています。質問をやり直してください')
         for ident, expected in state.get('drawings', {}).items():
             if await self.drawing(run, int(ident), expected['template_id']) != expected:
@@ -140,9 +143,9 @@ class LunchQuestions:
         return state
 
     async def ask(self, run, command_id, restart=False):
-        state = self.state(run)
+        state = await run_blocking(self.state, run)
         if restart and state:
-            review = self.flow.review(run["id"])
+            review = (await run_blocking(self.flow.review, run['id']))
             changed = state.get("policy_version") != 2 or await self.sources(run) != state["sources"]
             if not changed:
                 for ident, picture in state.get('drawings', {}).items():
@@ -151,7 +154,7 @@ class LunchQuestions:
                         break
             if not changed and (not review or review["state"] != "needs_correction"):
                 raise Conflict("回答をやり直すには入力変更または利用者の訂正依頼が必要です")
-            self.save(run, None)
+            await run_blocking(self.save, run, None)
             state = None
         if state: state = await self.checked(run)
         else:
@@ -181,7 +184,7 @@ class LunchQuestions:
                     if picture['template_version'] != template['template_version'] or not isinstance(picture.get('title'), str) or not picture['title'].strip():
                         raise Conflict('原本図面の名称・版を確認できません')
                     choices.append({'value': template['template_id'], 'label': picture['title']})
-                return self.question(run, state, command_id, item, 'template', 'template', f"「{item['name']}」で使用した厨房図面はどれですか？", choices)
+                return await run_blocking(self.question, run, state, command_id, item, 'template', 'template', f"「{item['name']}」で使用した厨房図面はどれですか？", choices)
             template = next((t for t in templates if t['template_id'] == selected), None)
             if not template: raise Conflict('工程の厨房図面が登録候補にありません')
             for step in document['steps']:
@@ -192,7 +195,7 @@ class LunchQuestions:
                 if work is None:
                     if len(ids) > 1:
                         ingredients = '・'.join(names[mid] for mid in ids)
-                        return self.question(run, state, command_id, item, step['id'], 'grouping',
+                        return await run_blocking(self.question, run, state, command_id, item, step['id'], 'grouping',
                             f"「{item['name']}」の {ingredients}\n「{step['operation']}」は、一緒に調理しましたか？",
                             [{'value': 'together', 'label': '一緒に調理しました'}, {'value': 'separate', 'label': '別々に調理しました'}])
                     work = {'mode': 'individual', 'groups': [{'ingredient_ids': ids}]}
@@ -214,7 +217,7 @@ class LunchQuestions:
                         choice['label'] += f'（図面の上から{number}か所目・同じ高さは左から）'
                 state.setdefault('drawings', {})[str(item['menu_id'])] = picture
                 ingredient = '・'.join(names[mid] if sum(m['name']==names[mid] for m in document['ingredients'])==1 else names[mid]+'（原本の同名食材'+str([m['id'] for m in document['ingredients'] if m['name']==names[mid]].index(mid)+1)+'番目）' for mid in group['ingredient_ids']); suffix = 'どの釜を使いましたか？' if kind == '回転釜' else 'どこで作業しましたか？'
-                return self.question(run, state, command_id, item, step['id'], 'equipment', f"「{item['name']}」の {ingredient}\n{step['operation']} は、{suffix}", choices, picture, index)
+                return await run_blocking(self.question, run, state, command_id, item, step['id'], 'equipment', f"「{item['name']}」の {ingredient}\n{step['operation']} は、{suffix}", choices, picture, index)
             actual = execution.question(item)
             if actual:
                 key, field, text, choices = actual
@@ -223,8 +226,8 @@ class LunchQuestions:
                     choices = [{'value': [name], 'label': name} for name in known]
                     if choices:
                         text += ' 原本・登録工程にある担当者を選ぶこともできます。'
-                return self.question(run, state, command_id, item, key, 'execution.'+field, text, choices)
-        self.save(run, state)
+                return await run_blocking(self.question, run, state, command_id, item, key, 'execution.'+field, text, choices)
+        await run_blocking(self.save, run, state)
         return {'ok': True, 'complete': True, 'process_saves': [self.payload(state, item) for item in state['documents'] if not item['saved']]}
 
     def question(self, run, state, command_id, item, key, field, text, choices, picture=None, group_index=None):
@@ -248,7 +251,7 @@ class LunchQuestions:
         return result
 
     async def validate_reply(self, run, message, question_id):
-        state = self.state(run) if self.active(run) else None
+        state = await run_blocking(self.state, run) if self.active(run) else None
         if not state or not state['pending']: return None
         state = await self.checked(run); pending = state['pending']
         if pending['question_id'] != question_id: raise Conflict('最新の作業場所の質問に回答してください')
@@ -309,7 +312,7 @@ class LunchQuestions:
 
     async def after_save(self, run, args):
         if not self.active(run): return
-        state = self.state(run)
+        state = await run_blocking(self.state, run)
         item = next(i for i in state['documents'] if str(i['menu_id']) == str(args.ids['menu_id']))
         source = next(s for s in state['sources']['menus'] if s['menu_id'] == item['menu_id'])
         saved = await self.flow.read(run, 'lunch_get_process', {'ids': args.ids, 'query': args.query})
@@ -320,4 +323,4 @@ class LunchQuestions:
         if before != after or any(s.get('basis', {}).get(MARKER) != state['id'] for s in saved['document']['steps']):
             raise Conflict('保存後の工程・使用設備が利用者の回答と一致しません')
         item['saved'] = True; source['process'] = saved
-        self.save(run, state)
+        await run_blocking(self.save, run, state)

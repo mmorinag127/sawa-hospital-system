@@ -9,8 +9,6 @@ import math
 import unicodedata
 
 from fastapi import HTTPException
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
@@ -250,6 +248,9 @@ def save(session, facility_id, month, payload):
 
 
 def excel(result):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
     if result["issues"]:
         raise HTTPException(409, {"message": "未確認項目を解消してから出力してください。", "issues": result["issues"]})
     workbook = Workbook()

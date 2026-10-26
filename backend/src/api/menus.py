@@ -89,7 +89,7 @@ def get_menu(month_id: str, facility_id: str | None = Query(default=None), edito
 
 
 @router.post("", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": SavedImportResponse}})
-async def upload_menu(
+def upload_menu(
     month_id: str,
     file: UploadFile = File(...),
     sheet_name: str | None = None,
@@ -100,7 +100,7 @@ async def upload_menu(
 ):
     if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month_id):
         raise HTTPException(422, "explicit YYYY-MM month is required")
-    content = await file.read()
+    content = file.file.read()
     if not content:
         raise HTTPException(status_code=400, detail="empty file")
     try:
@@ -212,8 +212,8 @@ def resolve_menu_master_check(month_id: str, item_id: str, body: dict, if_match:
 
 
 @router.post("/condiments", dependencies=[Depends(require_role("operator"))])
-async def upload_condiments(file: UploadFile = File(...), sheet_name: str | None = None):
-    content = await file.read()
+def upload_condiments(file: UploadFile = File(...), sheet_name: str | None = None):
+    content = file.file.read()
     if not content:
         raise HTTPException(status_code=400, detail="empty file")
     try:

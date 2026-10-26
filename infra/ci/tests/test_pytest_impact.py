@@ -81,6 +81,50 @@ def test_data():
         self.assertEqual(report['selected'], ['test_new.py::test_new'])
         self.assertEqual(len(report['reused']), 3)
 
+    def test_unread_frontend_and_workflow_settings_do_not_reset_backend_history(self):
+        (self.root / 'frontend').mkdir()
+        (self.root / '.github/workflows').mkdir(parents=True)
+        self.write('frontend/package.json', '{"name":"before"}')
+        self.write('.github/workflows/manual.yml', 'name: before\n')
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        self.write('frontend/package.json', '{"name":"after"}')
+        self.write('.github/workflows/manual.yml', 'name: after\n')
+        report = self.run_tests()
+        self.assertEqual(report['selected'], [])
+        self.assertEqual(len(report['reused']), 3)
+
+    def test_read_component_settings_still_invalidate_their_consumer(self):
+        (self.root / 'frontend').mkdir()
+        self.write('frontend/package.json', '{"name":"before"}')
+        self.write('test_example.py', '''from pathlib import Path
+def test_settings():
+    assert Path('frontend/package.json').read_text()
+def test_other():
+    assert True
+''')
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        self.write('frontend/package.json', '{"name":"after"}')
+        report = self.run_tests()
+        self.assertEqual(report['selected'], ['test_example.py::test_settings'])
+        self.assertEqual(report['reused'], ['test_example.py::test_other'])
+
+    def test_interrupted_call_is_not_completed_and_unstarted_cases_are_not_executed(self):
+        self.write('test_example.py', '''import pytest
+def test_first():
+    pytest.exit('controlled interruption', returncode=2)
+def test_unstarted():
+    assert True
+''')
+        report = self.run_tests(expected=2)
+        self.assertEqual(report['selected'], ['test_example.py::test_first', 'test_example.py::test_unstarted'])
+        self.assertEqual(report['executed'], ['test_example.py::test_first'])
+        self.assertEqual(report['completed'], [])
+        self.assertEqual(report['passed'], [])
+        self.assertEqual(report['incomplete'], ['test_example.py::test_first'])
+        self.assertEqual(report['not_started'], ['test_example.py::test_unstarted'])
+
     def test_shared_inputs_are_saved_once_and_changed_fixture_cannot_be_reused(self):
         self.write('test_example.py', '''from pathlib import Path
 import pytest
@@ -131,8 +175,11 @@ from types import SimpleNamespace
 import pytest_impact as impact
 
 def test_nested_tracking():
-    parent = SimpleNamespace()
-    child = SimpleNamespace()
+    def fixture():
+        return None
+    parent = SimpleNamespace(scope='function', func=fixture, argname='parent')
+    child = SimpleNamespace(scope='function', func=fixture, argname='child')
+    outcome = SimpleNamespace(excinfo=None)
     outer = impact.pytest_fixture_setup(parent, None)
     inner = impact.pytest_fixture_setup(child, None)
     next(outer)
@@ -141,13 +188,13 @@ def test_nested_tracking():
     inner_record = impact.FIXTURE_STACK[-1]
     assert outer_record == inner_record and outer_record is not inner_record
     try:
-        next(inner)
+        inner.send(outcome)
     except StopIteration:
         pass
     assert impact.FIXTURE_STACK[-1] is outer_record
     outer_record['unsafe'].add('outer-only')
     try:
-        next(outer)
+        outer.send(outcome)
     except StopIteration:
         pass
     assert impact.FIXTURES[id(parent)]['unsafe'] == {'outer-only'}
@@ -436,6 +483,48 @@ def test_predicates():
             with sqlite3.connect(path) as connection:
                 connection.execute('UPDATE inputs SET value = 2')
             self.assertIn('test_example.py::test_database', self.run_tests(1)['selected'])
+
+    def test_fresh_case_sqlite_and_generated_files_do_not_force_full_reexecution(self):
+        self.write('test_example.py', """import sqlite3
+import sys
+def test_owned(tmp_path):
+    path = tmp_path / 'fresh.sqlite'
+    with sqlite3.connect(str(path)) as connection:
+        sys.audit('sawa.test.database-checkout', None, connection)
+        connection.execute('CREATE TABLE result(value INTEGER)')
+        connection.execute('INSERT INTO result VALUES (7)')
+        assert connection.execute('SELECT value FROM result').fetchone() == (7,)
+    output = tmp_path / 'output.txt'
+    output.write_text('fresh')
+    assert output.read_text() == 'fresh'
+""")
+        self.run_tests()
+        report = self.run_tests()
+        self.assertEqual(report['selected'], [])
+        self.assertEqual(report['reused'], ['test_example.py::test_owned'])
+
+    def test_dynamic_cached_fixture_consumers_keep_source_dependencies(self):
+        self.write('fixture_helpers.py', """import pytest
+import leaf
+@pytest.fixture(scope='session')
+def generated_value():
+    return leaf.value()
+""")
+        self.write('conftest.py', "pytest_plugins = ['fixture_helpers']\n")
+        self.write('test_example.py', """def test_first(request):
+    assert request.getfixturevalue('generated_value') > 0
+def test_second(request):
+    assert request.getfixturevalue('generated_value') > 0
+def test_unrelated():
+    assert True
+""")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        self.assertEqual(self.run_tests()['selected'], [])
+        self.write('leaf.py', 'def value():\n    return 3\n')
+        report = self.run_tests()
+        self.assertCountEqual(report['selected'], ['test_example.py::test_first', 'test_example.py::test_second'])
+        self.assertEqual(report['reused'], ['test_example.py::test_unrelated'])
 
     def test_only_empty_owned_bootstrap_is_reusable_and_checkouts_always_execute(self):
         (self.root / 'backend').mkdir()

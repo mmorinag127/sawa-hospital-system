@@ -3,6 +3,7 @@ import json
 
 from .fax_workflow import digest
 from .store import Conflict
+from .sandbox import run_blocking
 from .task_flow import rows
 from .tasks import TASKS
 
@@ -50,11 +51,11 @@ async def complete_review(engine, run, review):
     await tools.flow.recheck(run, review)
     command = 'business:' + review['id']
     for index, action in enumerate(review['actions']):
-        current = tools.flow.review(run['id'])
+        current = await run_blocking(tools.flow.review, run['id'])
         if digest(action) in current['applied']:
             continue
         await engine.call(run, action['operation'], {'parameters': {**action['parameters'], 'reason': '利用者が確認し承認した内容だけを保存'}}, command + ':apply:' + str(index))
-    review = tools.flow.review(run['id'])
+    review = await run_blocking(tools.flow.review, run['id'])
     artifacts = []
     for index, (operation, parameters) in enumerate(export_parameters(run, review)):
         result = await engine.call(run, operation, {'parameters': parameters}, command + ':export:' + str(index))

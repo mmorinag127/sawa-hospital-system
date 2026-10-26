@@ -19,6 +19,7 @@ import threading
 
 import pytest
 from impact_collection import CollectionInputs
+from impact_owned_inputs import OwnedInputs
 
 
 SCHEMA = 2
@@ -41,6 +42,7 @@ GLOBAL_INPUTS = {}
 GLOBAL_UNSAFE = set()
 UNSAFE_PATHS = set()
 OUTCOMES = {}
+STARTED = []
 SELECTED = []
 OMITTED = []
 REASONS = {}
@@ -57,6 +59,10 @@ DISABLED_COLLECTOR = None
 BOOTSTRAP_DATABASE = None
 BOOTSTRAP_DATABASE_DIGEST = None
 COLLECTION_COMPLETE = False
+OWNED = None
+SOURCE_GRAPH = None
+SOURCE_INPUTS = {}
+PYTEST_BASE = None
 STDLIB = str(Path(os.__file__).resolve().parent) + os.sep
 RUNTIME_PATHS = tuple({Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()})
 MAIN_THREAD = threading.get_ident()
@@ -237,6 +243,28 @@ VOLATILE_ENV = {
 RUNNER_PREFIXES = ("GITHUB_", "RUNNER_", "ACTIONS_", "INPUT_", "SAWA_LOCAL_")
 
 
+def global_configuration(name):
+    # Other components' configs are ordinary tracked inputs for the cases that
+    # read them, not a reason to discard every backend dependency record.
+    return (
+        name in {'pyproject.toml', 'pytest.ini', 'tox.ini', 'setup.cfg',
+                 'conftest.py', 'backend/conftest.py', 'backend/pyproject.toml',
+                 'backend/pytest.ini', 'backend/tox.ini', 'backend/setup.cfg',
+                 'backend/alembic.ini', 'backend/requirements.txt',
+                 'backend/requirements-dev.txt', 'backend/requirements-test.txt',
+                 'requirements.txt', 'requirements-dev.txt', 'requirements-test.txt',
+                 'uv.lock', 'poetry.lock', 'backend/uv.lock', 'backend/poetry.lock',
+                 'scripts/run_local_backend_tests.py', 'scripts/local_hospital_test_runner.py',
+                 'backend/src/db.py', 'backend/src/monthly_menu_identity.py',
+                 'backend/src/services/monthly_menu_identity_schema.py'}
+        or name.startswith('infra/ci/') and not name.startswith('infra/ci/tests/')
+        and name.endswith(('.py', '.txt', '.json', '.toml'))
+        or name.startswith(('backend/alembic/', 'backend/migrations/',
+                            'backend/src/models/', 'backend/src/maintenance/'))
+        or name.startswith('backend/') and name.endswith('/conftest.py')
+    )
+
+
 def context():
     global CONTEXT_PARTS
     # CI run identifiers and temp paths are not application settings.
@@ -247,12 +275,7 @@ def context():
     }
     configs = {
         name: digest(ROOT / name) for name in sorted(TRACKED)
-        if Path(name).suffix in {".toml", ".ini", ".cfg", ".yaml", ".yml", ".lock"}
-        or name.endswith(("requirements.txt", "package.json", "package-lock.json"))
-        or name.endswith("conftest.py") or name.startswith("infra/ci/")
-        or name in {'scripts/run_local_backend_tests.py', 'scripts/local_hospital_test_runner.py'}
-        or name.startswith(('backend/alembic/', 'backend/migrations/', 'backend/src/models/', 'backend/src/maintenance/'))
-        or name in {'backend/src/db.py', 'backend/src/monthly_menu_identity.py', 'backend/src/services/monthly_menu_identity_schema.py'}
+        if global_configuration(name)
     }
     payload = {
         "schema": SCHEMA, "python": platform.python_version(),
@@ -387,6 +410,48 @@ def record_unsafe(reason):
         fixture["unsafe"].add(reason)
 
 
+def inherit_generated_fixture(record):
+    if record.get('input_set') is not None:
+        ACTIVE_INPUT_SETS.add(record['input_set'])
+    UNSAFE.update(record['unsafe'])
+    for name, value in record['inputs'].items():
+        if name in ACTIVE_SHARED_INPUTS and ACTIVE_SHARED_INPUTS[name] != value:
+            UNSAFE.add('changing-file-input')
+        ACTIVE_SHARED_INPUTS.setdefault(name, value)
+        record_input(name, value)
+
+
+def generated_input(path, *, write=False, database=False, readonly=False):
+    return (OWNED is not None and ACTIVE is not None
+            and OWNED.accepts(path, owner=ACTIVE, stack=FIXTURE_STACK,
+                              write=write, database=database, readonly=readonly))
+
+
+def absolute_input_path(value):
+    path = Path(os.fsdecode(value))
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def record_fixture_sources(function):
+    seen = set()
+    while function is not None and id(function) not in seen:
+        seen.add(id(function))
+        code = getattr(function, '__code__', None)
+        if code is None:
+            record_unsafe('fixture-source-unresolved')
+            return
+        path = Path(code.co_filename).resolve()
+        if str(path) in SOURCE_GRAPH.paths:
+            if path not in SOURCE_INPUTS:
+                SOURCE_INPUTS[path] = {str(Path(name).relative_to(ROOT)): digest(Path(name))
+                                       for name in SOURCE_GRAPH.dependencies(path)}
+            for name, value in SOURCE_INPUTS[path].items():
+                record_input(name, value)
+        elif not any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
+            record_unsafe('fixture-source-untracked')
+        function = getattr(function, '__wrapped__', None)
+
+
 def progress_environment_read():
     frame = sys._getframe(1)
     while frame:
@@ -452,6 +517,47 @@ def record_input(name, value):
 
 def audit(event, args):
     global BUSY
+    if (not BUSY and OWNED is not None and ACTIVE is not None
+            and threading.get_ident() == MAIN_THREAD
+            and event in {'os.remove', 'os.rmdir', 'os.rename', 'os.mkdir', 'os.symlink', 'os.link', 'os.chmod', 'os.truncate'}):
+        BUSY = True
+        try:
+            paths = args[:2] if event in {'os.rename', 'os.symlink', 'os.link'} else args[:1]
+            for value in paths:
+                if isinstance(value, (str, bytes, os.PathLike)):
+                    generated_input(absolute_input_path(value), write=True)
+        finally:
+            BUSY = False
+    if threading.get_ident() == MAIN_THREAD and not BUSY and OWNED is not None:
+        if event == 'sqlite3.connect':
+            OWNED.pending_connection = (args[0], ACTIVE)
+        elif event == 'sqlite3.connect/handle':
+            if OWNED.pending_connection is not None:
+                OWNED.connections[id(args[0])] = OWNED.pending_connection
+                OWNED.pending_connection = None
+            return
+        elif event == 'sawa.test.generated-sqlite-template':
+            BUSY = True
+            try:
+                frame = sys._getframe(1)
+                trusted = False
+                while frame:
+                    if ((frame.f_code.co_filename == str(ROOT / 'backend/tests/integration/sqlite_fixture_template.py')
+                         and frame.f_code.co_name == 'migrated_sqlite_template')
+                            or (frame.f_code.co_filename == str(ROOT / 'backend/conftest.py')
+                                and frame.f_code.co_name == 'delivery_sqlite_template')):
+                        trusted = True
+                        break
+                    frame = frame.f_back
+                if not trusted or not args or PYTEST_BASE is None:
+                    record_unsafe('generated-resource-producer-unresolved')
+                    return
+                producer = FIXTURE_STACK[-1] if FIXTURE_STACK else None
+                OWNED.register(args[0], owner=ACTIVE, producer=producer, base=PYTEST_BASE,
+                               shared=producer is not None and producer['scope'] != 'function')
+            finally:
+                BUSY = False
+            return
     if threading.get_ident() != MAIN_THREAD and event in {
         'open', 'os.listdir', 'os.scandir', 'subprocess.Popen', 'os.system', 'socket.connect', 'socket.getaddrinfo', 'sqlite3.connect', 'sawa.test.database-checkout',
     }:
@@ -471,6 +577,8 @@ def audit(event, args):
         try:
             if args and empty_database_bootstrap(args[0]):
                 return
+            if args and OWNED is not None and OWNED.database(args[0], owner=ACTIVE, stack=FIXTURE_STACK):
+                return
         finally:
             BUSY = False
         record_unsafe(event)
@@ -479,6 +587,13 @@ def audit(event, args):
         if (ACTIVE is None and BOOTSTRAP_DATABASE is not None and args
                 and args[0] == str(BOOTSTRAP_DATABASE) and not COLLECTION_COMPLETE and bootstrap_origin()):
             return
+        if OWNED is not None and len(args) > 1 and isinstance(args[1], sqlite3.Connection):
+            BUSY = True
+            try:
+                if OWNED.database(None, owner=ACTIVE, stack=FIXTURE_STACK, connection=args[1]):
+                    return
+            finally:
+                BUSY = False
         record_unsafe(event)
         return
     if event in {"subprocess.Popen", "os.system", "socket.connect", "socket.getaddrinfo"}:
@@ -490,7 +605,7 @@ def audit(event, args):
         return
     BUSY = True
     try:
-        original_path = Path(os.path.abspath(os.fsdecode(args[0])))
+        original_path = absolute_input_path(args[0])
         path = original_path.resolve()
         if original_path != path and original_path.is_relative_to(ROOT):
             name = 'source-link:' + str(original_path.relative_to(ROOT))
@@ -500,6 +615,8 @@ def audit(event, args):
         if any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
             return  # Installed versions are in the context, including in-repo venvs.
         if event != "open":
+            if generated_input(original_path):
+                return
             if path.is_relative_to(ROOT) and path.name not in {"__pycache__", ".pytest_cache"}:
                 name = 'directory:' + str(path.relative_to(ROOT))
                 value = input_digest(name)
@@ -517,6 +634,8 @@ def audit(event, args):
         write = (isinstance(mode, str) and any(c in mode for c in "wax+")) or (
             isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT)
         )
+        if generated_input(original_path, write=bool(write)):
+            return
         if write:
             if path.is_relative_to(ROOT) and str(path.relative_to(ROOT)) in TRACKED:
                 record_unsafe("tracked-file-write")
@@ -546,10 +665,13 @@ def audit(event, args):
 
 
 def pytest_sessionstart(session):
-    global BUSY, COLLECTION_INPUTS
+    global BUSY, COLLECTION_INPUTS, SOURCE_GRAPH, OWNED, PYTEST_BASE
     BUSY = True
     try:
         COLLECTION_INPUTS = CollectionInputs(ROOT, TRACKED)
+        SOURCE_GRAPH = CollectionInputs(ROOT, TRACKED, include_production=True)
+        OWNED = OwnedInputs(record_unsafe, inherit_generated_fixture)
+        PYTEST_BASE = session.config._tmp_path_factory.getbasetemp().resolve()
     finally:
         BUSY = False
     selector = session.config.pluginmanager.get_plugin("TestmonSelect")
@@ -566,7 +688,9 @@ def pytest_sessionstart(session):
             BUSY = True
             try:
                 resolved = original(path, *args, **kwargs)
-                original_path = Path(os.path.abspath(os.fsdecode(path)))
+                original_path = absolute_input_path(path)
+                if generated_input(original_path):
+                    return resolved
                 if original_path.is_relative_to(ROOT):
                     name = 'source-link:' + str(original_path.relative_to(ROOT))
                     record_input(name, resolution_digest(original_path))
@@ -597,7 +721,9 @@ def pytest_sessionstart(session):
                     record_unsafe('file-predicate-options')
                     return result
                 if isinstance(path, (str, bytes, os.PathLike)):
-                    original_path = Path(os.path.abspath(os.fsdecode(path)))
+                    original_path = absolute_input_path(path)
+                    if generated_input(original_path):
+                        return result
                     name = 'path-' + method + ':' + str(original_path.relative_to(ROOT) if original_path.is_relative_to(ROOT) else original_path)
                     record_input(name, hashlib.sha256(json.dumps(result).encode()).hexdigest())
                 else:
@@ -624,8 +750,13 @@ def pytest_sessionstart(session):
                 BUSY = True
                 try:
                     if isinstance(value, (str, bytes, os.PathLike)) and len(args) <= 1 and not kwargs:
-                        path = Path(os.path.abspath(os.fsdecode(value)))
-                        if path.is_relative_to(ROOT):
+                        path = absolute_input_path(value)
+                        frame = sys._getframe(1)
+                        transport_stat = (frame.f_globals.get('__name__') == 'shutil'
+                                          and frame.f_code.co_name == '_stat')
+                        if transport_stat and generated_input(path):
+                            pass
+                        elif path.is_relative_to(ROOT):
                             record_input(_method + ':' + str(path.relative_to(ROOT)), metadata_digest(path, _method))
                         elif not any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
                             record_unsafe('file-metadata')
@@ -657,6 +788,7 @@ def pytest_collection_modifyitems(session, config, items):
             raise ValueError('invalid failed-test identities')
     except (ValueError, OSError) as error:
         raise pytest.UsageError('Invalid local failed-test record; refusing selection') from error
+    forced = set(forced)
     # Selection is one snapshot before case execution. Repeating the same hash
     # for thousands of fixture consumers adds no information to that decision.
     initial_inputs = {}
@@ -721,6 +853,8 @@ def pytest_collection_modifyitems(session, config, items):
         'source_sha': os.environ.get('SAWA_LOCAL_SOURCE_SHA'),
         'selected': SELECTED, 'reused': OMITTED,
     })
+    with (STATE / 'started-tests.jsonl').open('w', encoding='utf-8') as stream:
+        stream.write(json.dumps({'source_sha': os.environ.get('SAWA_LOCAL_SOURCE_SHA')}) + '\n')
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
@@ -740,6 +874,7 @@ def pytest_runtest_protocol(item, nextitem):
                 UNSAFE.add('changing-file-input')
             ACTIVE_SHARED_INPUTS.setdefault(name, value)
     yield
+    record_fixture_usage(item)
     BUSY = True
     try:
         if not UNSAFE and any(input_digest(name) != value for name, value in INPUTS.items()):
@@ -765,13 +900,46 @@ def pytest_runtest_logreport(report):
     OUTCOMES.setdefault(report.nodeid, {})[report.when] = report.outcome
 
 
+def pytest_runtest_logstart(nodeid, location):
+    STARTED.append(nodeid)
+    with (STATE / 'started-tests.jsonl').open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps({'nodeid': nodeid}) + '\n')
+
+
+def completed_test(nodeid):
+    reports = OUTCOMES.get(nodeid, {})
+    return ('setup' in reports and 'teardown' in reports
+            and (reports['setup'] != 'passed' or 'call' in reports))
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_fixture_setup(fixturedef, request):
-    record = {"inputs": {}, "unsafe": set()}
+    global BUSY
+    record = {"inputs": {}, "unsafe": set(), "scope": fixturedef.scope}
     FIXTURE_STACK.append(record)
     try:
-        yield
+        before, BUSY = BUSY, True
+        try:
+            if not GLOBAL_UNSAFE:
+                record_fixture_sources(fixturedef.func)
+        finally:
+            BUSY = before
+        outcome = yield
+        if (outcome.excinfo is None and fixturedef.argname == 'tmp_path'
+                and fixturedef.func.__module__ == '_pytest.tmpdir'):
+            before, BUSY = BUSY, True
+            try:
+                OWNED.register(outcome.get_result(), owner=ACTIVE, producer=record,
+                               base=PYTEST_BASE, shared=False)
+            finally:
+                BUSY = before
     finally:
+        before, BUSY = BUSY, True
+        try:
+            if OWNED is not None:
+                OWNED.seal(record)
+        finally:
+            BUSY = before
         for index, active_record in enumerate(FIXTURE_STACK):
             if active_record is record:
                 del FIXTURE_STACK[index]
@@ -787,16 +955,32 @@ def pytest_fixture_setup(fixturedef, request):
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_setup(item):
     yield
-    for definitions in item._fixtureinfo.name2fixturedefs.values():
-        for definition in definitions:
-            record = FIXTURES.get(id(definition))
-            if record is not None:
-                ACTIVE_INPUT_SETS.add(record['input_set'])
-                for name, value in record['inputs'].items():
-                    if name in ACTIVE_SHARED_INPUTS and ACTIVE_SHARED_INPUTS[name] != value:
-                        UNSAFE.add('changing-file-input')
-                    ACTIVE_SHARED_INPUTS.setdefault(name, value)
-                UNSAFE.update(record["unsafe"])
+    record_fixture_usage(item)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    yield
+    record_fixture_usage(item)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item):
+    request = item._request
+    yield
+    record_fixture_usage(item, request=request)
+
+
+def record_fixture_usage(item, *, request=None):
+    definitions = getattr(item._request if request is None else request, '_fixture_defs', {}).values()
+    seen = set()
+    for definition in definitions:
+        if id(definition) in seen:
+            continue
+        seen.add(id(definition))
+        record = FIXTURES.get(id(definition))
+        if record is not None:
+            inherit_generated_fixture(record)
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
@@ -809,6 +993,8 @@ def pytest_sessionfinish(session, exitstatus):
         DISABLED_COLLECTOR.pytest_sessionfinish(session)
     STATE.mkdir(parents=True, exist_ok=True)
     current = {node: entry for node, entry in PREVIOUS.items() if node in COLLECTED_DEPENDENCIES}
+    if OWNED is not None:
+        OWNED.finish()
     final_inputs = {}
     def changed(values):
         for name, value in values.items():
@@ -824,6 +1010,8 @@ def pytest_sessionfinish(session, exitstatus):
     changed_sets = {key for key in referenced if changed(INPUT_SETS[key])}
     for node, entry in current.items():
         unsafe = set(entry['unsafe']) | GLOBAL_UNSAFE
+        if OWNED is not None:
+            unsafe.update(OWNED.unsafe_for(node))
         if changed_sets.intersection([*entry['input_sets'], *entry['collection_sets']]):
             unsafe.add('changing-file-input')
         for path in COLLECTED_DEPENDENCIES[node]:
@@ -837,8 +1025,19 @@ def pytest_sessionfinish(session, exitstatus):
             "tracking_sha256": tracking_digest(), "source_sha": os.environ.get("SAWA_LOCAL_SOURCE_SHA")})
     else:
         META.unlink(missing_ok=True)
+    started = set(STARTED)
+    executed = [node for node in SELECTED if node in started]
+    completed = [node for node in executed if completed_test(node)]
+    completed_set = set(completed)
+    passed = [node for node in completed if all(
+        OUTCOMES[node].get(phase) == 'passed' for phase in ('setup', 'call', 'teardown'))]
+    skipped = [node for node in completed if 'skipped' in OUTCOMES[node].values()]
     REPORT.write_text(json.dumps({
         "selected": SELECTED, "reused": OMITTED, "reasons": REASONS,
+        "executed": executed, "completed": completed, "passed": passed,
+        "skipped": skipped,
+        "not_started": [node for node in SELECTED if node not in started],
+        "incomplete": [node for node in executed if node not in completed_set],
         "failed": [node for node, reports in OUTCOMES.items() if 'failed' in reports.values()],
         "untracked": {node: value["unsafe"] for node, value in PREVIOUS.items() if value.get("unsafe")},
         "full": FULL, "exitstatus": int(exitstatus),
@@ -855,8 +1054,12 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 def pytest_terminal_summary(terminalreporter):
+    started = set(STARTED)
+    completed = sum(completed_test(node) for node in started)
     terminalreporter.write_line(
-        f"Impact selection: executed={len(SELECTED)}, unchanged={len(OMITTED)}; {REPORT}"
+        f"Impact selection: planned={len(SELECTED)}, started={len(started)}, "
+        f"completed={completed}, not_started={len(set(SELECTED) - started)}, "
+        f"reused={len(OMITTED)}; {REPORT}"
     )
 
 

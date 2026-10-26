@@ -145,7 +145,7 @@ def update_config(facility_id: str, body: dict):
 
 
 @router.post("/{facility_id}/order-form-source-workbook", dependencies=[Depends(require_role("admin"))])
-async def upload_order_form_source_workbook(
+def upload_order_form_source_workbook(
     facility_id: str,
     file: UploadFile = File(...),
     month_id: str | None = Form(default=None),
@@ -164,7 +164,7 @@ async def upload_order_form_source_workbook(
         uploaded = order_form_service.save_facility_source_workbook_upload(
             facility_id=facility_id,
             filename=filename,
-            data=await file.read(),
+            data=file.file.read(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": "source_workbook_upload_invalid", "message": str(exc),

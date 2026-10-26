@@ -1,4 +1,6 @@
 """Read registered work, never manufacture calendar dates or source associations."""
+from datetime import date
+
 from sqlalchemy import String, cast, select
 from sqlalchemy.orm import load_only
 
@@ -12,11 +14,20 @@ from src.services.implementation_price_scope_service import menu_source_ids
 
 
 def registered_work(session, *, facility_id=None, month=None):
+    try:
+        month_start = date.fromisoformat(month + "-01") if month is not None else None
+    except ValueError:
+        month_start = None
+    month_end = date(month_start.year + (month_start.month == 12), month_start.month % 12 + 1, 1) if month_start else None
+
     def scoped(model, day_column):
         statement = select(model).order_by(model.id)
         if facility_id is not None:
             statement = statement.where(model.facility_id == facility_id)
-        if month is not None:
+        if month_start is not None:
+            statement = statement.where(day_column >= month_start, day_column < month_end)
+        elif month is not None:
+            # The service also supports literal date-prefix searches, not guessed months.
             statement = statement.where(cast(day_column, String).startswith(month + '-', autoescape=True))
         return statement
 
@@ -24,7 +35,10 @@ def registered_work(session, *, facility_id=None, month=None):
     if facility_id is not None:
         facility_query = facility_query.where(Facility.id == facility_id)
     facilities = {row.id: row.name for row in session.scalars(facility_query)}
-    menu_query = scoped(MenuExecution, MenuExecution.service_date)
+    menu_query = scoped(MenuExecution, MenuExecution.service_date).options(load_only(
+        MenuExecution.id, MenuExecution.facility_id, MenuExecution.service_date,
+        MenuExecution.name, MenuExecution.version, MenuExecution.status, MenuExecution.source_document_id,
+    ))
     menus = list(session.scalars(menu_query))
     menu_ids = {row.id for row in menus}
     scoped_menu_ids = menu_query.with_only_columns(MenuExecution.id).order_by(None)
@@ -33,7 +47,8 @@ def registered_work(session, *, facility_id=None, month=None):
     revisions = {row.id: row for row in session.scalars(select(ProcessRevision).options(
         load_only(ProcessRevision.id, ProcessRevision.recipe_id, ProcessRevision.status)).where(
         ProcessRevision.id.in_(binding_query.with_only_columns(ProcessBinding.revision_id))))} if bindings else {}
-    recipes = {row.id: row for row in session.scalars(select(ProcessRecipe).where(
+    recipes = {row.id: row for row in session.scalars(select(ProcessRecipe).options(
+        load_only(ProcessRecipe.id, ProcessRecipe.facility_id)).where(
         ProcessRecipe.id.in_(binding_query.with_only_columns(ProcessBinding.recipe_id))))} if bindings else {}
     artifacts = {}
     if menu_ids:
@@ -88,7 +103,10 @@ def registered_work(session, *, facility_id=None, month=None):
         for artifact in artifacts.get(row.id, []):
             menu['route_artifacts'].append({'id': artifact.id, 'process_revision_id': artifact.process_revision_id,
                                            'generation_status': artifact.generation_status})
-    for row in session.scalars(scoped(DailyWorkSchedule, DailyWorkSchedule.service_date)):
+    for row in session.scalars(scoped(DailyWorkSchedule, DailyWorkSchedule.service_date).options(load_only(
+        DailyWorkSchedule.id, DailyWorkSchedule.facility_id, DailyWorkSchedule.service_date,
+        DailyWorkSchedule.source_menu_versions, DailyWorkSchedule.version, DailyWorkSchedule.status,
+    ))):
         value = item(row.facility_id, row.service_date)
         stale = row.source_menu_versions != menu_versions.get((row.facility_id, row.service_date), {})
         value['schedules'].append({'id': row.id, 'version': row.version, 'status': row.status, 'stale': stale})

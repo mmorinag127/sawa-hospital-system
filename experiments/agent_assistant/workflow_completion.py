@@ -6,6 +6,7 @@ The model supplies business decisions, never copies concurrency tokens or sheets
 import hashlib
 
 from .store import Conflict
+from .sandbox import run_blocking
 from .task_flow import rows
 from .shift_questions import ShiftQuestions
 
@@ -32,8 +33,10 @@ class WorkflowCompletion:
         from .catalog import OPERATIONS
         operation = OPERATIONS.get(name)
         if operation and operation.method != 'GET':
-            with self.tools.store.read() as db:
-                pending = db.execute("SELECT request FROM commands WHERE run_id=? AND status!='done'",(run['id'],)).fetchall()
+            def pending_commands():
+                with self.tools.store.read() as db:
+                    return db.execute("SELECT request FROM commands WHERE run_id=? AND status!='done'",(run['id'],)).fetchall()
+            pending = await run_blocking(pending_commands)
             import json
             if any((op := OPERATIONS.get(json.loads(row['request'])['name'])) and op.method != 'GET' for row in pending):
                 raise Conflict('結果未確定の業務操作があります。再送せず実行結果の照合が必要です')
@@ -71,8 +74,8 @@ class WorkflowCompletion:
     async def prepare_shift(self, ident, generation, raw, command):
         if raw:
             raise ValueError('入力項目はありません')
-        run = self.current(ident, generation, 'shift')
-        review = self.tools.flow.review(ident)
+        run = await run_blocking(self.current, ident, generation, 'shift')
+        review = (await run_blocking(self.tools.flow.review, ident))
         if review and review['state'] in ('awaiting_approval', 'approved'):
             await self.tools.flow.recheck(run, review)
             return {'ok': True, 'state': review['state'], 'review_id': review['id']}
@@ -113,8 +116,8 @@ class WorkflowCompletion:
     async def complete_shift(self, ident, generation, raw, command):
         if raw:
             raise ValueError('入力項目はありません')
-        run = self.current(ident, generation, 'shift')
-        review = self.tools.flow.review(ident)
+        run = await run_blocking(self.current, ident, generation, 'shift')
+        review = (await run_blocking(self.tools.flow.review, ident))
         if not review or review['state'] != 'approved':
             raise Conflict('勤務案の利用者承認が必要です')
         await self.tools.flow.recheck(run, review)
@@ -135,9 +138,9 @@ class WorkflowCompletion:
     async def prepare_fax(self, ident, generation, raw, command):
         if set(raw) != {'fax_id'}:
             raise ValueError('対象FAXを指定してください')
-        run = self.current(ident, generation, 'hospital')
+        run = await run_blocking(self.current, ident, generation, 'hospital')
         await self.tools.faxes.refresh(run)
-        item = next((item for item in self.tools.faxes.items(ident) if item['fax_id'] == raw['fax_id']), None)
+        item = next((item for item in (await run_blocking(self.tools.faxes.items, ident)) if item['fax_id'] == raw['fax_id']), None)
         if not item:
             raise Conflict('依頼対象のFAXではありません')
         captured = await self.tools.faxes.capture(run, item)
@@ -152,10 +155,10 @@ class WorkflowCompletion:
     async def complete_faxes(self, ident, generation, raw, command):
         if raw:
             raise ValueError('入力項目はありません')
-        run = self.current(ident, generation, 'hospital')
+        run = await run_blocking(self.current, ident, generation, 'hospital')
         await self.tools.faxes.refresh(run)
         artifacts = []; evidence = []
-        items = self.tools.faxes.items(ident)
+        items = (await run_blocking(self.tools.faxes.items, ident))
         for item in items:
             if not item['decision'] or not item['decision'].get('approve') or item['state'] not in ('approved', 'completed'):
                 raise Conflict('全対象FAXの原本照合・利用者承認が必要です')
@@ -164,7 +167,7 @@ class WorkflowCompletion:
             for name, body in [('hospital_check_anomalies', {'sheet': sheet, 'use_llm': False}), ('hospital_review_sheet', {'sheet': sheet}), ('hospital_save_sheet', {'sheet': sheet}), ('hospital_bag_order', {}), ('hospital_confirm_order', {})]:
                 # Recovery after an interrupted export/verification resumes from
                 # known successful owned receipts, never repeats known writes.
-                prior = [entry for entry in self.tools.flow.commands(ident)
+                prior = [entry for entry in (await run_blocking(self.tools.flow.commands, ident))
                          if entry['request']['name'] == name and entry['result'].get('ok')
                          and entry['request']['arguments'].get('parameters', {}).get('ids') == {'order_id': oid}
                          and entry['request']['arguments']['parameters'].get('body', {}) == body]

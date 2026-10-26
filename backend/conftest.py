@@ -22,7 +22,7 @@ def identify_test_bootstrap_connection(_connection, record):
 
 @sa.event.listens_for(sa.pool.Pool, 'checkout')
 def audit_test_database_checkout(_connection, _record, _proxy):
-    sys.audit('sawa.test.database-checkout', _record.info.get('sawa_impact_bootstrap_database'))
+    sys.audit('sawa.test.database-checkout', _record.info.get('sawa_impact_bootstrap_database'), _connection)
 
 
 _TESTS_ROOT = (Path(__file__).resolve().parent / "tests").resolve()
@@ -90,6 +90,7 @@ def delivery_sqlite_template(tmp_path_factory):
     from tests.integration.sqlite_fixture_template import file_digest
 
     template = tmp_path_factory.mktemp("delivery-empty-schema") / "empty.sqlite3"
+    sys.audit('sawa.test.generated-sqlite-template', str(template.parent))
     builder = sa.create_engine(f"sqlite:///{template}")
     try:
         runtime_db.Base.metadata.create_all(builder)
@@ -207,7 +208,7 @@ def verified_formal_sqlite_template(isolated_formal_sqlite_template):
     template = isolated_formal_sqlite_template
     before = file_digest(template)
     schema_source = formal_schema_source_digest()
-    verifier = sa.create_engine(f"sqlite:///{template}")
+    verifier = sa.create_engine(f"sqlite:///file:{template}?mode=ro&uri=true")
     try:
         with verifier.connect() as connection:
             require_formal_head(connection)

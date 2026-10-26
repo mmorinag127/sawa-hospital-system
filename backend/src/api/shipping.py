@@ -10,8 +10,8 @@ router = APIRouter()
 
 
 @router.post("/shipping/parse", dependencies=[Depends(require_role("operator"))])
-async def parse_shipping_pdf(file: UploadFile = File(...)):
-    content = await file.read()
+def parse_shipping_pdf(file: UploadFile = File(...)):
+    content = file.file.read()
     if not content:
         raise HTTPException(status_code=400, detail="empty file")
     try:
@@ -93,8 +93,8 @@ def mark_shipping_status(body: dict):
 
 
 @router.post("/shipping/enrich-excel", dependencies=[Depends(require_role("operator"))])
-async def enrich_shipping_excel(file: UploadFile = File(...)):
-    content = await file.read()
+def enrich_shipping_excel(file: UploadFile = File(...)):
+    content = file.file.read()
     if not content:
         raise HTTPException(status_code=400, detail="empty file")
     try:

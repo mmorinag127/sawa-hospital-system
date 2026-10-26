@@ -148,9 +148,15 @@ def run(output: Path, *, full: bool = False) -> int:
         report = json.loads(report_path.read_text())
         if report["source_sha"] != source_sha_start or report["exitstatus"] != 0:
             raise ValueError("backend selection does not match successful source")
+        planned, executed, completed = (report.get(key) for key in ('selected', 'executed', 'completed'))
+        if (any(not isinstance(nodes, list) or any(not isinstance(node, str) for node in nodes)
+                or len(nodes) != len(set(nodes)) for nodes in (planned, executed, completed))
+                or set(planned) != set(executed) or set(planned) != set(completed)
+                or report.get('failed') or report.get('not_started') or report.get('incomplete')):
+            raise ValueError('backend selection contains unfinished test cases')
         receipt["receipt_version"] = 2
         receipt["backend_selection"] = {"source_sha": source_sha_start,
-            "mode": environment["SAWA_LOCAL_TEST_MODE"], "executed": len(report["selected"]),
+            "mode": environment["SAWA_LOCAL_TEST_MODE"], "executed": len(executed),
             "reused": len(report["reused"]), "report_sha256": digest(report_path)}
         validate_receipt(receipt, source_sha_start, receipt["definition_sha256"])
     (output / "receipt.json").write_text(json.dumps(sign(receipt), indent=2) + "\n")

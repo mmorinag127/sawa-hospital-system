@@ -8987,7 +8987,7 @@ def _payload_has_hakodate_evidence_records(payload: dict[str, Any], *, order_id:
     return bool(_extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id))
 
 
-def _hakodate_owned_source(configured_input, pdf_receipt, synchronous_write_input=None, *, original_input=None):
+def _hakodate_owned_source(configured_input, pdf_receipt, synchronous_write_input=None, *, original_input=None, _analysis=None):
     execution = current_nonworkflow_execution() or {}
     start = original_input if original_input is not None else synchronous_write_input if synchronous_write_input is not None else processing_start_read_input()
     entries = start.get("physical_menu_entries")
@@ -8995,7 +8995,7 @@ def _hakodate_owned_source(configured_input, pdf_receipt, synchronous_write_inpu
     if not isinstance(order, dict) or not snapshots_equal(start.get("configured_input"), configured_input) or not isinstance(entries, list) or not entries:
         raise ValueError("hakodate_original_expectation_required")
     from src.services.hakodate_step_review_pipeline_service import canonical_target_semantics
-    plan = hakodate_cell_ocr_batch_service.capture_original_target_plan(configured_input=configured_input, physical_menu_entries=entries, week_code=order["week_code"])
+    plan = hakodate_cell_ocr_batch_service.capture_original_target_plan(configured_input=configured_input, physical_menu_entries=entries, week_code=order["week_code"], _analysis=_analysis)
     expected = hakodate_cell_ocr_batch_service.expected_sheet_cells_from_target_regions(plan)
     semantics = _json_snapshot(canonical_target_semantics(plan))
     if "expected_sheet_cells" in start or "expected_target_semantics" in start:
@@ -9168,7 +9168,7 @@ def _validate_selected_hakodate_artifacts(evidence, captured, *, allow_review=Fa
     manifest = evidence.get("artifact_manifest_json") or {}
     from src.services.recognition_acceptance_service import KEY
     if allow_review or KEY in manifest or hakodate_ocr_evidence_service.quantity_content_rejection_only(payload):
-        original_source = _original_hakodate_execution_source(payload)
+        original_source = _original_hakodate_execution_source(payload, _analysis=_analysis)
         if KEY in manifest and manifest[KEY].get("original_hakodate_source") != original_source:
             raise ValueError("recognition_acceptance_changed")
         if "original_hakodate_source" in manifest and manifest["original_hakodate_source"] != original_source:
@@ -9181,7 +9181,7 @@ def _validate_selected_hakodate_artifacts(evidence, captured, *, allow_review=Fa
     original = execution.get("processing_start_input")
     if not isinstance(original, dict) or not snapshots_equal(original.get("physical_menu_entries"), captured.get("physical_menu_entries")):
         raise ValueError("hakodate_original_expectation_required")
-    expected = _hakodate_owned_source(captured["configured_input"], captured["selected_pdf_receipt"], original_input=original)
+    expected = _hakodate_owned_source(captured["configured_input"], captured["selected_pdf_receipt"], original_input=original, _analysis=_analysis)
     for key in ("selected_pdf_receipt", "page", "configured_input_digest", "physical_menu_digest", "expected_sheet_cells", "expected_target_semantics"):
         if not snapshots_equal(source.get(key), expected[key]):
             raise ValueError("hakodate_artifact_source_mismatch")
@@ -9193,18 +9193,18 @@ def _validate_selected_hakodate_artifacts(evidence, captured, *, allow_review=Fa
     _validate_hakodate_owned_artifacts(payload, {**source, "physical_menu_digest": expected["physical_menu_digest"], "expected_sheet_cells": expected["expected_sheet_cells"]}, allow_review=allow_review, _analysis=_analysis)
 
 
-def _original_hakodate_execution_source(payload):
+def _original_hakodate_execution_source(payload, *, _analysis=None):
     execution = payload.get("_ocr_execution") if isinstance(payload, dict) else None
     start = execution.get("processing_start_input") if isinstance(execution, dict) else None
     if not isinstance(start, dict) or not isinstance(start.get("configured_input"), dict) or not execution.get("job_id"):
         raise ValueError("hakodate_original_expectation_required")
-    expected = _hakodate_owned_source(start["configured_input"], execution.get("selected_pdf_receipt"), original_input=start)
+    expected = _hakodate_owned_source(start["configured_input"], execution.get("selected_pdf_receipt"), original_input=start, _analysis=_analysis)
     expected.update(job_id=execution["job_id"], execution_id=execution.get("nonworkflow_execution_id"), workflow_attempt_id=execution.get("workflow_attempt_id"), workflow_revision=execution.get("workflow_revision"), evidence_run_id=start.get("evidence_run_id"))
     return expected
 
 
 def _validate_hakodate_original_execution(payload, *, allow_review=False, _analysis=None, _accepted_values=None):
-    expected = _original_hakodate_execution_source(payload)
+    expected = _original_hakodate_execution_source(payload, _analysis=_analysis)
     _validate_hakodate_owned_artifacts(payload, expected, allow_review=allow_review, _analysis=_analysis, _accepted_values=_accepted_values)
     return expected
 

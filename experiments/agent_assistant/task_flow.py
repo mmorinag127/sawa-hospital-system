@@ -9,6 +9,7 @@ from uuid import uuid4
 from .catalog import OPERATIONS, build_path, public_intake_data
 from .fax_workflow import digest
 from .store import Conflict
+from .sandbox import run_blocking
 from .tasks import TASKS
 from .lunch_questions import LunchQuestions
 
@@ -117,12 +118,7 @@ class TaskFlow:
         run = dict(id=uuid4().hex, domains=[spec['domain']], purpose='target_lookup')
         self.tools.authorizations[run['id']] = authorization
         try:
-            preparation = asyncio.create_task(asyncio.to_thread(self.tools.sandbox.prepare, run))
-            try:
-                await asyncio.shield(preparation)
-            except asyncio.CancelledError:
-                await preparation
-                raise
+            await run_blocking(self.tools.sandbox.prepare, run)
             await self.tools.sandbox.start(run)
             choices, schools, layouts, work_days = [], [], [], []
             kind = spec.get('target_kind')
@@ -243,14 +239,16 @@ class TaskFlow:
             payload = {'inputs':inputs,'choices':choices,'schools':schools,'layouts':layouts,'work_days':work_days,
                        'month_choices':month_choices,'batches':batches(choices, task_id),
                        'absence_days':absence_days() if task_id == 'shift_absence' else []}
-            with self.store.tx() as db:
-                db.execute('INSERT INTO selections VALUES(?,?,?,?)',(ident,owner,task_id,json.dumps(payload,ensure_ascii=False)))
+            def save_selection():
+                with self.store.tx() as db:
+                    db.execute('INSERT INTO selections VALUES(?,?,?,?)',(ident,owner,task_id,json.dumps(payload,ensure_ascii=False)))
+            await run_blocking(save_selection)
             return {'selection_id':ident, **payload}
         finally:
             await self.tools.sandbox.stop(run['id'])
             directory = self.tools.sandbox.path(run['id'])
             if directory.exists():
-                shutil.rmtree(directory)
+                await run_blocking(shutil.rmtree, directory)
             self.tools.authorizations.pop(run['id'],None)
 
     def selection(self, task_id, owner, selection_id, keys, layout_id=None):
@@ -326,7 +324,7 @@ class TaskFlow:
     async def capture_shift_reference(self, run):
         if not self.active(run) or not run['task_id'].startswith('shift_'):
             return
-        if any(event['kind']=='shift_reference' for event in self.store.events(run['id'])):
+        if any(event['kind']=='shift_reference' for event in await run_blocking(self.store.events, run['id'])):
             return
         month=run['task_inputs']['inputs']['month']
         period=await self.read(run,'shift_get_period',{'query':{'month':month}})
@@ -339,7 +337,7 @@ class TaskFlow:
             if detail.get('confirmed') is not True or detail.get('selected_candidate_id') is None:
                 raise Conflict('比較元の確定勤務表を確認できません')
             reference={'state':'available','data':detail}
-        self.store.event(run['id'],'shift_reference',reference)
+        await run_blocking(self.store.event, run['id'],'shift_reference',reference)
 
     async def scoped(self, run, name, args, *, inventory=False):
         if not self.active(run):
@@ -363,7 +361,7 @@ class TaskFlow:
             fax_ids = {str(x['data']['id']) for x in targets}
             if spec['target_kind']=='fax':
                 await self.tools.faxes.initialize(run)
-                order_ids={str(x['snapshot']['order_id']) for x in self.tools.faxes.items(run['id']) if x['snapshot'].get('order_id')}
+                order_ids={str(x['snapshot']['order_id']) for x in (await run_blocking(self.tools.faxes.items, run['id'])) if x['snapshot'].get('order_id')}
             else:
                 order_ids=fax_ids
             if args.ids.get('uploaded_pdf_id') is not None and str(args.ids['uploaded_pdf_id']) not in fax_ids:
@@ -394,7 +392,7 @@ class TaskFlow:
                         raise Conflict('別職員・別日の勤務条件を変更できません')
             allowed_runs = {str(x['data']['run_id']) for x in targets if 'run_id' in x['data']}
             allowed_candidates = {str(x['data']['candidate_id']) for x in targets if 'candidate_id' in x['data']}
-            for command in self.commands(run['id']):
+            for command in await run_blocking(self.commands, run['id']):
                 if command['request']['name'] == 'shift_solve' and command['result'].get('ok'):
                     data = command['result'].get('data',{})
                     if data.get('solve_run_id') is not None:
@@ -477,7 +475,7 @@ class TaskFlow:
             if name in ('lunch_import_source','lunch_confirm_import','lunch_save_procurement'):
                 if str(args.query.get('facility_id',args.body.get('facility_id'))) != str(facility_id) or args.query.get('month',args.body.get('month')) != inputs['month']:
                     raise Conflict('学校・対象月を明示してください')
-            imported={str(x['result'].get('data',{}).get('source_document_id')) for x in self.commands(run['id']) if x['request']['name']=='lunch_import_source' and x['result'].get('ok')}
+            imported={str(x['result'].get('data',{}).get('source_document_id')) for x in await run_blocking(self.commands, run['id']) if x['request']['name']=='lunch_import_source' and x['result'].get('ok')}
             if name == 'lunch_confirm_import':
                 if str(args.body.get('source_document_id')) not in imported: raise Conflict('今回添付した原本の抽出結果ではありません')
                 school_name=targets[0]['data']['name']
@@ -493,7 +491,7 @@ class TaskFlow:
                 if not any(str(x.get(field)) == str(ident) and (run['task_id']!='lunch_import' or str(x['id']) in imported) for x in documents):
                     raise Conflict('選択した学校・月の原本ではありません')
             if name == 'lunch_import_source':
-                source = next((e['payload'] for e in reversed(self.store.events(run['id'])) if e['kind']=='source' and e['payload']['source_id']==args.source_id),None)
+                source = next((e['payload'] for e in reversed(await run_blocking(self.store.events, run['id'])) if e['kind']=='source' and e['payload']['source_id']==args.source_id),None)
                 if not source or source['binding'] != {'facility_id':str(facility_id),'month':inputs['month']}:
                     raise Conflict('選択した学校・月と照合済みの添付原本が必要です')
 
@@ -504,7 +502,7 @@ class TaskFlow:
             documents.append({'operation':evidence['operation'],'parameters':evidence['parameters'],
                 'data':await self.read(run,evidence['operation'],evidence['parameters'])})
         if digest(documents) != review['signature']:
-            review['state']='stale'; self.save_review(run['id'],review)
+            review['state']='stale'; await run_blocking(self.save_review, run['id'],review)
             raise Conflict('確認後に入力または結果が変わりました。再確認が必要です')
         return documents
 
@@ -512,7 +510,7 @@ class TaskFlow:
         if not self.active(run) or not summary.strip():
             raise ValueError('選択式業務の確認結果が必要です')
         await self.questions.gate(run, 'review')
-        commands = {x['id']:x for x in self.commands(run['id'])}
+        commands = {x['id']:x for x in await run_blocking(self.commands, run['id'])}
         evidence = []
         for ident in evidence_commands:
             command = commands.get(ident)
@@ -553,14 +551,14 @@ class TaskFlow:
             raise Conflict('同じ確定操作を重複して提示できません')
         review = {'id':uuid4().hex,'state':'awaiting_approval','summary':summary,'evidence':evidence,
                   'signature':digest(evidence),'actions':planned,'applied':[],'decision':None}
-        self.save_review(run['id'],review)
-        self.store.event(run['id'],'task_review',{'review_id':review['id'],'summary':summary})
+        await run_blocking(self.save_review, run['id'],review)
+        await run_blocking(self.store.event, run['id'],'task_review',{'review_id':review['id'],'summary':summary})
         return {'ok':True,'queued_for_human':True,'review_id':review['id']}
 
     async def decide(self, run, review_id, approve, message):
         if run['status'] != 'running' or not self.active(run):
             raise Conflict('この依頼は回答を受け付けていません')
-        review = self.review(run['id'])
+        review = await run_blocking(self.review, run['id'])
         if not review or review['id'] != review_id:
             raise Conflict('古い確認画面です')
         decision = {'approve':approve,'message':message}
@@ -569,15 +567,17 @@ class TaskFlow:
         if review['state'] != 'awaiting_approval':
             raise Conflict('既に回答済み、または内容が変更されています')
         await self.recheck(run,review)
-        if self.store.get(run['id'])['generation'] != run['generation']:
+        if (await run_blocking(self.store.get, run['id']))['generation'] != run['generation']:
             raise Conflict('依頼は停止されました')
         if not approve and not message.strip():
             raise ValueError('訂正してほしい箇所を入力してください')
-        with self.store.read() as db:
-            last_command=db.execute('SELECT COALESCE(MAX(rowid),0) FROM commands WHERE run_id=?',(run['id'],)).fetchone()[0]
+        def last_command_id():
+            with self.store.read() as db:
+                return db.execute('SELECT COALESCE(MAX(rowid),0) FROM commands WHERE run_id=?',(run['id'],)).fetchone()[0]
+        last_command = await run_blocking(last_command_id)
         review.update(state='approved' if approve else 'needs_correction',decision=decision,approved_after=last_command)
-        self.save_review(run['id'],review)
-        self.store.event(run['id'],'task_decision',{'review_id':review_id,**decision})
+        await run_blocking(self.save_review, run['id'],review)
+        await run_blocking(self.store.event, run['id'],'task_decision',{'review_id':review_id,**decision})
         return {'ok':True}
 
     async def gate(self, run, name, args):
@@ -586,7 +586,7 @@ class TaskFlow:
         if name in {'lunch_save_process','lunch_get_schedule_draft','lunch_create_schedule','lunch_save_schedule','lunch_generate_route','lunch_save_route'} or name.startswith('lunch_export_'):
             await self.questions.gate(run, name, args)
         spec = TASKS[run['task_id']]
-        review = self.review(run['id'])
+        review = await run_blocking(self.review, run['id'])
         terminal = name in spec['terminal']
         if terminal or name in spec['exports']:
             if not review or review['state'] != 'approved':
@@ -622,11 +622,11 @@ class TaskFlow:
         if review and review['state']=='approved' and OPERATIONS[name].method != 'GET':
             # Computation/edit after review must be reviewed again, including a
             # change followed by a change back to the old visible value.
-            review['state']='stale'; self.save_review(run['id'],review)
+            review['state']='stale'; await run_blocking(self.save_review, run['id'],review)
 
     async def verify_output(self, run, name):
         if self.active(run) and name in TASKS[run['task_id']]['exports']:
-            review=self.review(run['id'])
+            review=await run_blocking(self.review, run['id'])
             if not review or review['state']!='approved': raise Conflict('出力の承認がありません')
             await self.recheck(run,review)
 
@@ -634,7 +634,7 @@ class TaskFlow:
         if name == 'lunch_save_process': await self.questions.after_save(run, args)
         if not self.active(run) or name not in TASKS[run['task_id']]['terminal']:
             return
-        review = self.review(run['id'])
+        review = await run_blocking(self.review, run['id'])
         wanted = {'operation':name,'parameters':{'ids':args.ids,'query':args.query,'body':args.body,'source_id':args.source_id}}
         if not review or review['state']!='approved' or wanted not in review['actions']:
             raise Conflict('確定の承認記録を照合できません')
@@ -676,11 +676,11 @@ class TaskFlow:
                 fields=('id','content_sha256','facility_hint','week_hint','original_filename','storage_uri','skip_ocr')
                 stable_before={k:before.get(k) for k in fields}; stable_after={k:after.get(k) for k in fields}
             if stable_before != stable_after:
-                review['state']='stale'; self.save_review(run['id'],review)
+                review['state']='stale'; await run_blocking(self.save_review, run['id'],review)
                 raise Conflict('確定中に確認対象の内容が変わりました。結果を再確認してください')
             entry['data']=after
         review['signature'] = digest(review['evidence'])
-        self.save_review(run['id'],review)
+        await run_blocking(self.save_review, run['id'],review)
 
     def coverage(self, run, evidence):
         spec = TASKS[run['task_id']]; targets=run['task_inputs']['targets']; inputs=run['task_inputs']['inputs']
@@ -768,11 +768,11 @@ class TaskFlow:
             # Each source/quantity approval and each final output are enforced by
             # FaxWorkflow, separately from the recognition-recovery approval.
             return
-        review=self.review(run['id'])
+        review=await run_blocking(self.review, run['id'])
         if not review or review['state']!='approved': raise Conflict('利用者が結果を承認していません')
         await self.recheck(run,review)
         if len(review['applied']) != len(review['actions']): raise Conflict('承認した確定処理が未完了です')
-        commands=self.commands(run['id']); spec=TASKS[run['task_id']]
+        commands=await run_blocking(self.commands, run['id']); spec=TASKS[run['task_id']]
         if run['task_id']=='lunch_import':
             confirms=[x for x in commands if x['request']['name']=='lunch_confirm_import' and x['result'].get('ok')]
             if not confirms: raise Conflict('献立の確定保存が未完了です')

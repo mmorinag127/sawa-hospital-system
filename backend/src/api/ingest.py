@@ -375,7 +375,7 @@ async def ingest_upload(
     from src.services.ingest_facility_selection_service import capture_selection
     from src.services.canonical_facility_store import CanonicalStoreError
     try:
-        facility_selection = capture_selection(
+        facility_selection = await asyncio.to_thread(capture_selection,
             facility_hint, effective_date, expected_canonical_revision, selected_version_id, week_hint)
     except CanonicalStoreError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

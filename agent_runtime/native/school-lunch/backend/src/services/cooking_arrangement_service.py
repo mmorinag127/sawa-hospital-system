@@ -9,9 +9,6 @@ import posixpath
 from zipfile import ZipFile
 from xml.etree import ElementTree
 
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
-from PIL import Image, ImageSequence
 
 from src.services import implementation_price_table_ocr_service
 from src.services.school_lunch_cooking_parser import extract_tables
@@ -39,6 +36,8 @@ def validate_upload(*, filename: str, content: bytes) -> str:
 
 
 def image_to_pdf(*, filename: str, image_bytes: bytes) -> bytes:
+    from PIL import Image, ImageSequence
+
     validate_upload(filename=filename, content=image_bytes)
     try:
         source = Image.open(BytesIO(image_bytes))
@@ -118,6 +117,8 @@ def _drawing_notes(workbook_bytes: bytes) -> list[dict[str, str]]:
 
 
 def extract_excel_candidates(*, filename: str, workbook_bytes: bytes) -> dict[str, Any]:
+    from openpyxl import load_workbook
+
     suffix = validate_upload(filename=filename, content=workbook_bytes)
     if suffix not in EXCEL_EXTENSIONS:
         raise ValueError("structured extraction requires XLS, XLSX, or XLSM")

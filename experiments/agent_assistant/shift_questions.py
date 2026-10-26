@@ -6,6 +6,7 @@ from copy import deepcopy
 
 from .conversation import check_answer
 from .store import Conflict, now
+from .sandbox import run_blocking
 from .task_flow import rows
 
 SHIFT_TASKS = {'shift_next_month', 'shift_wishes', 'shift_absence'}
@@ -27,7 +28,7 @@ class ShiftQuestions:
     async def ask(self, run, command, question, choices, *, kind='choice', context=None):
         ident = 'shift-question:' + hashlib.sha256(command.encode()).hexdigest()
         payload = {'command_id':ident, 'kind':kind, 'choices':choices, 'context':context or {}}
-        self.store.event(run['id'], 'business_shift_question', payload, ident)
+        await run_blocking(self.store.event, run['id'], 'business_shift_question', payload, ident)
         await self.tools.execute(run['id'], run['generation'], 'ask_operator', {'question':question[:2000], 'options':[item['label'] for item in choices]}, ident)
         return {'ok':True, 'waiting_input':True}
 
@@ -57,7 +58,7 @@ class ShiftQuestions:
             {'label':'条件を変えずにもう一度作成する', 'action':'retry'}]
         return await self.ask(run, command+':infeasible', '今の条件をすべて満たす勤務案を作れませんでした。' + ('\n'+'\n'.join(messages) if messages else '\n登録済みの希望休・勤務条件と必要人数を確認して調整してください。') + '\nどう調整しますか？ 選んだ変更は次の質問で確認してから反映します。', choices)
 
-    def answer(self, run, message, question_id, option):
+    def answer(self, run, message, question_id, option, *, schedule=True):
         matches = [event['payload'] for event in self.store.events(run['id']) if event['kind']=='business_shift_question' and event['payload']['command_id']==question_id]
         if not matches:
             return False
@@ -84,7 +85,8 @@ class ShiftQuestions:
             for kind, payload in [('operator_reply', {'message':message, 'question_id':question_id, 'option':option}), ('business_shift_answer', {'question_id':question_id, 'choice':choice})]:
                 db.execute('INSERT INTO events(run_id,provider_id,kind,payload,created) VALUES(?,?,?,?,?)', (run['id'], kind+':'+question_id, kind, json.dumps(payload,ensure_ascii=False), now()))
             db.execute("UPDATE runs SET status='preparing',task_inputs=?,updated=? WHERE id=?", (json.dumps(context,ensure_ascii=False), now(), run['id']))
-        self.tools.business.kick(run['id'])
+        if schedule:
+            self.tools.business.kick(run['id'])
         return True
 
     async def call(self, run, command, name, parameters):
@@ -102,7 +104,7 @@ class ShiftQuestions:
         return result
 
     async def advance(self, run):
-        answers = [event['payload'] for event in self.store.events(run['id']) if event['kind']=='business_shift_answer']
+        answers = [event['payload'] for event in await run_blocking(self.store.events, run['id']) if event['kind']=='business_shift_answer']
         choice = answers[-1]['choice']
         action = choice['action']
         command = 'shift-adjustment:' + answers[-1]['question_id']
@@ -133,7 +135,7 @@ class ShiftQuestions:
             context = deepcopy(run['task_inputs'])
             context['inputs'].update(month=periods[0]['target_month'], absence_date=day.isoformat())
             context['targets'] = [{'key':str(staff['id']), 'label':staff['name'], 'data':staff}]
-            self.store.update(run['id'], task_inputs=context)
+            await run_blocking(self.store.update, run['id'], task_inputs=context)
             return True
         if action=='page':
             return await self.page(run, command, choice['question'], choice['items'], choice['page'])
@@ -187,13 +189,13 @@ class ShiftQuestions:
                 # collection version must still match our immediately prior receipt.
                 if index and operation['name']=='shift_update_constraint':
                     source = await self.tools.flow.read(run, 'shift_get_constraints')
-                    previous = self.store.events(run['id'])
+                    previous = await run_blocking(self.store.events, run['id'])
                     receipts = [e['payload'] for e in previous if e['kind']=='native_response_receipt' and e['payload']['command_id']==command+':apply:'+str(index-1)]
                     if not receipts or source['collection_revision'] != receipts[-1]['data']['collection_revision']:
                         raise Conflict('欠勤条件の変更中に別の更新がありました')
                     parameters['body']['collection_revision'] = source['collection_revision']
                 parameters['reason'] = '利用者が質問で選択し、変更内容を確認した勤務条件だけを反映'
-                self.store.event(run['id'], 'business_shift_authorization', {'name':operation['name'], 'parameters':parameters, 'question_id':answers[-1]['question_id']}, command+':authorize:'+str(index))
+                await run_blocking(self.store.event, run['id'], 'business_shift_authorization', {'name':operation['name'], 'parameters':parameters, 'question_id':answers[-1]['question_id']}, command+':authorize:'+str(index))
                 result = await self.call(run, command+':apply:'+str(index), operation['name'], parameters)
                 if not result.get('ok'):
                     raise Conflict('勤務条件の保存を確認できません')

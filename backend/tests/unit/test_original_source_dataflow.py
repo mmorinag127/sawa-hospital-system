@@ -102,3 +102,52 @@ def test_success_returns_actual_validated_source_and_next_call_is_fresh(packet_r
     path.write_bytes(b"[]")
     with pytest.raises(ValueError, match="canonical_artifact_bytes_changed"):
         orders._validate_hakodate_original_execution(payload)
+
+
+def test_same_operation_passes_exact_target_plan_but_keeps_fresh_artifact_reads(packet_row):
+    from src.services import master_order_form_template_service as master
+    row = packet_row('ready')
+    payload = acceptance.payload_for_evidence(row)
+    before = deepcopy(payload)
+    analysis = artifacts._EvidenceAnalysis()
+    with patch.object(master, 'build_facility_template_workbook', wraps=master.build_facility_template_workbook) as build, \
+         patch.object(storage_service, 'load_bytes_from_uri', wraps=storage_service.load_bytes_from_uri) as reads:
+        first = orders._validate_hakodate_original_execution(payload, _analysis=analysis)
+        first_reads = reads.call_count
+        assert build.call_count == 1 and first_reads > 0
+        second = orders._validate_hakodate_original_execution(payload, _analysis=analysis)
+        assert build.call_count == 1 and reads.call_count == first_reads * 2
+        assert first == second and first is not second
+        first['expected_sheet_cells'].clear()
+        assert second['expected_sheet_cells']
+        orders._validate_hakodate_original_execution(payload, _analysis=artifacts._EvidenceAnalysis())
+        assert build.call_count == 2
+        path = Path(payload['hakodate_canonical_pipeline']['outputs']['records'])
+        path.write_bytes(b'[]')
+        with pytest.raises(ValueError, match='canonical_artifact_bytes_changed'):
+            orders._validate_hakodate_original_execution(payload, _analysis=analysis)
+    assert payload == before
+
+
+def test_target_plan_handoff_rechecks_master_bytes_and_input_identity(packet_row, monkeypatch, tmp_path):
+    from src.services import master_order_form_template_service as master
+    row = packet_row('ready')
+    payload = acceptance.payload_for_evidence(row)
+    source_path = tmp_path / 'authored-master.xlsx'
+    source_path.write_bytes(master.MASTER_TEMPLATE_PATH.read_bytes())
+    monkeypatch.setattr(master, 'MASTER_TEMPLATE_PATH', source_path)
+    analysis = artifacts._EvidenceAnalysis()
+    with patch.object(master, 'build_facility_template_workbook', wraps=master.build_facility_template_workbook) as build:
+        first = orders._original_hakodate_execution_source(payload, _analysis=analysis)
+        assert build.call_count == 1
+        source_path.write_bytes(source_path.read_bytes() + b'\n')
+        assert orders._original_hakodate_execution_source(payload, _analysis=analysis) == first
+        assert build.call_count == 2
+        changed = deepcopy(payload)
+        changed['_ocr_execution']['processing_start_input']['configured_input']['facility']['facility_name'] = 'changed-author'
+        with pytest.raises(ValueError):
+            orders._validate_hakodate_original_execution(changed, _analysis=analysis)
+        assert build.call_count == 3
+        source_path.unlink()
+        with pytest.raises(master.FacilityTemplateBuildError, match='master_template_not_found'):
+            orders._original_hakodate_execution_source(payload, _analysis=analysis)

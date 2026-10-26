@@ -1,7 +1,7 @@
 from datetime import date
 
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from src.db import session_scope
 from src.models.school_lunch import Facility, MenuExecution, DailyWorkSchedule
@@ -42,7 +42,35 @@ def month_bounds(month):
     return start, end
 
 
-async def require_school_scope(request: Request, session: Session = Depends(get_school_lunch_session)):
+def scope_session_factory():
+    from src.db import SessionLocal
+    return SessionLocal
+
+
+async def require_school_scope(request: Request, session_factory=Depends(scope_session_factory)):
+    path = request.url.path.removeprefix("/api/school-lunch")
+    if request.method == "GET" and path == "/registered-work":
+        return
+    if path == "/monthly-overview" or path == "/facilities" or path.startswith("/staff"):
+        return
+    values = {}
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            values = await request.json()
+        except ValueError:
+            raise HTTPException(422, "JSONの形式を確認してください。")
+    elif "multipart/form-data" in content_type:
+        values = dict(await request.form())
+
+    def validate():
+        with session_factory() as session:
+            _check_school_scope(request, session, values)
+
+    await run_in_threadpool(validate)
+
+
+def _check_school_scope(request, session, values):
     path = request.url.path.removeprefix("/api/school-lunch")
     if request.method == "GET" and path == "/registered-work":
         return
@@ -69,15 +97,6 @@ async def require_school_scope(request: Request, session: Session = Depends(get_
         if "facility_name" in values and values["facility_name"] != facility.name:
             raise HTTPException(409, "選択学校と資料の学校が一致しません。")
 
-    values = {}
-    content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
-        try:
-            values = await request.json()
-        except ValueError:
-            raise HTTPException(422, "JSONの形式を確認してください。")
-    elif "multipart/form-data" in content_type:
-        values = dict(await request.form())
     check_fields(values)
     if isinstance(values, dict):
         check_fields(values.get("menu"))

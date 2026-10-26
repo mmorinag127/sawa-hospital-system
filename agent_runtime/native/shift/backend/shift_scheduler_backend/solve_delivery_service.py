@@ -11,7 +11,6 @@ from sqlalchemy.exc import DBAPIError
 from . import models
 from .jobs import SolveJobRequest, _execution_json, execution_json_equal, recorded_input_version, record_execution_terminal
 from .periods import resolve_period_request
-from .solver import PreparedInputStopped, PreparedPeriodSolve, prepare_period_solve, run_prepared_period_solve
 from .validation_snapshot import begin_solver_input_snapshot, capture_delivery_read_set
 
 
@@ -72,6 +71,7 @@ def enqueue_configured_solve(session, request: SolveJobRequest, *, config):
 
 def _enqueue_solve(session, request, *, transport_contract=None, transport_factory=None):
     """Capture and persist together; caller supplies the actual transport contract."""
+    from .solver import prepare_period_solve
     if not isinstance(request, SolveJobRequest) or request.effective_settings is None:
         raise ValueError("shift_delivery_explicit_request_required")
     if transport_factory is None and (not isinstance(transport_contract, dict) or not transport_contract):
@@ -235,6 +235,7 @@ def classify_delivery_review(session, delivery, run, *, now=None):
 
 def execute_claimed_solve(session, claim: SolveClaim, *, clock):
     """Compare and execute within one snapshot; clock is an explicit control input."""
+    from .solver import PreparedInputStopped, PreparedPeriodSolve, prepare_period_solve, run_prepared_period_solve
     try:
         begin_solver_input_snapshot(session)
         delivery = _lock_row(session, models.SolveDelivery, claim.delivery_id)

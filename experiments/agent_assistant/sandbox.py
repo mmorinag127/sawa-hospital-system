@@ -45,6 +45,14 @@ async def settle_process_task(task):
     return task.result(), cancelled
 
 
+async def run_blocking(function, *args, **kwargs):
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    result, cancelled = await settle_process_task(task)
+    if cancelled is not None:
+        raise cancelled
+    return result
+
+
 def require_process_group_owner(pid, run_id, created=None):
     try:
         process = psutil.Process(pid)
@@ -248,9 +256,9 @@ class Sandbox:
             raise Conflict("依頼は停止または変更されました")
 
     async def start(self, run):
-        self.require_active_run(run)
+        await run_blocking(self.require_active_run, run)
         async with self.lock:
-            self.require_active_run(run)
+            await run_blocking(self.require_active_run, run)
             processes = [process for key, process in self.children.items() if key[0] == run["id"]]
             known = {process.pid for process in processes}
             orphaned = any(json.loads(marker.read_text())["pid"] not in known
@@ -259,9 +267,9 @@ class Sandbox:
                 _, cancelled = await settle_process_task(asyncio.create_task(self._stop(run["id"])))
                 if cancelled is not None:
                     raise cancelled
-            self.require_active_run(run)
+            await run_blocking(self.require_active_run, run)
         for domain in run["domains"]:
-            self.require_active_run(run)
+            await run_blocking(self.require_active_run, run)
             key = (run["id"], domain)
             if key in self.children and self.children[key].returncode is None:
                 continue
@@ -271,12 +279,12 @@ class Sandbox:
             # Only the operator's dedicated named worktree can supply source.
             if cfg.get("source_manifest"):
                 from .runtime import verify_source
-                verify_source(worktree, cfg["source_manifest"])
+                await run_blocking(verify_source, worktree, cfg["source_manifest"])
             elif not (worktree / ".git").is_file():
                 raise Conflict("業務APIには専用Git worktreeを指定してください")
             token = self.tokens.setdefault(key, secrets.token_urlsafe(32))
-            env = self.environment(run, domain, cfg, data, worktree, token,
-                                   include_models=run.get('purpose') != 'target_lookup')
+            env = await run_blocking(self.environment, run, domain, cfg, data, worktree, token,
+                                     include_models=run.get('purpose') != 'target_lookup')
             if domain == "school-lunch":
                 worker_key = (run["id"], "school-lunch-worker")
                 if worker_key not in self.children or self.children[worker_key].returncode is not None:
@@ -306,7 +314,7 @@ class Sandbox:
         # Stop must not finish between process creation and ownership registration.
         # Health polling stays outside the lock so stop never waits for readiness.
         async with self.lock:
-            self.require_active_run(run)
+            await run_blocking(self.require_active_run, run)
             if key in self.children and self.children[key].returncode is None:
                 return
             log = open(self.path(run["id"]) / f"{domain}.log", "ab")
@@ -347,7 +355,7 @@ class Sandbox:
         try:
             async with httpx.AsyncClient(timeout=1, trust_env=False) as client:
                 for _ in range(600):
-                    self.require_active_run(run)
+                    await run_blocking(self.require_active_run, run)
                     if proc.returncode is not None:
                         raise Conflict(f"{domain} のAPIが起動できません。試用ログを確認してください")
                     try:
@@ -371,7 +379,7 @@ class Sandbox:
     async def _locked_stop(self, run_id, expected_generation=None):
         async with self.lock:
             if expected_generation is not None and self.run_store is not None:
-                if self.run_store.get(run_id)["generation"] != expected_generation:
+                if (await run_blocking(self.run_store.get, run_id))["generation"] != expected_generation:
                     return False
             await self._stop(run_id)
             return True
@@ -434,13 +442,13 @@ class Sandbox:
     async def _restore(self, run):
         async with self.lock:
             if self.run_store is not None:
-                current = self.run_store.get(run['id'])
+                current = await run_blocking(self.run_store.get, run['id'])
                 if current['generation'] != run['generation'] or current['status'] not in ('stopped', 'stop_pending', 'rollback_stop_pending'):
                     raise Conflict('復元対象の依頼が変更されています')
             await self._stop(run['id'])
-            if self.run_store is not None and self.run_store.get(run['id'])['generation'] != run['generation']:
+            if self.run_store is not None and (await run_blocking(self.run_store.get, run['id']))['generation'] != run['generation']:
                 raise Conflict('停止中に復元対象の依頼が変更されています')
-            return self.restore_files(run)
+            return await run_blocking(self.restore_files, run)
 
     def restore_files(self, run):
         directory = self.path(run["id"])

@@ -10,10 +10,6 @@ from io import BytesIO
 from math import ceil, floor
 from typing import Any
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Color, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.page import PageMargins
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, selectinload, object_session
 from sqlalchemy.orm.attributes import set_committed_value
@@ -559,6 +555,8 @@ def validate_work_schedule_export(session: Session, schedule: dict[str, Any]) ->
 
 
 def generate_work_schedule_workbook(schedule: dict[str, Any], *, original: bool = False) -> bytes:
+    from openpyxl import Workbook
+
     require_task_times_for_output(schedule)
     if schedule.get("stale"):
         raise WorkScheduleConflict("献立変更後の工程表を確認・保存してから出力してください")
@@ -595,6 +593,8 @@ def check_schedule_export_sources(schedules, expected_sources):
 
 
 def generate_monthly_work_schedule_workbook(session: Session, facility_name: str, month: str, *, original: bool = False, expected_sources=None) -> bytes:
+    from openpyxl import Workbook
+
     begin_schedule_export(session)
     if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
         raise WorkScheduleConflict("対象月をYYYY-MMで指定してください")
@@ -701,6 +701,10 @@ def _work_schedule_lanes(tasks, position, width_points, extra_labels=None):
 
 
 def _populate_work_schedule_sheet(sheet, schedule: dict[str, Any]) -> None:
+    from openpyxl.styles import Alignment, Border, Color, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.page import PageMargins
+
     # Every standard export (daily/monthly, Excel/PDF) must use the same
     # complete hygiene check as the original-format renderer.
     try:

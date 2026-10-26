@@ -140,6 +140,34 @@ def fixed_route_geometry(regions, barriers, forbidden=()):
     }
 
 
+def fixed_wall_geometry(barriers):
+    return {
+        "barriers": tuple((wall["id"], wall["axis"], wall["position"], tuple(wall["span"])) for wall in barriers),
+        "lines": {}, "crossings": {},
+    }
+
+
+def _indexed_wall_crossings(a, b, barriers, geometry):
+    edge = (a, b)
+    if edge not in geometry["crossings"]:
+        axis = 0 if a[1] == b[1] else 1
+        fixed = a[1 - axis]
+        line = (axis, fixed)
+        if line not in geometry["lines"]:
+            walls = sorted(
+                ((wall["position"], index, wall) for index, wall in enumerate(barriers)
+                 if wall["axis"] == ("x" if axis == 0 else "y")
+                 and wall["span"][0] - EPS <= fixed <= wall["span"][1] + EPS),
+                key=lambda item: (item[0], item[1]),
+            )
+            geometry["lines"][line] = ([item[0] for item in walls], [item[2] for item in walls])
+        positions, walls = geometry["lines"][line]
+        low, high = sorted((a[axis], b[axis]))
+        candidates = walls[bisect_right(positions, low + EPS):bisect_left(positions, high - EPS)]
+        geometry["crossings"][edge] = _crossed_barriers(a, b, candidates)
+    return geometry["crossings"][edge]
+
+
 def _geometry_indexes(geometry, regions, barriers, forbidden):
     if geometry is None:
         geometry = fixed_route_geometry(regions, barriers, forbidden)
@@ -217,7 +245,7 @@ def _validate_network(manifest, request, routes):
     return list(barrier_by_id.values()), gate_by_id, result, anchor_ranges
 
 
-def _route(start, end, regions, barriers, gates, required_gate_ids, lane, forbidden=(), occupied=(), start_direction=None, end_direction=None, candidate_geometry=False, fixed_geometry=None):
+def _route(start, end, regions, barriers, gates, required_gate_ids, lane, forbidden=(), occupied=(), start_direction=None, end_direction=None, candidate_geometry=False, fixed_geometry=None, wall_geometry=None):
     """Search once, with gate progress in the state, rather than joining detours.
 
     Wall coordinates cannot be vertices. Thus even a failed search cannot
@@ -225,6 +253,9 @@ def _route(start, end, regions, barriers, gates, required_gate_ids, lane, forbid
     segment endpoint. Gate ranges are constraints, not compulsory midpoints.
     """
     geometry = _geometry_indexes(fixed_geometry, regions, barriers, forbidden)
+    walls = wall_geometry if wall_geometry is not None else fixed_wall_geometry(barriers)
+    if walls["barriers"] != geometry["barriers"]:
+        raise ValueError("異なる壁条件で交差インデックスを共有できません")
     if not all(any(_inside(p, box) for box in regions) for p in (start,end)):
         raise ValueError('設備 port が指定 corridor 領域内にありません')
     def on_wall(p):
@@ -310,7 +341,7 @@ def _route(start, end, regions, barriers, gates, required_gate_ids, lane, forbid
             nextprogress=progress;penalty=0;valid=True
             directed_edge=(p,q)
             if directed_edge not in barrier_crossings:
-                barrier_crossings[directed_edge]=_crossed_barriers(p,q,barriers)
+                barrier_crossings[directed_edge]=_indexed_wall_crossings(p,q,barriers,walls)
             for w,at in barrier_crossings[directed_edge]:
                 if candidate_geometry:
                     if not any(g['barrier_id']==w['id'] and g['span'][0]-EPS<=at<=g['span'][1]+EPS for g in gates.values()):

@@ -1,6 +1,7 @@
 """Provider choice is pinned to a run; changing the default cannot redirect it."""
 from .managed import Managed
 from .gemini import Gemini
+from .sandbox import run_blocking
 
 LABELS = {'claude': 'Claude Managed Agents', 'gemini': 'Gemini Interactions API'}
 
@@ -29,7 +30,7 @@ class Providers(Managed):
         return await super().start(run)
 
     async def reply(self, ident, *args, **kwargs):
-        if self.for_run(ident): return await self.gemini.reply(ident, *args, **kwargs)
+        if await run_blocking(self.for_run, ident): return await self.gemini.reply(ident, *args, **kwargs)
         return await super().reply(ident, *args, **kwargs)
 
     async def resume(self, ident):
@@ -37,9 +38,9 @@ class Providers(Managed):
         return await Recovery(self).resume(ident)
 
     async def stop(self, ident, *, expected_generation=None):
-        if self.for_run(ident): return await self.gemini.stop(ident, expected_generation=expected_generation)
+        if await run_blocking(self.for_run, ident): return await self.gemini.stop(ident, expected_generation=expected_generation)
         return await super().stop(ident, expected_generation=expected_generation)
 
     async def refresh_usage(self, ident, release=False, *, terminal_generation=None):
-        if self.for_run(ident): return await self.gemini.refresh_usage(ident, release, terminal_generation=terminal_generation)
+        if await run_blocking(self.for_run, ident): return await self.gemini.refresh_usage(ident, release, terminal_generation=terminal_generation)
         return await super().refresh_usage(ident, release, terminal_generation=terminal_generation)

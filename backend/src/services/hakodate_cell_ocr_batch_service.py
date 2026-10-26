@@ -994,7 +994,8 @@ def original_physical_draft(*, physical_menu_entries: list, week_code: str) -> d
     return {"fields": ["date", "daypart", "menu"], "rows": [[entry["_menu_date_obj"].isoformat(), entry["daypart"], entry["name"]] for entry in entries], "physical_menu_row_ids": row_ids, "physical_menu_row_count": len(row_ids), "week_id": week_code}
 
 
-def capture_original_target_plan(*, configured_input: dict, physical_menu_entries: list, week_code: str) -> list[dict]:
+def capture_original_target_plan(*, configured_input: dict, physical_menu_entries: list, week_code: str,
+                                 _analysis=None) -> list[dict]:
     """Derive region identities from the original authored workbook, never OCR output."""
     from src.services import master_order_form_template_service as master
     from src.services.hakodate_step_review_pipeline_service import canonical_logical_target_plan
@@ -1002,15 +1003,38 @@ def capture_original_target_plan(*, configured_input: dict, physical_menu_entrie
     if not isinstance(physical_menu_entries, list) or not physical_menu_entries:
         raise ValueError("physical_menu_rows_unresolved")
     hakodate_physical_menu_row_service.physical_row_ids_from_entries(physical_menu_entries)
+    facility = configured_input["facility"]
+    source_path = Path(master.MASTER_TEMPLATE_PATH)
+    source_bytes = None
+    binding = None
+    if _analysis is not None:
+        from src.services.canonical_ocr_artifact_service import _analysis_input_bytes
+        from copy import deepcopy
+        import hashlib
+        inputs = _analysis_input_bytes([configured_input, physical_menu_entries, week_code])
+        if inputs is not None:
+            if not source_path.exists():
+                raise master.FacilityTemplateBuildError(f"master_template_not_found:{source_path}")
+            columns = master._columns_from_facility_config(facility)
+            if not master._generated_columns(columns):
+                raise master.FacilityTemplateBuildError("facility_template_generated_columns_missing")
+            source_bytes = source_path.read_bytes()
+            binding = (inputs, hashlib.sha256(source_bytes).digest())
+            if _analysis.target_plan is not None and _analysis.target_plan[0] == binding:
+                return deepcopy(_analysis.target_plan[1])
     wb = master.build_facility_template_workbook(
-        facility_config=configured_input["facility"], week_value=week_code,
+        facility_config=facility, week_value=week_code,
         week_menu_entries=physical_menu_entries,
         logical_only=True,
+        master_template_path=source_path,
+        _source_bytes=source_bytes,
     )
     try:
         ws = wb[master.FACILITY_TEMPLATE_SHEET_NAME]
         draft = original_physical_draft(physical_menu_entries=physical_menu_entries, week_code=week_code)
         plan = canonical_logical_target_plan(worksheet=ws, fax_template=configured_input["facility"]["fax_template"], draft_sheet=draft)
+        if binding is not None:
+            _analysis.target_plan = (binding, deepcopy(plan))
         return plan
     finally:
         wb.close()
