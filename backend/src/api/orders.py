@@ -410,7 +410,7 @@ def _apply_order_workflow_context(order: dict, workflow: dict | None) -> None:
         order["apply_gate"] = workflow["apply_gate"]
 
 
-def _apply_job_status_to_order(order: dict, job: dict | None) -> None:
+def _apply_job_status_to_order(order: dict, job: dict | None, *, include_metrics: bool = True) -> None:
     if not isinstance(job, dict):
         return
     error_message = job.get("error_message")
@@ -423,7 +423,7 @@ def _apply_job_status_to_order(order: dict, job: dict | None) -> None:
         order["ocr_error"] = metrics_error
     elif error_message:
         order["ocr_error"] = error_message
-    if metrics:
+    if metrics and include_metrics:
         order["ocr_metrics"] = metrics
     order["ocr_updated_at"] = job.get("updated_at")
 
@@ -693,18 +693,19 @@ def list_orders(
     response_view: Literal["ocr_monitor"] | None = None,
 ):
     include_archived_flag = True if include_archived is None else include_archived
+    bindings: dict = {}
     page = order_service.list_orders_page(
         status=status,
         include_archived=include_archived_flag,
         limit=limit,
         before_received_at=before_received_at,
         before_id=before_id,
+        job_bindings_out=bindings,
     )
     orders = page["orders"]
     include_runtime_flag = (include_ocr is not None) if include_runtime is None else include_runtime
     if not include_runtime_flag:
         return _order_list_response(page, response_view)
-    bindings = get_recorded_order_job_bindings([order["id"] for order in orders])
     jobs = {}
     for order in orders:
         binding = bindings.get(order["id"])
@@ -731,7 +732,7 @@ def list_orders(
                 order["workflow_state"] = workflow
             review_job = jobs.get(order.get("ocr_job_id"))
             if review_job:
-                _apply_job_status_to_order(order, review_job)
+                _apply_job_status_to_order(order, review_job, include_metrics=False)
             elif cached_payload:
                 cached_status = _derive_status_from_payload(cached_payload)
                 if cached_status and not order.get("ocr_status"):
@@ -782,6 +783,18 @@ def _order_list_response(page: dict, view: str | None) -> dict:
     ]}
 
 
+@router.get("/dashboard", dependencies=[Depends(require_role("operator"))])
+def get_order_dashboard():
+    return order_service.get_order_dashboard()
+
+
+@router.get("/facility-overview", dependencies=[Depends(require_role("operator"))])
+def get_facility_order_overview(facility: str | None = None, week: str | None = None, status: str | None = None,
+                                limit: int = Query(default=25, ge=1, le=200), offset: int = Query(default=0, ge=0)):
+    from src.services.order_overview_read import list_facility_orders
+    return list_facility_orders(facility=facility, week=week, status=status, limit=limit, offset=offset)
+
+
 @router.post("/cache-refresh", dependencies=[Depends(require_role("admin"))])
 def refresh_orders_cache(status: str | None = None, include_archived: bool | None = None):
     include_archived_flag = True if include_archived is None else include_archived
@@ -797,8 +810,11 @@ def _parse_iso_date(value: str) -> dt_date:
 
 
 @router.get("/by-line-date", dependencies=[Depends(require_role("operator"))])
-def list_orders_by_line_date(date: str, facility: str | None = None, status: str | None = None):
+def list_orders_by_line_date(date: str, facility: str | None = None, status: str | None = None, summary_only: bool = False):
     target_date = _parse_iso_date(date)
+    if summary_only:
+        from src.services.order_overview_read import list_daily_order_facts
+        return {"date": target_date.isoformat(), "orders": list_daily_order_facts(target_date, facility=facility, status=status)}
     orders = order_service.list_orders_by_line_date(target_date, facility_id=facility, status=status)
     return {"date": target_date.isoformat(), "orders": orders}
 
@@ -1783,7 +1799,13 @@ def get_order_workflow_v2_inspection(
     order_id: str,
     include_ocr_results: bool = Query(default=False),
     history_details: bool = Query(default=True),
+    include_order_header: bool = False,
 ):
+    if include_order_header:
+        return _workflow_v2_or_404(order_workflow_v2_service.get_inspection(
+            order_id, include_ocr_results=include_ocr_results,
+            history_details=history_details, include_order_header=True,
+        ))
     if history_details:
         return _workflow_v2_or_404(order_workflow_v2_service.get_inspection(
             order_id, include_ocr_results=include_ocr_results,

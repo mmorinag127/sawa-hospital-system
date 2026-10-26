@@ -5,7 +5,7 @@ const { mount, transport, deferred } = require('./helpers/modernization-react-do
 // Mounted production page; only router/session/HTTP are synthetic component inputs.
 const PAGE = 'src/pages/orders/[id]/workflow-v2.tsx';
 const ORDER = 'explicit-order', OTHER = 'second-explicit-order';
-const reads = id => [`/orders/${id}/workflow-v2/inspection?include_ocr_results=true&history_details=false`, `/orders/${id}`];
+const reads = id => [`/orders/${id}/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, `/orders/${id}`];
 const orderCalls = t => t.calls.filter(call => /^\/(orders|outputs)(\/|\?)/.test(call.url));
 const value = (id, revision = 7) => ({ order_id: id, revision, state: 'ocr_failed',
   headline: `Owned ${id}`, blockers: [], warnings: [], selected_ocr_result_id: null,
@@ -17,7 +17,7 @@ async function setup(routerState, route = `/hospital/orders/${ORDER}/workflow-v2
   t.on('get', '/facilities', () => ({ data: { source: 'canonical_json', revision: 'synthetic', facilities: [] } }));
   for (const id of [ORDER, OTHER]) {
     const [inspection, order] = reads(id);
-    t.on('get', inspection, () => pending.get(id)?.promise || ({ data: { saved_sheet: null, pre_save_checks: {},
+    t.onWorkflowInspection(inspection, () => pending.get(id)?.promise || ({ data: { saved_sheet: null, pre_save_checks: {},
       workflow: value(id),
       ocr_candidates: require('./helpers/ocr-candidates.cjs')(id, [], value(id)) } }));
     t.on('get', order, () => ({ data: { id, current_version: { document_id: `pdf-${id}` },
@@ -70,7 +70,8 @@ test('router readiness and explicit query activate the correct order without URL
     await f.h.render();
     await f.h.waitFor(() => f.probe.current.workflow?.order_id === ORDER
       && f.probe.current.effectiveSelectedDocumentId === `pdf-${ORDER}`);
-    for (const url of reads(ORDER)) assert.ok(f.t.calls.some(call => call.method === 'get' && call.url === url), url);
+    assert.ok(f.t.calls.some(call => call.method === 'get' && call.url === reads(ORDER)[0]));
+    assert.ok(!f.t.calls.some(call => call.method === 'get' && call.url === reads(ORDER)[1]));
     assert.ok(orderCalls(f.t).every(call => call.url.startsWith(`/orders/${ORDER}`)));
     assert.equal(f.probe.current.orderId, ORDER);
     assert.equal(f.probe.current.ownsPageInput(f.probe.current.capturePageOwner()), true);

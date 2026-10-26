@@ -84,7 +84,7 @@ export default function OcrQueuePage() {
         apiClient.get("/ingest/jobs", {
           params: statusFilter ? { status: statusFilter } : undefined,
         }),
-        apiClient.get("/system/status"),
+        apiClient.get("/system/status", {params: {view: "operations"}}),
       ]);
       if (!isCurrent()) return null;
 

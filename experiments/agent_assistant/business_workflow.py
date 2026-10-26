@@ -95,6 +95,21 @@ class BusinessWorkflow:
 
     def kick(self, ident, authorization=None):
         run = self.store.get(ident)
+        self._schedule(run, authorization)
+
+    async def kick_many(self, identities, authorization=None):
+        def read_current():
+            with self.store.snapshot():
+                return [self.store.get(ident) for ident in identities]
+
+        if not identities:
+            return
+        runs = await asyncio.to_thread(read_current)
+        for run in runs:
+            self._schedule(run, authorization)
+
+    def _schedule(self, run, authorization=None):
+        ident = run['id']
         if not owned(run) or self.closed or run['status'] == 'completed':
             return
         if authorization:

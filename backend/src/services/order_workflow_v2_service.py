@@ -33,7 +33,7 @@ from src.models.order_sheet_patch_candidate import OrderSheetPatchCandidate
 from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import workflow_ocr_delivery_service
-from src.services.ocr_history_read import read_history, read_history_detail, read_history_summary
+from src.services.ocr_history_read import history_row_view, read_history, read_history_detail, read_history_summary
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, ocr_job_service, sheet_week_service, workflow_v2_sheet_review_service
@@ -4932,7 +4932,7 @@ def final_confirm(
 
 
 @_measure_inspection
-def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_details: bool = True) -> tuple[dict[str, Any] | None, str | None]:
+def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_details: bool = True, include_order_header: bool = False) -> tuple[dict[str, Any] | None, str | None]:
     from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
     analysis = _EvidenceAnalysis()
     with session_scope() as session, session.no_autoflush:
@@ -4948,13 +4948,14 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
                 return None, template_error
         _inspection_next("history_query")
         ocr_results = read_history(session, order.id) if history_details else read_history_summary(session, order.id)
+        selected_evidence = None
         if not history_details and workflow is not None and workflow.evidence_run_id:
             for index, row in enumerate(ocr_results):
                 if row.id == workflow.evidence_run_id:
-                    detail = read_history_detail(session, order.id, row.id)
-                    if detail is None:
+                    selected_evidence = session.get(OrderOcrEvidenceRun, row.id)
+                    if selected_evidence is None or selected_evidence.order_id != order.id:
                         return None, "ocr_result_not_found"
-                    ocr_results[index] = detail
+                    ocr_results[index] = history_row_view(selected_evidence)
         _inspection_next("saved_sheet", count=len(ocr_results))
         saved_sheet = None
         saved_sheet_hash = ""
@@ -5053,6 +5054,9 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
             ),
             "output_bundle": inspection_meta.get("output_bundle") if workflow is not None else None,
         }
+        if include_order_header:
+            from src.services.order_serialization_service import serialize_workflow_order_header
+            result["order_header"] = serialize_workflow_order_header(order)
         if include_ocr_results:
             _inspection_next("candidate_projection")
             serialized_rows = {row.id: serialized for row, serialized in zip(ocr_results, result["ocr_results"])}

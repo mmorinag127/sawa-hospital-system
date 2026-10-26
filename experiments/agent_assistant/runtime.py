@@ -59,9 +59,14 @@ def configuration(root):
 
 def main():
     import uvicorn
-    from .app import create_app
+    from .runtime_gateway import create_gateway
+
+    def initialize():
+        from .app import create_app
+        return create_app(configuration('/opt/sawa-agent'), Path('/var/lib/sawa-agent'))
+
     # This is a private sidecar reached only through the authenticated Next proxy.
-    app = create_app(configuration('/opt/sawa-agent'),Path('/var/lib/sawa-agent'))
+    app = create_gateway(initialize)
     uvicorn.run(app,host='0.0.0.0',port=8128,workers=1)
 
 

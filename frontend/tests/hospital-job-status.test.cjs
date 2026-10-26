@@ -23,7 +23,7 @@ async function setup() {
   t.on('get', '/facilities', () => ({ data: { source: 'canonical_json', revision: 'synthetic', facilities: [] } }));
   t.on('get', BASE, () => state.pending ? state.pending.promise : { data: clone(state.value) });
   t.on('get', `${BASE}/ocr-results`, () => ({ data: { results: [] } }));
-  t.on('get', `${BASE}/inspection?include_ocr_results=true&history_details=false`, () => state.pending ? state.pending.promise : ({ data: { workflow: clone(state.value), ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER), saved_sheet: null, pre_save_checks: {} } }));
+  t.onWorkflowInspection(`${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => state.pending ? state.pending.promise : ({ data: { workflow: clone(state.value), ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER), saved_sheet: null, pre_save_checks: {} } }));
   t.on('get', `/orders/${ORDER}`, () => ({ data: { id: ORDER,
     current_version: { document_id: 'pdf-A' }, versions: [{ document_id: 'pdf-A', is_current: true }] } }));
   t.on('get', `/orders/${ORDER}/week-options`, () => ({ data: { options: [] } }));

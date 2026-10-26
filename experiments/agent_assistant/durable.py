@@ -10,6 +10,8 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import threading
+import weakref
 import zlib
 
 from .store import Store, Conflict, now
@@ -94,6 +96,11 @@ class PostgresStore(Store):
         super().__init__(self.root)
         self.hydrate()
         self.working_ready = True
+
+    def close(self):
+        close = getattr(self.connect, "close", None)
+        if close is not None:
+            close()
 
     @contextmanager
     def tx(self):
@@ -227,17 +234,67 @@ class PostgresStore(Store):
             db.execute("UPDATE runs SET generation=generation+1,status=CASE WHEN status='stopping' THEN 'stop_pending' WHEN status IN ('stop_pending','rollback_stop_pending') THEN status ELSE 'reconciliation_required' END,updated=? WHERE status NOT IN ('rolled_back','completed','stopped','failed','budget_reached')",(now(),))
 
 
+class _PooledConnections:
+    def __init__(self, **parameters):
+        from psycopg2.pool import ThreadedConnectionPool
+        self.pool = ThreadedConnectionPool(1, 4, **parameters)
+        self.finalize = weakref.finalize(self, self.pool.closeall)
+        self.slots = threading.BoundedSemaphore(4)
+
+    def __call__(self):
+        if not self.slots.acquire(timeout=10):
+            raise Conflict("実行履歴への接続が混雑しています。業務操作は受け付けていません。")
+        try:
+            return _ConnectionLease(self.pool.getconn(), self)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def close(self):
+        self.finalize()
+
+
+class _ConnectionLease:
+    def __init__(self, connection, owner):
+        self.connection, self.owner = connection, owner
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def __enter__(self):
+        return self.connection.__enter__()
+
+    def __exit__(self, *exception):
+        return self.connection.__exit__(*exception)
+
+    def close(self):
+        if self.connection is not None:
+            connection, self.connection = self.connection, None
+            try:
+                if not connection.closed:
+                    try:
+                        connection.reset()
+                    except BaseException:
+                        self.owner.pool.putconn(connection, close=True)
+                        raise
+                self.owner.pool.putconn(connection, close=bool(connection.closed))
+            finally:
+                self.owner.slots.release()
+
+
 def cloud_store(root):
     import os
-    import psycopg2
     required = ('DB_HOST','DB_NAME','DB_USER','DB_PASSWORD')
     if any(not os.environ.get(name) for name in required):
         raise RuntimeError('stg実行履歴のCloud SQL設定が不足しています')
     if (os.environ['DB_HOST'] != '/cloudsql/sawahospitalsystem:asia-northeast2:orders-stg'
             or os.environ['DB_NAME'] != 'orders' or os.environ['DB_USER'] != 'orders_app'):
         raise RuntimeError('試用エージェントの永続化先はorders-stg専用です')
-    def connect():
-        return psycopg2.connect(host=os.environ['DB_HOST'],dbname=os.environ['DB_NAME'],
-            user=os.environ['DB_USER'],password=os.environ['DB_PASSWORD'],connect_timeout=10,
-            application_name='sawa-agent-isolated-trial')
-    return PostgresStore(root,connect)
+    connect = _PooledConnections(host=os.environ['DB_HOST'], dbname=os.environ['DB_NAME'],
+        user=os.environ['DB_USER'], password=os.environ['DB_PASSWORD'], connect_timeout=10,
+        application_name='sawa-agent-isolated-trial')
+    try:
+        return PostgresStore(root, connect)
+    except BaseException:
+        connect.close()
+        raise

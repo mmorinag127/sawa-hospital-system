@@ -4787,6 +4787,57 @@ def _normalize_order_list_cursor_id(value: str | None) -> str:
     return str(value or "").strip()
 
 
+def get_order_dashboard() -> dict[str, Any]:
+    """Stored order facts only; execution eligibility remains in guarded reads."""
+    counts = {key: 0 for key in ("未着", "要確認", "確定", "エラー")}
+    stats = {"counts": counts, "unresolved": 0, "latestReceived": None, "total": 0}
+    weeks: dict[str, dict] = {}
+    week_ids: set[str] = set()
+
+    def accumulate(facility, week_code, status, count, received_at):
+        week = _to_sheet_month_id(week_code)
+        if week:
+            week_ids.add(week)
+        label = week or "未確定"
+        row = weeks.setdefault(label, {"week": label, "counts": dict.fromkeys(counts, 0), "unresolved": 0})
+        stats["total"] += count
+        if status in counts:
+            counts[status] += count
+            row["counts"][status] += count
+        if not facility:
+            stats["unresolved"] += count
+            row["unresolved"] += count
+        if received_at is not None and (stats["latestReceived"] is None or received_at > stats["latestReceived"]):
+            stats["latestReceived"] = received_at
+
+    with session_scope() as session:
+        for facility, week, status, count, received in session.execute(select(
+            Order.facility_code, Order.week_code, Order.status, func.count(Order.id), func.max(Order.received_at),
+        ).group_by(Order.facility_code, Order.week_code, Order.status)):
+            accumulate(facility, week, status, count, received)
+        pending = [dict(row) for row in session.execute(select(
+            Order.id, Order.facility_code.label("facility"), Order.week_code.label("week"),
+            Order.status, Order.received_at,
+        ).where(or_(Order.status == "要確認", Order.facility_code.is_(None), Order.facility_code == ""))
+            .order_by(Order.received_at.desc().nullslast(), Order.id.desc()).limit(8)).mappings()]
+        uploads = session.execute(select(
+            UploadedPdf.id, UploadedPdf.facility_hint, UploadedPdf.week_hint, UploadedPdf.status,
+            UploadedPdf.received_at, UploadedPdf.current_document_id,
+        ).where(UploadedPdf.current_order_id.is_(None))
+            .order_by(UploadedPdf.received_at.desc(), UploadedPdf.id.desc()).limit(200)).mappings()
+        for upload in uploads:
+            if str(upload["status"] or "").strip().lower() == "completed" and upload["current_document_id"]:
+                continue
+            accumulate(upload["facility_hint"], str(upload["week_hint"] or "").strip(), "アップロード済み", 1, upload["received_at"])
+            if not upload["facility_hint"]:
+                pending.append({"id": f"UPLOAD-{upload['id']}", "facility": upload["facility_hint"],
+                                "source_kind": "uploaded_pdf", "uploaded_pdf_id": upload["id"],
+                                "week": upload["week_hint"], "status": "アップロード済み", "received_at": upload["received_at"]})
+        pending.sort(key=_order_list_sort_key, reverse=True)
+        pending = [{**row, "week": _to_sheet_month_id(row["week"])} for row in pending[:8]]
+    return {"stats": stats, "weeks": [weeks[key] for key in sorted(weeks)], "week_ids": sorted(week_ids), "pending_orders": pending}
+
+
 def _fetch_orders(
     status: Optional[str],
     *,
@@ -4794,6 +4845,7 @@ def _fetch_orders(
     limit: int | None = None,
     before_received_at: str | None = None,
     before_id: str | None = None,
+    job_bindings_out: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict]:
     normalized_limit = _normalize_order_list_limit(limit)
     cursor_received_at = _parse_order_list_cursor_received_at(before_received_at)
@@ -4832,6 +4884,8 @@ def _fetch_orders(
             query = query.limit(normalized_limit)
         rows = session.execute(query).mappings().all()
         job_bindings = get_recorded_order_job_bindings([row["id"] for row in rows], read_session=session)
+        if job_bindings_out is not None:
+            job_bindings_out.update(job_bindings)
         payloads: list[dict[str, Any]] = []
         for row in rows:
             week_code = row["week_code"]
@@ -5020,6 +5074,7 @@ def list_orders_page(
     limit: int | None = None,
     before_received_at: str | None = None,
     before_id: str | None = None,
+    job_bindings_out: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_limit = _normalize_order_list_limit(limit)
     cursor_received_at = _parse_order_list_cursor_received_at(before_received_at)
@@ -5027,15 +5082,16 @@ def list_orders_page(
     if cursor_received_at is None and cursor_id:
         cursor_id = ""
     has_cursor = cursor_received_at is not None
-    if not has_cursor:
+    if not has_cursor and job_bindings_out is None:
         orders = list_orders(status=status, include_archived=include_archived, limit=normalized_limit)
     else:
         orders = _fetch_orders(
             status,
             include_archived=include_archived,
             limit=normalized_limit,
-            before_received_at=cursor_received_at.isoformat(),
+            before_received_at=cursor_received_at.isoformat() if cursor_received_at is not None else None,
             before_id=cursor_id,
+            job_bindings_out=job_bindings_out,
         )
     has_more = normalized_limit is not None and len(orders) >= normalized_limit
     return {

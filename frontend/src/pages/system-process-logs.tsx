@@ -67,6 +67,8 @@ export default function SystemProcessLogsPage() {
   const [selectedId, setSelectedId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [detail, setDetail] = useState<ProcessLogItem | null>(null);
+  const [detailError, setDetailError] = useState("");
 
   const selected = useMemo(
     () => items.find((item) => item.id === selectedId) || items[0] || null,
@@ -77,7 +79,7 @@ export default function SystemProcessLogsPage() {
     setLoading(true);
     try {
       const res = await apiClient.get<ProcessLogResponse>("/system/process-logs", {
-        params: { limit: 100 },
+        params: { limit: 100, include_details: false },
       });
       const nextItems = Array.isArray(res.data?.items) ? res.data.items : [];
       setItems(nextItems);
@@ -95,6 +97,18 @@ export default function SystemProcessLogsPage() {
   useEffect(() => {
     loadLogs();
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setDetail(null);
+    setDetailError("");
+    if (selected) {
+      apiClient.get<ProcessLogItem>(`/system/process-logs/${encodeURIComponent(selected.id)}`, { signal: controller.signal })
+        .then(({ data }) => { if (!controller.signal.aborted) setDetail(data); })
+        .catch(() => { if (!controller.signal.aborted) setDetailError("詳細の取得に失敗しました。"); });
+    }
+    return () => controller.abort();
+  }, [selected]);
 
   return (
     <ThemeProvider theme={sawaTheme}>
@@ -179,7 +193,8 @@ export default function SystemProcessLogsPage() {
                   <dd>{selected.summary || "-"}</dd>
                 </div>
               </dl>
-              <pre className="json">{JSON.stringify(selected.details || selected, null, 2)}</pre>
+              {detailError ? <p className="error">{detailError}</p> : null}
+              <pre className="json">{detail?.id === selected.id ? JSON.stringify(detail.details, null, 2) : detailError ? "" : "読込中"}</pre>
             </>
           ) : (
             <p className="empty">行を選択すると詳細を表示します。</p>

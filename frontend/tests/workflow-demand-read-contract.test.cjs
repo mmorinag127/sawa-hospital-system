@@ -5,7 +5,7 @@ const test = require("node:test");
 const {mount, transport, deferred} = require('./helpers/modernization-react-dom.cjs');
 const PAGE = 'src/pages/orders/[id]/workflow-v2.tsx';
 const BASE = '/orders/demand/workflow-v2';
-const READ = `${BASE}/inspection?include_ocr_results=true&history_details=false`;
+const READ = `${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`;
 const RAW = `${BASE}/inspection?history_details=true`;
 const DETAIL = `${BASE}/inspection-detail/evidence`;
 async function setup(running = false) {
@@ -17,7 +17,7 @@ async function setup(running = false) {
     ocr_candidates:require('./helpers/ocr-candidates.cjs')('demand',structuredClone(state.results),state.workflow)});
   t.on('get','/auth/me',()=>({data:{role:'operator'}}));
   t.on('get','/facilities',()=>({data:{source:'canonical_json',revision:'fixture',facilities:[]}}));
-  t.on('get',READ,()=>({data:payload()}));
+  t.onWorkflowInspection(READ,()=>({data:payload()}));
   t.on('get',RAW,()=>({data:payload()}));
   t.on('get','/orders/demand',()=>({data:{id:'demand',current_version:{document_id:'pdf'},versions:[{document_id:'pdf',is_current:true}]}}));
   t.on('get','/orders/demand/document',()=>({data:new Blob(['component'])}));
@@ -137,11 +137,11 @@ test('progress single flight updates common status and retries completion refres
     assert.deepEqual(f.probe.current.workflow.common_job_status,progress().common_job_status);
     f.state.workflow.state='ocr_completed';
     f.t.on('get',`${BASE}/ocr-progress`,()=>({data:progress()}));
-    f.t.on('get',READ,()=>{throw Error('completion retry');});
+    f.t.onWorkflowInspection(READ,()=>{throw Error('completion retry');});
     await f.h.settle(()=>tick());
     assert.match(f.probe.current.error,/completion retry/);
     assert.equal(f.probe.current.workflow.state,'ocr_running');
-    f.t.on('get',READ,()=>({data:f.payload()}));
+    f.t.onWorkflowInspection(READ,()=>({data:f.payload()}));
     await f.h.settle(()=>tick());
     assert.equal(f.probe.current.workflow.state,'ocr_completed');
   } finally {await f.h.close();}
@@ -152,12 +152,12 @@ test('current progress revision refresh failure remains visible and retries',asy
   try {
     f.t.on('get',`${BASE}/ocr-progress`,()=>({data:{order_id:'demand',workflow_revision:8,
       state:'ocr_running',ocr_job:f.state.workflow.ocr_job,common_job_status:null}}));
-    f.t.on('get',READ,()=>{throw Error('revision refresh failed');});
+    f.t.onWorkflowInspection(READ,()=>{throw Error('revision refresh failed');});
     await f.h.settle(()=>f.timers.get(1)());
     assert.match(f.probe.current.error,/revision refresh failed/);
     assert.equal(f.probe.current.workflow.revision,7);
     f.state.workflow.revision=8;
-    f.t.on('get',READ,()=>({data:f.payload()}));
+    f.t.onWorkflowInspection(READ,()=>({data:f.payload()}));
     await f.h.settle(()=>f.timers.get(1)());
     assert.equal(f.probe.current.workflow.revision,8);
   } finally {await f.h.close();}
@@ -168,10 +168,10 @@ for (const boundary of ['refresh','revision','route']) test(`completion refresh 
   try {
     f.t.on('get',`${BASE}/ocr-progress`,()=>({data:{order_id:'demand',workflow_revision:7,
       state:'ocr_completed',ocr_job:f.state.workflow.ocr_job,common_job_status:null}}));
-    f.t.on('get',READ,()=>pending.promise);
+    f.t.onWorkflowInspection(READ,()=>pending.promise);
     await f.h.settle(()=>f.timers.get(1)());
     if(boundary==='revision') f.state.workflow.revision=8;
-    f.t.on('get',READ,()=>({data:f.payload()}));
+    f.t.onWorkflowInspection(READ,()=>({data:f.payload()}));
     if(boundary==='route') {
       f.h.nav.router.asPath+='?successor=1';
       await f.h.render();
@@ -210,9 +210,20 @@ for (const workflow of [null,{order_id:'foreign',revision:7}]) test(`current mal
   const f=await setup();
   try {
     const current=f.probe.current.workflow;
-    f.t.on('get',READ,()=>({data:{...f.payload(),workflow}}));
+    f.t.onWorkflowInspection(READ,()=>({data:{...f.payload(),workflow}}));
     await f.h.settle(()=>assert.rejects(f.probe.current.refreshAll(),/読取応答/));
     assert.equal(f.probe.current.workflow,current);
+  } finally {await f.h.close();}
+});
+
+for (const header of [undefined, {id:'foreign'}]) test(`invalid order header ${JSON.stringify(header)} cannot replace current state`,async()=>{
+  const f=await setup();
+  try {
+    const current=f.probe.current.workflow;
+    f.t.on('get',READ,()=>({data:{...f.payload(),order_header:header}}));
+    await f.h.settle(()=>assert.rejects(f.probe.current.refreshAll()));
+    assert.equal(f.probe.current.workflow,current);
+    assert.equal(f.t.calls.filter(call=>call.url==='/orders/demand').length,0);
   } finally {await f.h.close();}
 });
 
@@ -240,7 +251,7 @@ test('same revision detail refresh generation rejects old bytes after newer deta
 const source = fs.readFileSync(path.join(__dirname, "../src/pages/orders/[id]/workflow-v2.tsx"), "utf8");
 
 test("workflow demand reads retain filtered summaries and defer candidate details", () => {
-  assert.match(source, /inspection\?include_ocr_results=true&history_details=false/);
+  assert.match(source, /inspection\?include_ocr_results=true&history_details=false&include_order_header=true/);
   assert.match(source, /inspection-detail\/\$\{ocrResultId\}/);
   assert.match(source, /workflow_revision !== revision/);
   assert.match(source, /状態更新のため再読込が必要です/);

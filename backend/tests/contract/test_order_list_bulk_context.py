@@ -28,8 +28,10 @@ def test_same_page_without_per_order_context_reads(monkeypatch, count, lightweig
     def one_workflow(order_id, **kw):
         reads['workflow_single'] += 1
         return deepcopy(workflows.get(order_id))
-    monkeypatch.setattr(api.order_service, 'list_orders_page', lambda **kw: {
-        'orders': deepcopy(rows), 'has_more': True, 'next_cursor': {'id': 'cursor'}})
+    def page(**kw):
+        kw['job_bindings_out'].update(bulk_jobs([row['id'] for row in rows]))
+        return {'orders': deepcopy(rows), 'has_more': True, 'next_cursor': {'id': 'cursor'}}
+    monkeypatch.setattr(api.order_service, 'list_orders_page', page)
     monkeypatch.setattr(api.order_service, '_load_order_ocr_cache_map', bulk_cache)
     monkeypatch.setattr(api.order_service, 'get_cached_ocr_payload', one_cache)
     monkeypatch.setattr(api.order_service, 'get_order_workflow_state', one_workflow)

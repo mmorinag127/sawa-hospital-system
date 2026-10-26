@@ -761,37 +761,16 @@ def summarize_uploaded_pdfs() -> dict[str, Any]:
         ).all()
         status_counts = {status: int(count) for status, count in status_rows if status}
         stage_counts = {stage: int(count) for stage, count in stage_rows if stage}
-        stale_leases = int(
-            session.execute(
-                select(func.count(UploadedPdf.id)).where(
-                    (UploadedPdf.status == "processing")
-                    & (UploadedPdf.lease_expires_at.is_not(None))
-                    & (UploadedPdf.lease_expires_at <= now)
-                )
-            ).scalar_one()
-            or 0
-        )
-        retry_ready = int(
-            session.execute(
-                select(func.count(UploadedPdf.id)).where(
-                    (UploadedPdf.status == "retry_wait")
-                    & (or_(UploadedPdf.next_retry_at.is_(None), UploadedPdf.next_retry_at <= now))
-                )
-            ).scalar_one()
-            or 0
-        )
-        oldest_ready_at = session.execute(
-            select(func.min(UploadedPdf.received_at)).where(
-                or_(
-                    UploadedPdf.status == "pending",
-                    (UploadedPdf.status == "retry_wait")
-                    & (or_(UploadedPdf.next_retry_at.is_(None), UploadedPdf.next_retry_at <= now)),
-                    (UploadedPdf.status == "processing")
-                    & (UploadedPdf.lease_expires_at.is_not(None))
-                    & (UploadedPdf.lease_expires_at <= now),
-                )
-            )
-        ).scalar_one_or_none()
+        stale_condition = ((UploadedPdf.status == "processing")
+                           & UploadedPdf.lease_expires_at.is_not(None)
+                           & (UploadedPdf.lease_expires_at <= now))
+        retry_condition = ((UploadedPdf.status == "retry_wait")
+                           & or_(UploadedPdf.next_retry_at.is_(None), UploadedPdf.next_retry_at <= now))
+        stale_leases, retry_ready, oldest_ready_at = session.execute(select(
+            func.count(UploadedPdf.id).filter(stale_condition),
+            func.count(UploadedPdf.id).filter(retry_condition),
+            func.min(UploadedPdf.received_at).filter(or_(UploadedPdf.status == "pending", retry_condition, stale_condition)),
+        )).one()
     eligible = int(status_counts.get("pending", 0) or 0) + retry_ready + stale_leases
     return {
         "total": int(sum(status_counts.values())),

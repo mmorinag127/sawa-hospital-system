@@ -43,7 +43,7 @@ def current_ingest_lease():
     return deepcopy(_execution_lease.get())
 
 
-def ingest_terminal_receipt(session, job, captured):
+def ingest_terminal_receipt(session, job, captured, *, _read_evidence=None):
     """Select one recorded completion contract; never reinterpret old jobs."""
     if job is None or not isinstance(captured, dict):
         return None
@@ -120,9 +120,16 @@ def ingest_terminal_receipt(session, job, captured):
             raise ValueError("ingest_native_terminal_evidence_missing")
         return receipt
     from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
-    evidence = session.get(OrderOcrEvidenceRun, evidence_id)
-    payload = evidence.payload_json if evidence is not None else None
-    lineage = payload.get("_ocr_execution") if isinstance(payload, dict) else None
+    if _read_evidence is None:
+        evidence = session.get(OrderOcrEvidenceRun, evidence_id)
+        payload = evidence.payload_json if evidence is not None else None
+        lineage = payload.get("_ocr_execution") if isinstance(payload, dict) else None
+    else:
+        from src.services.ocr_terminal_evidence_read import TerminalEvidenceRead
+        evidence = _read_evidence.get(evidence_id)
+        if evidence is not None and (not isinstance(evidence, TerminalEvidenceRead) or evidence.id != evidence_id):
+            raise ValueError("ingest_terminal_read_evidence_invalid")
+        lineage = evidence.execution if evidence is not None else None
     original = captured.get("orders", {}).get(captured.get("order_id"), {})
     if (evidence is None or evidence.order_id != captured["order_id"]
             or evidence.template_version_id != original.get("order", {}).get("template_version_id")
@@ -878,44 +885,16 @@ def summarize_ingest_jobs() -> dict[str, Any]:
         ).all()
         counts = {status: int(count) for status, count in rows if status}
         eligible_condition = _eligible_ingest_job_condition(stale_before, recovery_cutoff)
-        oldest_pending_at = session.execute(
-            select(func.min(IngestJob.created_at)).where(eligible_condition)
-        ).scalar_one_or_none()
-        oldest_processing_at = session.execute(
-            select(func.min(IngestJob.started_at)).where(IngestJob.status == "processing")
-        ).scalar_one_or_none()
-        stale_processing_count = int(
-            session.execute(
-                select(func.count(IngestJob.id)).where(
-                    (IngestJob.status == "processing") & (IngestJob.started_at < stale_before)
-                )
-            ).scalar_one()
-            or 0
-        )
-        eligible_backlog_count = int(
-            session.execute(
-                select(func.count(IngestJob.id)).where(eligible_condition)
-            ).scalar_one()
-            or 0
-        )
-        blocked_old_pending_count = int(
-            session.execute(
-                select(func.count(IngestJob.id)).where(
-                    IngestJob.status.in_(["pending", "error"]),
-                    IngestJob.updated_at < recovery_cutoff,
-                )
-            ).scalar_one()
-            or 0
-        )
-        blocked_attempt_exhausted_count = int(
-            session.execute(
-                select(func.count(IngestJob.id)).where(
-                    IngestJob.status.in_(["pending", "error", "processing"]),
-                    IngestJob.generation_attempts >= max_attempts,
-                )
-            ).scalar_one()
-            or 0
-        )
+        (oldest_pending_at, oldest_processing_at, stale_processing_count,
+         eligible_backlog_count, blocked_old_pending_count,
+         blocked_attempt_exhausted_count) = session.execute(select(
+            func.min(IngestJob.created_at).filter(eligible_condition),
+            func.min(IngestJob.started_at).filter(IngestJob.status == "processing"),
+            func.count(IngestJob.id).filter((IngestJob.status == "processing") & (IngestJob.started_at < stale_before)),
+            func.count(IngestJob.id).filter(eligible_condition),
+            func.count(IngestJob.id).filter(IngestJob.status.in_(["pending", "error"]), IngestJob.updated_at < recovery_cutoff),
+            func.count(IngestJob.id).filter(IngestJob.status.in_(["pending", "error", "processing"]), IngestJob.generation_attempts >= max_attempts),
+        )).one()
         return {
             "total": sum(counts.values()),
             "counts": counts,

@@ -353,6 +353,26 @@ def serialize_order(order: Order, *, allow_unresolved_menu_amount: bool = False)
     }
 
 
+def serialize_workflow_order_header(order: Order) -> dict[str, Any]:
+    session = object_session(order)
+    if session is None:
+        raise ValueError("workflow_order_header_requires_session")
+    versions = [dict(row) for row in session.execute(select(
+        OrderVersion.version_no, OrderVersion.document_id, OrderVersion.message_id,
+        OrderVersion.received_at, OrderVersion.is_current,
+    ).where(OrderVersion.order_id == order.id).order_by(
+        OrderVersion.version_no.desc(), OrderVersion.received_at.desc(), OrderVersion.id.desc(),
+    )).mappings()]
+    return {
+        "id": order.id,
+        **_recorded_job_fields(order),
+        "versions": versions,
+        "version_count": len(versions),
+        "current_version": next((version for version in versions if version["is_current"]), None),
+        "menu_amount_resolution": menu_amount_resolution(order),
+    }
+
+
 def serialize_order_summary(order: Order) -> dict[str, Any]:
     week_month_id = sheet_week_service.to_sheet_month_id(order.week_code)
     week_value = sheet_week_service.normalize_sheet_week_value(order.week_code) or week_month_id

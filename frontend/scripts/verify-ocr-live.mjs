@@ -464,7 +464,7 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
       readWatchers.push(watcher);
       return settleResponse(watcher.promise);
     };
-    const inspectionRead = watchRead('inspection', '/workflow-v2/inspection?include_ocr_results=true&history_details=false');
+    const inspectionRead = watchRead('inspection', '/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true');
     const orderRead = watchRead('order', '');
     result.phase = 'open-workflow';
     const workflowResponse = await page.goto(`${origin}/hospital/orders/${encodeURIComponent(identity.orderId)}/workflow-v2`, { waitUntil: 'domcontentloaded' });
@@ -573,7 +573,7 @@ export async function verifyOcrBrowser({ origin, token, identity, source, output
     result.phase = 'capture-workflow-page';
     await page.screenshot({ path: resolve(output, 'workflow-v2-step2.png'), fullPage: true });
     diagnostics.begin('verify-state-preserved');
-    const finalRead = watchRead('final-inspection', '/workflow-v2/inspection?include_ocr_results=true&history_details=false');
+    const finalRead = watchRead('final-inspection', '/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true');
     const finalOrderRead = watchRead('final-order', '');
     await page.reload({ waitUntil: 'domcontentloaded' });
     const [finalReceipt, finalOrderReceipt] = await Promise.all([finalRead, finalOrderRead]);

@@ -105,12 +105,10 @@ def get_sqlite_db_path() -> Path | None:
 
 
 def _sum_operational_rows() -> int:
-    total = 0
     with session_scope() as session:
-        for _, model in _OPERATIONAL_MODELS:
-            count_value = session.execute(select(func.count()).select_from(model)).scalar_one_or_none()
-            total += int(count_value or 0)
-    return total
+        counts = [select(func.count()).select_from(model).scalar_subquery() for _, model in _OPERATIONAL_MODELS]
+        row = session.execute(select(*counts)).one()
+        return sum(int(value or 0) for value in row)
 
 
 def get_db_quota_status() -> dict:

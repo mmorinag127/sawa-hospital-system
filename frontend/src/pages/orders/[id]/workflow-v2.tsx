@@ -283,6 +283,7 @@ type OcrResult = {
 
 type InspectionPayload = {
   order_id?: string;
+  order_header?: OrderDetail;
   ocr_candidates?: {
     order_id: string;
     selected_ocr_result_id: string | null;
@@ -2410,16 +2411,12 @@ export default function OrderWorkflowV2Page() {
     ocrDetailAbortRef.current?.abort();
     rawInspectionRequestRef.current += 1;
     rawInspectionAbortRef.current?.abort();
-    const responses = await Promise.all([
-      apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?include_ocr_results=true&history_details=false`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}),
-      apiClient.get<OrderDetail>(`/orders/${orderId}`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}),
-    ]).catch(err=>{
+    const inspectionRes = await apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}).catch(err=>{
       if (refreshGeneration===refreshGenerationRef.current && requestedOrderId===activeOrderIdRef.current
         && ownsPageInput(own) && callerCurrent()) throw err;
       return null;
     });
-    if (!responses) return;
-    const [inspectionRes, orderRes]=responses;
+    if (!inspectionRes) return;
     const workflowRes = {data: inspectionRes.data.workflow};
     const staleRead = refreshGeneration !== refreshGenerationRef.current
       || requestedOrderId !== activeOrderIdRef.current
@@ -2428,6 +2425,10 @@ export default function OrderWorkflowV2Page() {
     if (!workflowRes.data) throw new Error("workflow 読取応答が不正です。");
     if (workflowRes.data.order_id !== requestedOrderId) {
       throw new Error("workflow 読取応答の注文が一致しません。");
+    }
+    const orderHeader = inspectionRes.data.order_header;
+    if (!orderHeader || orderHeader.id !== requestedOrderId) {
+      throw new Error("注文ヘッダーの読取応答が不正です。");
     }
     if (expectedJob!==null) {
       if ("executionKind" in expectedJob) {
@@ -2452,7 +2453,7 @@ export default function OrderWorkflowV2Page() {
     }
     const adopted = adopt(() => {
       adoptReadWorkflow(workflowRes.data);
-      setOrderDetail(orderRes.data);
+      setOrderDetail(orderHeader);
       applyPreSaveState(
         inspectionRes.data.pre_save_checks || workflowRes.data.pre_save_checks || {},
         inspectionRes.data.pre_save_status || null,

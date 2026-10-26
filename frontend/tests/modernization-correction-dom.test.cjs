@@ -44,7 +44,7 @@ function fixture() {
   t.on('get', `/orders/${order}/workflow-v2`, () => ({ data: { order_id: order, revision: state.revision,
     state: 'output_review', blockers: [], warnings: [], output_bundle_id: null } }));
   t.on('get', `/orders/${order}/workflow-v2/ocr-results`, () => ({ data: { results: [] } }));
-  t.on('get', `/orders/${order}/workflow-v2/inspection?include_ocr_results=true&history_details=false`, () => ({ data: { workflow: { order_id: order, revision: state.revision, state: 'output_review', blockers: [], warnings: [], output_bundle_id: null }, ocr_candidates: require('./helpers/ocr-candidates.cjs')(order), pre_save_checks: {} } }));
+  t.onWorkflowInspection(`/orders/${order}/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => ({ data: { workflow: { order_id: order, revision: state.revision, state: 'output_review', blockers: [], warnings: [], output_bundle_id: null }, ocr_candidates: require('./helpers/ocr-candidates.cjs')(order), pre_save_checks: {} } }));
   t.on('get', `/orders/${order}`, () => ({ data: { id: order, current_version: { document_id: documentId }, versions: [
     { document_id: documentId, version_no: 1, is_current: true }, { document_id: 'pdf-B', version_no: 2, is_current: false } ] } }));
   t.on('get', `/orders/${order}/week-options`, () => ({ data: { options: [] } }));

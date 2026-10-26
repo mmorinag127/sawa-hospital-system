@@ -69,7 +69,7 @@ function fixture() {
     const candidateResults = () => [SELECTED, NEXT].map(ocr_result_id => ({
       ocr_result_id, status: 'completed', selected: ocr_result_id === state.workflow.selected_ocr_result_id,
     }));
-    t.on('get', `${root}/inspection?include_ocr_results=true&history_details=false`, () => ({ data: { workflow: workflow(id),
+    t.onWorkflowInspection(`${root}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => ({ data: { workflow: workflow(id),
       ocr_candidates: require('./helpers/ocr-candidates.cjs')(id, candidateResults(), workflow(id)),
       pre_save_checks: clone(checks), pre_save_status: clone(status),
       anomaly_review: { warnings: [clone(warning)] },
@@ -149,7 +149,7 @@ const calls = (f, method, path) => f.t.calls.filter(c => c.method === method && 
 test('canonical source reads retain validation budget and show pending generation without publishing early', async () => {
   const f = await setup(), pending = deferred();
   try {
-    for (const call of f.t.calls.filter(call => call.url === `${BASE}/inspection?include_ocr_results=true&history_details=false`
+    for (const call of f.t.calls.filter(call => call.url === `${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`
       || call.url === `/orders/${ORDER}`)) assert.equal(call.config.timeout, 180000);
     f.t.on('get', `${BASE}/sheet-source`, () => pending.promise);
     const before = structuredClone(f.probe.current.sheetPayload);
@@ -203,7 +203,7 @@ test('combined read preserves dirty quantities and excludes sidecar from display
   const f = await setup();
   try {
     assert.equal(calls(f, 'get', `${BASE}/ocr-results`).length, 0);
-    assert.ok(calls(f, 'get', `${BASE}/inspection?include_ocr_results=true&history_details=false`).length > 0);
+    assert.ok(calls(f, 'get', `${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`).length > 0);
     assert.equal(Object.hasOwn(f.probe.current.inspection, 'ocr_candidates'), false);
     await f.h.settle(() => f.probe.current.updateSheetCell(0, 4, '19'));
     await f.h.settle(() => f.probe.current.refreshAll());
@@ -222,7 +222,7 @@ for (const candidate of [undefined, null, {}, {order_id: OTHER, results: []},
     const f = await setup();
     try {
       const before = snapshot(f), results = f.probe.current.ocrResults;
-      f.t.on('get', `${BASE}/inspection?include_ocr_results=true&history_details=false`, () => ({data: {workflow: clone(f.state.workflow), ocr_candidates: candidate}}));
+      f.t.onWorkflowInspection(`${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => ({data: {workflow: clone(f.state.workflow), ocr_candidates: candidate}}));
       await f.h.settle(async () => {
         await assert.rejects(f.probe.current.refreshAll(), /OCR候補の読取応答が不正/);
       });
@@ -237,9 +237,9 @@ for (const boundary of ['order', 'pdf', 'auth', 'route', 'week']) {
   test(`combined sidecar late malformed response after ${boundary} cannot adopt or throw`, async () => {
     const f = await setup(), pending = deferred();
     try {
-      const successor = await f.t.api.get(`${BASE}/inspection?include_ocr_results=true&history_details=false`);
+      const successor = await f.t.api.get(`${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`);
       let first = true;
-      f.t.on('get', `${BASE}/inspection?include_ocr_results=true&history_details=false`, () => {
+      f.t.onWorkflowInspection(`${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => {
         if (first) { first = false; return pending.promise; }
         return successor;
       });
@@ -626,7 +626,7 @@ for (const outcome of ['success', 'error']) test(`AI initial POST late ${outcome
 
 for (const stage of ['refresh', 'load']) test(`facility save ${stage} failure is visible and cannot publish successful completion`, async () => {
   const f = await setup(), failure = `synthetic follow-up ${stage} failure`;
-  const path = stage === 'refresh' ? `${BASE}/inspection?include_ocr_results=true&history_details=false` : `${BASE}/facility-config`;
+  const path = stage === 'refresh' ? `${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true` : `${BASE}/facility-config`;
   const raw = f.probe.current.sheetPayload, beforeRows = clone(raw.rows);
   try {
     const priorReads = calls(f, 'get', path).length;
@@ -649,7 +649,7 @@ for (const stage of ['refresh', 'load'])
 for (const boundary of ['route', 'auth'])
 for (const outcome of ['success', 'error']) test(`facility save ${stage} late ${outcome} after ${boundary} cannot publish completion`, async () => {
   const f = await setup(), pending = deferred(); let operation;
-  const path = stage === 'refresh' ? `${BASE}/inspection?include_ocr_results=true&history_details=false` : `${BASE}/facility-config`;
+  const path = stage === 'refresh' ? `${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true` : `${BASE}/facility-config`;
   try {
     const priorReads = calls(f, 'get', path).length;
     f.t.on('get', path, () => pending.promise);

@@ -4,6 +4,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import desc, select
+from sqlalchemy.orm import defer
 
 from src.db import session_scope
 from src.models.ingest_job import IngestJob
@@ -33,7 +34,7 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _audit_log_row(row: AuditLog) -> dict[str, Any]:
+def _audit_log_row(row: AuditLog, *, include_details: bool = True) -> dict[str, Any]:
     return {
         "id": f"audit:{row.id}",
         "source": "audit_logs",
@@ -53,12 +54,12 @@ def _audit_log_row(row: AuditLog) -> dict[str, Any]:
             "week": row.wek,
             "metadata": _json_safe(row.metadata_json or {}),
             "created_at": _iso(row.created_at),
-        },
+        } if include_details else None,
     }
 
 
-def _ingest_job_row(row: IngestJob) -> dict[str, Any]:
-    payload = _json_safe(row.payload or {})
+def _ingest_job_row(row: IngestJob, *, include_details: bool = True) -> dict[str, Any]:
+    payload = _json_safe(row.payload or {}) if include_details else row.payload or {}
     pdf_uri = payload.get("pdf_uri") if isinstance(payload, dict) else None
     message_id = payload.get("message_id") if isinstance(payload, dict) else None
     return {
@@ -82,12 +83,11 @@ def _ingest_job_row(row: IngestJob) -> dict[str, Any]:
             "finished_at": _iso(row.finished_at),
             "created_at": _iso(row.created_at),
             "updated_at": _iso(row.updated_at),
-        },
+        } if include_details else None,
     }
 
 
-def _ocr_job_row(row: OcrJob) -> dict[str, Any]:
-    metrics = _json_safe(row.metrics or {})
+def _ocr_job_row(row: OcrJob, *, include_details: bool = True) -> dict[str, Any]:
     return {
         "id": f"ocr:{row.id}",
         "source": "ocr_jobs",
@@ -104,15 +104,15 @@ def _ocr_job_row(row: OcrJob) -> dict[str, Any]:
             "input_reference": row.input_reference,
             "template_id": row.template_id,
             "output_reference": row.output_reference,
-            "metrics": metrics,
+            "metrics": _json_safe(row.metrics or {}),
             "error_message": row.error_message,
             "created_at": _iso(row.created_at),
             "updated_at": _iso(row.updated_at),
-        },
+        } if include_details else None,
     }
 
 
-def _uploaded_pdf_row(row: UploadedPdf) -> dict[str, Any]:
+def _uploaded_pdf_row(row: UploadedPdf, *, include_details: bool = True) -> dict[str, Any]:
     return {
         "id": f"uploaded_pdf:{row.id}",
         "source": "uploaded_pdfs",
@@ -147,11 +147,11 @@ def _uploaded_pdf_row(row: UploadedPdf) -> dict[str, Any]:
             "received_at": _iso(row.received_at),
             "created_at": _iso(row.created_at),
             "updated_at": _iso(row.updated_at),
-        },
+        } if include_details else None,
     }
 
 
-def _shipping_log_row(row: ShippingTrackingLog) -> dict[str, Any]:
+def _shipping_log_row(row: ShippingTrackingLog, *, include_details: bool = True) -> dict[str, Any]:
     return {
         "id": f"shipping:{row.id}",
         "source": "shipping_tracking_logs",
@@ -175,26 +175,27 @@ def _shipping_log_row(row: ShippingTrackingLog) -> dict[str, Any]:
             "source": row.source,
             "looked_up_at": _iso(row.looked_up_at),
             "created_at": _iso(row.created_at),
-        },
+        } if include_details else None,
     }
 
 
-def list_process_logs(limit: int = DEFAULT_PROCESS_LOG_LIMIT) -> dict[str, Any]:
+def list_process_logs(limit: int = DEFAULT_PROCESS_LOG_LIMIT, *, include_details: bool = True) -> dict[str, Any]:
     safe_limit = min(max(int(limit or DEFAULT_PROCESS_LOG_LIMIT), 1), MAX_PROCESS_LOG_LIMIT)
     per_source_limit = safe_limit
     items: list[dict[str, Any]] = []
 
     with session_scope() as session:
         items.extend(
-            _audit_log_row(row)
+            _audit_log_row(row, include_details=include_details)
             for row in session.execute(
-                select(AuditLog).order_by(desc(AuditLog.created_at)).limit(per_source_limit)
+                select(AuditLog).options(*([] if include_details else [defer(AuditLog.metadata_json)]))
+                .order_by(desc(AuditLog.created_at)).limit(per_source_limit)
             )
             .scalars()
             .all()
         )
         items.extend(
-            _ingest_job_row(row)
+            _ingest_job_row(row, include_details=include_details)
             for row in session.execute(
                 select(IngestJob)
                 .order_by(desc(IngestJob.updated_at), desc(IngestJob.created_at))
@@ -204,15 +205,16 @@ def list_process_logs(limit: int = DEFAULT_PROCESS_LOG_LIMIT) -> dict[str, Any]:
             .all()
         )
         items.extend(
-            _ocr_job_row(row)
+            _ocr_job_row(row, include_details=include_details)
             for row in session.execute(
-                select(OcrJob).order_by(desc(OcrJob.updated_at), desc(OcrJob.created_at)).limit(per_source_limit)
+                select(OcrJob).options(*([] if include_details else [defer(OcrJob.metrics)]))
+                .order_by(desc(OcrJob.updated_at), desc(OcrJob.created_at)).limit(per_source_limit)
             )
             .scalars()
             .all()
         )
         items.extend(
-            _uploaded_pdf_row(row)
+            _uploaded_pdf_row(row, include_details=include_details)
             for row in session.execute(
                 select(UploadedPdf)
                 .order_by(desc(UploadedPdf.updated_at), desc(UploadedPdf.created_at))
@@ -222,7 +224,7 @@ def list_process_logs(limit: int = DEFAULT_PROCESS_LOG_LIMIT) -> dict[str, Any]:
             .all()
         )
         items.extend(
-            _shipping_log_row(row)
+            _shipping_log_row(row, include_details=include_details)
             for row in session.execute(
                 select(ShippingTrackingLog)
                 .order_by(desc(ShippingTrackingLog.looked_up_at), desc(ShippingTrackingLog.created_at))
@@ -238,3 +240,20 @@ def list_process_logs(limit: int = DEFAULT_PROCESS_LOG_LIMIT) -> dict[str, Any]:
         "count": len(items[:safe_limit]),
         "items": items[:safe_limit],
     }
+
+
+def get_process_log(log_id: str) -> dict[str, Any] | None:
+    source, separator, ident = log_id.partition(":")
+    sources = {
+        "audit": (AuditLog, _audit_log_row),
+        "ingest": (IngestJob, _ingest_job_row),
+        "ocr": (OcrJob, _ocr_job_row),
+        "uploaded_pdf": (UploadedPdf, _uploaded_pdf_row),
+        "shipping": (ShippingTrackingLog, _shipping_log_row),
+    }
+    if not separator or not ident or source not in sources:
+        return None
+    model, serialize = sources[source]
+    with session_scope() as session:
+        row = session.execute(select(model).where(model.id == ident)).scalar_one_or_none()
+        return serialize(row) if row is not None else None

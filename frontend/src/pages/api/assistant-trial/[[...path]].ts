@@ -53,7 +53,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     body: chunks.length ? Buffer.concat(chunks) : undefined, signal: AbortSignal.timeout(isBusinessRequest ? 270000 : 60000), redirect: "error",
   });
   res.status(response.status);
-  for (const key of ["content-type", "content-disposition", "x-content-sha256", "cache-control", "content-security-policy", "x-content-type-options"]) { const value = response.headers.get(key); if (value) res.setHeader(key, value); }
+  for (const key of ["content-type", "content-disposition", "x-content-sha256", "cache-control", "content-security-policy", "x-content-type-options", "retry-after"]) { const value = response.headers.get(key); if (value) res.setHeader(key, value); }
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length > 25 * 1024 * 1024) { res.status(502).json({ detail: "出力サイズ上限を超えています" }); return; }
   res.send(bytes);

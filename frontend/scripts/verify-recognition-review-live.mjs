@@ -64,7 +64,7 @@ export async function inspectReview({ identity, source, token, output, playwrigh
       return item.promise.then(response => ({ response }), () => ({ response: null }));
     };
     const base = `/api/orders/${identity.orderId}`;
-    const initialReads = [watch(base), watch(base + '/workflow-v2/inspection?include_ocr_results=true&history_details=false')];
+    const initialReads = [watch(base), watch(base + '/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true')];
     result.phase = 'open-exact-order';
     const navigation = await page.goto(`${origin}/hospital/orders/${identity.orderId}/workflow-v2`, { waitUntil: 'domcontentloaded' });
     assert.equal(navigation.status(), 200);
@@ -143,7 +143,7 @@ export async function inspectReview({ identity, source, token, output, playwrigh
     await expect(dialog.getByRole('button', { name: '確認した値を採用して次へ', exact: true })).toBeEnabled();
     await page.screenshot({ path: resolve(output, 'review-dialog-local-choice-not-submitted.png'), fullPage: true });
     result.phase = 'verify-state-preserved';
-    const finalRead = watch(base + '/workflow-v2/inspection?include_ocr_results=true&history_details=false');
+    const finalRead = watch(base + '/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true');
     const finalOrderRead = watch(base);
     page.once('dialog', dialog => dialog.type() === 'beforeunload' ? dialog.accept() : dialog.dismiss());
     await page.reload({ waitUntil: 'domcontentloaded' });

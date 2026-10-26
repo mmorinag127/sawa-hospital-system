@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from src.staging_data import order_runtime_setting as _runtime_setting
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.db import session_scope
 from src.models.ocr_job import OcrJob
@@ -129,13 +129,29 @@ def summarize_reparse_quality(*, now: datetime | None = None) -> dict[str, Any]:
     skipped_reasons: dict[str, int] = defaultdict(int)
 
     with session_scope() as session:
-        rows = (
+        value_keys = (
+            "quality_track", "provider", "requested_provider", "error", "llm_assist",
+            "changed", "truncated_output", "rows_replaced_with_pipeline",
+        )
+        presence_keys = (
+            "llm_audit", "llm_pre_inference_audit", "llm_second_pass_audit",
+            "repair_pass_applied", "before_count", "after_count",
+        )
+        sqlite = session.get_bind().dialect.name == "sqlite"
+        presence = [
+            func.json_type(OcrJob.metrics, f"$.{key}").is_not(None)
+            if sqlite else OcrJob.metrics[key].is_not(None)
+            for key in presence_keys
+        ]
+        projected_rows = (
             session.execute(
                 select(
                     OcrJob.status,
-                    OcrJob.metrics,
                     OcrJob.error_message,
                     OcrJob.updated_at,
+                    *(OcrJob.metrics[key] for key in value_keys),
+                    *presence,
+                    (func.json_type(OcrJob.metrics) if sqlite else func.json_typeof(OcrJob.metrics)),
                 )
                 .where(OcrJob.updated_at >= since)
                 .order_by(OcrJob.updated_at.desc())
@@ -143,6 +159,13 @@ def summarize_reparse_quality(*, now: datetime | None = None) -> dict[str, Any]:
             )
             .all()
         )
+        rows = []
+        for row in projected_rows:
+            metrics = None
+            if row[-1] == "object":
+                metrics = dict(zip(value_keys, row[3:3 + len(value_keys)]))
+                metrics.update({key: None for key, present in zip(presence_keys, row[3 + len(value_keys):-1]) if present})
+            rows.append((row[0], metrics, row[1], row[2]))
 
     explicit_quality_track_jobs = 0
     for _status_value, metrics_value, _error_message_value, _updated_at_value in rows:

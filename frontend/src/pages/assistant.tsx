@@ -8,6 +8,7 @@ import {businessProgress, businessLabels, type BusinessProgress} from "../compon
 import ShiftReview, {ShiftReviewData} from "../components/assistant/ShiftReview";
 
 const BUSINESS_TIMEOUT = 300000;
+const terminalRun = (status: string) => ["completed", "rolled_back", "stopped"].includes(status);
 const assistantApi = {
   post<T=any>(url:string,data?:unknown,options?:AxiosRequestConfig) {
     const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage)|faxes\/[^/]+\/decision)$/.test(url);
@@ -87,10 +88,15 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   }
 
   async function load(id?: string) {
-    const [c, r, t] = await Promise.all([apiClient.get<Configuration>("/assistant-trial/config"), apiClient.get<Run[]>("/assistant-trial/runs"), apiClient.get<Task[]>("/assistant-trial/tasks")]);
-    setTasks(t.data);
-    setConfig(c.data); setRuns(r.data);
-    if (id) { const response=await apiClient.get<Run>(`/assistant-trial/runs/${id}`); if(selectedId.current===id)receiveRun(response.data); }
+    const configuration = apiClient.get<Configuration>("/assistant-trial/config").then(response => setConfig(response.data));
+    await Promise.all([
+      configuration,
+      apiClient.get<Run[]>("/assistant-trial/runs").then(response => setRuns(response.data)),
+      apiClient.get<Task[]>("/assistant-trial/tasks").then(async response => { await configuration; setTasks(response.data); }),
+      ...(id ? [apiClient.get<Run>(`/assistant-trial/runs/${id}`).then(response => {
+        if(selectedId.current===id)receiveRun(response.data);
+      })] : []),
+    ]);
   }
   async function reconcileCreate(key:string) {
     if(reconcilingCreate.current)return;
@@ -137,7 +143,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     return ()=>{active=false;clearTimeout(timer);};
   }, []);
   useEffect(()=>{
-    if(adminView || selected)return;
+    if(adminView || selected || !runs.some(run => !terminalRun(run.status)))return;
     let active=true,polling=false;
     const timer=setInterval(async()=>{
       if(polling)return;
@@ -147,12 +153,18 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       finally{polling=false;}
     },2500);
     return()=>{active=false;clearInterval(timer);};
-  },[selected?.id,adminView]);
+  },[selected?.id,adminView,runs.some(run => !terminalRun(run.status))]);
   useEffect(() => {
     setPollNotice("");
     if (!selected) return;
     let active = true;
     const id = selected.id;
+    if (terminalRun(selected.status)) {
+      if (adminView) void apiClient.get<Budget>("/assistant-trial/budget")
+        .then(({data}) => { if (active && selectedId.current === id) setConfig(c => c ? {...c, budget: data} : c); })
+        .catch(() => { if (active) setPollNotice("利用料金を取得できませんでした。"); });
+      return () => { active = false; };
+    }
     let polling = false;
     const timer = setInterval(async () => {
       if (polling) return;
@@ -170,7 +182,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       finally { polling = false; }
     }, 2500);
     return () => { active = false; clearInterval(timer); };
-  }, [selected?.id, adminView]);
+  }, [selected?.id, selected?.status, adminView]);
 
   useEffect(()=>{setSource(null);setSourceChecked(false);setConfirmRollback(false);},[selected?.id]);
   useEffect(()=>{setReply("");},[selected?.id,selected?.pending_question?.question_id]);
