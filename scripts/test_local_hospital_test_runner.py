@@ -97,7 +97,7 @@ class ReceiptContractTest(unittest.TestCase):
         self.assertIn('test_live_schema_adoption.py', ' '.join(BACKEND_RUNNER.DEDICATED_MODULES['live-schema-adoption']))
         self.assertEqual(BACKEND_RUNNER.DEDICATED_MODULES['modernization-pg-output'],
                          BACKEND_RUNNER.MODULES['output'] + BACKEND_RUNNER.MODULES['formal'])
-        def execute_backend(argv, *, cwd, env):
+        def execute_backend(argv, env):
             state = Path(env['SAWA_IMPACT_STATE'])
             (state / 'selection.json').write_text(json.dumps({
                 'selected': ['test_example.py::test_case'], 'reused': [],
@@ -116,20 +116,71 @@ class ReceiptContractTest(unittest.TestCase):
              patch.object(BACKEND_RUNNER, 'clean_tree', return_value=True), \
              patch.object(BACKEND_RUNNER, 'git', side_effect=lambda *args: str(Path(directory) / 'git') if '--absolute-git-dir' in args else 'a' * 40), \
              patch.object(BACKEND_RUNNER.sys, 'argv', ['runner']), \
-             patch.object(BACKEND_RUNNER.subprocess, 'run', side_effect=execute_backend) as execute:
+             patch.object(BACKEND_RUNNER, 'run_pytest', side_effect=execute_backend) as execute:
             self.assertEqual(BACKEND_RUNNER.main(), 0)
             argv = execute.call_args.args[0]
             self.assertIn('backend/tests', argv)
             self.assertEqual({item.removeprefix('--ignore=') for item in argv if item.startswith('--ignore=')}, seen)
-            self.assertNotIn('DB_HOST', execute.call_args.kwargs['env'])
-            self.assertNotIn('DATABASE_URL', execute.call_args.kwargs['env'])
-            self.assertNotIn('ALEMBIC_DB_URI', execute.call_args.kwargs['env'])
-            self.assertNotIn('PYTEST_ADDOPTS', execute.call_args.kwargs['env'])
-            self.assertNotIn('PYTEST_PLUGINS', execute.call_args.kwargs['env'])
-            self.assertEqual(execute.call_args.kwargs['env']['SAWA_IMPACT_FULL'], full_flag)
+            env = execute.call_args.args[1]
+            self.assertNotIn('DB_HOST', env)
+            self.assertNotIn('DATABASE_URL', env)
+            self.assertNotIn('ALEMBIC_DB_URI', env)
+            self.assertNotIn('PYTEST_ADDOPTS', env)
+            self.assertNotIn('PYTEST_PLUGINS', env)
+            self.assertEqual(env['SAWA_IMPACT_FULL'], full_flag)
             self.assertIn('--testmon', argv)
             self.assertTrue((Path(directory) / 'backend-tests/selection.json').is_file())
-            self.assertEqual(execute.call_args.kwargs['env']['DB_URI'], 'sqlite:///' + directory + '/git/sawa-local-impact/backend-runtime.sqlite')
+            self.assertEqual(env['DB_URI'], 'sqlite:///' + directory + '/git/sawa-local-impact/backend-runtime.sqlite')
+
+    def test_failed_attempt_restores_consistent_database_and_metadata(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'state'
+            state.mkdir()
+            metadata = state / 'inputs.json'
+            metadata.write_text('original metadata')
+            database = state / 'testmon.sqlite'
+            with sqlite3.connect(database) as connection:
+                connection.execute('CREATE TABLE original(value INTEGER)')
+                connection.execute('INSERT INTO original VALUES(7)')
+            with BACKEND_RUNNER.preserve_baseline(state):
+                metadata.unlink()
+                metadata.write_text('failed attempt')
+                with sqlite3.connect(database) as connection:
+                    connection.execute('DELETE FROM original')
+                BACKEND_RUNNER.retain_failures(state, state, ['case::failed'])
+            self.assertEqual(metadata.read_text(), 'original metadata')
+            with sqlite3.connect(database) as connection:
+                self.assertEqual(connection.execute('SELECT value FROM original').fetchall(), [(7,)])
+            self.assertEqual(json.loads((state / 'failed-tests.json').read_text()), ['case::failed'])
+
+    def test_accepted_attempt_keeps_new_history_and_symlinks_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'state'
+            state.mkdir()
+            with BACKEND_RUNNER.preserve_baseline(state) as checkpoint:
+                (state / 'inputs.json').write_text('new history')
+                checkpoint.accepted = True
+            self.assertEqual((state / 'inputs.json').read_text(), 'new history')
+            (state / 'testmon.sqlite-wal').symlink_to(state / 'inputs.json')
+            with self.assertRaisesRegex(ValueError, 'symlink'):
+                with BACKEND_RUNNER.preserve_baseline(state):
+                    self.fail('must reject a linked sidecar')
+
+    def test_interrupted_child_is_reaped_before_runner_returns(self):
+        from unittest.mock import MagicMock
+        process = MagicMock()
+        process.pid = 43210
+        process.wait.side_effect = [KeyboardInterrupt(), 0]
+        process.poll.return_value = None
+        process.__enter__.return_value = process
+        with patch.object(BACKEND_RUNNER.subprocess, 'Popen', return_value=process) as start, \
+             patch.object(BACKEND_RUNNER.os, 'killpg') as stop:
+            with self.assertRaises(KeyboardInterrupt):
+                BACKEND_RUNNER.run_pytest(['python', '-m', 'pytest'], {'owned': 'environment'})
+        self.assertTrue(start.call_args.kwargs['start_new_session'])
+        stop.assert_called_once_with(43210, BACKEND_RUNNER.signal.SIGINT)
+        self.assertEqual(process.wait.call_count, 2)
 
     def test_agent_cleanup_attempts_database_even_when_test_container_cannot_be_stopped(self):
         for failure in ('stop', 'owner'):

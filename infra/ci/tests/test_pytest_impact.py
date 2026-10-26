@@ -47,14 +47,70 @@ def test_data():
     def write(self, name, text):
         (self.root / name).write_text(text)
 
-    def run_tests(self, expected=0):
+    def run_tests(self, expected=0, paths=None):
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "-p", "pytest_impact",
-             "-p", "pytest-testmon", "--testmon", "-q", "test_example.py"],
+             "-p", "pytest-testmon", "--testmon", "-q", *(paths or ['test_example.py'])],
             cwd=self.root, env=self.env, text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, expected, (result.stdout + result.stderr)[-6000:])
         return json.loads((self.state / "selection.json").read_text())
+
+    def test_collection_inputs_are_scoped_to_module_and_imported_helper(self):
+        (self.root / 'backend/tests').mkdir(parents=True)
+        for name, text in {
+            'backend/tests/__init__.py': '',
+            'backend/tests/helper.py': "from pathlib import Path\nVALUE = Path('data.txt').read_text()\n",
+            'backend/tests/test_consumer.py': 'from .helper import VALUE\ndef test_value():\n    assert VALUE\n',
+            'backend/tests/test_other.py': 'def test_other():\n    assert 1 == 1\n',
+        }.items():
+            self.write(name, text)
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests(paths=['backend/tests'])
+        self.assertEqual(self.run_tests(paths=['backend/tests'])['selected'], [])
+        self.write('data.txt', 'second')
+        report = self.run_tests(paths=['backend/tests'])
+        self.assertEqual(report['selected'], ['backend/tests/test_consumer.py::test_value'])
+        self.assertEqual(report['reused'], ['backend/tests/test_other.py::test_other'])
+
+    def test_new_test_file_does_not_invalidate_unrelated_code_inputs(self):
+        self.run_tests()
+        self.write('test_new.py', 'def test_new():\n    assert True\n')
+        subprocess.run(['git', 'add', 'test_new.py'], cwd=self.root, check=True)
+        report = self.run_tests(paths=['test_example.py', 'test_new.py'])
+        self.assertEqual(report['selected'], ['test_new.py::test_new'])
+        self.assertEqual(len(report['reused']), 3)
+
+    def test_shared_inputs_are_saved_once_and_changed_fixture_cannot_be_reused(self):
+        self.write('test_example.py', '''from pathlib import Path
+import pytest
+@pytest.fixture(scope='module')
+def data():
+    return Path('data.txt').read_text()
+@pytest.mark.parametrize('index', range(100))
+def test_data(data, index):
+    assert data
+''')
+        self.run_tests()
+        metadata = json.loads((self.state / 'inputs.json').read_text())
+        self.assertEqual(metadata['schema'], 2)
+        shared = [values for values in metadata['input_sets'].values() if 'data.txt' in values]
+        self.assertEqual(len(shared), 1)
+        self.assertTrue(all('data.txt' not in entry['inputs'] for entry in metadata['tests'].values()))
+        self.assertEqual(len(self.run_tests()['reused']), 100)
+        self.write('data.txt', 'changed')
+        self.assertEqual(len(self.run_tests()['selected']), 100)
+
+    def test_failed_identity_and_oversized_metadata_never_authorize_reuse(self):
+        self.run_tests()
+        (self.state / 'failed-tests.json').write_text(json.dumps(['test_example.py::test_second']))
+        report = self.run_tests()
+        self.assertEqual(report['selected'], ['test_example.py::test_second'])
+        with (self.state / 'inputs.json').open('r+b') as stream:
+            stream.truncate(65 * 1024 * 1024)
+        report = self.run_tests()
+        self.assertEqual(report['baseline_status'], 'oversized-legacy-inputs')
+        self.assertEqual(len(report['selected']), 3)
 
     def test_unchanged_skips_individual_tests_and_indirect_change_runs_only_affected(self):
         first = self.run_tests()
@@ -345,9 +401,8 @@ def test_predicates():
         self.run_tests()
         path = self.state / 'inputs.json'
         history = json.loads(path.read_text())
-        for entry in history['tests'].values():
-            self.assertIn('data.txt', entry['inputs'])
-            del entry['inputs']['data.txt']
+        self.assertIn('data.txt', history['global_inputs'])
+        del history['global_inputs']['data.txt']
         path.write_text(json.dumps(history))
         report = self.run_tests()
         self.assertEqual(len(report['selected']), 3)

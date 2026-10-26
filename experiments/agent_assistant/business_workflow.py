@@ -99,7 +99,7 @@ class BusinessWorkflow:
 
     async def kick_many(self, identities, authorization=None):
         def read_current():
-            with self.store.snapshot():
+            with self.store.snapshot(view='identities', identities=identities):
                 return [self.store.get(ident) for ident in identities]
 
         if not identities:

@@ -15,6 +15,7 @@ import weakref
 import zlib
 
 from .store import Store, Conflict, now
+from . import ledger_reads
 
 
 SQLITE_HEADER = b"SQLite format 3\0"
@@ -90,7 +91,8 @@ class PostgresStore(Store):
                     payload bytea)''')
                 c.execute('''CREATE TABLE IF NOT EXISTS sawa_agent_trial.files (
                     path text PRIMARY KEY, digest text NOT NULL, payload bytea NOT NULL)''')
-                c.execute('INSERT INTO sawa_agent_trial.ledger VALUES (1,0,NULL) ON CONFLICT DO NOTHING')
+                ledger_reads.initialize(c)
+                c.execute('INSERT INTO sawa_agent_trial.ledger(id,epoch,payload) VALUES (1,0,NULL) ON CONFLICT DO NOTHING')
                 c.execute('UPDATE sawa_agent_trial.ledger SET epoch=epoch+1 WHERE id=1 RETURNING epoch,payload IS NULL')
                 self.epoch,self.new_ledger = c.fetchone()
         super().__init__(self.root)
@@ -101,6 +103,28 @@ class PostgresStore(Store):
         close = getattr(self.connect, "close", None)
         if close is not None:
             close()
+
+    def get(self, ident, owner=None):
+        with self.snapshot(view='identities', owner=owner, identities=[ident]):
+            return super().get(ident, owner)
+
+    def budget(self):
+        with self.snapshot(view='configuration'):
+            return super().budget()
+
+    def provider(self, value=None):
+        if value is not None:
+            return super().provider(value)
+        with self.snapshot(view='configuration'):
+            return super().provider()
+
+    def events(self, ident):
+        with self.snapshot(view='events', identities=[ident]):
+            return super().events(ident)
+
+    def listing(self, owner):
+        with self.snapshot(view='runs', owner=owner):
+            return super().listing(owner)
 
     @contextmanager
     def tx(self):
@@ -119,12 +143,35 @@ class PostgresStore(Store):
             yield db
 
     @contextmanager
+    def snapshot_read(self, *, view=None, owner=None, identities=None):
+        if view is None or self._read_snapshot.get() is not None:
+            with self.read() as db:
+                yield db
+            return
+        with closing(self.connect()) as pg, pg:
+            pg.set_session(readonly=True, isolation_level='REPEATABLE READ')
+            with pg.cursor() as cursor:
+                cursor.execute('''SELECT epoch,read_schema,
+                    read_digest=encode(sha256(payload),'hex') FROM sawa_agent_trial.ledger WHERE id=1''')
+                epoch, schema, valid = cursor.fetchone()
+                if epoch != self.epoch:
+                    raise Conflict('実行環境が交代しました。画面を再読み込みしてください')
+                if valid is not True or not isinstance(schema, dict):
+                    raise Conflict('実行履歴の行索引が正本と一致しないため読取りを停止しました')
+                with ledger_reads.materialize(cursor, schema, view=view, owner=owner,
+                                               identities=identities) as db:
+                    yield db
+
+    @contextmanager
     def _transaction(self, *, readonly):
         with closing(self.connect()) as pg, pg:
-            pg.set_session(readonly=readonly)
+            pg.set_session(readonly=readonly, isolation_level='READ COMMITTED')
             with pg.cursor() as c:
-                c.execute('SELECT epoch,payload FROM sawa_agent_trial.ledger WHERE id=1' + ('' if readonly else ' FOR UPDATE'))
-                epoch, payload = c.fetchone()
+                c.execute('''SELECT epoch,payload,read_schema,
+                    read_digest=encode(sha256(payload),'hex') FROM sawa_agent_trial.ledger WHERE id=1'''
+                    + ('' if readonly else ' FOR UPDATE'))
+                epoch, payload, read_schema, indexed = c.fetchone()
+                indexed = indexed is True and isinstance(read_schema, dict)
                 if epoch != self.epoch:
                     raise Conflict('実行環境が交代しました。画面を再読み込みし、履歴から停止・巻き戻しを行ってください')
                 db = sqlite3.connect(':memory:')
@@ -132,6 +179,7 @@ class PostgresStore(Store):
                 try:
                     if payload is not None:
                         db.deserialize(decode_ledger(payload))
+                    indexed_before = ledger_reads.capture(db) if not readonly and indexed is True else ({}, {})
                     db.execute('PRAGMA query_only=' + ('ON' if readonly else 'OFF'))
                     db.execute('BEGIN' if readonly else 'BEGIN IMMEDIATE')
                     yield db
@@ -156,7 +204,14 @@ class PostgresStore(Store):
                     if db.execute("SELECT 1 FROM sqlite_master WHERE name='artifacts'").fetchone():
                         for row in db.execute('SELECT path,sha256 FROM artifacts'):
                             self._file(c, Path(row['path']), expected=row['sha256'])
-                    c.execute('UPDATE sawa_agent_trial.ledger SET payload=%s WHERE id=1', (encode_ledger(db.serialize()),))
+                    if indexed is not True:
+                        c.execute('DELETE FROM sawa_agent_trial.read_rows')
+                    indexed_after = ledger_reads.capture(db)
+                    ledger_reads.synchronize(c, indexed_before, indexed_after)
+                    from psycopg2.extras import Json
+                    encoded = encode_ledger(db.serialize())
+                    c.execute('UPDATE sawa_agent_trial.ledger SET payload=%s,read_schema=%s,read_digest=%s WHERE id=1',
+                              (encoded, Json(indexed_after[0]), hashlib.sha256(encoded).hexdigest()))
                 except BaseException:
                     db.rollback()
                     raise

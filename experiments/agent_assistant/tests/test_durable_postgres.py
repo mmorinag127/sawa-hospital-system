@@ -77,6 +77,64 @@ def test_completed_artifacts_survive_without_claiming_active_work_resumed(tmp_pa
     assert b.get(run['id'])['spent']==12
 
 
+def test_indexed_views_preserve_results_without_decoding_entire_ledger(tmp_path, database, monkeypatch):
+    from experiments.agent_assistant import durable
+    store = PostgresStore(tmp_path, database)
+    store.set_budget(10000)
+    first, _ = store.create('operator', 'index-first', 'first', ['hospital'], 100)
+    store.update(first['id'], status='completed', spent=17, reserved=0)
+    second, _ = store.create('other', 'index-second', 'second', ['shift'], 200)
+    store.event(first['id'], 'notice', {'original': 'unchanged'})
+    with store.tx() as db:
+        db.execute("INSERT INTO target_lookups VALUES(?,?,?,?,'completed',?)",
+                   ('lookup-first', 'operator', 'shift_plan', '{}', '{"value":7}'))
+    with store.snapshot():
+        expected = (store.get(first['id']), store.listing('operator'), store.budget(), store.events(first['id']))
+    def forbidden(*args, **kwargs):
+        pytest.fail('page read decoded the complete compressed SQLite ledger')
+    monkeypatch.setattr(durable, 'decode_ledger', forbidden)
+    assert (store.get(first['id']), store.listing('operator'), store.budget(), store.events(first['id'])) == expected
+    assert expected[2]['reserved_cents'] == second['reserved']
+    with pytest.raises(KeyError):
+        store.get(first['id'], 'other')
+    assert store.target_lookup('lookup-first', 'operator')['payload'] == '{"value":7}'
+    with pytest.raises(KeyError):
+        store.target_lookup('lookup-first', 'other')
+    with store.snapshot(view='run', owner='operator', identities=[first['id']]):
+        assert store.get(first['id']) == expected[0]
+        assert store.events(first['id']) == expected[3]
+        with store.read() as db, pytest.raises(sqlite3.DatabaseError):
+            db.execute('SELECT * FROM commands').fetchall()
+
+
+def test_index_drift_blocks_reads_and_only_canonical_write_rebuilds(tmp_path, database):
+    store = PostgresStore(tmp_path, database)
+    store.set_budget(1000)
+    run, _ = store.create('operator', 'index-drift', 'original', ['hospital'], 100)
+    with database() as pg, pg.cursor() as cursor:
+        cursor.execute("UPDATE sawa_agent_trial.ledger SET read_digest='wrong' WHERE id=1")
+    with pytest.raises(Conflict, match='行索引'):
+        store.get(run['id'])
+    store.update(run['id'], status='completed', spent=31, reserved=0)
+    assert store.get(run['id'])['spent'] == 31
+    assert store.get(run['id'])['instruction'] == 'original'
+
+
+def test_indexed_snapshot_stays_on_one_commit_and_preserves_fencing(tmp_path, database):
+    store = PostgresStore(tmp_path, database)
+    store.set_budget(1000)
+    run, _ = store.create('operator', 'index-snapshot', 'original', ['hospital'], 100)
+    with store.snapshot(view='run', owner='operator', identities=[run['id']]):
+        assert store.get(run['id'])['spent'] == 0
+        import contextvars
+        contextvars.Context().run(store.update, run['id'], spent=23)
+        assert store.get(run['id'])['spent'] == 0
+    assert store.get(run['id'])['spent'] == 23
+    PostgresStore(tmp_path, database)
+    with pytest.raises(Conflict, match='交代'):
+        store.get(run['id'])
+
+
 def test_legacy_before_image_is_never_used_as_a_resume_copy(tmp_path, database):
     a=PostgresStore(tmp_path,database);a.set_budget(1000)
     run,_=a.create('operator','legacy-request','test',['shift'],100)
@@ -241,9 +299,13 @@ def test_legacy_raw_ledger_migrates_without_losing_business_or_cost_state(tmp_pa
             c.execute('SELECT payload FROM sawa_agent_trial.ledger WHERE id=1')
             raw=decode_ledger(c.fetchone()[0])
             c.execute('UPDATE sawa_agent_trial.ledger SET payload=%s WHERE id=1',(raw,))
+    with pytest.raises(Conflict, match='行索引'):
+        a.get(run['id'])
+    with pytest.raises(Conflict, match='行索引'):
+        a.events(run['id'])
+    a.update(run['id'],status='stopped',reserved=0)
     assert a.get(run['id'])['spent']==37
     assert a.events(run['id'])[0]['payload']['text']=='指定した厨房と釜で実施'
-    a.update(run['id'],status='stopped',reserved=0)
     with closing(database()) as pg,pg:
         with pg.cursor() as c:
             c.execute('SELECT payload FROM sawa_agent_trial.ledger WHERE id=1')
@@ -289,7 +351,7 @@ def test_corrupt_legacy_ledger_is_never_reinitialized(tmp_path,database):
             c.execute('SELECT payload FROM sawa_agent_trial.ledger WHERE id=1')
             damaged=decode_ledger(c.fetchone()[0])[:-100]
             c.execute('UPDATE sawa_agent_trial.ledger SET payload=%s WHERE id=1',(damaged,))
-    with pytest.raises(Conflict,match='破損'):a.get(run['id'])
+    with pytest.raises(Conflict,match='行索引'):a.get(run['id'])
     with pytest.raises(Conflict,match='破損'):PostgresStore(tmp_path,database)
     with closing(database()) as pg,pg:
         with pg.cursor() as c:

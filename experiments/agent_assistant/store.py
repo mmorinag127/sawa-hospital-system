@@ -92,14 +92,19 @@ class Store:
             yield db
 
     @contextmanager
-    def snapshot(self):
+    def snapshot(self, *, view=None, owner=None, identities=None):
         """Keep every part of one response on the same committed ledger."""
-        with self.read() as db:
+        with self.snapshot_read(view=view, owner=owner, identities=identities) as db:
             token = self._read_snapshot.set(db)
             try:
                 yield
             finally:
                 self._read_snapshot.reset(token)
+
+    @contextmanager
+    def snapshot_read(self, *, view=None, owner=None, identities=None):
+        with self.read() as db:
+            yield db
 
     def budget(self):
         month = billing_month()
@@ -176,6 +181,15 @@ class Store:
             if not row or (owner is not None and row["owner"] != owner):
                 raise KeyError("依頼が見つかりません")
             return self.decode(row)
+
+    def target_lookup(self, ident, owner):
+        with self.snapshot(view='lookup', owner=owner, identities=[ident]):
+            with self.read() as db:
+                row = db.execute('SELECT * FROM target_lookups WHERE id=? AND owner=?',
+                                 (ident, owner)).fetchone()
+                if row is None:
+                    raise KeyError(ident)
+                return dict(row)
 
     def listing(self, owner):
         with self.read() as db:

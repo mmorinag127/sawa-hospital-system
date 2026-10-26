@@ -195,7 +195,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             domains[name] = {"configured": bool(cfg), "baseline_ready": (baseline / "trial-manifest.json").is_file() and (baseline / "database.sqlite3").is_file(),
                              "data": "registered_staging_snapshot" if cfg.get('registered_source') else json.loads((baseline / "trial-manifest.json").read_text()).get("data") if (baseline / "trial-manifest.json").is_file() else None,
                              "ocr_pipeline_configured": bool(cfg.get("env", {}).get("OCR_PIPELINE_BUCKET")) if name == "hospital" else None}
-        with store.snapshot():
+        with store.snapshot(view='configuration'):
             provider = store.provider()
             budget = store.budget()
         return {"trial": True, "provider_id": provider, "provider": LABELS[provider], "providers": managed.choices(), "missing": managed.missing(), "domains": domains,
@@ -229,12 +229,9 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     async def target_lookup(ident: str, request: Request):
         authorization = request.headers.get('authorization', '')
         # The lookup row is owner-bound. Revalidate its exact domain on every poll.
-        with store.read() as db:
-            row = db.execute('SELECT task_id FROM target_lookups WHERE id=? AND owner=?', (ident, owner)).fetchone()
-        if not row:
-            raise KeyError(ident)
+        row = await asyncio.to_thread(store.target_lookup, ident, owner)
         await authorize(authorization, [TASKS[row['task_id']]['domain']])
-        return lookups.get(ident, owner, authorization)
+        return lookups.result(row, authorization)
 
     @app.get("/budget")
     def budget():
@@ -254,7 +251,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     @app.get("/runs")
     async def runs(request: Request):
         def read_response():
-            with store.snapshot():
+            with store.snapshot(view='runs', owner=owner):
                 listing = store.listing(owner)
                 return listing, [{**run, 'business': business.projection(run, tools.flow.review(run['id']), tools.faxes.items(run['id']) if tools.faxes.active(run) else [])} for run in listing]
 
@@ -317,28 +314,32 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
 
     @app.get("/runs/{ident}")
     async def run_detail(ident: str, request: Request):
-        run = store.get(ident, owner)
+        run = await asyncio.to_thread(store.get, ident, owner)
         if not owned(run) and run.get('task_id') in CONTRACTS and run['status'] in ('running', 'waiting_input', 'reconciliation_required'):
             await authorize(request.headers.get('authorization', ''), run['domains'])
-            business.adopt(run)
-            run = store.get(ident, owner)
+            await asyncio.to_thread(business.adopt, run)
+            run = await asyncio.to_thread(store.get, ident, owner)
         if owned(run):
-            business.kick(ident, request.headers.get('authorization', ''))
-        with store.snapshot():
-            run = store.get(ident, owner)
-            with store.read() as db:
-                artifacts = [dict(row) for row in db.execute("SELECT id,name,sha256,size FROM artifacts WHERE run_id=?", (ident,))]
-            events = store.events(ident)
-            from .shift_review import build_shift_review
-            from .lunch_review import build_lunch_review
-            review = tools.flow.review(ident) if run['status'] not in ('rolled_back','rollback_stop_pending') else None
-            reference = next((event['payload'] for event in events if event['kind']=='shift_reference'),None)
-            shift_review = build_shift_review(review,reference) if review and (run.get('task_id') or '').startswith('shift_') else None
-            lunch_review = build_lunch_review(review,run.get('task_inputs',{}).get('process_questions')) if run.get('task_id')=='lunch_daily_bundle' else None
-            faxes = tools.faxes.items(ident) if tools.faxes.active(run) and run["status"] not in ("rolled_back", "rollback_stop_pending") else []
-            business_events = [event for event in events if event['kind'] in ('operator_reply', 'task_decision', 'fax_decision', 'task_review', 'fax_review') or event['kind'] == 'tool_result' and event['payload'].get('result', {}).get('waiting_input')]
-            fax_labels = {str(item['fax_id']): item['snapshot'].get('name') or '対象のFAX' for item in faxes}
-            return {**run, 'business': business.projection(run, review, faxes), 'business_messages': conversation(business_events, fax_labels) if owned(run) else [], "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": pending_question(events) if run["status"] == "waiting_input" else None, "events": events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(run), "task_review": review, "fax_items": faxes}
+            await business.kick_many([ident], request.headers.get('authorization', ''))
+
+        def read_response():
+            with store.snapshot(view='run', owner=owner, identities=[ident]):
+                current = store.get(ident, owner)
+                with store.read() as db:
+                    artifacts = [dict(row) for row in db.execute("SELECT id,name,sha256,size FROM artifacts WHERE run_id=?", (ident,))]
+                events = store.events(ident)
+                from .shift_review import build_shift_review
+                from .lunch_review import build_lunch_review
+                review = tools.flow.review(ident) if current['status'] not in ('rolled_back','rollback_stop_pending') else None
+                reference = next((event['payload'] for event in events if event['kind']=='shift_reference'),None)
+                shift_review = build_shift_review(review,reference) if review and (current.get('task_id') or '').startswith('shift_') else None
+                lunch_review = build_lunch_review(review,current.get('task_inputs',{}).get('process_questions')) if current.get('task_id')=='lunch_daily_bundle' else None
+                faxes = tools.faxes.items(ident) if tools.faxes.active(current) and current["status"] not in ("rolled_back", "rollback_stop_pending") else []
+                business_events = [event for event in events if event['kind'] in ('operator_reply', 'task_decision', 'fax_decision', 'task_review', 'fax_review') or event['kind'] == 'tool_result' and event['payload'].get('result', {}).get('waiting_input')]
+                fax_labels = {str(item['fax_id']): item['snapshot'].get('name') or '対象のFAX' for item in faxes}
+                return {**current, 'business': business.projection(current, review, faxes), 'business_messages': conversation(business_events, fax_labels) if owned(current) else [], "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": pending_question(events) if current["status"] == "waiting_input" else None, "events": events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(current), "task_review": review, "fax_items": faxes}
+
+        return await asyncio.to_thread(read_response)
 
     @app.post("/runs/{ident}/faxes/{fax_id}/decision")
     async def decide_fax(ident: str, fax_id: str, payload: FaxDecision, request: Request):

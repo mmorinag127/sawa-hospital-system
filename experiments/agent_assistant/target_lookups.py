@@ -21,12 +21,13 @@ class TargetLookups:
         return self.get(ident, owner, authorization)
 
     def get(self, ident, owner, authorization):
-        with self.store.read() as db:
-            row = db.execute('SELECT * FROM target_lookups WHERE id=? AND owner=?', (ident, owner)).fetchone()
-        if not row:
-            raise KeyError(ident)
+        row = self.store.target_lookup(ident, owner)
+        return self.result(row, authorization)
+
+    def result(self, row, authorization):
+        ident = row['id']
         if row['state'] in ('queued', 'running') and (ident not in self.jobs or self.jobs[ident].done()):
-            self.jobs[ident] = asyncio.create_task(self.collect(dict(row), authorization))
+            self.jobs[ident] = asyncio.create_task(self.collect(row, authorization))
         return {'lookup_id': ident, 'state': row['state'], 'result': json.loads(row['payload']) if row['payload'] else None}
 
     async def collect(self, row, authorization):

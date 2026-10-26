@@ -14,12 +14,14 @@ import platform
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 
 import pytest
+from impact_collection import CollectionInputs
 
 
-SCHEMA = 1
+SCHEMA = 2
 ROOT = Path(os.environ["SAWA_IMPACT_ROOT"]).resolve()
 STATE = Path(os.environ["SAWA_IMPACT_STATE"]).resolve()
 if os.environ.get("SAWA_IMPACT_SPLIT_RUNS") == "1":
@@ -44,6 +46,13 @@ OMITTED = []
 REASONS = {}
 FIXTURES = {}
 FIXTURE_STACK = []
+INPUT_SETS = {}
+ACTIVE_INPUT_SETS = set()
+ACTIVE_SHARED_INPUTS = {}
+COLLECTION_INPUTS = None
+COLLECTION_SETS = {}
+CURRENT_COLLECTION_SETS = []
+COLLECTED_DEPENDENCIES = {}
 DISABLED_COLLECTOR = None
 BOOTSTRAP_DATABASE = None
 BOOTSTRAP_DATABASE_DIGEST = None
@@ -68,6 +77,21 @@ def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+def atomic_json(path, payload):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                         prefix='.inputs-', delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def tracking_digest():
@@ -226,12 +250,13 @@ def context():
         if Path(name).suffix in {".toml", ".ini", ".cfg", ".yaml", ".yml", ".lock"}
         or name.endswith(("requirements.txt", "package.json", "package-lock.json"))
         or name.endswith("conftest.py") or name.startswith("infra/ci/")
+        or name in {'scripts/run_local_backend_tests.py', 'scripts/local_hospital_test_runner.py'}
         or name.startswith(('backend/alembic/', 'backend/migrations/', 'backend/src/models/', 'backend/src/maintenance/'))
         or name in {'backend/src/db.py', 'backend/src/monthly_menu_identity.py', 'backend/src/services/monthly_menu_identity_schema.py'}
     }
     payload = {
         "schema": SCHEMA, "python": platform.python_version(),
-        "platform": platform.system(), "files": sorted(TRACKED),
+        "platform": platform.system(),
         "env": env, "configs": configs,
         "packages": sorted((d.metadata["Name"], d.version) for d in importlib.metadata.distributions()
                            if d.metadata["Name"]),
@@ -250,8 +275,15 @@ CONTEXT_CHANGES = []
 def load_previous():
     global BASELINE_STATUS, CONTEXT_CHANGES
     try:
+        # Legacy files duplicated collection inputs per case and can exceed 6GB.
+        # Never exhaust the operator's memory loading one as a reusable baseline.
+        if META.stat().st_size > 64 * 1024 * 1024:
+            BASELINE_STATUS = 'oversized-legacy-inputs'
+            return {}
         previous = json.loads(META.read_text())
         if not isinstance(previous, dict):
+            return {}
+        if previous.get('schema') != SCHEMA:
             return {}
         if os.environ.get('SAWA_LOCAL_SOURCE_SHA'):
             source = previous.get('source_sha')
@@ -270,6 +302,17 @@ def load_previous():
         if previous.get("tracking_sha256") != tracking_digest():
             BASELINE_STATUS = 'tracking-data-changed'
             return {}
+        shared = previous.get('global_inputs')
+        sets = previous.get('input_sets')
+        if not isinstance(shared, dict) or not isinstance(sets, dict):
+            return {}
+        if any(not valid_input_record(name, value) for name, value in shared.items()):
+            return {}
+        for key, values in sets.items():
+            if not isinstance(values, dict) or any(not valid_input_record(name, value) for name, value in values.items()):
+                return {}
+            if key != hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest():
+                return {}
         for node, entry in previous["tests"].items():
             if not isinstance(node, str) or not isinstance(entry, dict):
                 return {}
@@ -279,15 +322,23 @@ def load_previous():
                 return {}
             if any(not valid_input_record(name, value) for name, value in entry["inputs"].items()):
                 return {}
+            for field in ('input_sets', 'collection_sets'):
+                references = entry.get(field)
+                if not isinstance(references, list) or any(not isinstance(key, str) or key not in sets for key in references):
+                    return {}
         with sqlite3.connect(f"file:{DB}?mode=ro", uri=True) as conn:
             if conn.execute("PRAGMA quick_check").fetchone() != ("ok",):
                 return {}
         BASELINE_STATUS = 'verified'
+        INPUT_SETS.update(sets)
+        global PREVIOUS_GLOBAL_INPUTS
+        PREVIOUS_GLOBAL_INPUTS = shared
         return previous["tests"]
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
         return {}
 
 
+PREVIOUS_GLOBAL_INPUTS = {}
 PREVIOUS = load_previous()
 BASELINE = {"inputs_sha256": digest(META), "tracking_sha256": tracking_digest(),
             "source_sha": json.loads(META.read_text()).get("source_sha")} if PREVIOUS else None
@@ -326,7 +377,12 @@ def framework_read():
 
 
 def record_unsafe(reason):
-    (GLOBAL_UNSAFE if ACTIVE is None else UNSAFE).add(reason)
+    if ACTIVE is None:
+        owner = COLLECTION_INPUTS.owner() if COLLECTION_INPUTS is not None else None
+        target = COLLECTION_INPUTS.unsafe.setdefault(owner, set()) if owner is not None else GLOBAL_UNSAFE
+    else:
+        target = UNSAFE
+    target.add(reason)
     for fixture in FIXTURE_STACK:
         fixture["unsafe"].add(reason)
 
@@ -373,7 +429,18 @@ def record_input(name, value):
     if value is None:
         record_unsafe('unreadable-input')
         return
-    target = GLOBAL_INPUTS if ACTIVE is None else INPUTS
+    if ACTIVE is not None and name in GLOBAL_INPUTS:
+        if GLOBAL_INPUTS[name] != value:
+            record_unsafe('changing-file-input')
+        else:
+            return
+    if ACTIVE is None:
+        owner = COLLECTION_INPUTS.owner() if COLLECTION_INPUTS is not None else None
+        target = COLLECTION_INPUTS.inputs.setdefault(owner, {}) if owner is not None else GLOBAL_INPUTS
+    else:
+        if name in ACTIVE_SHARED_INPUTS and ACTIVE_SHARED_INPUTS[name] != value:
+            record_unsafe('changing-file-input')
+        target = INPUTS
     if name in target and target[name] != value:
         record_unsafe('changing-file-input')
     target.setdefault(name, value)
@@ -457,13 +524,7 @@ def audit(event, args):
         if path.is_relative_to(ROOT):
             name = str(path.relative_to(ROOT))
             if name in TRACKED:
-                target = GLOBAL_INPUTS if ACTIVE is None else INPUTS
-                value = digest(path)
-                if value is None or (name in target and target[name] != value):
-                    record_unsafe("changing-file-input")
-                target[name] = value
-                for fixture in FIXTURE_STACK:
-                    fixture["inputs"][name] = value
+                record_input(name, digest(path))
             elif "__pycache__" not in path.parts and ".pytest_cache" not in path.parts:
                 record_unsafe("untracked-file-input")
         else:
@@ -485,6 +546,12 @@ def audit(event, args):
 
 
 def pytest_sessionstart(session):
+    global BUSY, COLLECTION_INPUTS
+    BUSY = True
+    try:
+        COLLECTION_INPUTS = CollectionInputs(ROOT, TRACKED)
+    finally:
+        BUSY = False
     selector = session.config.pluginmanager.get_plugin("TestmonSelect")
     if selector is None:
         raise pytest.UsageError("test impact requires pytest-testmon 2.2.0")
@@ -583,22 +650,54 @@ def pytest_collection_modifyitems(session, config, items):
     selector = config.pluginmanager.get_plugin("TestmonSelect")
     candidates = set(selector.deselected_tests)
     stable = []
+    forced_path = STATE / 'failed-tests.json'
+    try:
+        forced = json.loads(forced_path.read_text()) if forced_path.exists() else []
+        if not isinstance(forced, list) or any(not isinstance(node, str) for node in forced):
+            raise ValueError('invalid failed-test identities')
+    except (ValueError, OSError) as error:
+        raise pytest.UsageError('Invalid local failed-test record; refusing selection') from error
+    # Selection is one snapshot before case execution. Repeating the same hash
+    # for thousands of fixture consumers adds no information to that decision.
+    initial_inputs = {}
+    def unchanged(values):
+        for name, value in values.items():
+            if name not in initial_inputs:
+                initial_inputs[name] = input_digest(name)
+            if initial_inputs[name] != value:
+                return False
+        return True
+    checked_sets = {}
+    def unchanged_set(key):
+        if key not in checked_sets:
+            checked_sets[key] = unchanged(INPUT_SETS[key])
+        return checked_sets[key]
+    for path, values in COLLECTION_INPUTS.inputs.items():
+        key = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+        INPUT_SETS.setdefault(key, dict(values))
+        COLLECTION_SETS[path] = key
+    collection_changed = PREVIOUS_GLOBAL_INPUTS != GLOBAL_INPUTS
     for item in items:
+        COLLECTED_DEPENDENCIES[item.nodeid] = COLLECTION_INPUTS.dependencies(item.path)
         previous = PREVIOUS.get(item.nodeid)
         reason = None
         if FULL:
             reason = "full-or-missing-baseline"
-        elif GLOBAL_UNSAFE:
+        elif item.nodeid in forced:
+            reason = 'previous-run-failed'
+        elif GLOBAL_UNSAFE or any(COLLECTION_INPUTS.unsafe.get(path) for path in COLLECTION_INPUTS.dependencies(item.path)):
             reason = "untracked-collection-input"
         elif not previous or not previous.get("passed"):
             reason = "new-failed-or-missing-input-record"
         elif previous.get("unsafe"):
             reason = "untracked-input"
-        elif any(previous['inputs'].get(name) != value for name, value in GLOBAL_INPUTS.items()):
+        elif collection_changed:
             reason = 'collection-input-changed'
+        elif previous['collection_sets'] != sorted(COLLECTION_SETS[path] for path in COLLECTION_INPUTS.dependencies(item.path) if path in COLLECTION_SETS):
+            reason = 'module-collection-input-changed'
         elif item.nodeid not in candidates:
             reason = "python-dependency-changed"
-        elif any(input_digest(name) != value for name, value in previous["inputs"].items()):
+        elif not all(unchanged_set(key) for key in previous['input_sets']) or not unchanged(previous['inputs']):
             reason = "file-input-changed"
         if reason:
             REASONS[item.nodeid] = reason
@@ -618,14 +717,28 @@ def pytest_collection_modifyitems(session, config, items):
     SELECTED.extend(item.nodeid for item in items)
     executed = set(SELECTED)
     OMITTED[:] = [node for node in OMITTED if node not in executed]
+    atomic_json(STATE / 'selection-plan.json', {
+        'source_sha': os.environ.get('SAWA_LOCAL_SOURCE_SHA'),
+        'selected': SELECTED, 'reused': OMITTED,
+    })
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_protocol(item, nextitem):
-    global ACTIVE, INPUTS, UNSAFE, BUSY
+    global ACTIVE, INPUTS, UNSAFE, BUSY, ACTIVE_INPUT_SETS, ACTIVE_SHARED_INPUTS, CURRENT_COLLECTION_SETS
     ACTIVE = item.nodeid
-    INPUTS = dict(GLOBAL_INPUTS)
+    INPUTS = {}
+    ACTIVE_INPUT_SETS = set()
+    ACTIVE_SHARED_INPUTS = {}
     UNSAFE = set(GLOBAL_UNSAFE)
+    dependencies = COLLECTION_INPUTS.dependencies(item.path)
+    CURRENT_COLLECTION_SETS = sorted(COLLECTION_SETS[path] for path in dependencies if path in COLLECTION_SETS)
+    for path in dependencies:
+        UNSAFE.update(COLLECTION_INPUTS.unsafe.get(path, ()))
+        for name, value in COLLECTION_INPUTS.inputs.get(path, {}).items():
+            if name in ACTIVE_SHARED_INPUTS and ACTIVE_SHARED_INPUTS[name] != value:
+                UNSAFE.add('changing-file-input')
+            ACTIVE_SHARED_INPUTS.setdefault(name, value)
     yield
     BUSY = True
     try:
@@ -634,11 +747,18 @@ def pytest_runtest_protocol(item, nextitem):
     finally:
         BUSY = False
     reports = OUTCOMES.get(item.nodeid, {})
+    inherited = {}
+    for key in sorted(ACTIVE_INPUT_SETS) + CURRENT_COLLECTION_SETS:
+        inherited.update(INPUT_SETS[key])
     PREVIOUS[item.nodeid] = {
         "passed": all(reports.get(phase) == "passed" for phase in ("setup", "call", "teardown")),
-        "inputs": dict(INPUTS), "unsafe": sorted(UNSAFE),
+        "inputs": {name: value for name, value in INPUTS.items() if inherited.get(name, GLOBAL_INPUTS.get(name)) != value},
+        "input_sets": sorted(ACTIVE_INPUT_SETS), "unsafe": sorted(UNSAFE),
+        "collection_sets": CURRENT_COLLECTION_SETS,
     }
     ACTIVE = None
+    ACTIVE_INPUT_SETS = set()
+    ACTIVE_SHARED_INPUTS = {}
 
 
 def pytest_runtest_logreport(report):
@@ -659,6 +779,9 @@ def pytest_fixture_setup(fixturedef, request):
         else:
             raise RuntimeError("Fixture tracking record is missing")
         FIXTURES[id(fixturedef)] = record
+        key = hashlib.sha256(json.dumps(record['inputs'], sort_keys=True).encode()).hexdigest()
+        INPUT_SETS.setdefault(key, dict(record['inputs']))
+        record['input_set'] = key
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -668,7 +791,11 @@ def pytest_runtest_setup(item):
         for definition in definitions:
             record = FIXTURES.get(id(definition))
             if record is not None:
-                INPUTS.update(record["inputs"])
+                ACTIVE_INPUT_SETS.add(record['input_set'])
+                for name, value in record['inputs'].items():
+                    if name in ACTIVE_SHARED_INPUTS and ACTIVE_SHARED_INPUTS[name] != value:
+                        UNSAFE.add('changing-file-input')
+                    ACTIVE_SHARED_INPUTS.setdefault(name, value)
                 UNSAFE.update(record["unsafe"])
 
 
@@ -681,16 +808,38 @@ def pytest_sessionfinish(session, exitstatus):
     if DISABLED_COLLECTOR is not None:
         DISABLED_COLLECTOR.pytest_sessionfinish(session)
     STATE.mkdir(parents=True, exist_ok=True)
-    for entry in PREVIOUS.values():
-        entry["unsafe"] = sorted(set(entry["unsafe"]) | GLOBAL_UNSAFE)
+    current = {node: entry for node, entry in PREVIOUS.items() if node in COLLECTED_DEPENDENCIES}
+    final_inputs = {}
+    def changed(values):
+        for name, value in values.items():
+            if name not in final_inputs:
+                final_inputs[name] = input_digest(name)
+            if final_inputs[name] != value:
+                return True
+        return False
+    if changed(GLOBAL_INPUTS):
+        GLOBAL_UNSAFE.add('changing-file-input')
+    referenced = {key for entry in current.values()
+                  for key in [*entry['input_sets'], *entry['collection_sets']]}
+    changed_sets = {key for key in referenced if changed(INPUT_SETS[key])}
+    for node, entry in current.items():
+        unsafe = set(entry['unsafe']) | GLOBAL_UNSAFE
+        if changed_sets.intersection([*entry['input_sets'], *entry['collection_sets']]):
+            unsafe.add('changing-file-input')
+        for path in COLLECTED_DEPENDENCIES[node]:
+            unsafe.update(COLLECTION_INPUTS.unsafe.get(path, ()))
+        entry['unsafe'] = sorted(unsafe)
     if int(exitstatus) == 0:
-        META.write_text(json.dumps({"context": CONTEXT, "tests": PREVIOUS,
+        atomic_json(META, {"schema": SCHEMA, "context": CONTEXT, "tests": current,
+            "global_inputs": GLOBAL_INPUTS,
+            "input_sets": {key: INPUT_SETS[key] for key in referenced},
             "context_parts": CONTEXT_PARTS,
-            "tracking_sha256": tracking_digest(), "source_sha": os.environ.get("SAWA_LOCAL_SOURCE_SHA")}, sort_keys=True))
+            "tracking_sha256": tracking_digest(), "source_sha": os.environ.get("SAWA_LOCAL_SOURCE_SHA")})
     else:
         META.unlink(missing_ok=True)
     REPORT.write_text(json.dumps({
         "selected": SELECTED, "reused": OMITTED, "reasons": REASONS,
+        "failed": [node for node, reports in OUTCOMES.items() if 'failed' in reports.values()],
         "untracked": {node: value["unsafe"] for node, value in PREVIOUS.items() if value.get("unsafe")},
         "full": FULL, "exitstatus": int(exitstatus),
         "code_tracking_disabled": DISABLED_COLLECTOR is not None,

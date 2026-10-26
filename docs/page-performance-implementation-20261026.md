@@ -22,7 +22,9 @@ Source investigation: /Users/mmorinag/Sawa/2025.12/tmp/page-navigation-20261026/
 
 ## Status
 
-- PR170 remains the starting implementation; not deployed.
+- PR170 is integrated into develop at `2a180d57`; fixture follow-up PR171 is
+  integrated at `51bef89d`. School PR101 and Shift PR94 are integrated separately.
+  These integrations do not establish staging delivery of the performance work.
 - Hospital: workflow order-header projection removes the duplicate detail GET;
   selected raw evidence is retained once for history and saved-sheet inspection.
   Native JSON canonical comparison avoids the normalization round trip only for
@@ -58,10 +60,59 @@ Source investigation: /Users/mmorinag/Sawa/2025.12/tmp/page-navigation-20261026/
 - Implementation is not live verification. Local serial checks have started;
   no Actions, deployment or budget changes have run. Review, integration,
   staging and required-data timings remain pending.
-- The investigation's suggested normalized SQL ledger migration is not silently
-  substituted for an implementation: the canonical ledger format is retained;
-  repeated transfer/decode is reduced to coherent response reads. Whether more
-  restructuring is required remains subject to the final measured read cost.
+- The remaining whole-ledger reads are now replaced by a transactional PostgreSQL
+  row index. The compressed SQLite ledger remains canonical. Writes update both
+  in the same transaction; readers verify epoch and canonical payload digest,
+  use one repeatable-read snapshot and refuse unprepared or inconsistent indexes.
+  Config, owner-scoped latest-100 runs, explicit run detail/events and owner-bound
+  target lookup reads transfer only their required rows. SQLite retains original
+  scalar/query semantics. An unloaded table read is rejected, not treated as empty.
+  An old writer that changes only the canonical payload causes reads to stop;
+  a canonical write rebuilds the index, never a stale read fallback.
+
+## Remaining implementation and measurements
+
+Known implementation was completed before the following batch verification.
+No additional commit, merge, Actions or deployment was performed during that
+implementation phase. The earlier fixture-first integration was a sequencing
+violation, not evidence that the backlog had been finished.
+
+- Input tracking schema 2 stores global/fixture/module inputs once, with per-case
+  references and deltas. Collection reads follow static relative/bare/helper
+  imports; unresolved dynamic imports remain conservative. Conftest/production
+  reads remain shared. Changed shared inputs invalidate their consumers.
+- Selection hashes each unique input once at selection and once before publishing
+  reusable history. Runtime mutation/unsafe-input guards are retained. Newly
+  added files no longer invalidate unrelated successful cases solely by filename.
+- Failed/interrupted attempts preserve the prior valid tracking database and
+  metadata; explicit failed/planned identities remain executable on retry. Owned
+  child process groups are stopped and reaped before baseline restoration.
+  Legacy metadata larger than 64MiB is rejected without loading it into memory.
+- Tracker/runner/codec batch: 101 passed, 27 subtests, 38.23s. Agent related suite:
+  423 passed, 21 skipped, one missing-backend-import setup failure. The corrected
+  PostgreSQL plus packaged preparation batch then passed all 22 cases in 1.87s;
+  skips in the first batch are not counted as passes. Native Linux confirmation
+  remains part of the signed serving-image verification, not this local result.
+
+Measured local comparisons (not staging/full-page latency):
+
+| Scenario | Before | After | Invariant |
+| --- | ---: | ---: | --- |
+| PG16 detail read, 10,000 unrelated events + 10 requested, median of 7 | 16.37ms | 2.40ms | Exact response SHA256 equal |
+| Same read, peak Python allocations | 48,189,585 bytes | 30,887 bytes | Same canonical committed ledger |
+| 200 cases, 200 shared input files, initial tracking | 1.106s | 0.429s | 200 executed in both |
+| Same cases unchanged | 0.806s | 0.256s | 200 reused in both |
+| Tracking metadata | 3,438,824 bytes | 46,487 bytes | Shared input checks retained |
+
+Raw evidence:
+`/private/tmp/sawa-page-pg-20261026-r4/output/ledger-before-after.json`,
+`/private/tmp/sawa-impact-measure-20261026/results.json`,
+`/private/tmp/sawa-page-pg-20261026-r4/output/current-agent-pg-validation.xml`.
+The metadata comparison used the original plugin from `51bef89d` and the current
+plugin on identical synthetic inputs in separate temporary repositories.
+These measurements do not establish a 15-minute full verification batch or
+2-3-second staging page completion. Full source-bound verification, minimum
+legitimate staging delivery and all-page required-data timings remain pending.
 
 ## Local verification in progress
 
