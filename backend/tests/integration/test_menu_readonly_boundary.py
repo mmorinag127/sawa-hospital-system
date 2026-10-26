@@ -397,7 +397,7 @@ def test_delivery_capture_projection_preserves_complete_json_and_storage(readonl
     ], prefixes=["TEMPORARY"])
     inputs = [
         {"selected_version_input": {"id": "v"}, "reparse_read_input": {
-            "order": {"id": "O"}, "unknown": {"nested": [1, 1.0, -0.0, True, None, "日本語", "\u0000"]},
+            "order": {"id": "O"}, "unknown": {"nested": [1, 1.0, -0.0, True, None, "日本語"]},
             "large": "x" * 1000000}},
         {}, None, [], "text", 1, False,
         {"selected_version_input": None, "reparse_read_input": None},
@@ -417,6 +417,19 @@ def test_delivery_capture_projection_preserves_complete_json_and_storage(readonl
         for identity, row in actual.items():
             for name in ("selected_version_input", "reparse_read_input"):
                 assert canonical_snapshot_json(getattr(row, name)) == canonical_snapshot_json(getattr(expected[identity], name))
+        connection.execute(table.insert(), {"workflow_attempt_id": "nul", "order_id": "O", "job_id": "J",
+            "selected_pdf_receipt": {}, "request_identity": {"reparse_read_input": {"value": "\u0000"}}})
+        for statement in (old, _recorded_delivery_statement(connection.dialect.name)):
+            with connection.begin_nested():
+                if connection.dialect.name == "postgresql":
+                    with pytest.raises(sa.exc.DataError, match="unsupported Unicode escape sequence"):
+                        connection.execute(statement).all()
+                    # The expected database error aborts this savepoint, not the fixture transaction.
+                    connection.get_nested_transaction().rollback()
+                else:
+                    row = next(row for row in connection.execute(statement) if row.workflow_attempt_id == "nul")
+                    assert row.reparse_read_input == {"value": "\u0000"}
+        connection.execute(table.delete().where(table.c.workflow_attempt_id == "nul"))
         assert json.dumps([dict(row) for row in connection.execute(sa.select(table)).mappings()], sort_keys=True) == json.dumps([dict(row) for row in before], sort_keys=True)
         connection.rollback()
 
