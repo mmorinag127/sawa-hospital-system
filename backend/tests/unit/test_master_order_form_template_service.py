@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from datetime import date
+import pytest
 
 from openpyxl import load_workbook
 from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor
@@ -20,6 +21,65 @@ def _facility_config(columns: list[dict]) -> dict:
             "columns": columns,
         },
     }
+
+
+def test_logical_target_workbooks_match_print_path_for_all_authored_facilities(repository_layout_source):
+    from src.services.hakodate_step_review_pipeline_service import canonical_logical_target_plan
+    week = '2026-09@2026-09-27~2026-10-03'
+    entries = [
+        {'menu_date': date(2026, 9, 30), 'daypart': '朝', 'name': 'A', 'slot_index': 0, 'diet_type': 'regular'},
+        {'menu_date': date(2026, 9, 30), 'daypart': '朝', 'name': 'B', 'slot_index': 1, 'diet_type': 'regular'},
+        {'menu_date': date(2026, 10, 1), 'daypart': '昼', 'name': 'C', 'slot_index': 2, 'diet_type': 'regular'},
+    ]
+    draft = {'fields': ['date', 'daypart', 'menu'],
+             'rows': [[entry['menu_date'].isoformat(), entry['daypart'], entry['name']] for entry in entries]}
+    facilities = config_service.load_facility_master()['facilities']
+    assert facilities
+    for facility in facilities:
+        configured = config_service.get_facility_config(facility['facility_id'])
+        outcomes = []
+        for logical_only in (False, True):
+            workbook = service.build_facility_template_workbook(
+                facility_config=configured, week_value=week, week_menu_entries=entries,
+                logical_only=logical_only)
+            try:
+                worksheet = workbook[service.FACILITY_TEMPLATE_SHEET_NAME]
+                outcomes.append((service.validated_body_row_plan(worksheet),
+                    canonical_logical_target_plan(worksheet=worksheet, fax_template=configured['fax_template'], draft_sheet=draft)))
+            finally:
+                workbook.close()
+        assert outcomes[0] == outcomes[1], facility['facility_id']
+
+
+@pytest.mark.parametrize('change', ['missing-source', 'missing-sheet', 'empty-menu', 'missing-columns'])
+def test_logical_target_path_preserves_authority_errors(tmp_path, change):
+    from openpyxl import Workbook
+    configured = _facility_config([
+        {'index': 0, 'role': 'date'}, {'index': 1, 'role': 'daypart'},
+        {'index': 3, 'role': 'menu_name', 'header': 'Menu'},
+        {'index': 4, 'role': 'quantity', 'diet_type': 'regular', 'area_id': 'X', 'header': 'Count', 'name': 'qty.regular_x'},
+    ])
+    source = service.MASTER_TEMPLATE_PATH
+    entries = [{'menu_date': date(2026, 10, 1), 'daypart': '朝', 'name': 'A', 'slot_index': 0, 'diet_type': 'regular'}]
+    if change == 'missing-source':
+        source = tmp_path / 'absent.xlsx'
+    elif change == 'missing-sheet':
+        source = tmp_path / 'wrong-sheet.xlsx'
+        workbook = Workbook()
+        workbook.save(source)
+        workbook.close()
+    elif change == 'empty-menu':
+        entries = []
+    elif change == 'missing-columns':
+        configured['fax_template']['columns'] = []
+    errors = []
+    for logical_only in (False, True):
+        with pytest.raises(service.FacilityTemplateBuildError) as error:
+            service.build_facility_template_workbook(facility_config=configured,
+                master_template_path=source, week_value='2026-10@2026-10-01~2026-10-01',
+                week_menu_entries=entries, logical_only=logical_only)
+        errors.append(str(error.value))
+    assert errors[0] == errors[1]
 
 
 def _generated_render_width(worksheet, count: int) -> int:

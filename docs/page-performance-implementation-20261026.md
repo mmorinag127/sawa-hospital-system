@@ -114,6 +114,29 @@ These measurements do not establish a 15-minute full verification batch or
 2-3-second staging page completion. Full source-bound verification, minimum
 legitimate staging delivery and all-page required-data timings remain pending.
 
+The first fixed-source batch was interrupted after 183.69s without a receipt.
+A narrowly measured audit-guard shortcut showed no improvement (20.18s to
+20.29s on the same real workflow regression) and was removed. Profiling instead
+identified 87 calls to print-workbook generation from logical target validation;
+87 styled workbook loads consumed 18.67s of a 33.05s instrumented profile.
+Logical validation now reads the same authored XLSX values and merge ranges,
+then uses the existing facility/week/body/column/schema and target validators.
+It does not restore print-only cell styles or images. The print/output path is
+unchanged. No previous plan or cached source replaces the current authored file.
+The actual worksheet XML cell coordinates, rather than a dimension hint, bound
+the copy. All authored facilities have exact target-plan parity across a
+month boundary; missing source/sheet/menu/columns retain their errors.
+
+Related batch: 141 passed and 23 subtests; one new-fixture invalid physical-week
+ID was corrected to the existing September-anchored canonical format. The entire
+master-template module then passed all 18 cases in 5.48s. The same real workflow
+case with the original tracking instrumentation measured 20.18s before and
+12.36s after this logical-workbook change (single comparisons, not page latency).
+Evidence: `/private/tmp/sawa-unsafe-tracking-measure-20261026/results.json`,
+`/private/tmp/sawa-unsafe-tracking-measure-20261026/profile/calls.prof`.
+An actual child-process regression also verifies TERM cleanup when an enclosing
+shell supplied ignored SIGINT; handlers are restored after the child is reaped.
+
 ## Local verification in progress
 
 Hospital runtime: `/private/tmp/sawa-hospital-secure-20261024/bin/python`,

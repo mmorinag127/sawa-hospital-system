@@ -1005,6 +1005,7 @@ def capture_original_target_plan(*, configured_input: dict, physical_menu_entrie
     wb = master.build_facility_template_workbook(
         facility_config=configured_input["facility"], week_value=week_code,
         week_menu_entries=physical_menu_entries,
+        logical_only=True,
     )
     try:
         ws = wb[master.FACILITY_TEMPLATE_SHEET_NAME]

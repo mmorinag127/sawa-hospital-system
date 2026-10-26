@@ -78,22 +78,35 @@ def preserve_baseline(state):
 
 
 def run_pytest(argv, env):
-    with subprocess.Popen(argv, cwd=ROOT, env=env, start_new_session=True) as process:
-        try:
-            return subprocess.CompletedProcess(argv, process.wait())
-        except BaseException:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGINT)
-                try:
-                    process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGTERM)
+    previous = {kind: signal.getsignal(kind) for kind in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        for kind in previous:
+            signal.signal(kind, signal.default_int_handler)
+        with subprocess.Popen(argv, cwd=ROOT, env=env, start_new_session=True) as process:
+            try:
+                return subprocess.CompletedProcess(argv, process.wait())
+            except BaseException:
+                # Repeated outer interrupts must not interrupt child cleanup.
+                for kind in previous:
+                    signal.signal(kind, signal.SIG_IGN)
+                if process.poll() is None:
                     try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        os.killpg(process.pid, signal.SIGINT)
+                        try:
+                            process.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(process.pid, signal.SIGTERM)
+                            try:
+                                process.wait(timeout=10)
+                            except subprocess.TimeoutExpired:
+                                os.killpg(process.pid, signal.SIGKILL)
+                                process.wait()
+                    except ProcessLookupError:
                         process.wait()
-            raise
+                raise
+    finally:
+        for kind, handler in previous.items():
+            signal.signal(kind, handler)
 
 
 def retain_failures(state, scratch, failed, *, successful=False):

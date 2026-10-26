@@ -6,6 +6,9 @@ import unittest
 import os
 import subprocess
 import tempfile
+import sys
+import time
+import signal
 from unittest.mock import patch
 from local_receipt_signing import sign, verify_signed
 import yaml
@@ -181,6 +184,37 @@ class ReceiptContractTest(unittest.TestCase):
         self.assertTrue(start.call_args.kwargs['start_new_session'])
         stop.assert_called_once_with(43210, BACKEND_RUNNER.signal.SIGINT)
         self.assertEqual(process.wait.call_count, 2)
+
+    def test_term_reaps_real_child_even_when_parent_inherited_ignored_interrupt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / 'child.pid'
+            child = f"import os,time; from pathlib import Path; Path({str(identity)!r}).write_text(str(os.getpid())); time.sleep(60)"
+            parent = (
+                "import os,signal,sys; signal.signal(signal.SIGINT,signal.SIG_IGN); "
+                f"sys.path.insert(0,{str(Path(__file__).parent)!r}); "
+                "import run_local_backend_tests as runner; "
+                f"runner.run_pytest([sys.executable,'-c',{child!r}],os.environ.copy())")
+            with subprocess.Popen([sys.executable, '-c', parent], stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, start_new_session=True) as process:
+                try:
+                    deadline = time.monotonic() + 10
+                    while not identity.exists() and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertTrue(identity.exists(), 'controlled child did not start')
+                    process.send_signal(signal.SIGTERM)
+                    process.communicate(timeout=10)
+                    self.assertNotEqual(process.returncode, 0)
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(int(identity.read_text()), 0)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    if identity.exists():
+                        try:
+                            os.killpg(int(identity.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
     def test_agent_cleanup_attempts_database_even_when_test_container_cannot_be_stopped(self):
         for failure in ('stop', 'owner'):
