@@ -335,3 +335,29 @@ def test_system_api_keeps_dated_legacy_history_separate_and_intake_counts(native
     assert body["ingest_jobs"]["done_count"] == 1
     assert body["ocr_operations"]["intake"] == {"uploaded_pdfs": body["uploaded_pdfs"], "ingest_jobs": body["ingest_jobs"]}
     assert snapshot(f) == before
+
+
+def test_system_configuration_and_quality_views_do_not_scan_unrequested_sections(monkeypatch):
+    from src.api import system
+
+    def forbidden():
+        pytest.fail("unrequested operational section was read")
+
+    intake = {"mode": "manual_upload", "manual_upload_enabled": True}
+    quality = {"gate": {"status": "pass"}, "sample": {"evaluated_jobs": 3}}
+    monkeypatch.setattr(system, "get_intake_status", lambda: intake)
+    monkeypatch.setattr(system, "GOOGLE_OAUTH_CLIENT_IDS", ["authored-client"])
+    for name in ("get_operations", "summarize_ingest_jobs", "summarize_uploaded_pdfs",
+                 "load_pipeline_state", "get_pipeline_config", "get_db_quota_status",
+                 "summarize_reparse_quality"):
+        monkeypatch.setattr(system, name, forbidden)
+    configured = system.system_status(view="configuration")
+    assert configured == {"intake": intake, "oauth_config": {"configured": True, "google_client_id_count": 1}}
+    monkeypatch.setattr(system, "summarize_reparse_quality", lambda: quality)
+    assert system.system_status(view="quality") == {**configured, "ocr_reparse_quality": quality}
+    def failed_quality():
+        raise RuntimeError("authored-quality-failure")
+    monkeypatch.setattr(system, "summarize_reparse_quality", failed_quality)
+    assert system.system_status(view="quality")["ocr_reparse_quality"] == {
+        "gate": {"status": "error"}, "error": "quality_summary_failed:authored-quality-failure",
+    }

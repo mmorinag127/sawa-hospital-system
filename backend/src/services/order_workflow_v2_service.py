@@ -1425,10 +1425,11 @@ def _serialize_workflow_checked(
         meta=meta,
         session=session,
     )
+    loaded_jobs = {}
     job_binding = ocr_job_service.get_recorded_order_job_bindings(
-        [order.id], read_session=session,
+        [order.id], read_session=session, _loaded_jobs=loaded_jobs,
     ).get(order.id) or {}
-    ocr_job = session.get(OcrJob, job_binding["job_id"]) if job_binding.get("job") is not None else None
+    ocr_job = loaded_jobs.get(job_binding["job_id"]) if job_binding.get("job") is not None else None
     serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta, session=session)
     if job_binding.get("error"):
         serialized["ocr_job_binding_error"] = job_binding["error"]
@@ -1739,11 +1740,8 @@ def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflo
     elif workflow is None:
         serialized = _serialize_uninitialized_workflow(order)
     else:
-        meta = _workflow_meta(workflow)
-        ocr_job_id = _normalize_id(meta.get("ocr_job_id"))
-        ocr_job = session.get(OcrJob, ocr_job_id) if ocr_job_id else None
         serialized = _serialize_workflow_checked(
-            session, order=order, workflow=workflow, ocr_job=ocr_job, _analysis=_analysis,
+            session, order=order, workflow=workflow, _analysis=_analysis,
         )
     resolution = _workflow_menu_amount_resolution(session, order, workflow, _analysis=_analysis)
     serialized["menu_amount_resolution"] = resolution
@@ -4990,10 +4988,9 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
         )
         _inspection_next("response_serialization")
         if workflow is not None:
-            job_id = _normalize_id(_workflow_meta(workflow).get("ocr_job_id"))
             checked_workflow = _inspection_call(
                 "workflow_serialize", _serialize_workflow_checked, session,
-                order=order, workflow=workflow, ocr_job=session.get(OcrJob, job_id) if job_id else None,
+                order=order, workflow=workflow,
                 _analysis=analysis,
             )
         else:

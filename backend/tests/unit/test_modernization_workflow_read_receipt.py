@@ -178,6 +178,7 @@ def test_read_candidate_omits_write_snapshots_but_preserves_output_and_rejects_w
 
         monkeypatch.setattr(orders, "synchronous_input_versions", forbidden)
         monkeypatch.setattr(guard, "_order_execution_input", forbidden)
+        monkeypatch.setattr(orders.ocr_evidence_service, "_serialize_evidence_run", forbidden)
         actual = workflow._build_materialization_candidate_for_saved_sheet(
             **kwargs, _for_read_projection=True,
         )
@@ -186,6 +187,7 @@ def test_read_candidate_omits_write_snapshots_but_preserves_output_and_rejects_w
         assert actual == expected
         assert proof["read_projection_only"] is True
         assert proof["input_versions"] is None
+        assert set(proof["evidence"]) == {"id", "payload_json"}
         assert orders._synchronous_cache_write_fence(session, f.order_id, proof) is False
         with pytest.raises(ValueError, match="revision_write_ownership_conflict"):
             ocr_revision_store.append_revision(

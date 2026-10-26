@@ -9,7 +9,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import JSON, and_, case, column, func, literal, or_, select, true, update
 
 from src.db import session_scope
 from src.models.ocr_job import OcrJob
@@ -594,7 +594,29 @@ def get_jobs(job_ids: list[str]) -> dict[str, dict[str, Any]]:
         return {job.id: _job_to_dict(job) for job in jobs}
 
 
-def get_recorded_order_job_bindings(order_ids: list[str], *, read_session=None) -> dict[str, dict[str, Any]]:
+def _recorded_delivery_statement(dialect_name: str):
+    from src.models.workflow_ocr_delivery import WorkflowOcrDelivery as Delivery
+
+    fields = (Delivery.workflow_attempt_id, Delivery.order_id, Delivery.job_id, Delivery.selected_pdf_receipt)
+    if dialect_name != "postgresql":
+        return select(*fields,
+            Delivery.request_identity["selected_version_input"].label("selected_version_input"),
+            Delivery.request_identity["reparse_read_input"].label("reparse_read_input"))
+    # Decode once without JSONB normalization; the complete captured input is
+    # still compared by snapshots_equal, including unknown/nested fields.
+    identity_input = case(
+        (func.json_typeof(Delivery.request_identity) == "object", Delivery.request_identity),
+        else_=literal({}, type_=JSON),
+    )
+    captured = func.json_to_record(identity_input).table_valued(
+        column("selected_version_input", JSON), column("reparse_read_input", JSON),
+    ).render_derived(with_types=True).lateral("captured_fields")
+    return select(*fields, captured.c.selected_version_input, captured.c.reparse_read_input).select_from(
+        Delivery,
+    ).join(captured, true())
+
+
+def get_recorded_order_job_bindings(order_ids: list[str], *, read_session=None, _loaded_jobs=None) -> dict[str, dict[str, Any]]:
     """Read the workflow's explicit execution, never a name or latest-row guess."""
     from src.models.order import Order
     from src.models.order_workflow_state import OrderWorkflowState
@@ -626,6 +648,8 @@ def get_recorded_order_job_bindings(order_ids: list[str], *, read_session=None) 
         jobs = {job.id: job for job in session.execute(
             select(OcrJob).where(OcrJob.id.in_(job_ids)),
         ).scalars()} if job_ids else {}
+        if _loaded_jobs is not None:
+            _loaded_jobs.update(jobs)
         inputs = {}
         for job_id, job in jobs.items():
             metrics = job.metrics if isinstance(job.metrics, dict) else {}
@@ -654,12 +678,10 @@ def get_recorded_order_job_bindings(order_ids: list[str], *, read_session=None) 
         )).scalars()} if version_ids else {}
         attempts = string_ids(job.metrics.get("workflow_attempt_id") for job in jobs.values()
                               if isinstance(job.metrics, dict))
-        deliveries = {row.workflow_attempt_id: row for row in session.execute(select(
-            WorkflowOcrDelivery.workflow_attempt_id, WorkflowOcrDelivery.order_id,
-            WorkflowOcrDelivery.job_id, WorkflowOcrDelivery.selected_pdf_receipt,
-            WorkflowOcrDelivery.request_identity["selected_version_input"].label("selected_version_input"),
-            WorkflowOcrDelivery.request_identity["reparse_read_input"].label("reparse_read_input"),
-        ).where(WorkflowOcrDelivery.workflow_attempt_id.in_(attempts)))} if attempts else {}
+        deliveries = {row.workflow_attempt_id: row for row in session.execute(
+            _recorded_delivery_statement(session.get_bind().dialect.name).where(
+                WorkflowOcrDelivery.workflow_attempt_id.in_(attempts)),
+        )} if attempts else {}
         bindings = {}
         for order_id, (document_id, state, meta, identity) in records.items():
             job = jobs.get(identity)

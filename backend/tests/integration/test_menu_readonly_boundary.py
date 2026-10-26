@@ -384,6 +384,43 @@ def snapshot(engine):
         return result
 
 
+def test_delivery_capture_projection_preserves_complete_json_and_storage(readonly_database):
+    import json
+    from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
+    from src.services.ocr_job_service import _recorded_delivery_statement
+    from src.services.snapshot_serialization import canonical_snapshot_json
+
+    source = WorkflowOcrDelivery.__table__
+    names = ("workflow_attempt_id", "order_id", "job_id", "selected_pdf_receipt", "request_identity")
+    table = sa.Table(source.name, sa.MetaData(), *[
+        sa.Column(name, source.c[name].type) for name in names
+    ], prefixes=["TEMPORARY"])
+    inputs = [
+        {"selected_version_input": {"id": "v"}, "reparse_read_input": {
+            "order": {"id": "O"}, "unknown": {"nested": [1, 1.0, -0.0, True, None, "日本語", "\u0000"]},
+            "large": "x" * 1000000}},
+        {}, None, [], "text", 1, False,
+        {"selected_version_input": None, "reparse_read_input": None},
+    ]
+    with readonly_database.connect() as connection:
+        table.create(connection)
+        connection.execute(table.insert(), [{"workflow_attempt_id": str(index), "order_id": "O", "job_id": "J",
+            "selected_pdf_receipt": {}, "request_identity": value} for index, value in enumerate(inputs)])
+        old = sa.select(source.c.workflow_attempt_id,
+            source.c.request_identity["selected_version_input"].label("selected_version_input"),
+            source.c.request_identity["reparse_read_input"].label("reparse_read_input"))
+        before = connection.execute(sa.select(table)).mappings().all()
+        expected = {row.workflow_attempt_id: row for row in connection.execute(old)}
+        actual = {row.workflow_attempt_id: row for row in connection.execute(
+            _recorded_delivery_statement(connection.dialect.name))}
+        assert actual.keys() == expected.keys()
+        for identity, row in actual.items():
+            for name in ("selected_version_input", "reparse_read_input"):
+                assert canonical_snapshot_json(getattr(row, name)) == canonical_snapshot_json(getattr(expected[identity], name))
+        assert json.dumps([dict(row) for row in connection.execute(sa.select(table)).mappings()], sort_keys=True) == json.dumps([dict(row) for row in before], sort_keys=True)
+        connection.rollback()
+
+
 def test_four_reads_no_dml_ddl_with_another_writer(readonly_database):
     seed()
     before = snapshot(readonly_database)

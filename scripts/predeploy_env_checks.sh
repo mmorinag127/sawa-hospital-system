@@ -41,9 +41,9 @@ check_http_code_any() {
   local authorization="${4:-}"
   local code
   if [ -n "$authorization" ]; then
-    code=$(curl -sS -H "Authorization: ${authorization}" -o /dev/null -w "%{http_code}" "$url" || true)
+    code=$(curl -sS --connect-timeout 10 --max-time 60 -H "Authorization: ${authorization}" -o /dev/null -w "%{http_code}" "$url" || true)
   else
-    code=$(curl -sS -o /dev/null -w "%{http_code}" "$url" || true)
+    code=$(curl -sS --connect-timeout 10 --max-time 60 -o /dev/null -w "%{http_code}" "$url" || true)
   fi
   IFS=',' read -r -a expected_arr <<< "$expected_csv"
   for e in "${expected_arr[@]}"; do
@@ -78,12 +78,11 @@ check_http_code_any "web_login" "$WEB_URL/login" "200,308" ""
 check_http_code_any "worker_health" "$WORKER_URL/health" "200" ""
 check_http_code_any "worker_backlog" "$WORKER_URL/health/backlog" "200" "$AUTHORIZATION_HEADER"
 
-check_http_code_any "worker_orders" "$WORKER_URL/orders?include_ocr=false" "200" "$AUTHORIZATION_HEADER"
-check_http_code_any "worker_system_status" "$WORKER_URL/system/status" "200" "$AUTHORIZATION_HEADER"
+check_http_code_any "worker_orders" "$WORKER_URL/orders?include_ocr=false&limit=1" "200" "$AUTHORIZATION_HEADER"
 
 if [ "$CHECK_WEB_PROXY" = "1" ]; then
-  check_http_code_any "web_api_orders" "$WEB_URL/api/orders?include_ocr=false" "200,308" "$AUTHORIZATION_HEADER"
-  check_http_code_any "web_api_system_status" "$WEB_URL/api/system/status" "200,308" "$AUTHORIZATION_HEADER"
+  check_http_code_any "web_api_orders" "$WEB_URL/api/orders?include_ocr=false&limit=1" "200,308" "$AUTHORIZATION_HEADER"
+  check_http_code_any "web_api_system_status" "$WEB_URL/api/system/status?view=configuration" "200,308" "$AUTHORIZATION_HEADER"
 fi
 
 
@@ -92,7 +91,11 @@ if [ "$CHECK_WEB_PROXY" = "1" ]; then
   check_http_code_any "web_api_orders_unauthenticated" "$WEB_URL/api/orders?include_ocr=false" "401,308" ""
 fi
 
-status_json=$(curl -sS -H "Authorization: ${AUTHORIZATION_HEADER}" "$WORKER_URL/system/status" || true)
+status_view=configuration
+if [ "$STRICT_OCR_QUALITY" = "1" ]; then
+  status_view=quality
+fi
+status_json=$(curl -fsS --connect-timeout 10 --max-time 60 -H "Authorization: ${AUTHORIZATION_HEADER}" "$WORKER_URL/system/status?view=$status_view" || true)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 python3 "$SCRIPT_DIR/check_predeploy_system_status.py" \
   "$status_json" \

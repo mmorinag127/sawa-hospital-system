@@ -9,6 +9,41 @@ const {spawnSync} = require("node:child_process");
 const repoRoot = path.resolve(__dirname, "../../..");
 const read = (relativePath) => fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 
+test('predeploy reads one bounded status body and preserves strict quality refusal', () => {
+  for (const [strict, gate, success] of [['0', 'fail', true], ['1', 'pass', true], ['1', 'fail', false]]) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'predeploy-demand-'));
+    try {
+      const calls = path.join(directory, 'calls');
+      fs.writeFileSync(path.join(directory, 'curl'), `#!/bin/bash
+url="\${!#}"
+printf '%s\\n' "$url" >> "$TEST_CALLS"
+[[ " $* " == *" --connect-timeout 10 "* && " $* " == *" --max-time 60 "* ]] || exit 91
+if [[ "$*" == *"-o /dev/null"* ]]; then
+  if [[ "$url" == *'/orders?'* && "$*" != *'Authorization:'* ]]; then printf 401; else printf 200; fi
+else
+  printf '%s' "$TEST_STATUS"
+fi
+`, { mode: 0o700 });
+      const status = { intake: { mode: 'manual_upload', manual_upload_enabled: true, manual_upload_storage: { configured: true } },
+        oauth_config: { configured: true }, ocr_reparse_quality: { gate: { status: gate } } };
+      const result = spawnSync('bash', ['scripts/predeploy_env_checks.sh'], { cwd: repoRoot, encoding: 'utf8', env: {
+        ...process.env, PATH: directory + path.delimiter + process.env.PATH,
+        WEB_URL: 'https://web.invalid', WORKER_URL: 'https://worker.invalid', AUTHORIZATION_HEADER: 'Bearer authored-test',
+        CHECK_WEB_PROXY: '1', STRICT_OCR_QUALITY: strict, TEST_STATUS: JSON.stringify(status), TEST_CALLS: calls,
+      } });
+      assert.equal(result.status === 0, success, result.stdout + result.stderr);
+      const urls = fs.readFileSync(calls, 'utf8').trim().split('\n');
+      assert.deepEqual(urls.filter(url => url.startsWith('https://worker.invalid/system/status')),
+        [`https://worker.invalid/system/status?view=${strict === '1' ? 'quality' : 'configuration'}`]);
+      for (const url of urls.filter(url => url.includes('/orders?') && !url.endsWith('include_ocr=false'))) {
+        assert.equal(new URL(url).searchParams.get('limit'), '1');
+      }
+      assert.ok(urls.includes('https://web.invalid/api/system/status?view=configuration'));
+      assert.ok(!urls.some(url => url.includes('view=full')));
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  }
+});
+
 test('agent base resolution uses registry bytes under existing deploy permissions', () => {
   const job = yaml.load(read('.github/workflows/deploy-stg.yml')).jobs['build-agent'];
   assert.ok(job.steps.some(step => step.uses === 'astral-sh/setup-uv@v8.1.0'));

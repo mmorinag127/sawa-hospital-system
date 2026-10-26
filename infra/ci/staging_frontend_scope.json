@@ -23,6 +23,7 @@
     "tests/config/ocr-queue-functional.test.mjs",
     "tests/config/saved-workflow-readonly.test.mjs",
     "tests/config/system-status-safe-screenshot.test.mjs",
+    "tests/config/system-status-demand-read.test.mjs",
     "tests/config/dashboard-monthly-read-status.test.mjs",
     "tests/config/ocr-admin-readonly.test.mjs",
     "tests/config/hospital-readonly-pages.test.mjs",

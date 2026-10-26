@@ -253,6 +253,21 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
         else:
             input_versions = synchronous_input_versions(order, evidence, draft, cache)
             input_versions["selected_pdf_receipt"] = pdf_receipt
+        if _for_read_projection:
+            # Only the canonical menu payload is consumed by the read candidate.
+            # Keep the full acceptance payload: its digest covers every key.
+            from src.services.recognition_acceptance_service import KEY as acceptance_key
+            payload = evidence.payload_json if isinstance(evidence.payload_json, dict) else {}
+            if (evidence.artifact_manifest_json or {}).get(acceptance_key) is not None:
+                read_payload = deepcopy(payload)
+            else:
+                read_payload = ocr_evidence_service._extract_evidence_payload(
+                    {key: value for key, value in payload.items() if key != "diagnostic_pipeline_output"},
+                    _analysis=_analysis,
+                )
+            captured_evidence = {"id": evidence.id, "payload_json": read_payload}
+        else:
+            captured_evidence = ocr_evidence_service._serialize_evidence_run(evidence, include_payload=True, _analysis=_analysis)
         return {
             **({"read_projection_only": True, "order_lines": projection_lines} if _for_read_projection else {}),
             "order_id": order_id,
@@ -265,7 +280,7 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
             "cache_exists": cache is not None,
             "cache_updated_at": cache.updated_at if cache is not None else None,
             "input_versions": input_versions,
-            "evidence": ocr_evidence_service._serialize_evidence_run(evidence, include_payload=True, _analysis=_analysis),
+            "evidence": captured_evidence,
             "draft": deepcopy(draft_sheet_service._serialize_draft(draft)) if draft is not None else None,
             "selected_pdf_receipt": pdf_receipt,
             "configured_input": _capture_selected_order_config(session, order, read_only=_for_read_projection),

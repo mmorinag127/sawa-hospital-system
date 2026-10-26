@@ -32,7 +32,22 @@ def _is_production_runtime() -> bool:
 
 
 @router.get("/system/status", dependencies=[Depends(require_role("operator"))])
-def system_status(view: Literal["full", "operations"] = "full"):
+def system_status(view: Literal["full", "operations", "configuration", "quality"] = "full"):
+    if view == "configuration":
+        return {
+            "intake": get_intake_status(),
+            "oauth_config": {"configured": bool(GOOGLE_OAUTH_CLIENT_IDS), "google_client_id_count": len(GOOGLE_OAUTH_CLIENT_IDS)},
+        }
+    if view == "quality":
+        try:
+            quality = summarize_reparse_quality()
+        except Exception as exc:  # noqa: BLE001
+            quality = {"gate": {"status": "error"}, "error": f"quality_summary_failed:{exc}"}
+        return {
+            "intake": get_intake_status(),
+            "oauth_config": {"configured": bool(GOOGLE_OAUTH_CLIENT_IDS), "google_client_id_count": len(GOOGLE_OAUTH_CLIENT_IDS)},
+            "ocr_reparse_quality": quality,
+        }
     if view == "operations":
         operations = get_operations()
         ingest_summary = summarize_ingest_jobs()

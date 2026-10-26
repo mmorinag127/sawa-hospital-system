@@ -196,15 +196,46 @@ export default function SystemStatusPage() {
   const [maintenanceMessage, setMaintenanceMessage] = useState("");
   const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [clearConfirm, setClearConfirm] = useState("");
+  const [detailsBusy, setDetailsBusy] = useState(false);
+
+  const loadDetails = async (section: "operations" | "quality" | "quota" | "full") => {
+    setDetailsBusy(true);
+    try {
+      const res = section === "quota"
+        ? await apiClient.get("/system/db/quota")
+        : await apiClient.get("/system/status", { params: { view: section } });
+      const data = section === "quota" ? { db_quota: res.data } : res.data;
+      setStatus((current) => ({ ...current, ...data }));
+      setError("");
+    } catch {
+      setStatus((current) => {
+        if (section === "full") return null;
+        const next = { ...current };
+        if (section === "quota") delete next.db_quota;
+        if (section === "quality") delete next.ocr_reparse_quality;
+        if (section === "operations") {
+          delete next.ocr_operations;
+          delete next.ocr_pipeline;
+          delete next.uploaded_pdfs;
+          delete next.ingest_jobs;
+        }
+        return next;
+      });
+      setError("システム状態の詳細取得に失敗しました。");
+    } finally {
+      setDetailsBusy(false);
+    }
+  };
 
   const loadStatus = async (silent = false) => {
     try {
-      const res = await apiClient.get("/system/status");
+      const res = await apiClient.get("/system/status", { params: { view: "configuration" } });
       setStatus(res.data || null);
       setError("");
       if (!silent) {
         setMaintenanceMessage("");
       }
+      await loadDetails("operations");
     } catch {
       setStatus(null);
       setError("システム状態の取得に失敗しました。");
@@ -297,7 +328,7 @@ export default function SystemStatusPage() {
           (ingestJobs?.stale_processing_count || 0) > 0
         ? "warn"
         : "ok";
-  const ocrBacklogLabel =
+  const ocrBacklogLabel = !uploadedPdfs || !ingestJobs ? "未取得" :
     ocrBacklogSeverity === "error" ? "要介入" : ocrBacklogSeverity === "warn" ? "滞留あり" : "正常";
 
   return (
@@ -327,7 +358,7 @@ export default function SystemStatusPage() {
             保存先: {status?.intake?.manual_upload_storage?.mode ?? "未取得"}
           </p>
           <p className="meta">
-            永続化: {status?.intake?.manual_upload_storage?.persisted ? "あり" : "なし"}
+            永続化: {status?.intake?.manual_upload_storage?.persisted == null ? "未取得" : status.intake.manual_upload_storage.persisted ? "あり" : "なし"}
           </p>
           {status?.intake?.manual_upload_enabled && !status?.intake?.manual_upload_storage?.configured ? (
             <p className="meta warn">注文書アップロード保存先が未設定です。</p>
@@ -335,8 +366,8 @@ export default function SystemStatusPage() {
         </article>
         <article className="card">
           <h2>Google 認証</h2>
-          <p className="value">{status?.oauth_config?.configured ? "OK" : "未設定"}</p>
-          <p className="meta">設定数: {status?.oauth_config?.google_client_id_count ?? 0}</p>
+          <p className="value">{status?.oauth_config == null ? "未取得" : status.oauth_config.configured ? "OK" : "未設定"}</p>
+          <p className="meta">設定数: {status?.oauth_config?.google_client_id_count ?? "未取得"}</p>
           <p className="meta">Googleログインで利用します。</p>
         </article>
         <article className="card card-wide ocr-card">
@@ -377,6 +408,7 @@ export default function SystemStatusPage() {
         </article>
         <article className="card">
           <h2>DB Quota</h2>
+          <Button onClick={() => loadDetails("quota")} disabled={detailsBusy || maintenanceBusy}>使用量を取得</Button>
           <p className={`value quota-level ${quotaLevelClass}`}>{quotaLevel}</p>
           <p className="meta">
             使用量: {formatQuotaNumber(dbQuota?.used, dbQuota?.unit)} / 上限:{" "}
@@ -388,6 +420,7 @@ export default function SystemStatusPage() {
         </article>
         <article className="card">
           <h2>OCR 品質ゲート</h2>
+          <Button onClick={() => loadDetails("quality")} disabled={detailsBusy || maintenanceBusy}>品質を取得</Button>
           <p className={`value quality-gate ${qualityGateStatus}`}>
             {formatQualityGate(ocrQuality?.gate?.status)}
           </p>
@@ -438,7 +471,7 @@ export default function SystemStatusPage() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={9}>データがありません</td>
+                  <td colSpan={9}>{ocrQuality ? "データがありません" : "未取得"}</td>
                 </tr>
               )}
             </tbody>
@@ -463,9 +496,10 @@ export default function SystemStatusPage() {
           DBダウンロードと全権クリアは管理者のみ実行できます。誤操作防止のため、クリア時は確認文字列が必要です。
         </p>
         <div className="admin-actions">
-          <Button className="btn ghost admin-ordinary-control" type="button" onClick={() => loadStatus()} disabled={maintenanceBusy}>
+          <Button className="btn ghost admin-ordinary-control" type="button" onClick={() => loadStatus()} disabled={maintenanceBusy || detailsBusy}>
             状態を再取得
           </Button>
+          <Button onClick={() => loadDetails("full")} disabled={maintenanceBusy || detailsBusy}>外部履歴を含む全詳細を取得</Button>
           <Link className="btn ghost link-btn" href="/system-process-logs">
             処理ログを確認
           </Link>

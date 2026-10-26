@@ -214,3 +214,33 @@ Hospital runtime: `/private/tmp/sawa-hospital-secure-20261024/bin/python`,
   `/private/tmp/sawa-page-pg-20261026-r4/output/results.xml` and
   `/private/tmp/sawa-page-pg-20261026-r4/output/agent-results.xml`.
   This does not replace the complete Linux serving-image verification receipt.
+
+## 2026-10-27 live follow-up
+
+The deployed 7d079322 images were source-verified, but order ORD581f55d6
+still required 40.977 seconds after deployment checks and local profiles stopped.
+Run 40404034894 was cancelled after image deployment because its repeated full
+system-status reads were saturating the small staging database. It did not pass.
+
+Follow-up changes preserve complete job/delivery input comparison and write CAS:
+
+- Retain loaded job objects through workflow serialization instead of loading the
+  same large metrics JSON before, during and after binding validation.
+- Extract the two delivery identity branches in one PostgreSQL json_to_record
+  call. Keep JSON values, not JSONB-normalized values, and compare the complete
+  captured input as before. Non-object identity inputs remain missing branches.
+- Read-only saved-sheet menu candidates no longer generate unrelated evidence
+  capabilities, a second execution-lineage copy or diagnostic archives. The
+  original selectability check remains; acceptance payloads remain complete
+  because their digest covers every key. Read-only proofs cannot authorize writes.
+- Configuration and quality status views omit unrequested operational scans.
+  Deployment checks fetch one status body, bound the order list to one record,
+  retain authentication/configuration checks and the strict quality failure gate,
+  and cap HTTP connection/request duration.
+- The status page reads configuration then current operations. Database usage,
+  quality and legacy/full detail remain available explicitly. Unread/failed
+  sections display unknown rather than zero, normal or a stale successful gate.
+
+All follow-up implementation precedes the added SQLite/PostgreSQL projection,
+candidate parity/write refusal, status API, actual DOM and deploy-script tests.
+Follow-up batch verification, integration and live measurements are pending.
