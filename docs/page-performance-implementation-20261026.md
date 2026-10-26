@@ -90,3 +90,15 @@ Hospital runtime: `/private/tmp/sawa-hospital-secure-20261024/bin/python`,
   sandbox. This is not a passed PostgreSQL test. Docker and other clusters were
   not started/stopped, and no shared-memory segments belonging to other work
   were removed.
+- All three frontend production builds completed successfully in serial.
+  Hospital required replacing this worktree's external node_modules symlink
+  with its own offline `npm ci`; the original linked directory was untouched.
+- Additional assistant/source contracts: 55 passed after pinned baselines were
+  updated to the implementation commit and the fixture clock honored cleared
+  intervals and the actual 5000ms creation-reconciliation timer.
+- Local WebKit readonly browser regressions: 11 passed outside the browser-launch
+  sandbox. Earlier launch aborts were not product failures or successful tests.
+- School procurement frontend: 15 passed. Shift original-result and wire-caller
+  regressions: 73 passed after fixtures supplied the new explicit period API.
+- Implementation commits: hospital `f3ff2507`, school `8e59128`, shift `bfa2d47`.
+  These are local commits, not develop integration or staging delivery.

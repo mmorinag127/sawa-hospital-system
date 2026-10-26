@@ -6,7 +6,7 @@ const ts=require('typescript');
 const base='d55763365c3d2159dc976b130e0cc7a6de5f162f';
 // Approved behavior changes are separate from the original native-control conversion baseline.
 const behavioralBaseline={
-  'src/pages/hospital-dashboard.tsx':'227cae9',
+  'src/pages/hospital-dashboard.tsx':'f3ff2507',
 };
 const cases=[['src/components/UnifiedShell.tsx','hospital-unified-shell-control',{button:1}],['src/pages/hospital-dashboard.tsx','hospital-dashboard-control',{button:1}],['src/pages/auth/automation.tsx','hospital-automation-control',{select:1,input:1,button:1}]];
 const parse=s=>ts.createSourceFile('shell.tsx',s,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
