@@ -81,12 +81,17 @@ test('weekly history grouping retains source labels and count, including multipl
 });
 
 test('system status uses dashboard link and GET; current/historical pipeline errors remain failures', async () => withPage(async page => {
-  await page.setContent('<h1>システム状態と復帰手順</h1><article class="card"><h2>取込方式</h2><p class="value">注文書アップロード</p><p class="meta">受付方式は手動アップロードに固定しています。</p><p class="meta">保存先: gcs</p><p class="meta">永続化: あり</p></article><p class="ocr-queue-summary-value">0 / 1 / 2</p><p class="ocr-queue-summary-value">3 / 4 / 5</p>');
+  await page.setContent('<h1>システム状態と復帰手順</h1><article class="card"><h2>取込方式</h2><p class="value">注文書アップロード</p><p class="meta">受付方式は手動アップロードに固定しています。</p><p class="meta">保存先: gcs</p><p class="meta">永続化: あり</p></article><p class="ocr-queue-summary-value">0 / 1 / 2</p><p class="ocr-queue-summary-value">3 / 4 / 5</p><button>品質を取得</button>');
   const paths = [];
   const data = { intake: { manual_upload_storage: { mode: 'gcs', persisted: true } }, oauth_config: {}, ocr_pipeline: {},
-    uploaded_pdfs: { pending_count: 0, processing_count: 1, completed_count: 2 }, ingest_jobs: { pending_count: 3, processing_count: 4, stale_processing_count: 5 } };
-  const options = { navigate: async path => paths.push(path), receipt: async (path, action) => {
-    assert.deepEqual(paths, ['/hospital']); assert.equal(path, '/api/system/status'); await action(); return data;
+    uploaded_pdfs: { pending_count: 0, processing_count: 1, completed_count: 2 }, ingest_jobs: { pending_count: 3, processing_count: 4, stale_processing_count: 5 },
+    ocr_reparse_quality: { gate: { status: 'pass' } } };
+  const options = { navigate: async path => paths.push(path), receipt: async (path, action, query) => {
+    assert.equal(path, '/api/system/status');
+    assert.ok(['operations', 'quality'].includes(query.view));
+    if (query.view === 'operations') assert.deepEqual(paths, ['/hospital']);
+    else assert.deepEqual(paths, ['/hospital', '/system-status']);
+    await action(); return data;
   } };
   await one(page, 'system-status-entry', options);
   assert.deepEqual(paths, ['/hospital', '/system-status']);

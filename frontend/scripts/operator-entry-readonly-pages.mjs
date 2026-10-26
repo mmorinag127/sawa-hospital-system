@@ -142,7 +142,7 @@ export async function verifyOperatorEntryPages({ page, expect, check, receipt, n
   });
   await check('system-status-entry', async () => {
     await navigate('/hospital');
-    const data = await receipt('/api/system/status', () => navigate('/system-status'));
+    const data = await receipt('/api/system/status', () => navigate('/system-status'), { view: 'operations' });
     mark('system-entry-response-shape');
     assert.ok(data?.intake && data.oauth_config && data.ocr_pipeline && data.uploaded_pdfs && data.ingest_jobs);
     await expect(page.getByRole('heading', { name: 'システム状態と復帰手順', exact: true })).toBeVisible();
@@ -158,9 +158,13 @@ export async function verifyOperatorEntryPages({ page, expect, check, receipt, n
     ]);
     mark('system-entry-errors');
     assert.ok(!data.ocr_pipeline.last_error);
-    assert.ok(!data.ocr_reparse_quality?.error);
     assert.notEqual(String(data.ocr_pipeline.status || '').toLowerCase(), 'error');
-    assert.ok(!['fail', 'error'].includes(String(data.ocr_reparse_quality?.gate?.status || '').toLowerCase()));
+    const quality = await receipt('/api/system/status', () =>
+      page.getByRole('button', { name: '品質を取得', exact: true }).click(), { view: 'quality' });
+    mark('system-entry-quality');
+    assert.ok(quality.ocr_reparse_quality?.gate?.status);
+    assert.ok(!quality.ocr_reparse_quality.error);
+    assert.ok(!['fail', 'error'].includes(String(quality.ocr_reparse_quality.gate.status).toLowerCase()));
     await expect(page.locator('.error:visible,.quality-gate.fail:visible,.quality-gate.error:visible')).toHaveCount(0);
   });
 }
