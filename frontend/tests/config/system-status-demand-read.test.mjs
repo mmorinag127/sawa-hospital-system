@@ -47,7 +47,18 @@ test('status renders configuration before operations and fetches costly sections
     if (name === '@sawa/ui') return { sawaTheme: {} };
     if (name === 'next/link') return { default: ({ children, ...props }) => React.createElement('a', props, children) };
     if (name === '../components/TopNav') return { default: () => null };
-    if (name === '../components/OcrOperations') return { OcrOperationsSummary: () => null, OcrOperationsHistory: () => null };
+    if (name === '../components/OcrOperations') {
+      const actual = {};
+      const component = readFileSync(new URL('../../src/components/OcrOperations.tsx', import.meta.url), 'utf8');
+      const output = ts.transpileModule(component, { compilerOptions: {
+        jsx: ts.JsxEmit.React, module: ts.ModuleKind.CommonJS,
+      } }).outputText;
+      vm.compileFunction(output, ['exports', 'require', 'React'])(actual, name => {
+        assert.equal(name, 'next/link');
+        return { default: ({ children, ...props }) => React.createElement('a', props, children) };
+      }, React);
+      return actual;
+    }
     if (name === '../hooks/useCurrentUserRole') return { useCurrentUserRole: () => ({ isAdmin: false }) };
     if (name === '../services/apiClient') return { apiClient };
     throw new Error('Unexpected import ' + name);
@@ -57,9 +68,17 @@ test('status renders configuration before operations and fetches costly sections
     await act(async () => root.render(React.createElement(exports.default)));
     assert.deepEqual(calls, [['/system/status', 'configuration'], ['/system/status', 'operations']]);
     assert.match(document.body.textContent, /設定数: 2/);
+    assert.match(document.querySelector('[role="status"]').textContent, /OCR状態を取得中/);
+    assert.equal(document.querySelector('[role="alert"]'), null);
     assert.equal(document.querySelector('.ocr-backlog-badge').textContent, '未取得');
     assert.equal(button('品質を取得').disabled, true);
-    await act(async () => releaseOperations({ data: { uploaded_pdfs: { pending_count: 0 }, ingest_jobs: { pending_count: 0 } } }));
+    await act(async () => releaseOperations({ data: {
+      ocr_operations: { source: 'recorded_sql_workflow/v1', observed_at: '2026-10-27',
+        summary: { status: 'idle', total: 0, counts: {} }, items: [], history: [] },
+      uploaded_pdfs: { pending_count: 0 }, ingest_jobs: { pending_count: 0 },
+    } }));
+    assert.equal(document.querySelector('[role="status"]'), null);
+    assert.match(document.querySelector('[aria-label="現行SQL OCR状態"]').textContent, /現在のOCRジョブなし/);
     assert.equal(document.querySelector('.ocr-backlog-badge').textContent, '正常');
     assert.match(document.querySelector('.quality-table').textContent, /未取得/);
     await act(async () => button('使用量を取得').click());

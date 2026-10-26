@@ -197,9 +197,11 @@ export default function SystemStatusPage() {
   const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [clearConfirm, setClearConfirm] = useState("");
   const [detailsBusy, setDetailsBusy] = useState(false);
+  const [operationsPending, setOperationsPending] = useState(true);
 
   const loadDetails = async (section: "operations" | "quality" | "quota" | "full") => {
     setDetailsBusy(true);
+    if (section === "operations" || section === "full") setOperationsPending(true);
     try {
       const res = section === "quota"
         ? await apiClient.get("/system/db/quota")
@@ -223,11 +225,13 @@ export default function SystemStatusPage() {
       });
       setError("システム状態の詳細取得に失敗しました。");
     } finally {
+      if (section === "operations" || section === "full") setOperationsPending(false);
       setDetailsBusy(false);
     }
   };
 
   const loadStatus = async (silent = false) => {
+    setOperationsPending(true);
     try {
       const res = await apiClient.get("/system/status", { params: { view: "configuration" } });
       setStatus(res.data || null);
@@ -237,6 +241,7 @@ export default function SystemStatusPage() {
       }
       await loadDetails("operations");
     } catch {
+      setOperationsPending(false);
       setStatus(null);
       setError("システム状態の取得に失敗しました。");
     }
@@ -321,7 +326,8 @@ export default function SystemStatusPage() {
   const uploadedPdfs = status?.uploaded_pdfs;
   const ingestJobs = status?.ingest_jobs;
   const ocrBacklogSeverity =
-    (uploadedPdfs?.manual_review_count || 0) > 0 || (ingestJobs?.error_count || 0) > 0
+    !uploadedPdfs || !ingestJobs ? "unknown" :
+    (uploadedPdfs.manual_review_count || 0) > 0 || (ingestJobs.error_count || 0) > 0
       ? "error"
       : (uploadedPdfs?.eligible_backlog_count || 0) > 0 ||
           (uploadedPdfs?.processing_count || 0) > 0 ||
@@ -374,7 +380,7 @@ export default function SystemStatusPage() {
           <h2>現行の注文OCR</h2>
           <div className="ocr-card-top">
             <div className="ocr-card-status">
-              <OcrOperationsSummary operations={status?.ocr_operations} />
+              {operationsPending ? <p role="status">OCR状態を取得中...</p> : <OcrOperationsSummary operations={status?.ocr_operations} />}
               <p className={`ocr-backlog-badge ${ocrBacklogSeverity}`}>{ocrBacklogLabel}</p>
             </div>
             <div className="ocr-queue-summary" aria-label="OCR滞留サマリ">
