@@ -26,7 +26,12 @@ The runner partition contract verifies every excluded file's dedicated mapping.
 Frontend `test:config` already includes root `tests/*.test.cjs`, including dataset,
 shell-controls and API-session contracts; those are not run again individually.
 Frontend lint, config, inspection-demand-read, typecheck and E2E each run once.
-Dedicated PG, image and live-UI commands retain their distinct checks.
+Dedicated PG, image and live-UI commands retain their distinct checks. In focused
+staging, the output PG group keeps fresh-head migration and complete output
+transaction checks; historical revision-resume matrices remain full-mode only.
+Frontend focused files/specs are listed in `infra/ci/staging_frontend_scope.json`;
+full mode retains the legacy complete frontend suites. Omitted cases are not
+counted as passed, executed, or reused.
 PG runners create a fresh physical PG16 cluster/socket for each local run,
 validate source OWNER, postmaster PID, server and database identities, and verify
 shutdown. Historical fixed paths and unverified server profiles are not used.

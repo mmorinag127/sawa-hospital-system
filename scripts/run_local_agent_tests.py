@@ -117,7 +117,8 @@ def main():
         for key, value in environment.items():
             args += ["-e", key + "=" + value]
         args += ["--entrypoint", "/opt/agent/gateway/bin/python", dev_image["Id"], "-m", "pytest",
-                 "experiments/agent_assistant/tests", "-q", "-p", "no:cacheprovider",
+                 "experiments/agent_assistant/tests", "-v", "-p", "no:cacheprovider",
+                 "-o", "faulthandler_timeout=120",
                  "--basetemp=/tmp/sawa-native-tests", "--junitxml=/evidence/results.xml"]
         result = subprocess.run(["docker", *args])
         record["test_exit_code"] = result.returncode

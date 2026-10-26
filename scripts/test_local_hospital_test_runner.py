@@ -17,6 +17,7 @@ import run_local_backend_tests as BACKEND_RUNNER
 import run_local_frontend_e2e as E2E_RUNNER
 import local_hospital_legacy_step as LEGACY_RUNNER
 import run_local_pg_output_boundary as PG_OUTPUT_RUNNER
+import run_local_frontend_contracts as FRONTEND_RUNNER
 
 
 MODULE = Path(__file__).with_name("local_hospital_test_runner.py")
@@ -360,10 +361,71 @@ class ReceiptContractTest(unittest.TestCase):
                     raise result
                 return result
             with patch.dict(os.environ, {'SAWA_LOCAL_RUN_ID': '123', 'CI': '', 'GITHUB_ACTIONS': ''}), \
+                 patch.object(PG_OUTPUT_RUNNER, 'focused_staging', return_value=False), \
                  patch.object(PG_OUTPUT_RUNNER, 'run', side_effect=execute) as run, \
                  patch.object(PG_OUTPUT_RUNNER.traceback, 'print_exc'):
                 self.assertEqual(PG_OUTPUT_RUNNER.main(), int(results != (0, 0)))
             self.assertEqual([call.args[3] for call in run.call_args_list], ['output', 'formal'])
+
+    def test_focused_pg_keeps_fresh_head_and_transaction_boundary_without_history_matrix(self):
+        with patch.dict(os.environ, {'SAWA_LOCAL_RUN_ID': '123', 'CI': '', 'GITHUB_ACTIONS': ''}), \
+             patch.object(PG_OUTPUT_RUNNER, 'focused_staging', return_value=True), \
+             patch.object(PG_OUTPUT_RUNNER, 'run', return_value=0) as run:
+            self.assertEqual(PG_OUTPUT_RUNNER.main(), 0)
+        self.assertEqual([call.args[3] for call in run.call_args_list], ['output'])
+
+    def test_frontend_scope_preserves_auth_identity_edits_reads_and_real_browser_paths(self):
+        with patch.dict(os.environ, {'SAWA_LOCAL_TEST_MODE': 'focused'}), \
+             patch.object(RUNNER, 'git', return_value='codex/repair'):
+            config = RUNNER.frontend_scope('config')
+            e2e = RUNNER.frontend_scope('e2e')
+        cjs = ('workflow-demand-read-contract', 'workflow-controls-source', 'workflow-route-identity',
+                     'workflow-unsaved-boundary', 'modernization-workflow-action-dom', 'portal-auth-gate',
+                     'portal-proxy-session', 'assistant-workflow-ui', 'assistant-drawing-proxy',
+                     'pdf-upload-input-ownership', 'bulk-ocr-command-ownership', 'order-list-read-boundary',
+                     'order-facility-read', 'hospital-job-status', 'login-flow', 'login-destination')
+        settings = (('google-auth-deploy', 'js'), ('ocr-first-request', 'mjs'),
+                             ('ocr-queue-functional', 'mjs'), ('saved-workflow-readonly', 'mjs'),
+                             ('system-status-safe-screenshot', 'mjs'), ('dashboard-monthly-read-status', 'mjs'),
+                             ('ocr-admin-readonly', 'mjs'), ('hospital-readonly-pages', 'mjs'),
+                             ('hospital-additional-readonly', 'mjs'))
+        self.assertEqual(set(config), {'tests/' + name + '.test.cjs' for name in cjs}
+                         | {'tests/config/' + name + '.test.' + suffix for name, suffix in settings})
+        self.assertEqual(set(e2e), {'tests/e2e/' + name + '.spec.ts' for name in (
+            'api_proxy_stream', 'order_confirm', 'orders_index', 'pdf_upload', 'workflow_v2_sheet_edit')})
+        for branch in ('release/prod-repair', ''):
+            with patch.dict(os.environ, {'SAWA_LOCAL_TEST_MODE': 'focused'}), \
+                 patch.object(RUNNER, 'git', return_value=branch):
+                self.assertIsNone(RUNNER.frontend_scope('config'))
+                self.assertFalse(RUNNER.focused_staging())
+
+    def test_invalid_frontend_scope_fails_closed_instead_of_omitting_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / 'infra/ci/staging_frontend_scope.json'
+            target.parent.mkdir(parents=True)
+            for names in ([], ['../outside.test.cjs'], ['tests/missing.test.cjs'], [[]]):
+                target.write_text(json.dumps({'version': 1, 'scope': 'staging-core-and-page-repair',
+                                              'config': names, 'e2e': ['tests/e2e/absent.spec.ts']}))
+                with self.subTest(names=names), patch.object(RUNNER, 'ROOT', root), \
+                     patch.object(RUNNER, 'focused_staging', return_value=True):
+                    with self.assertRaises(ValueError):
+                        RUNNER.frontend_scope('config')
+
+    def test_frontend_contract_command_reports_scope_and_retains_the_full_entry(self):
+        for modules in (None, ['tests/portal-auth-gate.test.cjs']):
+            with tempfile.TemporaryDirectory() as directory, \
+                 patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': directory, 'CI': '', 'GITHUB_ACTIONS': ''}), \
+                 patch.object(FRONTEND_RUNNER, 'clean_tree', return_value=True), \
+                 patch.object(FRONTEND_RUNNER, 'git', return_value='a' * 40), \
+                 patch.object(FRONTEND_RUNNER, 'frontend_scope', return_value=modules), \
+                 patch.object(FRONTEND_RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+                self.assertEqual(FRONTEND_RUNNER.main(), 0)
+                expected = ['node', '--test', '--test-concurrency=1', *modules] if modules else ['npm', 'run', 'test:config']
+                self.assertEqual(run.call_args.args[0], expected)
+                record = json.loads((Path(directory) / 'frontend-contracts/scope.json').read_text())
+                self.assertEqual(record['modules'], modules)
+                self.assertEqual(bool(record['outside_scope']), bool(modules))
 
     def test_local_legacy_gh_uses_existing_login_not_a_synthetic_actions_token(self):
         for token in (None, 'synthetic-existing-local-token'):
@@ -411,6 +473,10 @@ class ReceiptContractTest(unittest.TestCase):
                 self.assertEqual(dict(os.environ), parent)
 
     def test_e2e_copies_only_tracked_source_and_keeps_next_generated_changes_isolated(self):
+        for modules in (None, ['tests/e2e/orders_index.spec.ts']):
+            self.check_e2e_isolation(modules)
+
+    def check_e2e_isolation(self, modules):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / 'checkout'
             frontend = root / 'frontend'
@@ -427,6 +493,7 @@ class ReceiptContractTest(unittest.TestCase):
             def next_run(argv, *, cwd, env):
                 self.assertNotEqual(cwd, frontend)
                 self.assertEqual(argv[-1], '--workers=1')
+                self.assertEqual(argv[3:-1], modules or [])
                 self.assertFalse((cwd / '.env.local').exists())
                 self.assertNotIn('PRIVATE_VALUE', env)
                 self.assertNotIn('GOOGLE_APPLICATION_CREDENTIALS', env)
@@ -442,12 +509,14 @@ class ReceiptContractTest(unittest.TestCase):
                  patch.object(E2E_RUNNER, 'ROOT', root), \
                  patch.object(E2E_RUNNER, 'clean_tree', return_value=True), \
                  patch.object(E2E_RUNNER, 'git', return_value='a' * 40), \
+                 patch.object(E2E_RUNNER, 'frontend_scope', return_value=modules), \
                  patch.object(E2E_RUNNER.sys, 'argv', ['runner']), \
                  patch.object(E2E_RUNNER.subprocess, 'check_output', return_value=b'frontend/next-env.d.ts\0'), \
                  patch.object(E2E_RUNNER.subprocess, 'run', side_effect=next_run):
                 self.assertEqual(E2E_RUNNER.main(), 0)
             self.assertEqual(original.read_text(), 'original source')
             record = json.loads((evidence / 'frontend-e2e/source.json').read_text())
+            self.assertEqual(record['modules'], modules)
             self.assertEqual(record['files'], {'frontend/next-env.d.ts': hashlib.sha256(b'original source').hexdigest()})
 
     @classmethod

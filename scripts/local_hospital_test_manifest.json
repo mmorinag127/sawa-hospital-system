@@ -68,7 +68,7 @@
     },
     {
       "name": "frontend-config",
-      "command": "cd frontend && npm run test:config",
+      "command": "python3 scripts/run_local_frontend_contracts.py",
       "legacy_steps": [
         {
           "workflow": "ci.yml",

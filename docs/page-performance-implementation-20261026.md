@@ -25,8 +25,15 @@ staging change cannot satisfy the requested roughly fifteen-minute budget.
 - General cases remain available through `SAWA_LOCAL_TEST_MODE=impact` or
   `--full` on the parent runner. Production `release/prod-*` and detached sources still
   force full backend execution; a focused receipt cannot satisfy production.
-- Frontend, owned PostgreSQL, agent/native image, trust and receipt checks remain
-  required by the existing local manifest. No Actions tests replace local work.
+- Frontend focused scope is explicit in `infra/ci/staging_frontend_scope.json`:
+  read projections, identity/edits, authentication, assistant and upload contracts,
+  plus real order-list/upload/confirmation/workflow/proxy browser specs. Other
+  frontend cases remain in full mode; the scope reports mark them not run.
+- Focused PostgreSQL output verification keeps the fresh-head migration probe
+  and the complete output transaction suite. Historical revision-by-revision
+  resume matrices run in full mode, not as evidence of a page-read repair.
+  Separate adoption, readonly, C1, menu identity, native image, trust and receipt
+  checks remain required. No Actions tests replace local work.
 - The duration and selected count still require measurement. This scope change
   is not a claim that the full legacy suite or staging behavior has passed.
 

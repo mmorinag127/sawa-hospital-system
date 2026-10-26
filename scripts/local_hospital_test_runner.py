@@ -15,6 +15,39 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "scripts/local_hospital_test_manifest.json"
 
 
+def focused_staging():
+    mode = os.environ.get('SAWA_LOCAL_TEST_MODE')
+    if mode not in (None, 'full', 'impact', 'focused'):
+        raise ValueError('Unknown local test mode')
+    branch = git('branch', '--show-current')
+    return mode == 'focused' and bool(branch) and not branch.startswith('release/prod-')
+
+
+def frontend_scope(group):
+    if group not in ('config', 'e2e'):
+        raise ValueError('Unknown frontend verification group')
+    if not focused_staging():
+        return None
+    value = json.loads((ROOT / 'infra/ci/staging_frontend_scope.json').read_text())
+    if (not isinstance(value, dict) or set(value) != {'version', 'scope', 'config', 'e2e'}
+            or type(value['version']) is not int or value['version'] != 1
+            or value['scope'] != 'staging-core-and-page-repair'):
+        raise ValueError('Invalid staging frontend scope')
+    for kind in ('config', 'e2e'):
+        modules = value[kind]
+        if (not isinstance(modules, list) or not modules
+                or any(not isinstance(name, str) for name in modules)
+                or len(set(modules)) != len(modules)):
+            raise ValueError('Invalid staging frontend module list')
+        for name in modules:
+            if (not isinstance(name, str) or not name.startswith('tests/')
+                    or '..' in Path(name).parts or not (ROOT / 'frontend' / name).is_file()
+                    or (kind == 'e2e' and not name.endswith('.spec.ts'))
+                    or (kind == 'config' and not name.endswith(('.test.cjs', '.test.mjs', '.test.js')))):
+                raise ValueError('Invalid staging frontend module')
+    return value[group]
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

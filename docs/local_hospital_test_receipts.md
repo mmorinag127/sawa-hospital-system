@@ -101,6 +101,14 @@ The first tracking run executes every case in the selected scope. Explicit full
 mode still executes the whole backend suite. A reported all-test run is not evidence of a
 speed improvement: real backend reuse and timing must be measured separately.
 
+Focused staging also declares its frontend contract files and real browser specs
+in `infra/ci/staging_frontend_scope.json`. Other frontend cases are not run or
+claimed as passed/reused. Full and production runs retain the complete suites.
+The output PG group always performs its fresh-head migration probe and all
+transaction/output cases; historical per-revision resume matrices are full-mode
+coverage. Adoption, readonly, C1, menu identity and all native/runtime checks are
+unchanged. Scope reports and command logs preserve these distinctions.
+
 ## Cold-run preparation reduction
 
 The requested ceiling is approximately 15 minutes, including a cold/full run.

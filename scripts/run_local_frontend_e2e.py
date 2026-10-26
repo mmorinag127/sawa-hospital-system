@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 
-from local_hospital_test_runner import ROOT, clean_tree, git, reject_hosted_runner
+from local_hospital_test_runner import ROOT, clean_tree, frontend_scope, git, reject_hosted_runner
 
 
 def main():
@@ -17,6 +17,7 @@ def main():
     if not clean_tree():
         raise ValueError("E2E requires a fixed clean source checkout")
     source = git("rev-parse", "HEAD")
+    modules = frontend_scope('e2e')
     base = os.environ.get("SAWA_LOCAL_EVIDENCE_DIR")
     evidence = Path(base if base else tempfile.mkdtemp(prefix="sawa-local-e2e-")) / "frontend-e2e"
     evidence.mkdir(exist_ok=False)
@@ -56,10 +57,11 @@ def main():
                 "NODE_ENV": "development"})
     (evidence / "source.json").write_text(json.dumps({
         "source_sha": source, "files": hashes, "base_url": env["E2E_BASE_URL"],
-        "workspace": str(workspace),
+        "workspace": str(workspace), 'modules': modules,
+        'outside_scope': 'Other E2E specs not run or claimed as passed/reused' if modules else None,
     }, indent=2))
     result = subprocess.run([
-        "node", "node_modules/@playwright/test/cli.js", "test", *sys.argv[1:], "--workers=1",
+        "node", "node_modules/@playwright/test/cli.js", "test", *(modules or []), *sys.argv[1:], "--workers=1",
     ], cwd=workspace, env=env)
     if not clean_tree() or git("rev-parse", "HEAD") != source:
         raise ValueError("E2E changed its fixed source checkout")

@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "scope": "staging-core-and-page-repair",
+  "config": [
+    "tests/workflow-demand-read-contract.test.cjs",
+    "tests/workflow-controls-source.test.cjs",
+    "tests/workflow-route-identity.test.cjs",
+    "tests/workflow-unsaved-boundary.test.cjs",
+    "tests/modernization-workflow-action-dom.test.cjs",
+    "tests/portal-auth-gate.test.cjs",
+    "tests/portal-proxy-session.test.cjs",
+    "tests/assistant-workflow-ui.test.cjs",
+    "tests/assistant-drawing-proxy.test.cjs",
+    "tests/pdf-upload-input-ownership.test.cjs",
+    "tests/bulk-ocr-command-ownership.test.cjs",
+    "tests/order-list-read-boundary.test.cjs",
+    "tests/order-facility-read.test.cjs",
+    "tests/hospital-job-status.test.cjs",
+    "tests/login-flow.test.cjs",
+    "tests/login-destination.test.cjs",
+    "tests/config/google-auth-deploy.test.js",
+    "tests/config/ocr-first-request.test.mjs",
+    "tests/config/ocr-queue-functional.test.mjs",
+    "tests/config/saved-workflow-readonly.test.mjs",
+    "tests/config/system-status-safe-screenshot.test.mjs",
+    "tests/config/dashboard-monthly-read-status.test.mjs",
+    "tests/config/ocr-admin-readonly.test.mjs",
+    "tests/config/hospital-readonly-pages.test.mjs",
+    "tests/config/hospital-additional-readonly.test.mjs"
+  ],
+  "e2e": [
+    "tests/e2e/api_proxy_stream.spec.ts",
+    "tests/e2e/order_confirm.spec.ts",
+    "tests/e2e/orders_index.spec.ts",
+    "tests/e2e/pdf_upload.spec.ts",
+    "tests/e2e/workflow_v2_sheet_edit.spec.ts"
+  ]
+}
