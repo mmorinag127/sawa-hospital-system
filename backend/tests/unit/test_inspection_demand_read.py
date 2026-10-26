@@ -112,7 +112,10 @@ def test_summary_full_and_detail_parity(state, authored_april_context, isolated,
     ))
     for small, expected in zip(summary["ocr_results"], full["ocr_results"]):
         if expected["selected"]:
-            assert json.dumps(small, ensure_ascii=True) == json.dumps(expected, ensure_ascii=True)
+            assert small["execution_details_state"] == "not_loaded"
+            assert {k: v for k, v in small.items() if k not in {"execution_lineage", "execution_details_state"}} == {
+                k: v for k, v in expected.items() if k != "execution_lineage"
+            }
         else:
             assert small["detail_state"] == "not_loaded"
             assert "selectable" not in small
@@ -234,6 +237,40 @@ def test_candidate_sidecar_filters_current_template_without_loading_all_details(
     assert all(item["template_version_id"] == candidates["candidate_template_version_id"] for item in candidates["results"])
     assert all(item.get("detail_state") != "not_loaded" for item in candidates["results"] if item["selected"])
     assert all(item.get("detail_state") == "not_loaded" for item in candidates["results"] if not item["selected"])
+
+
+def test_selected_execution_body_is_demand_loaded_without_changing_adoption(authored_april_context):
+    order, first, _ = _create_order_with_evidence()
+    _, error = service.confirm_context(
+        order_id=order, expected_revision=0, facility_id="FAC00001",
+        week_start="2026-04-26", week_end="2026-04-30", template_id="template-fac00001",
+    )
+    assert error is None
+    _stamp_evidence_with_workflow_template(order, first)
+    execution = {"evidence_run_id": first, "job_id": "synthetic-inspection-job",
+                 "workflow_attempt_id": None, "workflow_revision": None,
+                 "disposition": "pipeline_result", "captured_input": {"large_diagnostic": "x" * 100_000}}
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, order)
+        state.evidence_run_id, state.state = first, "ocr_selected"
+        row = session.get(OrderOcrEvidenceRun, first)
+        row.payload_json = {**row.payload_json, "_ocr_execution": execution}
+    full, error = service.get_inspection(order, history_details=True)
+    assert error is None
+    small, error = service.get_inspection(order, history_details=False)
+    assert error is None
+    selected = next(row for row in small["ocr_results"] if row["selected"])
+    expected = next(row for row in full["ocr_results"] if row["selected"])
+    assert selected["execution_lineage"] == {k: v for k, v in execution.items() if k != "captured_input"}
+    assert selected["execution_details_state"] == "not_loaded"
+    assert selected["selectable"] == expected["selectable"]
+    assert small["workflow"] == full["workflow"]
+    detail, error = service.get_inspection_detail(order, first)
+    assert error is None
+    assert detail["execution_lineage"] == execution
+    assert len(json.dumps(selected)) < len(json.dumps(expected)) - 90_000
+    with session_scope() as session:
+        assert session.get(OrderOcrEvidenceRun, first).payload_json["_ocr_execution"] == execution
 
 
 def test_ocr_progress_reads_only_the_recorded_owned_job(monkeypatch, authored_sheet_case):

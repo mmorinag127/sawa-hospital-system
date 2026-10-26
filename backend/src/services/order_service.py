@@ -173,13 +173,18 @@ def _workflow_attempt_write_fence(session: Any, job_id: str, order_id: str, *, s
     )
 
 
-def _capture_selected_order_config(session: Any, order: Order) -> dict[str, Any]:
-    from src.services.workflow_attempt_guard_service import _order_execution_input
+def _capture_selected_order_config(session: Any, order: Order, *, read_only: bool = False) -> dict[str, Any]:
+    from src.services.workflow_attempt_guard_service import _order_execution_input, selected_order_template_input
 
+    if read_only:
+        _, receipt = selected_order_template_input(session, order)
+        return config_service.capture_authored_processing_config(
+            order.facility_code, selected_authored_version=receipt["authored_version"],
+        )
     return _order_execution_input(session, order, lock=True)["configured_input"]
 
 
-def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any = None, for_materialization: bool = False, _analysis=None) -> dict[str, Any] | None:
+def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any = None, for_materialization: bool = False, _analysis=None, _for_read_projection: bool = False) -> dict[str, Any] | None:
     """Capture the exact operator-read inputs required for a later cache CAS."""
     with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
         from src.services.initial_saved_import_service import get_binding, execution_input, processing_input
@@ -188,7 +193,7 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
         if imported is not None:
             captured = processing_input(session, imported) if for_materialization else execution_input(session, imported)
             snapshot = imported["snapshot"]
-            return {"order_id": order_id, "workflow_revision": snapshot["workflow"]["revision"],
+            result = {"order_id": order_id, "workflow_revision": snapshot["workflow"]["revision"],
                     "workflow_meta": deepcopy(snapshot["workflow"]["secondary_actions_json"]),
                     "draft_id": snapshot["draft"]["id"], "evidence_run_id": snapshot["workflow"]["evidence_run_id"],
                     "draft_base_evidence_run_id": snapshot["draft"]["base_evidence_run_id"],
@@ -197,6 +202,9 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
                     "input_versions": {"order_lines": snapshot["lines"], "draft": snapshot["draft"], "evidence": snapshot["evidence"]},
                     "initial_saved_import": captured["initial_saved_import"],
                     "initial_saved_source_receipt": source_receipt(snapshot)}
+            if _for_read_projection:
+                result.update(read_projection_only=True, order_lines=snapshot["lines"], input_versions=None)
+            return result
         order = session.get(Order, order_id)
         workflow = session.get(OrderWorkflowState, order_id)
         if order is None or workflow is None or not isinstance(workflow.revision, int):
@@ -232,11 +240,21 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
                 for key in ("base_evidence_run_id", "evidence_run_id")
             ):
                 return None
-        cache = session.get(OrderOcrCache, order_id)
+        cache = None if _for_read_projection else session.get(OrderOcrCache, order_id)
         pdf_receipt = capture_selected_pdf_receipt(session, order)
-        input_versions = synchronous_input_versions(order, evidence, draft, cache)
-        input_versions["selected_pdf_receipt"] = pdf_receipt
+        if _for_read_projection:
+            # A read needs the same lines, not a copy of every OCR/cache body
+            # used exclusively by the later write CAS.
+            projection_lines = [
+                deepcopy({column.key: getattr(row, column.key) for column in row.__table__.columns})
+                for row in sorted(order.lines, key=lambda row: row.id)
+            ]
+            input_versions = None
+        else:
+            input_versions = synchronous_input_versions(order, evidence, draft, cache)
+            input_versions["selected_pdf_receipt"] = pdf_receipt
         return {
+            **({"read_projection_only": True, "order_lines": projection_lines} if _for_read_projection else {}),
             "order_id": order_id,
             "order_lines_updated_at": order.lines_updated_at,
             "workflow_revision": workflow.revision,
@@ -247,10 +265,10 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
             "cache_exists": cache is not None,
             "cache_updated_at": cache.updated_at if cache is not None else None,
             "input_versions": input_versions,
-            "evidence": deepcopy(ocr_evidence_service._serialize_evidence_run(evidence, include_payload=True, _analysis=_analysis)),
+            "evidence": ocr_evidence_service._serialize_evidence_run(evidence, include_payload=True, _analysis=_analysis),
             "draft": deepcopy(draft_sheet_service._serialize_draft(draft)) if draft is not None else None,
             "selected_pdf_receipt": pdf_receipt,
-            "configured_input": _capture_selected_order_config(session, order),
+            "configured_input": _capture_selected_order_config(session, order, read_only=_for_read_projection),
             "physical_menu_entries": _json_snapshot(_build_position_menu_entries_safe(order.week_code, order.facility_code, session=session)),
         }
 
@@ -261,7 +279,7 @@ def _synchronous_cache_write_fence(
     write_input: dict[str, Any] | None,
     *, source_failure: str | None = None,
 ) -> bool:
-    if not isinstance(write_input, dict) or write_input.get("order_id") != order_id:
+    if not isinstance(write_input, dict) or write_input.get("order_id") != order_id or write_input.get("read_projection_only"):
         return False
     if write_input.get("initial_saved_import") is not None:
         from src.services.workflow_attempt_guard_service import lock_order_execution_input, lock_current_execution_write

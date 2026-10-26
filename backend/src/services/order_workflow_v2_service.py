@@ -1718,7 +1718,7 @@ def _workflow_menu_amount_resolution(session, order, workflow, *, _analysis=None
             error = "saved_sheet_template_mismatch"
     if error is None:
         try:
-            candidate = _build_materialization_candidate_for_saved_sheet(session=session, order=order, saved_sheet=draft, _analysis=_analysis)
+            candidate = _build_materialization_candidate_for_saved_sheet(session=session, order=order, saved_sheet=draft, _analysis=_analysis, _for_read_projection=True)
         except SelectedPdfReceiptError as exc:
             error = str(exc)
         else:
@@ -2905,7 +2905,7 @@ def mark_ocr_run_completed(
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
-def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool, _analysis=None) -> dict[str, Any]:
+def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool, _analysis=None, include_execution_details: bool = True) -> dict[str, Any]:
     from src.services.recognition_acceptance_service import KEY
     payload = row.payload_json if isinstance(row.payload_json, dict) else {}
     manifest = row.artifact_manifest_json if isinstance(row.artifact_manifest_json, dict) else {}
@@ -2922,6 +2922,12 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool, _analysis
         sheet_review_base_url = _normalize_id(signed_url)
     overlay_status = "ready" if overlay_url else "missing"
     selectable = _inspection_call("selectability", ocr_evidence_service.evidence_run_is_selectable, row, _analysis=_analysis)
+    execution = payload.get("_ocr_execution")
+    if not include_execution_details and isinstance(execution, dict):
+        execution = {key: execution[key] for key in (
+            "order_id", "evidence_run_id", "job_id", "workflow_attempt_id", "workflow_revision",
+            "execution_id", "nonworkflow_execution_id", "disposition", "producer_version",
+        ) if key in execution}
     return {
         "ocr_result_id": row.id,
         "order_id": row.order_id,
@@ -2931,7 +2937,8 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool, _analysis
         "source": row.source,
         "status": row.status,
         "selected": selected,
-        "execution_lineage": copy.deepcopy(payload.get("_ocr_execution")),
+        "execution_lineage": copy.deepcopy(execution),
+        **({"execution_details_state": "not_loaded"} if not include_execution_details else {}),
         "result_disposition": payload["_ocr_execution"].get("disposition") if isinstance(payload.get("_ocr_execution"), dict) else None,
         "selectable": selectable,
         "recognition_review": copy.deepcopy(payload.get("hakodate_recognition_review")),
@@ -4041,6 +4048,7 @@ def _build_materialization_candidate_for_saved_sheet(
     order: Order,
     saved_sheet: OrderSheetDraft,
     _analysis=None,
+    _for_read_projection: bool = False,
 ) -> dict[str, Any]:
     workflow = _get_workflow_readonly(session, order.id)
     if workflow is None:
@@ -4054,7 +4062,7 @@ def _build_materialization_candidate_for_saved_sheet(
         return {"error": "saved_sheet_template_mismatch", "lines": []}
     order_service_module = _get_order_service_module()
     try:
-        captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session, for_materialization=True, _analysis=_analysis)
+        captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session, for_materialization=True, _analysis=_analysis, _for_read_projection=_for_read_projection)
     except SelectedPdfReceiptError:
         raise
     except ValueError as exc:
@@ -4071,7 +4079,8 @@ def _build_materialization_candidate_for_saved_sheet(
                                      for entry in captured["physical_menu_entries"]]}
     else:
         session.info.pop("materialization_initial_saved_input", None)
-        original_meta = output_builder._build_ocr_menu_meta(_build_order_payload_for_outputs(order=order, lines=captured["input_versions"]["order_lines"]), configured["facility"], parsed_input=captured["evidence"]["payload_json"])
+        lines = captured["order_lines"] if captured.get("read_projection_only") else captured["input_versions"]["order_lines"]
+        original_meta = output_builder._build_ocr_menu_meta(_build_order_payload_for_outputs(order=order, lines=lines), configured["facility"], parsed_input=captured["evidence"]["payload_json"])
     names = list(dict.fromkeys(str(entry.get("menu_name") or "").strip() for entry in original_meta.get("entries", [])))
     captured["output_ocr_menu_entries"] = copy.deepcopy(original_meta.get("entries", []))
     captured["output_ocr_menu_defaults"] = menu_service.resolve_menu_defaults_in_session(session, names, order.facility_code)[0] if names else {}
@@ -5001,6 +5010,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
                 _inspection_call(
                     "ocr_row_serialize", _serialize_ocr_result, row, selected=row.id == (workflow.evidence_run_id if workflow is not None else None),
                     _analysis=analysis if workflow is not None and row.id == workflow.evidence_run_id else _EvidenceAnalysis(),
+                    include_execution_details=history_details,
                 )
                 if history_details or (workflow is not None and row.id == workflow.evidence_run_id)
                 else {

@@ -313,6 +313,28 @@ def test_reads_keep_raw_saved_source_and_do_not_grant_write_ownership(imported):
     assert service.OWNED not in session.info
 
 
+def test_imported_materialization_read_cannot_be_used_as_write_proof(editable_import):
+    from src.services import order_service as orders, ocr_revision_store
+
+    session, _, _ = editable_import
+    before = all_rows(session)
+    full = orders._capture_synchronous_cache_write_input("O", write_session=session, for_materialization=True)
+    read = orders._capture_synchronous_cache_write_input(
+        "O", write_session=session, for_materialization=True, _for_read_projection=True,
+    )
+    assert read["order_lines"] == full["input_versions"]["order_lines"]
+    assert read["configured_input"] == full["configured_input"]
+    assert read["evidence"] == full["evidence"]
+    assert read["read_projection_only"] is True and read["input_versions"] is None
+    assert orders._synchronous_cache_write_fence(session, "O", read) is False
+    with pytest.raises(ValueError, match="revision_write_ownership_conflict"):
+        ocr_revision_store.append_revision(
+            "O", {"revision_id": "imported-read-must-not-write", "base_evidence_run_id": read["evidence_run_id"]},
+            session=session, synchronous_write_input=read,
+        )
+    assert all_rows(session) == before
+
+
 @pytest.mark.parametrize("kind", ["orm", "core"])
 def test_unowned_change_cannot_mint_receipt_and_next_reader_rejects(imported, kind):
     session, _, _ = imported
