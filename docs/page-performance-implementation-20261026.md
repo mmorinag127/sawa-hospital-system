@@ -102,3 +102,12 @@ Hospital runtime: `/private/tmp/sawa-hospital-secure-20261024/bin/python`,
   regressions: 73 passed after fixtures supplied the new explicit period API.
 - Implementation commits: hospital `f3ff2507`, school `8e59128`, shift `bfa2d47`.
   These are local commits, not develop integration or staging delivery.
+- PostgreSQL setup subsequently recovered by removing only segment `74317855`,
+  whose key matched this task's failed initdb, NATTCH was zero and creator PID
+  49576 was no longer running. The previous 31 segments were not modified.
+  An owned Unix-only PG16 cluster then passed the shift duplicate-delivery test
+  (1 case) and agent persistence/restart/fencing module (12 cases), serially.
+  Both invocations verified shutdown. Raw JUnit files are
+  `/private/tmp/sawa-page-pg-20261026-r4/output/results.xml` and
+  `/private/tmp/sawa-page-pg-20261026-r4/output/agent-results.xml`.
+  This does not replace the complete Linux serving-image verification receipt.
