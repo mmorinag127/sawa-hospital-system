@@ -167,6 +167,12 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
       await route.fulfill({
         status: 200,
         json: {
+          order_header: {
+            id: orderId,
+            version_count: 1,
+            current_version: { document_id: documentId, is_current: true },
+            versions: [{ document_id: documentId, is_current: true }],
+          },
           workflow: currentWorkflow(),
           ocr_candidates: {
             order_id: orderId, workflow_state: currentWorkflow().state,
