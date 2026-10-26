@@ -1,5 +1,6 @@
 """Actual controller/Tools against synthetic native transport; no paid model/OCR proof."""
 import asyncio
+from unittest.mock import AsyncMock
 from copy import deepcopy
 
 import httpx
@@ -189,9 +190,34 @@ def test_confirmed_native_response_survives_projection_loss_and_controller_resta
     asyncio.run(scenario())
 
 
+def test_batch_wakeup_drives_approved_work_once_and_preserves_completion(tmp_path):
+    async def scenario():
+        store, native, tools, run = shift(tmp_path, 'shift_export')
+        engine, run = attach(store, native, tools, run)
+        try:
+            await engine.advance(run['id'])
+            review = tools.flow.review(run['id'])
+            await tools.flow.decide(store.get(run['id']), review['id'], True, '')
+            assert await asyncio.to_thread(engine.decision_ready, run['id'], True, schedule=False)
+            await engine.kick_many([run['id'], run['id']])
+            job = engine.jobs[run['id']]
+            await asyncio.wait_for(asyncio.shield(job), 5)
+            assert store.get(run['id'])['status'] == 'completed'
+            assert store.get(run['id'])['reserved'] == 0
+            assert native.reads.count('/solve-runs/501/export') == 1
+            assert not native.writes
+            with store.read() as db:
+                assert db.execute('SELECT COUNT(*) FROM artifacts WHERE run_id=?', (run['id'],)).fetchone()[0] == 1
+            await engine.kick_many([run['id']])
+            assert engine.jobs[run['id']] is job
+            assert native.reads.count('/solve-runs/501/export') == 1
+        finally:
+            await engine.close()
+    asyncio.run(scenario())
+
+
 def test_http_approval_response_loss_and_exact_retry_do_not_repeat_exports(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
     from fastapi.responses import JSONResponse
     from fastapi.testclient import TestClient
     from experiments.agent_assistant.app import create_app
@@ -206,6 +232,7 @@ def test_http_approval_response_loss_and_exact_retry_do_not_repeat_exports(tmp_p
     app.state.tools.authorizations[run['id']] = 'Bearer synthetic'
     wakeups = []
     actual.kick = lambda ident, authorization=None: wakeups.append(ident)
+    actual.kick_many = AsyncMock(side_effect=lambda identities, authorization=None: wakeups.extend(identities))
     lost = False
     @app.middleware('http')
     async def disconnect_after_acceptance(request, call_next):
@@ -351,6 +378,7 @@ def test_more_than_eight_layouts_remain_selectable_without_internal_ids(tmp_path
         store.update(run['id'], task_inputs=context)
         engine, run = attach(store, native, tools, store.get(run['id']))
         engine.kick = lambda *args: None
+        engine.kick_many = AsyncMock()
         assert await engine.choose_layout(run)
         question = pending_question(store.events(run['id']))
         assert len(question['options']) == 8

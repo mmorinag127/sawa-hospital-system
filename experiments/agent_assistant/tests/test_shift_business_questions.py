@@ -1,6 +1,7 @@
 """Real controller/question ledger and synthetic native API; no model or production DB."""
 import asyncio
 from copy import deepcopy
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -46,6 +47,7 @@ def environment(tmp_path, task='shift_absence', *, blocking=False):
     native.request=transport
     engine,run=attach(store,native,tools,store.get(run['id']))
     engine.kick=lambda *a,**kw:None
+    engine.kick_many=AsyncMock()
     return store,native,tools,run,engine
 
 

@@ -1,5 +1,6 @@
 """Real packaged APIs/owned databases; synthetic inputs and no model/network fees."""
 import asyncio
+from unittest.mock import AsyncMock
 from contextlib import contextmanager, suppress
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -282,6 +283,7 @@ def test_real_shift_business_condition_question_parse_confirm_resolve_and_output
             run,_=store.create('native-operator','native-shift-question','synthetic',['shift'],100,task_id='shift_next_month',task_inputs=context)
             sandbox.prepare(run);tools.authorizations[run['id']]='Bearer synthetic-native-operator'
             engine=BusinessWorkflow(store,tools,NoModel());engine.kick=lambda *a,**kw:None
+            engine.kick_many=AsyncMock()
             engine.initialize(run);store.update(run['id'],status='running');run=store.get(run['id'])
             try:
                 await sandbox.start(run)

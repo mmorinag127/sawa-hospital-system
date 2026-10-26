@@ -1,6 +1,7 @@
 """Synthetic local race regressions; no provider calls or live business proof."""
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -47,6 +48,7 @@ def test_late_layout_and_pagination_answers_preserve_stop(tmp_path, page, fence)
         store.update(run['id'], task_inputs=context)
         engine, run = attach(store, native, tools, store.get(run['id']))
         engine.kick = lambda *_: None
+        engine.kick_many = AsyncMock()
         await engine.choose_layout(run)
         question = pending_question(store.events(run['id']))
         waiting = store.get(run['id'])
