@@ -1397,6 +1397,7 @@ export default function OrderWorkflowV2Page() {
   const [sheetPayload, setSheetPayloadState] = useState<SheetPayload | null>(null);
   const [visibleStep, setVisibleStep] = useState(1);
   const [visibleStepReady, setVisibleStepReady] = useState(false);
+  const leavingAfterConfirmRef = useRef(false);
   const [displayEpoch, setDisplayEpoch] = useState(0);
   const [displayLoading, setDisplayLoading] = useState(false);
   const displayRequestRef = useRef(0);
@@ -2638,7 +2639,7 @@ export default function OrderWorkflowV2Page() {
   }, [orderId,effectiveSelectedDocumentId,router.asPath]);
 
   useEffect(() => {
-    if (!visibleStepReady || !orderId || workflow?.order_id !== orderId || !Number.isInteger(workflow?.revision)) return;
+    if (leavingAfterConfirmRef.current || !workflowRevisionRef.current || !visibleStepReady || !orderId || workflow?.order_id !== orderId || !Number.isInteger(workflow?.revision)) return;
     const scope = visibleStep === 2 ? "ocr" : visibleStep === 3 ? "sheet" : visibleStep === 4 ? "output" : null;
     if (!scope) { setDisplayLoading(false); displayReadyRef.current = "summary"; return; }
     const own = capturePageOwner();
@@ -4475,11 +4476,25 @@ export default function OrderWorkflowV2Page() {
           return;
         }
         if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker(menuAmountBlocker));
-        await executeWorkflowMutation("finalConfirm", (config) => apiClient.post(`/orders/${orderId}/workflow-v2/confirm`, {
-          confirmed_by: "operator",
-        }, config), adopt);
-        assertCurrent();
-        await router.push("/orders");
+        leavingAfterConfirmRef.current = true;
+        let confirmed = false;
+        try {
+          await executeWorkflowMutation("finalConfirm", (config) => apiClient.post(`/orders/${orderId}/workflow-v2/confirm`, {
+            confirmed_by: "operator",
+          }, config), adopt);
+          confirmed = true;
+          assertCurrent();
+          if ((await router.push("/orders")) === false) {
+            leavingAfterConfirmRef.current = false;
+            adopt(() => setDisplayEpoch(epoch => epoch + 1));
+          }
+        } catch (error) {
+          leavingAfterConfirmRef.current = false;
+          if (confirmed) adopt(() => setDisplayEpoch(epoch => epoch + 1));
+          throw error;
+        } finally {
+          leavingAfterConfirmRef.current = false;
+        }
       },
       {
         successMessage: "注文を確定しました",

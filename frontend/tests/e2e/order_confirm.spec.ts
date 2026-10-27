@@ -218,7 +218,8 @@ for (const artifactsAvailable of [true, false]) test(`owned OCR completion refre
   const card = page.locator(".ocr-card").filter({ hasText: "OCR-E2E-COMPLETED" });
   await expect(card).toBeVisible();
   await expect.poll(() => mounted.requestCounts[`GET /api/orders/${orderId}/workflow-v2/ocr-progress`] ?? 0).toBeGreaterThan(0);
-  expect(mounted.requestCounts[`GET /api/orders/${orderId}/workflow-v2/inspection`]).toBeGreaterThanOrEqual(2);
+  expect(mounted.requestCounts[`GET /api/orders/${orderId}/workflow-v2/display`]).toBeGreaterThanOrEqual(2);
+  expect(mounted.requestCounts[`GET /api/orders/${orderId}/workflow-v2/inspection`] ?? 0).toBe(0);
   const select = card.getByRole("button", { name: "正解にする", exact: true });
   if (artifactsAvailable) await expect(select).toBeEnabled();
   else {

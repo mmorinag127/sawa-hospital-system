@@ -259,6 +259,7 @@ export default function OrdersPage() {
   const [nextCursor, setNextCursor] = useState<OrderListCursor | null>(null);
   const [hasMoreOrders, setHasMoreOrders] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string>("");
+  const [runtimeError, setRuntimeError] = useState("");
   const [archiveNotice, setArchiveNotice] = useState<string>("");
   const [archiveError, setArchiveError] = useState<string>("");
   const [reloadToken, setReloadToken] = useState<number>(0);
@@ -274,6 +275,7 @@ export default function OrdersPage() {
       runtimeOperation.current?.abort();
       runtimeOperation.current = null;
       setIsHydratingRuntime(false);
+      setRuntimeError("");
     };
     const unsubscribe = subscribeBrowserSession(retire);
     return () => { unsubscribe(); retire(); };
@@ -428,17 +430,21 @@ export default function OrdersPage() {
     const identities = groupOrders.filter(order => order.source_kind !== "uploaded_pdf")
       .map(order => String(order.id || "")).filter(Boolean);
     setIsHydratingRuntime(true);
+    setRuntimeError("");
     try {
       for (let offset = 0; offset < identities.length; offset += 100) {
+        const requested = identities.slice(offset, offset + 100);
         const params = new URLSearchParams();
-        identities.slice(offset, offset + 100).forEach(id => params.append("order_ids", id));
+        requested.forEach(id => params.append("order_ids", id));
         const response = await apiClient.get(`/orders/display-context?${params}`, { signal: controller.signal });
         if (controller.signal.aborted || runtimeOperation.current !== controller || session !== browserSessionKey()) return;
         const contexts = response.data?.orders;
         if (!contexts || typeof contexts !== "object" || Array.isArray(contexts)) throw new Error("表示情報の応答が不正です。");
+        if (requested.some(id => !contexts[id] || contexts[id].validation_state !== "references_only"))
+          throw new Error("注文の補足情報を確認できません。再取得してください。");
         setOrders(previous => previous.map(order => {
           const id = String(order.id || "");
-          if (!identities.slice(offset, offset + 100).includes(id)) return order;
+          if (!requested.includes(id)) return order;
           const context = contexts[id];
           if (!context || context.validation_state !== "references_only") return order;
           return { ...order, workflow_state: context.workflow_state,
@@ -448,7 +454,7 @@ export default function OrdersPage() {
       }
     } catch (error: any) {
       if (!controller.signal.aborted && runtimeOperation.current === controller)
-        setLoadError(String(error?.message || "表示情報を取得できませんでした。"));
+        setRuntimeError(String(error?.message || "表示情報を取得できませんでした。"));
     } finally {
       if (runtimeOperation.current === controller) {
         runtimeOperation.current = null;
@@ -1024,12 +1030,14 @@ export default function OrdersPage() {
 
   const toggleWeekGroup = (groupKey: string) => {
     const nextExpanded = expandedWeekGroups[groupKey] !== true;
-    const group = weekGroups.find(item => item.key === groupKey);
-    if (nextExpanded && group) void hydrateRuntimeOrders(group.orders);
-    if (!nextExpanded) {
+    const visibleOrders = weekGroups.filter(group => group.key === groupKey ? nextExpanded : expandedWeekGroups[group.key])
+      .flatMap(group => group.orders);
+    if (visibleOrders.length) void hydrateRuntimeOrders(visibleOrders);
+    else {
       runtimeOperation.current?.abort();
       runtimeOperation.current = null;
       setIsHydratingRuntime(false);
+      setRuntimeError("");
     }
     setExpandedWeekGroups((current) => {
       return {
@@ -1204,6 +1212,7 @@ export default function OrdersPage() {
         </div>
         <TopNav />
       </header>
+      {runtimeError ? <p className="message" role="alert">補足情報の取得失敗: {runtimeError}</p> : null}
 
       <section className="panel">
         <header className="panel-header">
@@ -1211,7 +1220,7 @@ export default function OrdersPage() {
           <span className="badge">
             表示 {filteredOrders.length} 件
             {hasMoreOrders ? " / 追加あり" : ""}
-            {isHydratingRuntime ? " / 補足情報を取得中" : ""}
+          {isHydratingRuntime ? " / 補足情報を取得中" : ""}
           </span>
         </header>
         <div className="filters">

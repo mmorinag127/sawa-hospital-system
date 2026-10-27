@@ -34,7 +34,7 @@ const context = {
   workflowSupportText: () => null, processingStageLabel: () => null,
   useCallback: fn => fn, runtimeOperation: {current: null}, AbortController, URLSearchParams,
   browserSessionKey: () => 'fixture-session', setIsHydratingRuntime: () => {},
-  setLoadError: () => {}, setOrders: () => {}, apiClient: {},
+  setLoadError: () => {}, setRuntimeError: () => {}, setOrders: () => {}, apiClient: {},
 };
 vm.runInNewContext(code, context, { filename });
 const page = context.module.exports;
@@ -132,4 +132,16 @@ test('a superseded week response cannot alter current rows or clear its loading 
   await current;
   assert.equal(loading, false);
   assert.equal(rows[1].workflow_state.state, 'current');
+});
+
+test('a failed supplement keeps base rows and reports a separate error', async () => {
+  const rows = [{id: 'still-visible', status: '未着'}];
+  let supplementalError = '';
+  context.setRuntimeError = value => {supplementalError = value;};
+  context.setLoadError = () => {throw new Error('supplement must not hide the base list');};
+  context.setOrders = () => {throw new Error('failed read must not change rows');};
+  context.apiClient.get = async () => {throw new Error('owned supplement failure');};
+  await page.hydrateRuntimeOrders(rows);
+  assert.equal(supplementalError, 'owned supplement failure');
+  assert.deepEqual(rows, [{id: 'still-visible', status: '未着'}]);
 });

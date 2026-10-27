@@ -1,4 +1,15 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+
+async function gotoOrders(page: Page, baseUrl: string) {
+  await page.route("**/api/orders/display-context?**", async route => {
+    const ids = new URL(route.request().url()).searchParams.getAll("order_ids");
+    expect(ids.length).toBeGreaterThan(0);
+    expect(ids.length).toBeLessThanOrEqual(100);
+    await route.fulfill({status: 200, json: {orders: Object.fromEntries(ids.map(id => [id,
+      {validation_state: "references_only", workflow_state: null, job: null, error: null}]))}});
+  });
+  await page.goto(`${baseUrl}/orders`);
+}
 
 test("orders list highlights facility-unregistered and week-unresolved orders in the global summary", async ({ page }) => {
   const baseUrl = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3100";
@@ -84,7 +95,7 @@ test("orders list highlights facility-unregistered and week-unresolved orders in
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/orders`);
+  await gotoOrders(page, baseUrl);
 
   await expect(page.getByRole("heading", { name: "注文一覧" })).toBeVisible();
   const unresolvedGroup = page.locator(".week-group").first();
@@ -212,7 +223,7 @@ test("orders list renders order cards for a resolved week and keeps submitted/mi
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/orders`);
+  await gotoOrders(page, baseUrl);
 
   const resolvedGroup = page.locator(".week-group").first();
   await expect(resolvedGroup.getByRole("heading", { name: "03/22 - 03/28" })).toBeVisible();
@@ -284,7 +295,7 @@ test("orders list can collapse and reopen a week group", async ({ page }) => {
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/orders`);
+  await gotoOrders(page, baseUrl);
 
   const weekGroup = page.locator(".week-group").first();
   await expect(weekGroup.locator(".week-group-summary")).toHaveCount(0);
@@ -295,8 +306,10 @@ test("orders list can collapse and reopen a week group", async ({ page }) => {
   await weekGroup.getByRole("button", { name: "閉じる" }).click();
   await expect(weekGroup.locator(".week-group-summary")).toHaveCount(0);
   await expect(weekGroup.getByText(orderId)).toHaveCount(0);
+  await page.route("**/api/orders/display-context?**", route => route.fulfill({status: 503, json: {detail: "owned supplement unavailable"}}));
   await weekGroup.getByRole("button", { name: "開く" }).click();
   await expect(weekGroup.getByText(orderId)).toBeVisible();
+  await expect(page.getByRole("alert").filter({hasText: "補足情報の取得失敗"})).toBeVisible();
 });
 
 test("orders list merges relocation facility pairs into one display slot", async ({ page }) => {
@@ -383,7 +396,7 @@ test("orders list merges relocation facility pairs into one display slot", async
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/orders`);
+  await gotoOrders(page, baseUrl);
 
   const resolvedGroup = page.locator(".week-group").first();
   await resolvedGroup.getByRole("button", { name: "開く" }).click();
@@ -480,7 +493,7 @@ test("orders list can archive a completed week and restore it from archived view
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/orders`);
+  await gotoOrders(page, baseUrl);
 
   expect(showArchived).toBe(false);
   const weekGroup = page.locator(".week-group").filter({ has: page.getByRole("heading", { name: "04/05 - 04/11" }) });
@@ -605,7 +618,7 @@ test("orders list can bulk archive visible week groups regardless of order statu
     await route.fulfill({ status: 200, json: {} });
   });
 
-  await page.goto(`${baseUrl}/orders`);
+  await gotoOrders(page, baseUrl);
 
   await expect(page.getByRole("button", { name: "表示中の週次を一括アーカイブ (2)" })).toBeVisible();
   await page.getByRole("button", { name: "表示中の週次を一括アーカイブ (2)" }).click();
