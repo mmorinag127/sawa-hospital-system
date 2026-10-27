@@ -415,7 +415,8 @@ class ReceiptContractTest(unittest.TestCase):
                      'workflow-unsaved-boundary', 'modernization-workflow-action-dom', 'portal-auth-gate',
                      'portal-proxy-session', 'assistant-workflow-ui', 'assistant-drawing-proxy',
                      'pdf-upload-input-ownership', 'bulk-ocr-command-ownership', 'order-list-read-boundary',
-                     'order-facility-read', 'hospital-job-status', 'login-flow', 'login-destination')
+                     'order-facility-read', 'hospital-job-status', 'login-flow', 'login-destination',
+                     'current-ocr-operations')
         settings = (('google-auth-deploy', 'js'), ('ocr-first-request', 'mjs'),
                              ('ocr-queue-functional', 'mjs'), ('saved-workflow-readonly', 'mjs'),
                              ('system-status-safe-screenshot', 'mjs'), ('dashboard-monthly-read-status', 'mjs'),
