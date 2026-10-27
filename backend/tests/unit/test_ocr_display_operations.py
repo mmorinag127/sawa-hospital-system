@@ -106,7 +106,8 @@ def test_native_template_mismatch_still_blocks_display(native_sql, field):
         if field == "captured":
             metrics = deepcopy(job.metrics)
             metrics["nonworkflow_execution"]["orders"][f["order_id"]]["order"]["template_version_id"] = "foreign-template"
-            job.metrics = metrics
+            # Explicit out-of-band corruption in the owned fixture, not a writer command.
+            session.execute(OcrJob.__table__.update().where(OcrJob.id == f["job_id"]).values(metrics=metrics))
         else:
             from src.models.facility_template_version import FacilityTemplateVersion
             original = session.get(FacilityTemplateVersion, f["projection"])
@@ -114,7 +115,7 @@ def test_native_template_mismatch_still_blocks_display(native_sql, field):
             values.update(id="foreign-template", version="foreign-component")
             session.add(FacilityTemplateVersion(**values))
             session.flush()
-            job.template_version_id = "foreign-template"
+            session.execute(OcrJob.__table__.update().where(OcrJob.id == f["job_id"]).values(template_version_id="foreign-template"))
         session.commit()
     value = read_without_work(f, lambda: display.get_order_job_displays([f["order_id"]]))[f["order_id"]]
     assert value["job"] is None
