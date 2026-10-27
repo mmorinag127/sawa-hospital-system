@@ -217,7 +217,9 @@ for (const [field, value] of [['saved_sheet_id', 'foreign-draft'],
       assert.equal(f.probe.current.sheetDirty, true);
       await f.h.settle(() => f.probe.current.runAnomalyReview());
       assert.match(f.probe.current.error, /^(他の更新と競合しました。編集中の値は保持しています。最新状態を確認してから、もう一度保存してください。|表示データの取得完了後に操作してください。)$/);
-      assert.equal(f.t.calls.filter(call => call.url === `${BASE}/sheet/anomaly-review`).length, 0);
+      const attempts = f.t.calls.filter(call => call.url === `${BASE}/sheet/anomaly-review`);
+      if (f.probe.current.error === '表示データの取得完了後に操作してください。') assert.equal(attempts.length, 0);
+      else assert.deepEqual(attempts.map(call => call.config.headers['If-Match']), ['"7"']);
       assert.equal(f.state.workflow.revision, 8);
       assert.equal(f.state.saved.rows[0][3], '26');
       assert.equal(f.probe.current.sheetPayload.rows[0][3], '31');

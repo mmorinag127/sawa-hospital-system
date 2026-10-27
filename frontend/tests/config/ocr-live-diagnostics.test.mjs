@@ -76,8 +76,8 @@ test('original verification asserts, wait and readonly/external gates remain in 
   assert.ok(firstRequest.includes('url.search !== expected.search'));
   assert.ok(firstRequest.includes("request.method() !== 'GET'"));
   assert.ok(firstRequest.includes('url.origin !== expected.origin || url.pathname !== expected.pathname'));
-  assert.ok(current.includes('assert.equal(liveOcrResults?.order_id, identity.orderId)'));
-  assert.ok(current.includes('assert.ok(Array.isArray(liveOcrResults?.results))'));
+  assert.ok(current.includes('assert.equal(inspection.ocr_candidates.order_id, identity.orderId)'));
+  assert.ok(current.includes('assert.ok(Array.isArray(inspection.ocr_candidates.results))'));
   let offset = 0;
   for (const check of checks) {
     const found = current.indexOf(`diagnostics.begin('${check}')`, offset);

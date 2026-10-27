@@ -89,6 +89,7 @@ export async function readLiveCandidate({ inspection, workflow, identity, page, 
     inspection = {...inspection, ocr_candidates: displayed.ocr_candidates};
   }
   assert.equal(inspection.ocr_candidates.order_id, identity.orderId);
+  assert.ok(Array.isArray(inspection.ocr_candidates.results));
   assert.equal(inspection.ocr_candidates.selected_ocr_result_id, workflow.selected_ocr_result_id);
   const matches = inspection.ocr_candidates.results.filter(item => item.ocr_result_id === identity.evidenceId);
   assert.equal(matches.length, 1);
