@@ -1402,6 +1402,7 @@ export default function OrderWorkflowV2Page() {
   const [displayLoading, setDisplayLoading] = useState(false);
   const displayRequestRef = useRef(0);
   const displayReadyRef = useRef("");
+  const initialDisplayReadRef = useRef<{scope: string; revision: number; order: string; document: string; route: string; auth: string | null; inputGeneration: number} | null>(null);
   const summaryDocumentRef = useRef<{order: string; route: string; document: string} | null>(null);
   const [storedQuadReview, setQuadReview] = useState<QuadReviewPayload | null>(null);
   const [quadReviewLoading, setQuadReviewLoading] = useState(false);
@@ -2409,13 +2410,14 @@ export default function OrderWorkflowV2Page() {
     callerCurrent: () => boolean = () => true,
     expectedJob: {jobId:string;attemptId:string} | NativeOcrOwner | null = null,
     adopt: ActionAdoption = (publish) => publish(),
-    displayScope: "summary" | "ocr" | "sheet" | "output" = "summary",
+    displayScope: "initial" | "summary" | "ocr" | "sheet" | "output" = "summary",
     signal?: AbortSignal,
   ) => {
     if (!orderId) return;
     const own=capturePageOwner();
     if (!ownsPageInput(own) || !callerCurrent()) return;
     const requestedOrderId = orderId;
+    if (displayScope === "initial") initialDisplayReadRef.current = null;
     const refreshGeneration = refreshGenerationRef.current + 1;
     refreshGenerationRef.current = refreshGeneration;
     ocrDetailRequestRef.current += 1;
@@ -2436,8 +2438,14 @@ export default function OrderWorkflowV2Page() {
       || !ownsPageInput(own) || !callerCurrent();
     if (staleRead) return;
     if (!workflowRes.data) throw new Error("workflow 読取応答が不正です。");
-    if (inspectionRes.data.display_scope !== displayScope) throw new Error("表示範囲の読取応答が不正です。");
-    if (displayScope !== "summary" && requestedRevision !== workflowRes.data.revision) {
+    const initial = displayScope === "initial";
+    const initialStep = stepIndexForState(workflowRes.data.state);
+    const expectedScope = initial ? (initialStep === 2 ? "ocr" : initialStep === 3 ? "sheet" : initialStep === 4 ? "output" : "summary") : displayScope;
+    if (inspectionRes.data.display_scope !== expectedScope) throw new Error("表示範囲の読取応答が不正です。");
+    if (initial && expectedScope !== "summary" && !inspectionRes.data.loaded_sections?.includes(expectedScope)) {
+      throw new Error("表示範囲の読取応答が不完全です。");
+    }
+    if (!initial && displayScope !== "summary" && requestedRevision !== workflowRes.data.revision) {
       throw new Error("状態更新のため再読込が必要です。");
     }
     if (workflowRes.data.order_id !== requestedOrderId) {
@@ -2457,7 +2465,7 @@ export default function OrderWorkflowV2Page() {
           || workflowRes.data.ocr_job?.workflow_attempt_id!==expectedJob.attemptId) return false;
     }
     const {ocr_candidates: candidates, ...inspectionData} = inspectionRes.data;
-    if (displayScope !== "summary" && displayScope !== "output" && (!candidates || candidates.order_id !== requestedOrderId
+    if (expectedScope !== "summary" && expectedScope !== "output" && (!candidates || candidates.order_id !== requestedOrderId
       || !Array.isArray(candidates.results)
       || candidates.results.some(item => !item || typeof item.ocr_result_id !== "string")
       || typeof candidates.workflow_state !== "string"
@@ -2479,10 +2487,14 @@ export default function OrderWorkflowV2Page() {
         setExpandedCellCopyMode(normalizeExpandedCellCopyMode(workflowRes.data.expanded_cell_copy_mode));
       }
       if (candidates) setOcrResults(candidates.results);
-      setInspection((previous) => displayScope === "summary" ? inspectionData : {...previous, ...inspectionData});
-      if (displayScope === "summary") {
+      setInspection((previous) => initial || displayScope === "summary" ? inspectionData : {...previous, ...inspectionData});
+      if (initial || displayScope === "summary") {
         displayReadyRef.current = "";
-        setOcrResults([]);
+        initialDisplayReadRef.current = initial ? {scope: expectedScope, revision: workflowRes.data.revision,
+          order: own.context.orderId, document: own.context.documentId || String(orderHeader.current_version?.document_id
+            || orderHeader.versions?.find((version) => version.is_current)?.document_id || "").trim(),
+          route: own.context.route, auth: own.auth, inputGeneration: own.inputGeneration} : null;
+        if (!candidates) setOcrResults([]);
         setDisplayEpoch((epoch) => epoch + 1);
       }
       rawInspectionRequestRef.current += 1;
@@ -2589,6 +2601,7 @@ export default function OrderWorkflowV2Page() {
     refreshGenerationRef.current += 1;
     setVisibleStepReady(false);
     displayReadyRef.current = "";
+    initialDisplayReadRef.current = null;
     displayRequestRef.current += 1;
     setOcrResults([]);
     sheetEditGenerationRef.current += 1;
@@ -2632,7 +2645,7 @@ export default function OrderWorkflowV2Page() {
     let active=true;
     const controller = new AbortController();
     const current=()=>active && ownsPageInput(own);
-    void refreshAll(current, null, (publish) => publish(), "summary", controller.signal).catch((err) => {
+    void refreshAll(current, null, (publish) => publish(), "initial", controller.signal).catch((err) => {
       if (current()) setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
     return ()=>{active=false;controller.abort();};
@@ -2650,8 +2663,14 @@ export default function OrderWorkflowV2Page() {
     setDisplayLoading(true);
     displayReadyRef.current = "";
     void (async () => {
-      const adopted = await refreshAll(current, null, (publish) => publish(), scope, controller.signal);
+      const initialRead = initialDisplayReadRef.current;
+      const adopted = initialRead?.scope === scope && initialRead.revision === workflow.revision
+        && initialRead.order === own.context.orderId && initialRead.document === own.context.documentId
+        && initialRead.route === own.context.route && initialRead.auth === own.auth
+        && initialRead.inputGeneration === own.inputGeneration
+        ? true : await refreshAll(current, null, (publish) => publish(), scope, controller.signal);
       if (!adopted || !current()) return;
+      if (initialDisplayReadRef.current === initialRead) initialDisplayReadRef.current = null;
       if (scope === "sheet" && workflow.selected_ocr_result_id) {
         await loadOcrResultDetail(workflow.selected_ocr_result_id, current);
         if (!current()) return;

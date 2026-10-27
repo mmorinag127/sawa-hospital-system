@@ -62,7 +62,7 @@ function fixture(selected, mutate = () => {}, failure = null,
     let data = inspection();
     if (reloaded) mutate(data, evidence);
     respond(base, {id: identity.orderId, current_version: {document_id: identity.documentId}});
-    respond(base + '/workflow-v2/display?scope=summary', data);
+    respond(base + '/workflow-v2/display?scope=initial', data);
   }
   const text = () => `${evidence.recognition_acceptance ? '確認済み' : '要確認'}: 1セル ${identity.evidenceId}`;
   function locator(name = '') {

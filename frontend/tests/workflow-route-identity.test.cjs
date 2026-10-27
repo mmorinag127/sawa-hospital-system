@@ -5,7 +5,7 @@ const { mount, transport, deferred } = require('./helpers/modernization-react-do
 // Mounted production page; only router/session/HTTP are synthetic component inputs.
 const PAGE = 'src/pages/orders/[id]/workflow-v2.tsx';
 const ORDER = 'explicit-order', OTHER = 'second-explicit-order';
-const reads = id => [`/orders/${id}/workflow-v2/display?scope=summary`, `/orders/${id}`];
+const reads = id => [`/orders/${id}/workflow-v2/display?scope=initial`, `/orders/${id}`];
 const orderCalls = t => t.calls.filter(call => /^\/(orders|outputs)(\/|\?)/.test(call.url));
 const value = (id, revision = 7) => ({ order_id: id, revision, state: 'ocr_failed',
   headline: `Owned ${id}`, blockers: [], warnings: [], selected_ocr_result_id: null,

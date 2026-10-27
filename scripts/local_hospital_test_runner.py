@@ -146,9 +146,9 @@ def run(output: Path, *, full: bool = False) -> int:
     environment = dict(os.environ)
     for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         environment.pop(key, None)
-    environment["SAWA_IMPACT_FULL"] = "1"
     branch = git("branch", "--show-current")
     environment["SAWA_LOCAL_TEST_MODE"] = "full" if full or not branch or branch.startswith("release/prod-") else "focused"
+    environment["SAWA_IMPACT_FULL"] = "1" if environment["SAWA_LOCAL_TEST_MODE"] == "full" else "0"
     records = []
     source_stable = True
     for index, item in enumerate(commands):

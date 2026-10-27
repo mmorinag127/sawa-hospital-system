@@ -449,18 +449,34 @@ class ReceiptContractTest(unittest.TestCase):
 
     def test_frontend_contract_command_reports_scope_and_retains_the_full_entry(self):
         for modules in (None, ['tests/portal-auth-gate.test.cjs']):
+            def execute(*args, **kwargs):
+                if modules:
+                    state = Path(kwargs['env']['SAWA_NODE_IMPACT_STATE'])
+                    key = hashlib.sha256(('frontend/' + modules[0]).encode()).hexdigest()
+                    (state / (key + '.json.report.json')).write_text(json.dumps({
+                        'selected': ['frontend/' + modules[0] + '::case#0'], 'reused': []}))
+                return subprocess.CompletedProcess([], 0)
             with tempfile.TemporaryDirectory() as directory, \
                  patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': directory, 'CI': '', 'GITHUB_ACTIONS': ''}), \
                  patch.object(FRONTEND_RUNNER, 'clean_tree', return_value=True), \
-                 patch.object(FRONTEND_RUNNER, 'git', return_value='a' * 40), \
+                 patch.object(FRONTEND_RUNNER, 'git', side_effect=lambda *args: directory if args == ('rev-parse', '--git-common-dir') else 'a' * 40), \
+                 patch.object(FRONTEND_RUNNER, 'focused_staging', return_value=bool(modules)), \
                  patch.object(FRONTEND_RUNNER, 'frontend_scope', return_value=modules), \
-                 patch.object(FRONTEND_RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+                 patch.object(FRONTEND_RUNNER.subprocess, 'run', side_effect=execute) as run:
                 self.assertEqual(FRONTEND_RUNNER.main(), 0)
-                expected = ['node', '--test', '--test-concurrency=1', *modules] if modules else ['npm', 'run', 'test:config']
+                expected = ['node', '--import', str(FRONTEND_RUNNER.ROOT / 'infra/ci/node-impact/register.mjs'), '--test', '--test-concurrency=1', *modules] if modules else ['npm', 'run', 'test:config']
                 self.assertEqual(run.call_args.args[0], expected)
                 record = json.loads((Path(directory) / 'frontend-contracts/scope.json').read_text())
                 self.assertEqual(record['modules'], modules)
                 self.assertEqual(bool(record['outside_scope']), bool(modules))
+                if modules:
+                    selection = json.loads((Path(directory) / 'frontend-contracts/selection.json').read_text())
+                    self.assertEqual(selection['source_sha'], 'a' * 40)
+                    self.assertEqual(selection['selected'], ['frontend/' + modules[0] + '::case#0'])
+                    self.assertEqual(selection['reused'], [])
+                else:
+                    self.assertEqual(run.call_args.kwargs['env']['SAWA_IMPACT_FULL'], '1')
+                    self.assertNotIn('SAWA_NODE_IMPACT_STATE', run.call_args.kwargs['env'])
 
     def test_local_legacy_gh_uses_existing_login_not_a_synthetic_actions_token(self):
         for token in (None, 'synthetic-existing-local-token'):
@@ -661,6 +677,7 @@ class ReceiptContractTest(unittest.TestCase):
                      patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)) as execute:
                     self.assertEqual(RUNNER.run(Path(directory) / 'evidence'), 1)
                     self.assertEqual(execute.call_args.kwargs['env']['SAWA_LOCAL_TEST_MODE'], expected)
+                    self.assertEqual(execute.call_args.kwargs['env']['SAWA_IMPACT_FULL'], '1' if expected == 'full' else '0')
 
     def test_source_change_stops_remaining_groups_and_never_signs(self):
         with tempfile.TemporaryDirectory() as directory:

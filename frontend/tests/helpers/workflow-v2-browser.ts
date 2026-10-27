@@ -170,7 +170,10 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
     }
     if ((path.endsWith(`/orders/${orderId}/workflow-v2/inspection`) || path.endsWith(`/orders/${orderId}/workflow-v2/display`)) && method === "GET") {
       await options.beforeInspectionRead?.();
-      const scope = url.searchParams.get("scope") || "inspection";
+      const requestedScope = url.searchParams.get("scope") || "inspection";
+      const state = currentWorkflow().state;
+      const scope = requestedScope !== "initial" ? requestedScope : state === "ocr_completed" ? "ocr"
+        : state === "ocr_selected" ? "sheet" : ["sheet_saved", "bagging_ready", "bagging_confirmed", "output_review", "confirmed"].includes(state) ? "output" : "summary";
       await route.fulfill({
         status: 200,
         json: {

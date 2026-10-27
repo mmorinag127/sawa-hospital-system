@@ -155,6 +155,56 @@ def test_saved_output_display_does_not_materialize_and_sheet_scope_preserves_edi
     assert all(row["detail_state"] == "not_loaded" for row in saved["ocr_candidates"]["results"])
 
 
+def test_initial_display_loads_only_current_scope_with_one_master_snapshot(history_case, monkeypatch):
+    from src.services import workflow_display_read_service as display
+    from src.services import facility_master_service
+    case = history_case()
+    source = case.produce(cell_values="5")
+    case.save(source["sheet"])
+    read = facility_master_service.get_snapshot
+    calls = []
+
+    def snapshot():
+        value = read()
+        calls.append(value.revision)
+        return value
+
+    monkeypatch.setattr(facility_master_service, "get_snapshot", snapshot)
+    with case.readonly():
+        initial, error = display.get_display(case.id, scope="initial")
+        assert error is None
+        assert len(calls) == 1
+        explicit, error = display.get_display(case.id, scope="output")
+    assert error is None
+    assert initial == explicit
+    assert initial["display_scope"] == "output"
+    assert initial["loaded_sections"] == ["output"]
+    assert "ocr_candidates" not in initial
+
+
+def test_saved_cell_map_display_does_not_fetch_unused_evidence_payload(history_case):
+    from sqlalchemy import event
+    from src.services import workflow_display_read_service as display
+    case = history_case()
+    source = case.produce(cell_values="5")
+    assert source["sheet"]["target_cell_map"]
+    case.save(source["sheet"])
+    statements = []
+
+    def observe(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    with case.readonly():
+        event.listen(case.engine, "before_cursor_execute", observe)
+        try:
+            value, error = display.get_display(case.id, scope="sheet")
+        finally:
+            event.remove(case.engine, "before_cursor_execute", observe)
+    assert error is None
+    assert value["saved_sheet"]["sheet"] == source["sheet"]
+    assert not any("order_ocr_evidence_runs.payload_json" in sql for sql in statements)
+
+
 def test_display_rejects_missing_saved_reference_instead_of_rebuilding(history_case):
     from src.db import session_scope
     from src.models.order_workflow_state import OrderWorkflowState

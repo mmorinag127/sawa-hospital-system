@@ -204,7 +204,7 @@ test('combined read preserves dirty quantities and excludes sidecar from display
   const f = await setup();
   try {
     assert.equal(calls(f, 'get', `${BASE}/ocr-results`).length, 0);
-    assert.ok(calls(f, 'get', `${BASE}/display?scope=summary`).length > 0);
+    assert.ok(calls(f, 'get', `${BASE}/display?scope=initial`).length > 0);
     assert.equal(Object.hasOwn(f.probe.current.inspection, 'ocr_candidates'), false);
     await f.h.settle(() => f.probe.current.updateSheetCell(0, 4, '19'));
     await f.h.settle(() => f.probe.current.refreshAll());

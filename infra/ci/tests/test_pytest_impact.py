@@ -73,6 +73,52 @@ def test_data():
         self.assertEqual(report['selected'], ['backend/tests/test_consumer.py::test_value'])
         self.assertEqual(report['reused'], ['backend/tests/test_other.py::test_other'])
 
+    def test_integer_descriptor_reads_are_not_assumed_unchanged(self):
+        self.write('test_fd.py', """
+import os
+def test_descriptor():
+    descriptor = os.open('data.txt', os.O_RDONLY)
+    try:
+        with open(descriptor, 'r', closefd=False) as stream:
+            assert stream.read() == 'first'
+    finally:
+        os.close(descriptor)
+""")
+        subprocess.run(['git', 'add', 'test_fd.py'], cwd=self.root, check=True)
+        self.run_tests(paths=['test_fd.py'])
+        report = self.run_tests(paths=['test_fd.py'])
+        self.assertIn('test_fd.py::test_descriptor', report['selected'])
+        self.assertNotIn('test_fd.py::test_descriptor', report['reused'])
+
+    def test_direct_descriptor_reads_execute_again_and_preserve_results(self):
+        self.write('test_fd.py', """
+import os
+import pytest
+@pytest.mark.parametrize('method', [name for name in ('read', 'pread', 'readv', 'preadv') if hasattr(os, name)])
+def test_descriptor(method):
+    descriptor = os.open('data.txt', os.O_RDONLY)
+    try:
+        if method == 'read':
+            assert os.read(descriptor, 5) == b'first'
+        elif method == 'pread':
+            assert os.pread(descriptor, 5, 0) == b'first'
+        else:
+            buffer = bytearray(5)
+            count = os.readv(descriptor, [buffer]) if method == 'readv' else os.preadv(descriptor, [buffer], 0)
+            assert count == 5
+            assert buffer == b'first'
+    finally:
+        os.close(descriptor)
+""")
+        subprocess.run(['git', 'add', 'test_fd.py'], cwd=self.root, check=True)
+        self.run_tests(paths=['test_fd.py'])
+        report = self.run_tests(paths=['test_fd.py'])
+        for name in ('read', 'pread', 'readv', 'preadv'):
+            if hasattr(os, name):
+                node = f'test_fd.py::test_descriptor[{name}]'
+                self.assertIn(node, report['selected'])
+                self.assertNotIn(node, report['reused'])
+
     def test_new_test_file_does_not_invalidate_unrelated_code_inputs(self):
         self.run_tests()
         self.write('test_new.py', 'def test_new():\n    assert True\n')
@@ -80,6 +126,14 @@ def test_data():
         report = self.run_tests(paths=['test_example.py', 'test_new.py'])
         self.assertEqual(report['selected'], ['test_new.py::test_new'])
         self.assertEqual(len(report['reused']), 3)
+
+    def test_untracked_former_input_invalidates_only_its_consumers(self):
+        self.run_tests()
+        subprocess.run(['git', 'rm', '--cached', '-q', 'data.txt'], cwd=self.root, check=True)
+        report = self.run_tests()
+        self.assertEqual(report['baseline_status'], 'verified')
+        self.assertEqual(report['selected'], ['test_example.py::test_data'])
+        self.assertCountEqual(report['reused'], ['test_example.py::test_first', 'test_example.py::test_second'])
 
     def test_unread_frontend_and_workflow_settings_do_not_reset_backend_history(self):
         (self.root / 'frontend').mkdir()
@@ -440,6 +494,37 @@ def setting():
             self.run_tests()
             self.assertIn("test_example.py::test_metadata", self.run_tests()["selected"])
 
+    def test_external_write_and_permission_change_are_not_reused(self):
+        with tempfile.TemporaryDirectory() as external:
+            path = Path(external) / 'external.txt'
+            path.write_text('before')
+            self.write('test_example.py', f'''import os
+from pathlib import Path
+PATH = Path({str(path)!r})
+def test_write():
+    PATH.write_text("changed")
+def test_chmod():
+    os.chmod(PATH, 0o600)
+''')
+            self.run_tests()
+            result = self.run_tests()
+            for name in ('test_write', 'test_chmod'):
+                node = 'test_example.py::' + name
+                self.assertIn(node, result['selected'])
+                self.assertIn('unowned-file-write', result['untracked'][node])
+
+    def test_missing_strict_resolution_is_rechecked(self):
+        self.write('test_example.py', '''from pathlib import Path
+import pytest
+def test_missing():
+    with pytest.raises(FileNotFoundError):
+        Path('missing.txt').resolve(strict=True)
+''')
+        self.run_tests()
+        self.assertEqual(self.run_tests()['reused'], ['test_example.py::test_missing'])
+        self.write('missing.txt', 'created')
+        self.assertEqual(self.run_tests(expected=1)['selected'], ['test_example.py::test_missing'])
+
     def test_repository_metadata_change_executes_without_content_change(self):
         (self.root / 'data.txt').chmod(0o644)
         self.write('test_example.py', "import os\ndef test_mode():\n    assert os.stat('data.txt').st_mode & 0o777 == 0o644\n")
@@ -544,6 +629,8 @@ def test_owned(tmp_path):
     output = tmp_path / 'output.txt'
     output.write_text('fresh')
     assert output.read_text() == 'fresh'
+    assert output.stat().st_size == 5
+    assert output.stat(follow_symlinks=False).st_size == 5
 """)
         self.run_tests()
         report = self.run_tests()
@@ -578,6 +665,26 @@ def test_unrelated():
         report = self.run_tests()
         self.assertCountEqual(report['selected'], ['test_example.py::test_first', 'test_example.py::test_second'])
         self.assertEqual(report['reused'], ['test_example.py::test_unrelated'])
+
+    def test_exclusive_tempfile_is_owned_but_existing_external_file_is_not(self):
+        with tempfile.TemporaryDirectory() as external:
+            path = Path(external) / 'external.txt'
+            path.write_text('external')
+            self.write('test_example.py', f'''from pathlib import Path
+from tempfile import NamedTemporaryFile
+def test_owned():
+    with NamedTemporaryFile(mode="w+") as temporary:
+        temporary.write("generated")
+        temporary.flush()
+        assert Path(temporary.name).read_text() == "generated"
+def test_external():
+    assert Path({str(path)!r}).read_text() == "external"
+''')
+            self.run_tests()
+            report = self.run_tests()
+            self.assertEqual(report['reused'], ['test_example.py::test_owned'])
+            self.assertEqual(report['selected'], ['test_example.py::test_external'])
+            self.assertIn('external-file-input', report['untracked']['test_example.py::test_external'])
 
     def _check_only_empty_owned_bootstrap(self, state_name):
         self.state = self.root / state_name
@@ -733,6 +840,66 @@ def test_process():
         result = self.run_tests()
         self.assertEqual(result["selected"], ["test_example.py::test_process"])
         self.assertEqual(result["reasons"]["test_example.py::test_process"], "untracked-input")
+
+    def test_fixed_git_blob_fixture_is_reused_but_mutable_revision_is_not(self):
+        subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                        'commit', '-qm', 'baseline'], cwd=self.root, check=True)
+        revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.root, text=True).strip()
+        self.write('test_example.py', f'''import subprocess
+from pathlib import Path
+import pytest
+ROOT = Path(__file__).resolve().parent
+@pytest.fixture(scope="module")
+def blob():
+    return subprocess.check_output(["git", "show", "{revision}:data.txt"], cwd=ROOT)
+def test_first(blob):
+    assert blob == b"first"
+def test_second(blob):
+    assert blob == b"first"
+def test_mutable_revision():
+    assert subprocess.check_output(["git", "show", "HEAD:data.txt"], cwd=ROOT) == b"first"
+''')
+        subprocess.run(['git', 'add', 'test_example.py'], cwd=self.root, check=True)
+        self.run_tests()
+        result = self.run_tests()
+        self.assertCountEqual(result['reused'], ['test_example.py::test_first', 'test_example.py::test_second'])
+        self.assertEqual(result['selected'], ['test_example.py::test_mutable_revision'])
+        self.assertIn('subprocess.Popen', result['untracked']['test_example.py::test_mutable_revision'])
+        self.write('data.txt', 'second')
+        subprocess.run(['git', 'add', 'data.txt'], cwd=self.root, check=True)
+        subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                        'commit', '-qm', 'replacement'], cwd=self.root, check=True)
+        replacement = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.root, text=True).strip()
+        subprocess.run(['git', 'replace', revision, replacement], cwd=self.root, check=True)
+        result = self.run_tests(expected=1)
+        for node in ('test_first', 'test_second'):
+            self.assertEqual(result['reasons']['test_example.py::' + node], 'file-input-changed')
+
+    def test_thread_metadata_read_is_not_reused(self):
+        self.write('test_example.py', '''from pathlib import Path
+from threading import Thread
+def test_thread():
+    thread = Thread(target=lambda: Path('data.txt').stat())
+    thread.start()
+    thread.join()
+''')
+        self.run_tests()
+        result = self.run_tests()
+        self.assertEqual(result['selected'], ['test_example.py::test_thread'])
+        self.assertIn('threaded-input', result['untracked']['test_example.py::test_thread'])
+
+    def test_unmanaged_low_level_thread_is_not_reused(self):
+        self.write('test_example.py', '''import _thread
+from threading import Event
+def test_thread():
+    done = Event()
+    _thread.start_new_thread(done.set, ())
+    assert done.wait(5)
+''')
+        self.run_tests()
+        result = self.run_tests()
+        self.assertEqual(result['selected'], ['test_example.py::test_thread'])
+        self.assertIn('threaded-input', result['untracked']['test_example.py::test_thread'])
 
     def test_import_time_data_dependency_is_not_lost(self):
         self.write("operations.py", "from pathlib import Path\nVALUE = Path('data.txt').read_text()\n")

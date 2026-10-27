@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -75,6 +76,48 @@ class GeneratedInputs(unittest.TestCase):
         external.mkdir()
         (root / 'link').symlink_to(external, target_is_directory=True)
         self.assertFalse(self.inputs.accepts(root / 'link' / 'input', owner='producer', stack=[]))
+
+    def test_created_file_tracks_identity_and_cross_case_use(self):
+        path = self.base / 'created'
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        try:
+            self.inputs.register_file(path, descriptor, owner='producer', stack=[])
+            self.assertTrue(self.inputs.accepts(path, owner='producer', stack=[]))
+            self.assertTrue(self.inputs.accepts(path, owner='other', stack=[]))
+            self.assertIn('cross-case-generated-input', self.inputs.unsafe_for('producer'))
+            path.unlink()
+            path.write_text('replacement')
+            self.assertFalse(self.inputs.accepts(path, owner='producer', stack=[]))
+        finally:
+            os.close(descriptor)
+            self.inputs.finish()
+
+    def test_created_file_tracking_has_bounded_descriptors_and_closes_them(self):
+        for index in range(33):
+            path = self.base / ('created-' + str(index))
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            try:
+                accepted = self.inputs.register_file(path, descriptor, owner='producer', stack=[])
+                self.assertEqual(bool(accepted), index < 32)
+            finally:
+                os.close(descriptor)
+        retained = [descriptor for _, descriptor in self.inputs.files.values()]
+        self.assertEqual(len(retained), 32)
+        self.inputs.finish()
+        self.assertEqual(self.inputs.files, {})
+        for descriptor in retained:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
+    def test_shared_fixture_file_is_not_assumed_owned(self):
+        path = self.base / 'created'
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        try:
+            self.inputs.register_file(path, descriptor, owner='producer', stack=[{'scope': 'session'}])
+            self.assertFalse(self.inputs.accepts(path, owner='producer', stack=[]))
+        finally:
+            os.close(descriptor)
+            self.inputs.finish()
 
 
 if __name__ == '__main__':

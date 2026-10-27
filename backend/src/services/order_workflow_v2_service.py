@@ -854,7 +854,7 @@ def _workflow_template_version_identity(row: OrderWorkflowState, meta: dict[str,
     return template_version_id, None
 
 
-def _canonical_workflow_template_version(session, template_version_id, facility_id):
+def _canonical_workflow_template_version(session, template_version_id, facility_id, *, master=None):
     from src.services import canonical_facility_lineage as lineage
     from src.services.canonical_facility_store import CanonicalStoreError
 
@@ -871,7 +871,7 @@ def _canonical_workflow_template_version(session, template_version_id, facility_
     if validation.get("errors"):
         return None, "facility_template_unresolved"
     try:
-        config_service.validate_selected_authored_facility_config(facility_id, receipt["authored_version"])
+        config_service.validate_selected_authored_facility_config(facility_id, receipt["authored_version"], master=master)
     except (CanonicalStoreError, ValueError, OSError):
         return None, "template_version_mismatch"
     return version, None
@@ -1658,7 +1658,9 @@ def _require_existing_workflow_template_version(
     meta: dict[str, Any],
 ) -> tuple[str | None, str | None]:
     from src.services.initial_saved_import_service import get_binding
-    imported = get_binding(session, order.id, template_version_id=order.template_version_id)
+    from src.services.facility_master_service import get_snapshot
+    master = get_snapshot().master
+    imported = get_binding(session, order.id, template_version_id=order.template_version_id, master=master)
     if imported is not None:
         if imported["snapshot"]["template"] is None:
             return None, "template_version_required"
@@ -1678,7 +1680,7 @@ def _require_existing_workflow_template_version(
         context_facility_id = _normalize_id(meta.get("facility_id"))
         if context_facility_id and context_facility_id != facility_id:
             return None, "template_version_mismatch"
-        version, error = _canonical_workflow_template_version(session, template_version_id, facility_id)
+        version, error = _canonical_workflow_template_version(session, template_version_id, facility_id, master=master)
         if error:
             return None, error
         try:

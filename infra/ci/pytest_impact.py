@@ -6,11 +6,13 @@ subprocess and untracked inputs remain executable. This plugin is CI opt-in.
 from __future__ import annotations
 
 import hashlib
+import _thread
 import importlib.metadata
 import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -35,6 +37,7 @@ META = STATE / "inputs.json"
 DB = Path(os.environ["TESTMON_DATAFILE"]).resolve()
 REPORT = STATE / "selection.json"
 BUSY = False
+CREATING_TEMP = False
 ACTIVE = None
 INPUTS = {}
 UNSAFE = set()
@@ -110,6 +113,20 @@ def tracking_digest():
 
 
 def input_digest(name):
+    if name.startswith('git-blob:'):
+        _, revision, source = name.split(':', 2)
+        executable = shutil.which('git')
+        if not executable:
+            return None
+        try:
+            result = subprocess.run([executable, 'show', revision + ':' + source],
+                                    cwd=ROOT, capture_output=True, check=True)
+            binary = digest(Path(executable).resolve())
+            if binary is None:
+                return None
+            return hashlib.sha256(binary.encode() + b'\0' + result.stdout).hexdigest()
+        except (OSError, subprocess.SubprocessError):
+            return None
     for method in ('stat', 'lstat'):
         prefix = method + ':'
         if name.startswith(prefix):
@@ -142,7 +159,7 @@ def input_digest(name):
         return hashlib.sha256(json.dumps(value).encode()).hexdigest()
     directory_kind, _, directory_path = name.partition(':')
     if directory_kind not in {'directory', 'directory-names', 'walk-directory'}:
-        return digest(ROOT / name)
+        return digest(ROOT / name) if name in TRACKED else None
     path = (ROOT / directory_path).resolve()
     if not path.is_relative_to(ROOT):
         return None
@@ -219,10 +236,22 @@ def valid_input_record(name, value):
     if name in TRACKED:
         return True
     kind, separator, path = name.partition(':')
+    if not separator:
+        candidate = Path(name)
+        return (not candidate.is_absolute() and bool(candidate.parts)
+                and '..' not in candidate.parts and '\0' not in name
+                and candidate.as_posix() == name)
     if not separator or not path or '\0' in path:
         return False
     if kind == 'environment':
         return True
+    if kind == 'git-blob':
+        revision, separator, source = path.partition(':')
+        candidate = Path(source)
+        return (separator == ':' and len(revision) == 40
+                and all(char in '0123456789abcdef' for char in revision)
+                and bool(candidate.parts) and not candidate.is_absolute()
+                and '..' not in candidate.parts and candidate.as_posix() == source)
     if '..' in Path(path).parts:
         return False
     if kind in ('path-exists', 'path-is_file', 'path-is_dir'):
@@ -548,15 +577,22 @@ def record_input(name, value):
 
 def audit(event, args):
     global BUSY
-    if (not BUSY and OWNED is not None and ACTIVE is not None
-            and threading.get_ident() == MAIN_THREAD
-            and event in {'os.remove', 'os.rmdir', 'os.rename', 'os.mkdir', 'os.symlink', 'os.link', 'os.chmod', 'os.truncate'}):
+    if (not BUSY and threading.get_ident() == MAIN_THREAD
+            and event in {'os.remove', 'os.rmdir', 'os.rename', 'os.mkdir', 'os.symlink', 'os.link', 'os.chmod', 'os.truncate'}
+            and not framework_read()):
         BUSY = True
         try:
             paths = args[:2] if event in {'os.rename', 'os.symlink', 'os.link'} else args[:1]
             for value in paths:
                 if isinstance(value, (str, bytes, os.PathLike)):
-                    generated_input(absolute_input_path(value), write=True)
+                    if not Path(os.fsdecode(value)).is_absolute():
+                        record_unsafe('unowned-file-write')
+                        continue
+                    path = absolute_input_path(value)
+                    if not path.is_relative_to(STATE) and not generated_input(path, write=True):
+                        record_unsafe('unowned-file-write')
+                else:
+                    record_unsafe('unowned-file-write')
         finally:
             BUSY = False
     if threading.get_ident() == MAIN_THREAD and not BUSY and OWNED is not None:
@@ -591,6 +627,7 @@ def audit(event, args):
             return
     if threading.get_ident() != MAIN_THREAD and event in {
         'open', 'os.listdir', 'os.scandir', 'subprocess.Popen', 'os.system', 'socket.connect', 'socket.getaddrinfo', 'sqlite3.connect', 'sawa.test.database-checkout',
+        'os.remove', 'os.rmdir', 'os.rename', 'os.mkdir', 'os.symlink', 'os.link', 'os.chmod', 'os.truncate',
     }:
         record_unsafe('threaded-input')
         return
@@ -627,10 +664,30 @@ def audit(event, args):
                 BUSY = False
         record_unsafe(event)
         return
+    if event == 'subprocess.Popen' and len(args) == 4:
+        executable, arguments, cwd, env = args
+        if (executable == 'git' and isinstance(arguments, (list, tuple))
+                and len(arguments) == 3 and list(arguments[:2]) == ['git', 'show']
+                and isinstance(arguments[2], str) and env is None
+                and cwd is not None and os.path.abspath(cwd) == str(ROOT)):
+            revision, separator, source = arguments[2].partition(':')
+            name = 'git-blob:' + arguments[2]
+            if (separator and source in TRACKED and valid_input_record(name, '0' * 64)):
+                BUSY = True
+                try:
+                    value = input_digest(name)
+                    if value is not None:
+                        record_input(name, value)
+                        return
+                finally:
+                    BUSY = False
     if event in {"subprocess.Popen", "os.system", "socket.connect", "socket.getaddrinfo"}:
         record_unsafe(event)
         return
     if event not in {"open", "os.listdir", "os.scandir"}:
+        return
+    if event == 'open' and args and isinstance(args[0], int):
+        record_unsafe('file-descriptor-input')
         return
     if not args or not isinstance(args[0], (str, bytes, os.PathLike)):
         return
@@ -643,9 +700,9 @@ def audit(event, args):
             record_input(name, input_digest(name))
         if path.is_relative_to(STATE):
             return
-        if any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
-            return  # Installed versions are in the context, including in-repo venvs.
         if event != "open":
+            if any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
+                return
             if generated_input(original_path):
                 return
             if path.is_relative_to(ROOT) and path.name not in {"__pycache__", ".pytest_cache"}:
@@ -666,15 +723,25 @@ def audit(event, args):
             return
         mode = args[1]
         flags = args[2] if len(args) > 2 else 0
+        if mode is None and not Path(os.fsdecode(args[0])).is_absolute():
+            record_unsafe('relative-descriptor-input')
+            return
         write = (isinstance(mode, str) and any(c in mode for c in "wax+")) or (
-            isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT)
+            isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)
         )
         if generated_input(original_path, write=bool(write)):
             return
         if write:
+            if (CREATING_TEMP and threading.get_ident() == MAIN_THREAD
+                    and isinstance(flags, int) and flags & os.O_CREAT and flags & os.O_EXCL):
+                return
             if path.is_relative_to(ROOT) and str(path.relative_to(ROOT)) in TRACKED:
                 record_unsafe("tracked-file-write")
+            else:
+                record_unsafe('unowned-file-write')
             return
+        if any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
+            return  # Installed versions are in the context, including in-repo venvs.
         if path.is_relative_to(ROOT):
             name = str(path.relative_to(ROOT))
             if name in TRACKED:
@@ -718,6 +785,9 @@ def pytest_sessionstart(session):
     def observe_resolution(original):
         def observed(path, *args, **kwargs):
             global BUSY
+            if threading.get_ident() != MAIN_THREAD and not framework_read():
+                record_unsafe('threaded-input')
+                return original(path, *args, **kwargs)
             if BUSY or GLOBAL_UNSAFE or framework_read():
                 return original(path, *args, **kwargs)
             BUSY = True
@@ -735,6 +805,15 @@ def pytest_sessionstart(session):
                 elif not any(original_path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
                     record_unsafe('external-path-resolution')
                 return resolved
+            except FileNotFoundError:
+                original_path = absolute_input_path(path)
+                if not generated_input(original_path):
+                    value = absent_digest(original_path)
+                    if value is None:
+                        record_unsafe('unresolved-path-input')
+                    else:
+                        record_input('absent:' + str(original_path), value)
+                raise
             except (OSError, RuntimeError):
                 record_unsafe('unresolved-path-input')
                 raise
@@ -744,9 +823,24 @@ def pytest_sessionstart(session):
 
     Path.resolve = observe_resolution(Path.resolve)
     os.path.realpath = observe_resolution(os.path.realpath)
+    for name in ('read', 'pread', 'readv', 'preadv'):
+        original = getattr(os, name, None)
+        if original is None:
+            continue
+
+        def observed_fd_read(*args, _original=original, **kwargs):
+            if not BUSY and not framework_read():
+                record_unsafe('file-descriptor-input')
+            return _original(*args, **kwargs)
+
+        setattr(os, name, observed_fd_read)
+
     def observe_predicate(original, method):
         def observed(path, *args, **kwargs):
             global BUSY
+            if threading.get_ident() != MAIN_THREAD and not framework_read():
+                record_unsafe('threaded-input')
+                return original(path, *args, **kwargs)
             if BUSY or GLOBAL_UNSAFE or framework_read():
                 return original(path, *args, **kwargs)
             BUSY = True
@@ -780,19 +874,26 @@ def pytest_sessionstart(session):
 
         def observed_stat(*args, _original=original, _method=name, **kwargs):
             global BUSY
+            if threading.get_ident() != MAIN_THREAD and not framework_read():
+                record_unsafe('threaded-input')
+                return _original(*args, **kwargs)
             if not BUSY and not GLOBAL_UNSAFE and not framework_read():
                 value = args[0] if args else kwargs.get("path")
                 BUSY = True
                 try:
-                    if isinstance(value, (str, bytes, os.PathLike)) and len(args) <= 1 and not kwargs:
+                    options = dict(kwargs)
+                    if not args:
+                        options.pop('path', None)
+                    follow = options.pop('follow_symlinks', True)
+                    if (isinstance(value, (str, bytes, os.PathLike)) and len(args) <= 1
+                            and not options and isinstance(follow, bool)
+                            and (_method == 'stat' or follow)):
                         path = absolute_input_path(value)
                         frame = sys._getframe(1)
-                        transport_stat = (frame.f_globals.get('__name__') == 'shutil'
-                                          and frame.f_code.co_name == '_stat')
                         source_stat = (frame.f_globals.get('__name__') == 'linecache'
                             and frame.f_code.co_name in {'checkcache', 'updatecache'}
                             and os.path.realpath(frame.f_code.co_filename) == STDLIB + 'linecache.py')
-                        if transport_stat and generated_input(path):
+                        if generated_input(path):
                             pass
                         elif path.is_relative_to(ROOT):
                             relative = str(path.relative_to(ROOT))
@@ -800,7 +901,8 @@ def pytest_sessionstart(session):
                                 record_input(relative, digest(path))
                                 record_input('source-link:' + relative, resolution_digest(path))
                             else:
-                                record_input(_method + ':' + relative, metadata_digest(path, _method))
+                                method = 'lstat' if _method == 'lstat' or not follow else 'stat'
+                                record_input(method + ':' + relative, metadata_digest(path, method))
                         elif not any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
                             record_unsafe('file-metadata')
                     else:
@@ -1122,6 +1224,11 @@ _environment_iter = os._Environ.__iter__
 
 def observed_environment(self, key):
     global BUSY
+    if (threading.get_ident() != MAIN_THREAD and isinstance(key, str)
+            and (key in VOLATILE_ENV or key.startswith(RUNNER_PREFIXES))
+            and not framework_read() and not progress_environment_read()):
+        record_unsafe('threaded-input')
+        return _environment_getitem(self, key)
     if (not BUSY and not GLOBAL_UNSAFE and isinstance(key, str)
             and (key in VOLATILE_ENV or key.startswith(RUNNER_PREFIXES))
             and not framework_read() and not progress_environment_read()):
@@ -1139,6 +1246,9 @@ os._Environ.__getitem__ = observed_environment
 
 
 def observed_environment_iter(self):
+    if threading.get_ident() != MAIN_THREAD and not framework_read() and not progress_environment_read():
+        record_unsafe('threaded-input')
+        return _environment_iter(self)
     if not BUSY and not GLOBAL_UNSAFE and not framework_read() and not progress_environment_read():
         record_unsafe("volatile-environment")
     return _environment_iter(self)
@@ -1156,3 +1266,45 @@ def observed_thread_start(self, *args, **kwargs):
 
 
 threading.Thread.start = observed_thread_start
+
+_start_new_thread = _thread.start_new_thread
+
+
+def observed_start_new_thread(*args, **kwargs):
+    if not framework_read():
+        record_unsafe('threaded-input')
+    return _start_new_thread(*args, **kwargs)
+
+
+_thread.start_new_thread = observed_start_new_thread
+
+_mkstemp_inner = tempfile._mkstemp_inner
+
+
+def observed_mkstemp_inner(*args, **kwargs):
+    global BUSY, CREATING_TEMP
+    observe = (not BUSY and OWNED is not None and ACTIVE is not None
+               and threading.get_ident() == MAIN_THREAD and not framework_read())
+    before = CREATING_TEMP
+    CREATING_TEMP = observe
+    try:
+        descriptor, path = _mkstemp_inner(*args, **kwargs)
+    except BaseException:
+        if observe:
+            record_unsafe('unowned-file-write')
+        raise
+    finally:
+        CREATING_TEMP = before
+    if observe:
+        BUSY = True
+        try:
+            if generated_input(absolute_input_path(path), write=True):
+                return descriptor, path
+            if not OWNED.register_file(path, descriptor, owner=ACTIVE, stack=FIXTURE_STACK):
+                record_unsafe('unowned-file-write')
+        finally:
+            BUSY = False
+    return descriptor, path
+
+
+tempfile._mkstemp_inner = observed_mkstemp_inner

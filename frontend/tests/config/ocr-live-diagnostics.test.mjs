@@ -68,7 +68,7 @@ test('original verification asserts, wait and readonly/external gates remain in 
       ? line.replace("item.pathname.endsWith('/ocr-results')", "item.pathname.endsWith('/display')") : line;
     assert.ok(current.includes(expected.trim()), expected);
   }
-  assert.ok(current.includes("watchRead('inspection', '/workflow-v2/display?scope=summary')"));
+  assert.ok(current.includes("watchRead('inspection', '/workflow-v2/display?scope=initial')"));
   assert.ok(current.includes('assert.equal(detailReceipt.ok, true)'));
   assert.ok(current.includes('assert.equal(evidence.workflow_revision, workflow.revision)'));
   assert.ok(current.includes("getByRole('button', { name: '詳細を表示', exact: true }).click()"));

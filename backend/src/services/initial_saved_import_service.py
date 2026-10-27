@@ -81,11 +81,11 @@ def prepare_import_master(master, snapshots, policy):
     return result
 
 
-def get_binding(session, order_id, *, template_version_id=None):
+def get_binding(session, order_id, *, template_version_id=None, master=None):
     from src.services import facility_master_service, config_service
     from src.services.initial_saved_source_service import validate_saved_source, capture_saved_source
 
-    master = facility_master_service.get_snapshot().master
+    master = facility_master_service.get_snapshot().master if master is None else master
     imports = master.get(IMPORTS)
     if imports is None:
         return None

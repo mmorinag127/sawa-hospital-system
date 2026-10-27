@@ -285,7 +285,7 @@ def _candidates(session, order, state, meta):
 
 
 def get_display(order_id, *, scope="summary"):
-    if scope not in {"summary", "ocr", "sheet", "output", "inspection"}:
+    if scope not in {"initial", "summary", "ocr", "sheet", "output", "inspection"}:
         return None, "workflow_display_scope_invalid"
     with session_scope() as session, session.no_autoflush, retain_read_models(session):
         order, error = workflow._get_order_or_error(session, order_id)
@@ -303,6 +303,12 @@ def get_display(order_id, *, scope="summary"):
                             state=workflow._canonical_workflow_v2_state(state, meta)))
             serialized["ocr_job"], serialized["ocr_job_binding_error"], serialized["common_job_status"] = _job_summary(session, order, state, meta)
         serialized["validation_state"] = "references_only"
+        if scope == "initial":
+            current_state = serialized.get("state")
+            scope = ("ocr" if current_state == "ocr_completed" else
+                     "sheet" if current_state == "ocr_selected" else
+                     "output" if current_state in {"sheet_saved", "bagging_ready", "bagging_confirmed", "output_review", "confirmed"} else
+                     "summary")
         versions = [dict(row) for row in session.execute(select(
             OrderVersion.version_no, OrderVersion.document_id, OrderVersion.message_id,
             OrderVersion.received_at, OrderVersion.is_current,
@@ -331,7 +337,10 @@ def get_display(order_id, *, scope="summary"):
                 return None, error
             if state and state.draft_id:
                 draft = session.get(OrderSheetDraft, state.draft_id)
-                evidence = session.get(OrderOcrEvidenceRun, draft.base_evidence_run_id) if draft else None
+                sheet_data = draft.draft_sheet_json if draft and isinstance(draft.draft_sheet_json, dict) else {}
+                target_map = sheet_data.get("target_cell_map")
+                needs_evidence = not (isinstance(target_map, list) and target_map)
+                evidence = session.get(OrderOcrEvidenceRun, draft.base_evidence_run_id) if draft and needs_evidence else None
                 result["saved_sheet"] = workflow._saved_sheet_with_target_cell_map(order=order, workflow=state,
                     saved_sheet=draft, evidence_payload=evidence.payload_json if evidence and evidence.order_id == order.id else None)
                 sheet = result["saved_sheet"].get("sheet")

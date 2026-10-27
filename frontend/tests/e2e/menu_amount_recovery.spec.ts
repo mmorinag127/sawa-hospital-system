@@ -19,7 +19,7 @@ for (const latestResolved of [false, true]) {
       let json: object = {};
       if (path.endsWith(`/orders/${orderId}/workflow-v2/display`)) {
         json = {
-          display_scope: requestUrl.searchParams.get("scope"), loaded_sections: ["output"],
+          display_scope: requestUrl.searchParams.get("scope") === "initial" ? "output" : requestUrl.searchParams.get("scope"), loaded_sections: ["output"],
           order_header: { id: orderId, versions: [], menu_amount_resolution: resolution(!latestResolved) },
           workflow: { order_id: orderId, revision: 7, source: "workflow_v2",
             state: "output_review", headline: "Owned recovery loaded", blockers: [],

@@ -1,6 +1,7 @@
 """Distinguish fresh pytest outputs from external inputs, without trusting old DBs."""
 from dataclasses import dataclass
 import hashlib
+import os
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -44,6 +45,34 @@ class OwnedInputs:
         self.used = {}
         self.connections = {}
         self.pending_connection = None
+        self.files = {}
+        self.violated_owners = set()
+
+    def register_file(self, path, descriptor, *, owner, stack):
+        if (owner is None or len(self.files) >= 32
+                or any(record.get('scope') != 'function' for record in stack)):
+            return
+        try:
+            path = Path(path)
+            info = path.lstat()
+            opened = os.fstat(descriptor)
+            if (not path.is_absolute() or path.is_symlink() or not path.is_file()
+                    or (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino)
+                    or path in self.files):
+                return
+            self.files[path] = (owner, os.dup(descriptor))
+            return True
+        except (OSError, TypeError, ValueError):
+            return
+
+    def release_files(self, owner):
+        for path, (created_by, descriptor) in list(self.files.items()):
+            if created_by == owner:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                del self.files[path]
 
     def register(self, directory, *, owner, producer, base, shared):
         path = Path(directory)
@@ -79,6 +108,19 @@ class OwnedInputs:
             path = original.resolve()
         except (OSError, RuntimeError, ValueError):
             return False
+        file_owner = self.files.get(original)
+        if file_owner is not None:
+            try:
+                info = original.lstat()
+                opened = os.fstat(file_owner[1])
+                if (original.is_symlink() or (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino)):
+                    return False
+            except OSError:
+                return False
+            if file_owner[0] != owner:
+                self.unsafe('cross-case-generated-input')
+                self.violated_owners.add(file_owner[0])
+            return True
         root = next((self.roots[parent] for parent in (original, *original.parents)
                      if parent in self.roots), None)
         if root is None or not path.is_relative_to(root.path):
@@ -141,13 +183,15 @@ class OwnedInputs:
         return self.accepts(value, owner=owner, stack=stack, database=True, readonly=readonly)
 
     def unsafe_for(self, owner):
-        reasons = set()
+        reasons = {'cross-case-generated-input'} if owner in self.violated_owners else set()
         for root in self.used.get(owner, {}).values():
             if root.producer is not None:
                 reasons.update(root.producer['unsafe'])
         return reasons
 
     def finish(self):
+        for owner in {value[0] for value in self.files.values()}:
+            self.release_files(owner)
         roots = {identity: root for used in self.used.values() for identity, root in used.items()}
         for root in roots.values():
             if not root.shared:

@@ -64,8 +64,7 @@ export async function inspectReview({ identity, source, token, output, playwrigh
       return item.promise.then(response => ({ response }), () => ({ response: null }));
     };
     const base = `/api/orders/${identity.orderId}`;
-    const initialRead = watch(base + '/workflow-v2/display?scope=summary');
-    const candidateRead = watch(base + '/workflow-v2/display?scope=ocr');
+    const initialRead = watch(base + '/workflow-v2/display?scope=initial');
     result.phase = 'open-exact-order';
     const navigation = await page.goto(`${origin}/hospital/orders/${identity.orderId}/workflow-v2`, { waitUntil: 'domcontentloaded' });
     assert.equal(navigation.status(), 200);
@@ -82,7 +81,7 @@ export async function inspectReview({ identity, source, token, output, playwrigh
     result.phase = 'open-step2';
     const evidence = await readLiveCandidate({inspection, workflow, identity, page, requireUnselected: true,
       readCandidates: async () => {
-        const receipt = await candidateRead;
+        const receipt = await watch(base + '/workflow-v2/display?scope=ocr');
         assert.ok(receipt.response);
         return receipt.response.json();
       },
@@ -149,8 +148,7 @@ export async function inspectReview({ identity, source, token, output, playwrigh
     await expect(dialog.getByRole('button', { name: '確認した値を採用して次へ', exact: true })).toBeEnabled();
     await page.screenshot({ path: resolve(output, 'review-dialog-local-choice-not-submitted.png'), fullPage: true });
     result.phase = 'verify-state-preserved';
-    const finalRead = watch(base + '/workflow-v2/display?scope=summary');
-    const finalCandidateRead = watch(base + '/workflow-v2/display?scope=ocr');
+    const finalRead = watch(base + '/workflow-v2/display?scope=initial');
     page.once('dialog', dialog => dialog.type() === 'beforeunload' ? dialog.accept() : dialog.dismiss());
     await page.reload({ waitUntil: 'domcontentloaded' });
     const finalResponse = await finalRead;
@@ -163,7 +161,7 @@ export async function inspectReview({ identity, source, token, output, playwrigh
       revision: workflow.revision});
     const finalEvidence = await readLiveCandidate({inspection: finalInspection, workflow, identity, page, requireUnselected: true,
       readCandidates: async () => {
-        const receipt = await finalCandidateRead;
+        const receipt = await watch(base + '/workflow-v2/display?scope=ocr');
         assert.ok(receipt.response);
         return receipt.response.json();
       },

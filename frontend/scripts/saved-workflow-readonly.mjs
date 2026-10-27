@@ -48,7 +48,7 @@ export async function readSavedWorkflow({ page, origin, orderId, action, mark })
   const pending = specs.map(([path, name]) => page.waitForResponse(response => {
     const url = new URL(response.url());
     return url.origin === origin && url.pathname === path && response.request().method() === 'GET'
-      && (name === 'pdf' || url.searchParams.getAll('scope').join() === (name === 'inspection' ? 'sheet' : 'summary'));
+      && (name === 'pdf' || url.searchParams.getAll('scope').join() === (name === 'inspection' ? 'sheet' : 'initial'));
   }).then(async response => {
     mark(`saved-${name}-http`);
     assert.equal(response.status(), 200);

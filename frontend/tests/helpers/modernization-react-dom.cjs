@@ -24,10 +24,13 @@ function transport() {
   };
   return { api, calls, on(method, url, handler) { handlers.set(`${method} ${url}`, handler); },
     onWorkflowInspection(url, handler) {
-      assert.ok(url.endsWith('/display?scope=summary'));
+      assert.ok(url.endsWith('/display?scope=summary') || url.endsWith('/display?scope=initial'));
       const orderUrl = url.slice(0, url.indexOf('/workflow-v2/'));
-      const fixture = async (call, scope) => {
+      const fixture = async (call, requestedScope) => {
         const response = await handler(call);
+        const state = response.data.workflow?.state;
+        const scope = requestedScope !== 'initial' ? requestedScope : state === 'ocr_completed' ? 'ocr'
+          : state === 'ocr_selected' ? 'sheet' : ['sheet_saved', 'bagging_ready', 'bagging_confirmed', 'output_review', 'confirmed'].includes(state) ? 'output' : 'summary';
         const headerFixture = handlers.get(`get ${orderUrl}`);
         assert.equal(typeof headerFixture, 'function', `header fixture ${orderUrl}`);
         const header = await headerFixture({method: 'get', url: orderUrl, config: call.config});
@@ -38,7 +41,7 @@ function transport() {
         if (scope !== 'sheet' && data.saved_sheet) { data.saved_sheet = {...data.saved_sheet}; delete data.saved_sheet.sheet; }
         return {...response, data};
       };
-      for (const scope of ['summary', 'ocr', 'sheet', 'output']) {
+      for (const scope of ['initial', 'summary', 'ocr', 'sheet', 'output']) {
         handlers.set(`get ${orderUrl}/workflow-v2/display?scope=${scope}`, call => fixture(call, scope));
       }
       const detailPrefix = `get ${orderUrl}/workflow-v2/inspection-detail/`;

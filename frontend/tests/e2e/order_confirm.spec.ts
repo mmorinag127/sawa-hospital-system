@@ -118,6 +118,15 @@ for (const status of [409, 500] as const) test(`final confirm pending prevents d
   await expect(page.locator('[data-sheet-row="2"][data-sheet-col="3"]')).toHaveValue("5");
 });
 
+test("initial output view uses one scoped request without fetching hidden OCR detail", async ({page}) => {
+  const mounted = await mountWorkflowV2SheetPage(page, {workflowState: "output_review",
+    workflow: {saved_sheet_id: "SHEET-E2E-001", bagging_result_id: "BAG-E2E-001", output_bundle_id: "BUNDLE-E2E-001"}});
+  await expect(page.getByRole("button", {name: "確定して一覧にもどる", exact: true})).toBeEnabled();
+  expect(mounted.requestCounts[`GET /api/orders/${mounted.orderId}/workflow-v2/display`]).toBe(1);
+  expect(mounted.requestCounts[`GET /api/orders/${mounted.orderId}/workflow-v2/inspection`] ?? 0).toBe(0);
+  expect(Object.keys(mounted.requestCounts).filter(key => key.includes("/inspection-detail/"))).toEqual([]);
+});
+
 for (const failPostConfirmRead of [false, true]) test(`successful confirmation returns without a second detail read or training write: ${failPostConfirmRead}`, async ({ page }) => {
   const mounted = await mountWorkflowV2SheetPage(page, { workflowState: "output_review",
     workflow: { saved_sheet_id: "SHEET-E2E-001", bagging_result_id: "BAG-E2E-001", output_bundle_id: "BUNDLE-E2E-001" } });
