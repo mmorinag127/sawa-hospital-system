@@ -368,10 +368,26 @@ def get_display(order_id, *, scope="summary"):
             result["anomaly_review"] = deepcopy(meta.get("anomaly_review"))
             result["loaded_sections"].append("output")
         if scope == "inspection" and state and state.evidence_run_id:
-            evidence = session.get(OrderOcrEvidenceRun, state.evidence_run_id)
-            if evidence is None or evidence.order_id != order.id:
+            evidence = session.execute(select(
+                OrderOcrEvidenceRun.id,
+                OrderOcrEvidenceRun.payload_json["hakodate_overlay"].label("overlay"),
+            ).where(
+                OrderOcrEvidenceRun.id == state.evidence_run_id,
+                OrderOcrEvidenceRun.order_id == order.id,
+            )).first()
+            if evidence is None:
                 return None, "selected_ocr_missing"
-            selected = workflow._serialize_ocr_result(evidence, selected=True, include_execution_details=False)
-            result["ocr_results"] = [selected if row["ocr_result_id"] == evidence.id else row for row in result["ocr_results"]]
+            overlay = evidence.overlay if isinstance(evidence.overlay, dict) else {}
+            uri = workflow._normalize_id(overlay.get("uri") or overlay.get("overlay_uri"))
+            url = workflow._normalize_id(overlay.get("url") or overlay.get("overlay_url"))
+            if uri and not url:
+                url = workflow._normalize_id(workflow._inspection_call(
+                    "sign_url", getattr(workflow._get_order_service_module(), "_signed_url_from_uri", lambda _uri: None), uri,
+                ))
+            preview = {"overlay_url": url or None, "overlay_uri": uri or None,
+                       "overlay_status": "ready" if url else "missing",
+                       "overlay_message": None if url else "このOCR結果には表示可能なoverlay成果物がありません。"}
+            # Preview metadata is not evidence selectability or command validation.
+            result["ocr_results"] = [{**row, **preview} if row["ocr_result_id"] == evidence.id else row for row in result["ocr_results"]]
             result["ocr_candidates"]["results"] = result["ocr_results"]
         return result, None
