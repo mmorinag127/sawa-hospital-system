@@ -1,6 +1,7 @@
 """Display-only reads of owned synthetic SQL records, not live OCR proof."""
 from copy import deepcopy
 from unittest.mock import patch
+import pytest
 
 from sqlalchemy import event
 from sqlalchemy.sql import Select, visitors
@@ -94,3 +95,27 @@ def test_history_is_explicit_keyset_paged_and_does_not_read_metrics(native_sql):
     second = read_without_work(f, lambda: display.get_operations_history(limit=2, cursor=first["next_cursor"]))
     assert [row["job_id"] for row in second["history"]] == ["display-history-2"]
     assert second["next_cursor"] is None
+
+
+@pytest.mark.parametrize("field", ["captured", "job_column"])
+def test_native_template_mismatch_still_blocks_display(native_sql, field):
+    f = native_sql
+    finish_authored_native(f, "1")
+    with f["factory"]() as session:
+        job = session.get(OcrJob, f["job_id"])
+        if field == "captured":
+            metrics = deepcopy(job.metrics)
+            metrics["nonworkflow_execution"]["orders"][f["order_id"]]["order"]["template_version_id"] = "foreign-template"
+            job.metrics = metrics
+        else:
+            from src.models.facility_template_version import FacilityTemplateVersion
+            original = session.get(FacilityTemplateVersion, f["projection"])
+            values = {column.key: deepcopy(getattr(original, column.key)) for column in original.__table__.columns}
+            values.update(id="foreign-template", version="foreign-component")
+            session.add(FacilityTemplateVersion(**values))
+            session.flush()
+            job.template_version_id = "foreign-template"
+        session.commit()
+    value = read_without_work(f, lambda: display.get_order_job_displays([f["order_id"]]))[f["order_id"]]
+    assert value["job"] is None
+    assert value["error"] == "template_version_mismatch"

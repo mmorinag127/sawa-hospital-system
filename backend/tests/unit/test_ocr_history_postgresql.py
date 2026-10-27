@@ -16,6 +16,65 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.services.ocr_history_read import read_history
 
 
+def test_postgresql_job_display_extracts_small_native_and_workflow_references():
+    from types import SimpleNamespace
+    from src.models.ocr_job import OcrJob
+    from src.models.document import OrderDocument
+    from src.models.uploaded_pdf import UploadedPdf
+    from src.models.order_version import OrderVersion
+    from src.services.workflow_display_read_service import read_recorded_job_values, _job_summary
+    url = os.environ.get('OCR_HISTORY_PROJECTION_POSTGRES_URL')
+    if not url:
+        pytest.skip('Requires explicit disposable PostgreSQL URL')
+    engine = create_engine(url)
+    metadata = MetaData()
+    tables = {model: Table(model.__table__.name, metadata,
+        *[Column(column.name, column.type) for column in model.__table__.columns], prefixes=['TEMPORARY'])
+        for model in (OcrJob, OrderDocument, UploadedPdf, OrderVersion)}
+    pdf = {'order_id': 'display-order', 'document_id': 'display-doc', 'uploaded_pdf_id': 'display-upload',
+        'message_id': 'display-message', 'storage_uri': 'owned-component.pdf', 'sha256': 'a' * 64}
+    captured = {'order': {'current_document_id': 'display-doc', 'template_version_id': 'display-template'},
+        'line_snapshot': ['unreturned-large-input'] * 10000}
+    native = {'ingest_ocr_mode': 'hakodate', 'intake_protocol': 'native_ingest_v2', 'job_id': 'native-job',
+        'order_id': 'display-order', 'execution_id': 'display-execution', 'ingest_lease': {'generation': 3},
+        'selected_pdf_receipt': pdf, 'orders': {'display-order': captured}}
+    try:
+        with engine.connect() as connection:
+            for table in tables.values():
+                table.create(connection)
+            connection.execute(tables[OrderDocument].insert().values(id='display-doc', storage_uri=pdf['storage_uri'],
+                source_email_id=pdf['message_id']))
+            connection.execute(tables[UploadedPdf].insert().values(id='display-upload', storage_uri=pdf['storage_uri'],
+                message_id=pdf['message_id'], content_sha256=pdf['sha256'], current_order_id='display-order',
+                current_document_id='display-doc'))
+            for identity, metrics, template in [
+                ('native-job', {'nonworkflow_execution': native}, None),
+                ('workflow-job', {'workflow_attempt_id': 'display-attempt', 'reparse_read_input': captured,
+                    'selected_pdf_receipt': pdf}, 'display-template')]:
+                connection.execute(tables[OcrJob].insert().values(id=identity, order_id='display-order',
+                    status='done', input_reference=pdf['storage_uri'], order_document_id='display-doc',
+                    uploaded_pdf_id='display-upload', input_artifact_digest=pdf['sha256'],
+                    template_version_id=template, metrics=metrics))
+            with Session(bind=connection) as session:
+                rows = read_recorded_job_values(session, ['native-job', 'workflow-job'])
+                assert rows['native-job']['native_template_version'] == 'display-template'
+                assert rows['native-job']['native_current_document'] == 'display-doc'
+                assert rows['native-job']['native_generation'] == 3
+                assert 'line_snapshot' not in str(rows)
+                state = SimpleNamespace(state='ocr_completed', template_version_id='display-template')
+                order = SimpleNamespace(id='display-order', current_document_id='display-doc')
+                for identity, attempt in [('native-job', None), ('workflow-job', 'display-attempt')]:
+                    job, error, common = _job_summary(session, order, state,
+                        {'ocr_job_id': identity, 'ocr_job_attempt_id': attempt}, _rows=rows)
+                    assert error is None
+                    assert job['recorded_state'] == 'done'
+                    assert common['jobId'] == identity
+                assert not session.new and not session.dirty
+            connection.rollback()
+    finally:
+        engine.dispose()
+
+
 def test_postgresql_projection_values_storage_and_memory(record_property):
     url = os.environ.get('OCR_HISTORY_PROJECTION_POSTGRES_URL')
     if not url:

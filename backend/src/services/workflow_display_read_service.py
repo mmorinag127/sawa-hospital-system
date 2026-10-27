@@ -149,6 +149,7 @@ def read_recorded_job_values(session, identities):
         native_pdf.label("native_pdf"), version_kind.label("version_kind"),
         native["ingest_lease"]["generation"].label("native_generation"),
         native_orders.op("->")(OcrJob.order_id)["order"]["current_document_id"].label("native_current_document"),
+        native_orders.op("->")(OcrJob.order_id)["order"]["template_version_id"].label("native_template_version"),
         captured["order"]["current_document_id"].label("workflow_current_document"))
     rows = {row["id"]: dict(row) for row in session.execute(statement.where(OcrJob.id.in_(identities))).mappings()}
     for row in rows.values():
@@ -231,7 +232,9 @@ def _job_summary(session, order, state, meta, *, _rows=None):
             return None, "ocr_recorded_job_pdf_mismatch", None
         if version.get("document_id") != pdf["document_id"]:
             return None, "ocr_recorded_job_pdf_mismatch", None
-    if row["template_version_id"] != state.template_version_id:
+    recorded_template = row["native_template_version"] if native_owner else row["template_version_id"]
+    if (recorded_template != state.template_version_id
+            or native_owner and row["template_version_id"] is not None and row["template_version_id"] != recorded_template):
         return None, "template_version_mismatch", None
     attempt = row["workflow_attempt_id"]
     if attempt is not None and (not isinstance(attempt, str) or not attempt):

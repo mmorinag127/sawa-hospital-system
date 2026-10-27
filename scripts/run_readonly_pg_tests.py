@@ -21,7 +21,8 @@ MODULES = {
                   'backend/tests/integration/test_stg_menu_master_migration.py',
                   'backend/tests/contract/test_automation_bootstrap_postgres.py'],
     'menu-identity': ['backend/tests/integration/test_monthly_menu_identity_migration.py'],
-    'output': ['backend/tests/integration/pg_output_boundary_cases.py'],
+    'output': ['backend/tests/integration/pg_output_boundary_cases.py',
+               'backend/tests/unit/test_ocr_history_postgresql.py'],
     'formal': ['backend/tests/integration/test_formal_alembic_fresh_chain.py'],
 }
 DATABASES = {
@@ -83,7 +84,7 @@ def run(source, run_id, attempt, suite='readonly'):
         owner.write_text(str(source))
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(('PG', 'C1_', 'C2_', 'SAWA_OWNED_PG_'))
-           and key not in ('TEST_BOOTSTRAP_DB_URI', 'MODERNIZATION_PG_TEST_URI', 'PYTEST_ADDOPTS', 'PYTEST_PLUGINS')}
+           and key not in ('TEST_BOOTSTRAP_DB_URI', 'MODERNIZATION_PG_TEST_URI', 'OCR_HISTORY_PROJECTION_POSTGRES_URL', 'PYTEST_ADDOPTS', 'PYTEST_PLUGINS')}
     uri = 'sqlite:///' + str(root / 'bootstrap.sqlite3')
     env.update({key: uri for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')})
     env.update({
@@ -101,7 +102,7 @@ def run(source, run_id, attempt, suite='readonly'):
         {'host': str(socket), 'port': port}) for key, database in databases.items()})
     if suite == 'output':
         env.update({key: env['MODERNIZATION_PG_TEST_URI']
-                    for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')})
+                    for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI', 'OCR_HISTORY_PROJECTION_POSTGRES_URL')})
     lifecycle = []
     initialized = False
     owned_pid = None
