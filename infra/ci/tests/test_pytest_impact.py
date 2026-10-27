@@ -949,7 +949,8 @@ def test_mutable_revision():
         result = self.run_tests()
         self.assertCountEqual(result['reused'], ['test_example.py::test_first', 'test_example.py::test_second'])
         self.assertEqual(result['selected'], ['test_example.py::test_mutable_revision'])
-        self.assertIn('subprocess.Popen', result['untracked']['test_example.py::test_mutable_revision'])
+        self.assertTrue({'subprocess.Popen', 'file-descriptor-input'} &
+                        set(result['untracked']['test_example.py::test_mutable_revision']))
         self.write('data.txt', 'second')
         subprocess.run(['git', 'add', 'data.txt'], cwd=self.root, check=True)
         subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',

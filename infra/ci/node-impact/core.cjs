@@ -6,8 +6,7 @@ const cp = require('node:child_process');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { fileURLToPath } = require('node:url');
 const { syncBuiltinESMExports } = require('node:module');
-const { types } = require('node:util');
-const NativeError = Error;
+const { types, getCallSites } = require('node:util');
 
 const read = fs.readFileSync.bind(fs);
 const write = fs.writeFileSync.bind(fs);
@@ -155,15 +154,13 @@ function wrapMethod(object, name, before) {
 let pathReadSyncDepth = 0;
 // Options getters can read unrelated descriptors during a path-based read.
 function nativePathRead() {
-  const formatter = Object.getOwnPropertyDescriptor(NativeError, 'prepareStackTrace');
-  const limit = Object.getOwnPropertyDescriptor(NativeError, 'stackTraceLimit');
-  if (formatter?.get || formatter?.set || formatter?.value || limit?.get || limit?.set) return false;
+  if (typeof getCallSites !== 'function') return false;
   try {
-    const frames = new NativeError().stack.split('\n').slice(1).filter(line => !line.includes(__filename + ':'));
-    if (!/\bat (?:tryReadSync|Object\.readFileSync) \(node:fs:\d+:\d+\)$/.test(frames[0] || '')) return false;
+    const frames = getCallSites(20, {sourceMap: false}).filter(frame => frame.scriptName !== __filename);
+    if (frames[0]?.scriptName !== 'node:fs' || !['tryReadSync', 'readFileSync'].includes(frames[0].functionName)) return false;
     if (pathReadSyncDepth) return true;
-    const afterFs = frames.find(line => !/\(node:fs:\d+:\d+\)$/.test(line));
-    return /\(node:internal\/modules\/(?:cjs|esm)\//.test(afterFs || '');
+    const afterFs = frames.find(frame => frame.scriptName !== 'node:fs');
+    return /^node:internal\/modules\/(?:cjs|esm)\//.test(afterFs?.scriptName || '');
   } catch { return false; }
 }
 const originalReadFileSync = fs.readFileSync;

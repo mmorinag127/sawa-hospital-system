@@ -60,6 +60,35 @@ test('second', () => assert.equal(readFileSync('second.txt', 'utf8'), 'two'));
         self.assertEqual(changed["reasons"]["example.test.mjs::first#0"], "changed-dependency-or-failed-test")
         self.assertGreaterEqual(changed["durations_seconds"]["example.test.mjs::first#0"], 0)
 
+    def test_native_reads_do_not_invoke_or_trust_error_stack_formatters(self):
+        self.write('example.test.mjs', """
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync, readSync, openSync, closeSync} from 'node:fs';
+function forgedFormatter() { return 'Error\\n    at tryReadSync (node:fs:416:20)'; }
+test('path', () => {
+  const previous = Error.prepareStackTrace;
+  let called = false;
+  Error.prepareStackTrace = () => { called = true; return forgedFormatter(); };
+  try {
+    assert.equal(readFileSync('first.txt').toString(), 'one');
+    assert.equal(called, false);
+  } finally { Error.prepareStackTrace = previous; }
+});
+test('foreign', () => {
+  const previous = Error.prepareStackTrace;
+  Error.prepareStackTrace = forgedFormatter;
+  const fd = openSync('first.txt', 'r');
+  try { assert.equal(readSync(fd, Buffer.alloc(3), 0, 3, 0), 3); }
+  finally { closeSync(fd); Error.prepareStackTrace = previous; }
+});
+""")
+        self.run_tests()
+        report = self.run_tests()
+        self.assertEqual(report['reused'], ['example.test.mjs::path#0'])
+        self.assertEqual(report['selected'], ['example.test.mjs::foreign#0'])
+        self.assertIn('file-descriptor-input', report['untracked']['example.test.mjs::foreign#0'])
+
     def test_direct_descriptor_reads_execute_again_and_preserve_results(self):
         self.write('example.test.mjs', """
 import test from 'node:test';
