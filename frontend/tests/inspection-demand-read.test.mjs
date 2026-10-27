@@ -5,6 +5,7 @@ import harness from "./helpers/modernization-react-dom.cjs";
 const { mount, transport, deferred } = harness;
 const page = "src/pages/orders/[id]/inspection-v2.tsx";
 const url = id => `/orders/${id}/workflow-v2/display`;
+const rawUrl = id => `/orders/${id}/workflow-v2/inspection`;
 const detailUrl = id => `/orders/${id}/workflow-v2/inspection-detail/candidate-${id}`;
 const value = (id, revision = 7) => ({
   workflow: { order_id: id, revision, state: "ocr_selected", selected_ocr_result_id: `selected-${id}` },
@@ -23,6 +24,7 @@ async function setup(configure = () => {}) {
   const t = transport();
   for (const id of ["A", "B"]) {
     t.on("get", url(id), () => ({ data: value(id) }));
+    t.on("get", rawUrl(id), () => ({ data: value(id) }));
     t.on("get", `/orders/${id}/document`, () => ({ data: new Blob(["synthetic PDF"]) }));
     t.on("get", detailUrl(id), () => ({ data: detailValue(id) }));
   }
@@ -111,7 +113,7 @@ test("failed initial inspection retries without blocking the independent PDF", a
     await h.click(h.button("画面全体を再読み込み"));
     assert.match(h.document.body.textContent, /selected-A/);
     assert.equal(attempts, 2);
-    assert.ok(t.calls.filter(c => c.url === url("A")).every(c => c.config.params.history_details === false));
+    assert.ok(t.calls.filter(c => c.url === url("A")).every(c => c.config.params.scope === "inspection"));
     assert.ok(h.revoked.includes("blob:synthetic-1"));
   } finally { await h.close(); }
 });
@@ -145,8 +147,8 @@ test("same-revision raw JSON is only rendered when open and does not replace ins
   const pending = deferred();
   const { h, t } = await setup(t => {
     t.on("get", detailUrl("A"), () => pending.promise);
-    t.on("get", url("A"), call => ({
-      data: call.config?.params?.history_details === false ? value("A") : {
+    t.on("get", rawUrl("A"), () => ({
+      data: {
         ...value("A"), source: "full-only-data",
         ocr_results: [value("A").ocr_results[0], detailValue("A")],
       },
@@ -160,7 +162,7 @@ test("same-revision raw JSON is only rendered when open and does not replace ins
     await h.click(h.button("詳細を確認"));
     await toggle(h, true);
     await h.waitFor(() => h.document.querySelector("details pre"));
-    assert.equal(t.calls.filter(c => c.url === url("A")).length, 2);
+    assert.equal(t.calls.filter(c => c.url === rawUrl("A")).length, 1);
     assert.match(h.document.querySelector("details pre").textContent, /full-only-data/);
     assert.equal(h.document.querySelector(".state-panel").textContent, state);
     assert.equal(h.document.querySelector("iframe").src, pdf);
@@ -170,7 +172,7 @@ test("same-revision raw JSON is only rendered when open and does not replace ins
     await toggle(h, false);
     assert.equal(h.document.querySelector("details pre"), null);
     await toggle(h, true);
-    assert.equal(t.calls.filter(c => c.url === url("A")).length, 3);
+    assert.equal(t.calls.filter(c => c.url === rawUrl("A")).length, 2);
   } finally { await h.close(); }
 });
 
@@ -178,8 +180,7 @@ test("raw failure retry, close cancellation and late response invalidation", asy
   const pending = deferred();
   let fullCalls = 0;
   const { h, t } = await setup(t => {
-    t.on("get", url("A"), call => {
-      if (call.config?.params?.history_details === false) return { data: value("A") };
+    t.on("get", rawUrl("A"), () => {
       if (++fullCalls === 1) throw new Error("raw failed");
       return pending.promise;
     });
@@ -199,10 +200,10 @@ test("raw failure retry, close cancellation and late response invalidation", asy
 
 for (const initialPending of [true, false]) test(`late ${initialPending ? "initial" : "raw"} response and URL ownership retire on order switch`, async () => {
   const initial = deferred(), raw = deferred();
-  const { h, t } = await setup(t => t.on("get", url("A"), call =>
-    call.config?.params?.history_details === false
-      ? initialPending ? initial.promise : { data: value("A") }
-      : raw.promise));
+  const { h, t } = await setup(t => {
+    t.on("get", url("A"), () => initialPending ? initial.promise : { data: value("A") });
+    t.on("get", rawUrl("A"), () => raw.promise);
+  });
   try {
     if (initialPending) assert.equal(h.document.querySelector("details"), null);
     else await toggle(h, true);
@@ -215,30 +216,28 @@ for (const initialPending of [true, false]) test(`late ${initialPending ? "initi
     assert.match(h.document.body.textContent, /selected-B/);
     assert.doesNotMatch(h.document.body.textContent, /selected-A/);
     assert.equal(h.document.querySelector("details pre"), null);
-    assert.ok(t.calls.filter(c => c.url === url("A")).every(c => c.config.signal.aborted));
+    assert.ok(t.calls.filter(c => [url("A"), rawUrl("A")].includes(c.url)).every(c => c.config.signal.aborted));
     assert.ok(h.revoked.includes("blob:synthetic-1"));
   } finally { await h.close(); }
 });
 
 test("raw cannot start before the initial revision is available", async () => {
   const initial = deferred();
-  const { h, t } = await setup(t => t.on("get", url("A"), call =>
-    call.config?.params?.history_details === false ? initial.promise : {
-      data: value("A"),
-    }));
+  const { h, t } = await setup(t => t.on("get", url("A"), () => initial.promise));
   try {
     assert.equal(h.document.querySelector("details"), null);
     assert.equal(t.calls.filter(c => c.url === url("A")).length, 1);
     await h.settle(() => initial.resolve({ data: value("A") }));
     await toggle(h, true);
     await h.waitFor(() => h.document.querySelector("details pre"));
-    assert.equal(t.calls.filter(c => c.url === url("A")).length, 2);
+    assert.equal(t.calls.filter(c => c.url === url("A")).length, 1);
+    assert.equal(t.calls.filter(c => c.url === rawUrl("A")).length, 1);
   } finally { await h.close(); }
 });
 
 test("raw revision mismatch preserves inspection/PDF until whole-page reload", async () => {
-  const { h, t } = await setup(t => t.on("get", url("A"), call => ({
-    data: call.config?.params?.history_details === false ? value("A") : {
+  const { h, t } = await setup(t => t.on("get", rawUrl("A"), () => ({
+    data: {
       ...value("A", 8), workflow: { ...value("A", 8).workflow, headline: "updated workflow" },
     },
   })));
@@ -270,8 +269,7 @@ test("whole-page reload invalidates a pending raw response even at the same revi
       if (++pdfCalls === 1) throw new Error("PDF failed");
       return { data: new Blob(["retry PDF"]) };
     });
-    t.on("get", url("A"), call => call.config?.params?.history_details === false
-      ? { data: value("A") } : pending.promise);
+    t.on("get", rawUrl("A"), () => pending.promise);
   });
   try {
     await toggle(h, true);
