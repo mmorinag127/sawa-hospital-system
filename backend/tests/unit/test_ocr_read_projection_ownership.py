@@ -190,7 +190,7 @@ def test_dict_subclass_keeps_deepcopy():
     assert original["nested"] == ["raw"]
 
 
-def test_only_selectability_borrows_and_other_seven_calls_are_unchanged():
+def test_only_selectability_and_metadata_summary_borrow_other_edit_consumers_keep_copies():
     calls = []
     helper_calls = []
     for path in (ROOT / "backend/src").rglob("*.py"):
@@ -205,7 +205,17 @@ def test_only_selectability_borrows_and_other_seven_calls_are_unchanged():
                     or (isinstance(node.func, ast.Attribute) and node.func.attr == "_payload_for_evidence_with_accepted_values")):
                 helper_calls.append((path, node))
     assert len(calls) == 7
-    assert all(not node.keywords for _, node in calls)
+    summary_calls = [(path, node) for path, node in calls if node.keywords]
+    assert len(summary_calls) == 1
+    summary_path, summary_call = summary_calls[0]
+    assert summary_path.name == "ocr_evidence_service.py"
+    assert len(summary_call.keywords) == 1
+    keyword = summary_call.keywords[0]
+    assert keyword.arg == "copy_payload"
+    assert isinstance(keyword.value, ast.Name) and keyword.value.id == "include_payload"
+    serializer = next(item for item in ast.parse(summary_path.read_text()).body
+                      if isinstance(item, ast.FunctionDef) and item.name == "_serialize_evidence_run")
+    assert serializer.lineno <= summary_call.lineno <= serializer.end_lineno
     assert len(helper_calls) == 2
     wrapper_calls = [(path, node) for path, node in helper_calls
                      if path.name == "recognition_acceptance_service.py"]
@@ -233,7 +243,7 @@ def test_only_selectability_borrows_and_other_seven_calls_are_unchanged():
     assert {name: sum(path.name == name for path, _ in calls) for name in
             ("ocr_evidence_service.py", "order_service.py", "order_workflow_v2_service.py")} == {
                 "ocr_evidence_service.py": 1, "order_service.py": 4, "order_workflow_v2_service.py": 2}
-    assert sum(not node.keywords for _, node in calls) == 7
+    assert sum(not node.keywords for _, node in calls) == 6
 
 
 @pytest.mark.parametrize("mode", ["ready", "review", "accepted", "diagnostic", "operatorEdited"])
