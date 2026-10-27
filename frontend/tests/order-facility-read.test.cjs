@@ -53,7 +53,7 @@ test('saved version and explicit pending week use distinct canonical contracts',
   for(const change of [{facility_id:'OTHER'},{effective_date:'2026-10-25'},{version:null},{config:null}]) {
     assert.throws(() => helpers.facilityReadConfig(pending, {source:'canonical_json',facility_id:'F',effective_date:'2026-11-01',version:{version_id:'next'},config:{},...change}));
   }
-  assert.match(source, /\}, \[facilityConfigReadKey\]\)/);
+  assert.match(source, /\}, \[facilityConfigReadKey, visibleStep, visibleStepReady\]\)/);
   assert.match(source, /facilityConfigLoadedKey === facilityConfigReadKey/);
 });
 function harness({dirty=false, pending=false} = {}) {

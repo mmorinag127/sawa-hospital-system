@@ -118,7 +118,10 @@ for(const kind of ['detail','raw']) for(const boundary of ['revision','refresh',
       const expected=kind==='detail'?{ocr_result_id:'evidence',workflow_revision:7,selectable:true}:f.payload();
       await f.h.settle(async()=>{
         pending.resolve({data:expected});
-        if(boundary==='revision'&&kind==='detail') await assert.rejects(operation,/再読込/);
+        if(boundary==='revision'&&kind==='detail') {
+          assert.equal(signal.aborted,true, 'revision change retires the outstanding detail request');
+          assert.equal(await operation,null);
+        }
         else await operation;
       });
       if(boundary==='revision'&&kind==='raw') assert.match(f.probe.current.error,/再読込/);
