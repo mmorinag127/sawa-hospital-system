@@ -83,8 +83,8 @@ def _job_summary(session, order, state, meta):
     identity = meta.get("ocr_job_id")
     if not identity:
         missing = state.state in {"ocr_running", "ocr_completed", "ocr_failed"} or "ocr_job_id" in meta or "ocr_job_attempt_id" in meta
-        return None, "ocr_job_not_recorded" if missing else None
-    keys = ("workflow_attempt_id", "ocr_started_at", "run_started_at", "ocr_finished_at",
+        return None, "ocr_job_not_recorded" if missing else None, None
+    keys = ("workflow_attempt_id", "workflow_completion_revision", "ocr_started_at", "run_started_at", "ocr_finished_at",
             "run_finished_at", "stage_updated_at", "ocr_elapsed_seconds", "elapsed_seconds",
             "processing_stage", "result_state", "progress_step", "progress_total", "progress_label",
             "error", "error_detail", "error_user_message", "recovery_action", "evidence_run_id", "rerun_terminal_receipt")
@@ -93,6 +93,7 @@ def _job_summary(session, order, state, meta):
         OcrJob.id, OcrJob.order_id, OcrJob.order_document_id, OcrJob.uploaded_pdf_id,
         OcrJob.input_artifact_digest, OcrJob.template_version_id, OcrJob.status,
         OcrJob.error_message, OcrJob.created_at, OcrJob.updated_at,
+        OcrJob.input_reference, OcrJob.output_reference, OcrJob.template_id,
     ]
     if session.get_bind().dialect.name == "postgresql":
         object_metrics = case((func.json_typeof(metrics) == "object", metrics), else_=literal({}, type_=JSON))
@@ -103,37 +104,44 @@ def _job_summary(session, order, state, meta):
         native_object = case((func.json_typeof(native) == "object", native), else_=literal({}, type_=JSON))
         native_fields = func.json_to_record(native_object).table_valued(
             column("execution_id", JSON), column("ingest_ocr_mode", JSON), column("intake_protocol", JSON),
+            column("job_id", JSON), column("order_id", JSON),
         ).render_derived(with_types=True).lateral("display_execution")
         statement = select(*fields, *(projected.c[key] for key in keys),
             native_fields.c.execution_id.label("native_execution_id"),
             native_fields.c.ingest_ocr_mode.label("native_mode"),
             native_fields.c.intake_protocol.label("native_protocol"),
+            native_fields.c.job_id.label("native_job_id"), native_fields.c.order_id.label("native_order_id"),
         ).select_from(OcrJob).join(projected, true()).join(native_fields, true())
     else:
         statement = select(*fields, *(metrics[key].label(key) for key in keys),
             metrics["nonworkflow_execution"]["execution_id"].label("native_execution_id"),
             metrics["nonworkflow_execution"]["ingest_ocr_mode"].label("native_mode"),
-            metrics["nonworkflow_execution"]["intake_protocol"].label("native_protocol"))
+            metrics["nonworkflow_execution"]["intake_protocol"].label("native_protocol"),
+            metrics["nonworkflow_execution"]["job_id"].label("native_job_id"),
+            metrics["nonworkflow_execution"]["order_id"].label("native_order_id"))
     row = session.execute(statement.where(OcrJob.id == identity)).mappings().first()
     if row is None:
-        return None, "ocr_recorded_job_missing"
+        return None, "ocr_recorded_job_missing", None
     if row["order_id"] != order.id:
-        return None, "ocr_recorded_job_order_mismatch"
+        return None, "ocr_recorded_job_order_mismatch", None
     if type(row["workflow_attempt_id"]) is not type(meta.get("ocr_job_attempt_id")) or row["workflow_attempt_id"] != meta.get("ocr_job_attempt_id"):
-        return None, "ocr_recorded_job_attempt_mismatch"
+        return None, "ocr_recorded_job_attempt_mismatch", None
     if row["order_document_id"] != order.current_document_id:
-        return None, "ocr_recorded_job_document_mismatch"
+        return None, "ocr_recorded_job_document_mismatch", None
     if row["template_version_id"] != state.template_version_id:
-        return None, "template_version_mismatch"
+        return None, "template_version_mismatch", None
     values = dict(row)
     values["metrics"] = {key: values.pop(key) for key in keys}
     if values.pop("native_mode") == "hakodate":
         values["metrics"]["nonworkflow_execution"] = {
             "ingest_ocr_mode": "hakodate", "execution_id": values["native_execution_id"],
             "intake_protocol": values["native_protocol"],
+            "job_id": values["native_job_id"], "order_id": values["native_order_id"],
         }
     # A recorded terminal summary is not a selectable result or a command proof.
-    return workflow._serialize_ocr_job(SimpleNamespace(**values)), None
+    status = str(values["status"] or "").strip().lower()
+    common = workflow._recorded_hospital_job_status(values, {"status": status})
+    return workflow._serialize_ocr_job(SimpleNamespace(**values)), None, common
 
 
 def _candidates(session, order, state, meta):
@@ -172,7 +180,7 @@ def get_display(order_id, *, scope="summary"):
             serialized = (workflow._workflow_blocker_projection(serialized, error) if error else
                           workflow._apply_canonical_workflow_state_projection(serialized, row=state, meta=meta,
                             state=workflow._canonical_workflow_v2_state(state, meta)))
-            serialized["ocr_job"], serialized["ocr_job_binding_error"] = _job_summary(session, order, state, meta)
+            serialized["ocr_job"], serialized["ocr_job_binding_error"], serialized["common_job_status"] = _job_summary(session, order, state, meta)
         serialized["validation_state"] = "references_only"
         versions = [dict(row) for row in session.execute(select(
             OrderVersion.version_no, OrderVersion.document_id, OrderVersion.message_id,

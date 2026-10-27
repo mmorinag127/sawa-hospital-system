@@ -125,6 +125,11 @@ def test_display_summary_never_rebuilds_or_verifies_ocr_on_read(history_case, mo
     assert "ocr_candidates" not in value
     assert "menu_amount_resolution" not in value["workflow"]
     assert "sheet" not in (value.get("saved_sheet") or {})
+    job = value["workflow"]["ocr_job"]
+    if job is not None:
+        common = value["workflow"]["common_job_status"]
+        assert common["jobId"] == job["ocr_job_id"]
+        assert common["sourceState"] == job["status"]
 
 
 def test_saved_output_display_does_not_materialize_and_sheet_scope_preserves_edits(history_case, monkeypatch):
