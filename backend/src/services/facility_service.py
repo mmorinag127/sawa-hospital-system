@@ -2,7 +2,7 @@ import json
 from copy import deepcopy
 from uuid import uuid4
 from loguru import logger
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from src.db import session_scope
 from src.models.facility import Facility, FacilityArea, FacilityConfig
@@ -311,6 +311,10 @@ def sync_facility_names_from_master() -> int:
         return 0
     updated = 0
     with session_scope() as session:
+        facility_ids = [entry.get("facility_id") for entry in facilities if isinstance(entry, dict)]
+        existing = {fac.id: fac for fac in session.scalars(select(Facility).where(Facility.id.in_(
+            [facility_id for facility_id in facility_ids if isinstance(facility_id, str)]
+        )))}
         for entry in facilities:
             if not isinstance(entry, dict):
                 continue
@@ -318,9 +322,11 @@ def sync_facility_names_from_master() -> int:
             name = entry.get("facility_name")
             if not isinstance(facility_id, str) or not facility_id.strip() or not isinstance(name, str) or not name.strip():
                 raise canonical_facility_store.CanonicalStoreError("facility_projection_identity_missing")
-            fac = session.get(Facility, facility_id)
+            fac = existing.get(facility_id)
             if fac is None:
-                session.add(Facility(id=facility_id, name=name))
+                fac = Facility(id=facility_id, name=name)
+                session.add(fac)
+                existing[facility_id] = fac
                 updated += 1
             elif fac.name != name:
                 fac.name = name

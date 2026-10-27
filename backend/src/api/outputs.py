@@ -5,7 +5,6 @@ from datetime import date as dt_date
 from html import escape
 from pathlib import Path
 
-import pandas as pd
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse
 from loguru import logger
@@ -766,6 +765,8 @@ def _preview_csv(path: str, encoding: str, limit: int) -> dict:
 def _normalize_cell(value) -> str:
     if value is None:
         return ""
+    import pandas as pd
+
     if isinstance(value, float) and pd.isna(value):
         return ""
     if hasattr(value, "isoformat"):

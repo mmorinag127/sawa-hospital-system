@@ -19,7 +19,6 @@ from xml.sax.saxutils import escape as xml_escape
 from uuid import uuid4
 from sqlalchemy import select
 
-import pandas as pd
 from loguru import logger
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
@@ -189,6 +188,8 @@ def _ensure_date(value):
         return None
     if hasattr(value, "isoformat"):
         return value
+    import pandas as pd
+
     try:
         return pd.to_datetime(value).date()
     except Exception:
@@ -222,6 +223,8 @@ def _format_jp_date(value: Any) -> str:
         return ""
     if hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
         return f"{value.year}年{value.month}月{value.day}日"
+    import pandas as pd
+
     try:
         parsed = pd.to_datetime(value).date()
         return f"{parsed.year}年{parsed.month}月{parsed.day}日"
@@ -234,6 +237,8 @@ def _coerce_to_date(value: Any) -> dt_date | None:
         return None
     if isinstance(value, dt_date):
         return value
+    import pandas as pd
+
     try:
         return pd.to_datetime(value).date()
     except Exception:

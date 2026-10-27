@@ -104,6 +104,11 @@ def test_workflow_v2_ocr_run_forwards_selected_document_id(monkeypatch) -> None:
 
 
 def test_download_document_uses_selected_document_version(monkeypatch) -> None:
+    from tests.helpers.document_read import seed_document_read
+    seed_document_read("ORDdocversion", "gs://bucket/current.pdf", versions=(
+        (1, "DOC-v1", "gs://bucket/old.pdf", False),
+        (2, "DOC-v2", "gs://bucket/current.pdf", True),
+    ))
     client = TestClient(app)
     captured: dict[str, object] = {}
 
@@ -153,6 +158,7 @@ def test_download_document_uses_selected_document_version(monkeypatch) -> None:
         assert captured_receipt is receipt
         return fake_load(uri), "original", "direct"
     monkeypatch.setattr(orders_api, "_load_document_bytes", load_selected)
+    monkeypatch.setattr(orders_api.order_service, "get_order_by_id", lambda *a, **k: pytest.fail("PDF read assembled the full order"))
 
     res = client.get("/orders/ORDdocversion/document?document_id=DOC-v1")
 

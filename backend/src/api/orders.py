@@ -1173,16 +1173,30 @@ def get_order_shipping_statuses(order_id: str, limit: int = 10, max_age_days: in
 
 @router.get("/{order_id}/document", dependencies=[Depends(require_role("operator"))])
 def download_document(order_id: str, document_id: str | None = None):
-    _order, selected_version = _resolve_order_document_version(order_id, document_id)
-    uri = selected_version.get("storage_uri")
-    if not uri:
-        raise HTTPException(status_code=404, detail="document not found")
     try:
+        from sqlalchemy import select
         from src.db import session_scope
         from src.models.order import Order
+        from src.models.order_version import OrderVersion
         from src.services.workflow_attempt_guard_service import capture_selected_pdf_receipt
         with session_scope() as session:
-            receipt = capture_selected_pdf_receipt(session, session.get(Order, order_id), selected_version)
+            order = session.get(Order, order_id)
+            if order is None:
+                raise HTTPException(status_code=404, detail="order not found")
+            versions = [dict(row) for row in session.execute(select(
+                OrderVersion.document_id, OrderVersion.version_no, OrderVersion.message_id,
+                OrderVersion.storage_uri, OrderVersion.is_current,
+            ).where(OrderVersion.order_id == order_id).order_by(
+                OrderVersion.version_no.desc(), OrderVersion.received_at.desc(), OrderVersion.id.desc(),
+            )).mappings()]
+            selected_version = _select_order_document_version({
+                "document_id": order.current_document_id,
+                "document": order.document_uri,
+                "versions": versions,
+                "current_version": next((row for row in versions if row["is_current"]), None),
+            }, document_id)
+            uri = selected_version["storage_uri"]
+            receipt = capture_selected_pdf_receipt(session, order, selected_version)
         data, source_kind, source_variant = _load_document_bytes(uri, receipt)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1404,6 +1418,10 @@ def _resolve_order_document_version(order_id: str, document_id: str | None = Non
     order = order_service.get_order_by_id(order_id, allow_unresolved_menu_amount=True)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
+    return order, _select_order_document_version(order, document_id)
+
+
+def _select_order_document_version(order: dict, document_id: str | None = None) -> dict:
     selected_document_id = str(document_id or "").strip()
     versions = [item for item in (order.get("versions") or []) if isinstance(item, dict)]
     if selected_document_id:
@@ -1411,15 +1429,15 @@ def _resolve_order_document_version(order_id: str, document_id: str | None = Non
             if str(version.get("document_id") or "").strip() == selected_document_id:
                 if not str(version.get("storage_uri") or "").strip():
                     raise HTTPException(status_code=404, detail="document not found")
-                return order, version
+                return version
         raise HTTPException(status_code=404, detail="document version not found")
     current_version = order.get("current_version") if isinstance(order.get("current_version"), dict) else None
     if current_version and str(current_version.get("storage_uri") or "").strip():
-        return order, current_version
+        return current_version
     uri = str(order.get("document") or "").strip()
     if not uri:
         raise HTTPException(status_code=404, detail="document not found")
-    return order, {
+    return {
         "document_id": order.get("document_id"),
         "version_no": None,
         "storage_uri": uri,

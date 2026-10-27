@@ -3,6 +3,7 @@
   "scope": "staging-core-and-page-repair",
   "groups": {
     "page-read-results-and-response-ownership": [
+      "backend/tests/unit/test_cold_start_work.py",
       "backend/tests/unit/test_page_performance_projections.py",
       "backend/tests/unit/test_order_list_response_ownership.py",
       "backend/tests/unit/test_ocr_read_projection_ownership.py",

@@ -1542,6 +1542,8 @@ def test_daily_bags_excludes_forbidden_but_keeps_saved_quantities(owned_outputs)
 def test_download_document_does_not_fetch_signed_substitute_when_own_read_fails(monkeypatch):
     client = TestClient(app)
     order_id = "ORD-document-fallback-001"
+    from tests.helpers.document_read import seed_document_read
+    seed_document_read(order_id, "gs://bucket/path/document.pdf")
     pdf_bytes = b"%PDF-1.4 fallback"
 
     monkeypatch.setattr(
@@ -1576,6 +1578,8 @@ def test_download_document_does_not_fetch_signed_substitute_when_own_read_fails(
 def test_download_document_never_borrows_archived_ocr_input_when_selected_source_missing(monkeypatch):
     client = TestClient(app)
     order_id = "ORD-document-fallback-ocr-001"
+    from tests.helpers.document_read import seed_document_read
+    seed_document_read(order_id, "gs://bucket/path/document.pdf")
     archived_pdf = b"%PDF-archived-original"
 
     monkeypatch.setattr(
@@ -1615,6 +1619,8 @@ def test_download_document_never_borrows_archived_ocr_input_when_selected_source
 def test_download_document_requires_authoritative_proof_before_source_read(monkeypatch):
     client = TestClient(app)
     order_id = "ORD-document-missing-001"
+    from tests.helpers.document_read import seed_document_read
+    seed_document_read(order_id, "gs://bucket/path/document.pdf")
 
     monkeypatch.setattr(
         orders_api.order_service,

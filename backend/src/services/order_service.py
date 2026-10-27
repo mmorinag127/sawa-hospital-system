@@ -27,7 +27,6 @@ from src.workers.ingest_mail_adapter import IngestEmailPayload, parse_ingest_pay
 from loguru import logger
 from uuid import uuid4
 from datetime import date, datetime, timedelta, timezone
-import pandas as pd
 from sqlalchemy import select, delete, func, or_, update
 
 from src.db import session_scope
@@ -1096,6 +1095,8 @@ def _daypart_sort_components(value: object) -> tuple[int, str]:
 
 
 def _normalize_entry_date(value: object) -> date | None:
+    import pandas as pd
+
     if isinstance(value, date):
         try:
             if pd.isna(value):
@@ -3933,6 +3934,8 @@ def _validate_reparse_date_anchor_stability(
 
 
 def _parse_date_value(value):
+    import pandas as pd
+
     if value is None:
         return None
     if isinstance(value, date):
@@ -3957,6 +3960,8 @@ def _parse_date_value(value):
 def _normalize_received_at(value):
     if hasattr(value, "isoformat"):
         return value
+    import pandas as pd
+
     try:
         return pd.to_datetime(value)
     except Exception:
@@ -17210,7 +17215,8 @@ def apply_submitted_ocr_sheet(
             return None, "order_not_found"
         if not order.facility_code:
             return None, "facility_missing"
-        received_at = order.received_at or pd.Timestamp.utcnow()
+        from pandas import Timestamp
+        received_at = order.received_at or Timestamp.utcnow()
         facility_id = order.facility_code
 
     facility_config = deepcopy(synchronous_write_input["configured_input"]["facility"])
@@ -27632,7 +27638,8 @@ def _reparse_order_with_attempt(
         if not document_uri:
             return None, "document_missing"
         existing_document_uri = str(document_uri or "").strip() or None
-        received_at = order.received_at or pd.Timestamp.utcnow()
+        from pandas import Timestamp
+        received_at = order.received_at or Timestamp.utcnow()
         message_id = order.message_id
         existing_week_code = order.week_code
         existing_lines_updated_at = order.lines_updated_at

@@ -14,7 +14,10 @@ import threading
 from zoneinfo import ZoneInfo
 from loguru import logger
 from uuid import uuid4
-import pandas as pd
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from sqlalchemy import delete, select, inspect, or_, text, func
 
@@ -820,6 +823,8 @@ def _parse_monthly_menu(
     sheet_name: str | None,
     month_id_hint: str | None,
 ) -> tuple[date | None, str | None, list[dict], list[dict]]:
+    import pandas as pd
+
     if filename.lower().endswith(".csv"):
         raise ValueError("monthly menu parser does not support csv")
     raw = pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, header=None)
@@ -1895,7 +1900,7 @@ def _merge_master_defaults(items: list[dict], facility_id: str | None = None) ->
     return merged
 
 
-def _infer_menu_name_column(df: pd.DataFrame) -> str | None:
+def _infer_menu_name_column(df: "pd.DataFrame") -> str | None:
     if df.empty:
         return None
     best_col = None
@@ -1932,7 +1937,9 @@ def _load_menu_frame(
     filename: str,
     sheet_name: str | None,
     header: int | None = 0,
-) -> pd.DataFrame:
+) -> "pd.DataFrame":
+    import pandas as pd
+
     if filename.lower().endswith(".csv"):
         return pd.read_csv(BytesIO(file_bytes), header=header)
     if sheet_name:
@@ -2357,6 +2364,8 @@ def _preview_saved_import(session, row, resolutions, *, initial=False):
 
 
 def save_menu_import(month_id, content, archived, *, sheet_name, scope_override, diet_types=None):
+    import pandas as pd
+
     if _normalize_month_id(month_id) != month_id:
         raise ValueError("explicit YYYY-MM month is required")
     if hashlib.sha256(content).hexdigest() != archived.content_sha256 or not archived.file_uri:
@@ -4331,6 +4340,8 @@ def resolve_menu_defaults_in_session(session, names: list[str], facility_id: str
 
 
 def import_condiments(file_bytes: bytes, filename: str, sheet_name: str | None = None) -> dict:
+    import pandas as pd
+
     ensure_menu_schema()
     if filename.lower().endswith(".csv"):
         raise ValueError("condiment import does not support csv")

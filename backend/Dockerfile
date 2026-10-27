@@ -26,6 +26,9 @@ COPY ocr_pipeline ./ocr_pipeline
 COPY tmp ./tmp
 COPY pyproject.toml .
 
+# Compile immutable application sources at build time, not on each cold start.
+RUN python -m compileall -q src migrations ocr_pipeline
+
 # Trust Cloud Run's reverse proxy headers so request.url matches the public HTTPS URL.
 # This is required for verifying Cloud Scheduler OIDC tokens whose audience is the target URL.
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips", "*"]
