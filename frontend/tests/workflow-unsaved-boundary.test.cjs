@@ -58,9 +58,10 @@ async function setup() {
   const h = await mount('src/pages/orders/[id]/workflow-v2.tsx', { api: t.api, probe, route: ROOT,
     routerState: { beforePopState(fn) { pop = fn; } } });
   try {
-    await h.waitFor(() => probe.current?.workflow?.revision === 7 && probe.current.sheetPayload
+    await h.waitFor(() => probe.current?.workflow?.revision === 7
       && probe.current.effectiveSelectedDocumentId === PDF && probe.current.contextFacilityResolution.status === 'ready');
     await h.settle(() => probe.current.setVisibleStep(3));
+    await h.waitFor(() => probe.current.sheetPayload);
     return { h, t, state, probe, source, pop: (...args) => pop(...args) };
   } catch (error) { await h.close(); throw error; }
 }

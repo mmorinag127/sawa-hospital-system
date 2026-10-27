@@ -88,8 +88,8 @@ test('second response cannot finish the first pending request', async () => {
 
 for (const [target, method] of [
   [url.replace('worker.example', 'foreign.example'), 'GET'],
-  [url.replace('/O/', '/B/'), 'GET'], [url.replace('=true', '=false'), 'GET'],
-  [url + '&extra=1', 'GET'], [url.replace('?include_ocr_results=true', ''), 'GET'],
+  [url.replace('/O/', '/B/'), 'GET'], [url.replace('scope=summary', 'scope=output'), 'GET'],
+  [url + '&extra=1', 'GET'], [url.replace('?scope=summary', ''), 'GET'],
   [url + '#fragment', 'GET'], [url, 'POST'], ['not a URL', 'GET'],
 ]) {
   test(`unmatched URL/method cannot satisfy read: ${target} ${method}`, async () => {

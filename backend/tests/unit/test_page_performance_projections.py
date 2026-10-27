@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 from tests.contract.test_orders_ocr_sheet_history_api import history_case  # noqa: F401
+from tests.helpers.owned_output import owned_outputs  # noqa: F401
 
 from src.services import snapshot_serialization as snapshots
 from src.services import system_process_log_service as logs
@@ -169,25 +170,37 @@ def test_display_rejects_missing_saved_reference_instead_of_rebuilding(history_c
     assert value is None and error == "output_bundle_artifact_missing"
 
 
-def test_confirmed_display_reads_snapshot_without_rebuilding_ocr(history_case, monkeypatch):
+def test_confirmed_display_reads_snapshot_without_rebuilding_ocr(owned_outputs, isolated_formal_schema, monkeypatch):
+    from datetime import datetime
+    from sqlalchemy import select
+    from src.db import session_scope
+    from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
+    from src.workers.ingest_mail_adapter import IngestEmailPayload
+    from tests.unit.test_disabled_facility_columns import _snapshot
     from src.services import workflow_display_read_service as display
     from src.services import order_workflow_v2_service as workflow
-    case = history_case()
-    source = case.produce(cell_values="5")
-    case.save(source["sheet"])
-    case.command("POST", "bagging")
-    confirmed = case.command("POST", "confirm", {"confirmed_by": "operator"})
+    order = owned_outputs.create_order_from_ingest(
+        IngestEmailPayload(message_id="display-confirmed", pdf_uri="component:unregistered",
+            received_at=datetime(2026, 4, 18), facility_hint="display-facility",
+            week_hint="2026-04@2026-04-18~2026-04-18"),
+        lines=[{"date": "2026-04-18", "daypart": "昼", "menu_name": "Display dish",
+            "diet_type": "regular", "area_id": "2F", "bag_type": "standard", "quantity_original": 5}],
+        recipe={"qty_per_serving": 40, "unit_type": "g", "category": "副菜", "temp_type": "cold"},
+        physical_slot=0)
+    with session_scope() as session:
+        snapshot_id = session.scalar(select(OrderConfirmedSnapshot.id).where(OrderConfirmedSnapshot.order_id == order["id"]))
+    before = _snapshot(isolated_formal_schema)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("confirmed display rebuilt its producer")
     monkeypatch.setattr(workflow, "_build_materialization_candidate_for_saved_sheet", forbidden)
     monkeypatch.setattr(workflow, "_serialize_ocr_result", forbidden)
-    with case.readonly():
-        value, error = display.get_display(case.id, scope="output")
+    value, error = display.get_display(order["id"], scope="output")
     assert error is None
     assert value["workflow"]["state"] == "confirmed"
-    assert value["workflow"]["confirmed_snapshot_id"] == confirmed["confirmed_snapshot_id"]
-    assert value["output_bundle"]["confirmed_snapshot_id"] == confirmed["confirmed_snapshot_id"]
+    assert value["workflow"]["confirmed_snapshot_id"] == snapshot_id
+    assert value["output_bundle"]["confirmed_snapshot_id"] == snapshot_id
+    assert _snapshot(isolated_formal_schema) == before
 
 
 def test_read_operation_never_survives_response_or_changed_input(monkeypatch):

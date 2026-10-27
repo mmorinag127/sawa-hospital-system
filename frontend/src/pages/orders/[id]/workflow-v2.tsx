@@ -1401,6 +1401,7 @@ export default function OrderWorkflowV2Page() {
   const [displayLoading, setDisplayLoading] = useState(false);
   const displayRequestRef = useRef(0);
   const displayReadyRef = useRef("");
+  const summaryDocumentRef = useRef<{order: string; route: string; document: string} | null>(null);
   const [storedQuadReview, setQuadReview] = useState<QuadReviewPayload | null>(null);
   const [quadReviewLoading, setQuadReviewLoading] = useState(false);
   const [quadReviewMessage, setQuadReviewMessage] = useState("");
@@ -2620,6 +2621,12 @@ export default function OrderWorkflowV2Page() {
 
   useEffect(() => {
     if (!orderId) return;
+    const previous = summaryDocumentRef.current;
+    summaryDocumentRef.current = {order: orderId, route: router.asPath, document: effectiveSelectedDocumentId};
+    // Resolving the current document from this response is not a new selection.
+    if (previous?.order === orderId && previous.route === router.asPath && !previous.document
+        && effectiveSelectedDocumentId === currentDocumentId && workflow?.order_id === orderId
+        && Number.isInteger(workflow.revision)) return;
     const own=capturePageOwner();
     let active=true;
     const controller = new AbortController();
@@ -2651,7 +2658,9 @@ export default function OrderWorkflowV2Page() {
       displayReadyRef.current = scope;
     })().catch((err) => {
       if (current() && !controller.signal.aborted) setError(formatApiError(err, "表示データの取得に失敗しました"));
-    }).finally(() => { if (current()) setDisplayLoading(false); });
+    }).finally(() => {
+      if (active && request === displayRequestRef.current) setDisplayLoading(false);
+    });
     return () => { active = false; controller.abort(); };
   }, [orderId, workflow?.order_id, workflow?.revision, visibleStep, visibleStepReady, displayEpoch]);
 

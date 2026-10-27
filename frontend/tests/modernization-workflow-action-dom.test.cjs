@@ -130,11 +130,12 @@ async function setup() {
   try {
     await h.waitFor(() => probe.current?.workflow?.revision === 7
       && probe.current.effectiveSelectedDocumentId === PDF
-      && probe.current.contextFacilityResolution.status === 'ready'
-      && probe.current.sheetPayload && probe.current.facilityTemplateColumnDraft.length === fields.length,
-    'transport-derived workflow, sheet, selected PDF and authored facility columns');
+      && probe.current.contextFacilityResolution.status === 'ready',
+    'transport-derived workflow and selected PDF');
     // View navigation only; no ownership/CAS/validation state is injected.
     await h.settle(() => probe.current.setVisibleStep(3));
+    await h.waitFor(() => probe.current.sheetPayload && probe.current.facilityTemplateColumnDraft.length === fields.length,
+      'sheet and authored facility columns after opening the editor');
     return { ...f, h, probe };
   } catch (error) { await h.close(); throw error; }
 }

@@ -78,12 +78,14 @@ async function setup() {
     'workflow', 'sheetPayload', 'sheetDirty', 'sheetDirtyRef', 'pendingSheetCellEditsRef',
     'expandedCellCopyMode', 'expandedCellCopySaving', 'updateExpandedCellCopyMode',
     'updateSheetCell', 'flushPendingSheetCellEdits', 'refreshAll', 'error',
-    'setSelectedDocumentId', 'workflowRevisionRef',
+    'setSelectedDocumentId', 'workflowRevisionRef', 'setVisibleStep',
     'editorVersion', 'runAnomalyReview', 'showSheetReview', 'saveSheet', 'beginWorkflowEditorEdit',
   ]};
   const h = await mount('src/pages/orders/[id]/workflow-v2.tsx',
     {api: t.api, probe, route: `/orders/${ORDER}/workflow-v2`, routerState: {query: {id: ORDER}}});
   try {
+    await h.waitFor(() => probe.current?.workflow);
+    await h.settle(() => probe.current.setVisibleStep(3));
     await h.waitFor(() => probe.current?.sheetPayload?.rows?.[0]?.[3] === '26');
     await h.settle();
     return {h, t, pending, probe, state,

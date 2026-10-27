@@ -54,8 +54,8 @@ function listeners() {
 }
 function emitJSON(events, data, status = 200) {
   events.emit(response(`/api/orders/${id}/workflow-v2`, data.workflow, status));
-  events.emit(response(`/api/orders/${id}/workflow-v2/display?scope=summary`, {...data.inspection, order_header: data.order}));
-  events.emit(response(`/api/orders/${id}/workflow-v2/display?scope=sheet`, {...data.inspection, order_header: data.order}));
+  events.emit(response(`/api/orders/${id}/workflow-v2/display?scope=summary`, {...data.inspection, order_header: data.order}, status));
+  events.emit(response(`/api/orders/${id}/workflow-v2/display?scope=sheet`, {...data.inspection, order_header: data.order}, status));
   events.emit(response(`/api/orders/${id}`, data.order));
 }
 test('all four waiters precede navigation and delayed PDF body prevents early success', async () => {

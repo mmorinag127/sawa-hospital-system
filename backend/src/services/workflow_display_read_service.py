@@ -166,6 +166,8 @@ def get_display(order_id, *, scope="summary"):
         meta = workflow._workflow_meta(state, copy_meta=False)
         serialized = workflow._serialize_workflow(state, meta_override=meta) if state else workflow._serialize_uninitialized_workflow(order)
         if state:
+            if not workflow._workflow_meta_has_confirmed_context(meta) and not serialized.get("context_suggestion"):
+                serialized["context_suggestion"] = workflow._order_context_suggestion(order)
             error = _reference_error(session, order, state, meta)
             serialized = (workflow._workflow_blocker_projection(serialized, error) if error else
                           workflow._apply_canonical_workflow_state_projection(serialized, row=state, meta=meta,
