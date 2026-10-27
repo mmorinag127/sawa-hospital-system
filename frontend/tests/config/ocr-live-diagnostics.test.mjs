@@ -50,10 +50,12 @@ test('original verification asserts, wait and readonly/external gates remain in 
   const original = execFileSync('git', ['show', `725fd66139927ad60c058145647b79c61d705b44:${file}`], {encoding:'utf8'});
   const current = readFileSync(new URL('../../scripts/verify-ocr-live.mjs', import.meta.url), 'utf8');
   for (const line of original.split('\n').filter(line => /assert\.|await expect\(|waitForLoadState\('networkidle'\)|allowedExternalUrls\.has|allowedMethods\.has|route\.abort|\.click\(\)/.test(line))) {
-    const expected = line.includes('assert.equal(workflowReceipt.ok, true)') || line.includes('assert.equal(ocrResultsReceipt.ok, true)')
+    const expected = ['workflowReceipt', 'ocrResultsReceipt', 'orderReceipt'].some(name => line.includes(`assert.equal(${name}.ok, true)`))
       ? '    assert.equal(inspectionReceipt.ok, true);'
       : line.includes("item.pathname.endsWith('/workflow-v2')")
-      ? line.replace("item.pathname.endsWith('/workflow-v2')", "item.pathname.endsWith('/inspection')")
+      ? line.replace("item.pathname.endsWith('/workflow-v2')", "item.pathname.endsWith('/display')")
+      : line.includes('item.pathname === `/api/orders/${identity.orderId}`')
+      ? "    assert.equal(liveOrder.id, identity.orderId);"
       : line.includes('assert.ok(liveEvidence)')
       ? "  assert.equal(matches.length, 1);"
       : line.includes("assert.equal(liveEvidence.selectable, false)")
@@ -63,7 +65,7 @@ test('original verification asserts, wait and readonly/external gates remain in 
       : line === "      await expect(card.getByRole('button', {name: '正解にする', exact: true})).toBeDisabled();"
       ? "      await expect(card.getByRole('button', {name: accepted ? '正解にする' : '確認して正解にする', exact: true})).toBeEnabled();"
       : line.includes("item.pathname.endsWith('/ocr-results')")
-      ? line.replace("item.pathname.endsWith('/ocr-results')", "item.pathname.endsWith('/inspection')") : line;
+      ? line.replace("item.pathname.endsWith('/ocr-results')", "item.pathname.endsWith('/display')") : line;
     assert.ok(current.includes(expected.trim()), expected);
   }
   assert.ok(current.includes("watchRead('inspection', '/workflow-v2/display?scope=summary')"));

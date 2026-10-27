@@ -79,6 +79,7 @@ export async function readLiveCandidate({ inspection, workflow, identity, page, 
   assert.equal(inspection.workflow.order_id, identity.orderId);
   assert.equal(inspection.workflow.revision, workflow.revision);
   assert.ok(Number.isInteger(workflow.revision));
+  if (requireUnselected) assert.equal(workflow.selected_ocr_result_id, null);
   const pendingCandidates = readCandidates?.();
   await page.locator('.step-nav button').filter({ hasText: 'OCR選択' }).click();
   if (pendingCandidates) {

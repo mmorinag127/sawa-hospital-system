@@ -291,7 +291,7 @@ for (const change of ['revision','selected','quantity','approval','warning']) te
     if (change === 'revision') data.workflow.revision++;
     if (change === 'selected') data.workflow.selected_ocr_result_id = null;
     if (change === 'quantity') data.saved_sheet.sheet.rows[0].quantity = 99;
-    if (change === 'approval') data.ocr_candidates.results[0].recognition_acceptance.values.F11 = '9';
+    if (change === 'approval') evidence.recognition_acceptance.values.F11 = '9';
     if (change === 'warning') data.workflow.warnings.push('synthetic-private');
   }), output = mkdtempSync(join(tmpdir(), 'live-change-'));
   try {
