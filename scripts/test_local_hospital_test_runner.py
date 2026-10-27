@@ -389,7 +389,8 @@ class ReceiptContractTest(unittest.TestCase):
                              ('system-status-safe-screenshot', 'mjs'), ('dashboard-monthly-read-status', 'mjs'),
                              ('ocr-admin-readonly', 'mjs'), ('hospital-readonly-pages', 'mjs'),
                              ('hospital-additional-readonly', 'mjs'),
-                             ('system-status-demand-read', 'mjs'), ('operator-entry-readonly', 'mjs'))
+                             ('system-status-demand-read', 'mjs'), ('operator-entry-readonly', 'mjs'),
+                             ('operational-page-demand-read', 'mjs'))
         self.assertEqual(set(config), {'tests/' + name + '.test.cjs' for name in cjs}
                          | {'tests/config/' + name + '.test.' + suffix for name, suffix in settings})
         self.assertEqual(set(e2e), {'tests/e2e/' + name + '.spec.ts' for name in (

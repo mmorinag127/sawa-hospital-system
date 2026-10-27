@@ -140,7 +140,7 @@ def _owner(session, order, state, job, meta, native_deliveries, evidence_reads):
             selected=request["selected_version_input"])
     # Active reservations and completed result revisions are different contracts;
     # the shared guard checks the former CAS or the latter exact terminal receipt.
-    business = workflow_delivery._business_status(session, delivery)
+    business = workflow_delivery._business_status_from_rows(delivery, job, state)
     if business not in {"terminal", "eligible", "handoff", "awaiting_output"}:
         raise ValueError("ocr_workflow_" + business)
     return "workflow", attempt, delivery.delivery_generation, delivery.selected_pdf_receipt

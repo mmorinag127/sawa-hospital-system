@@ -47,4 +47,9 @@ def _string_keyed_json(value: Any) -> bool:
 
 
 def snapshots_equal(left: Any, right: Any) -> bool:
+    if left is right and _string_keyed_json(left):
+        # Validate the native value once; nonfinite numbers and deep/cyclic
+        # inputs must retain the serializer's original rejection behavior.
+        canonical_snapshot_json(left)
+        return True
     return canonical_snapshot_json(left) == canonical_snapshot_json(right)

@@ -228,7 +228,18 @@ def test_real_workflow_delivery_and_attempt_share_current_projection(native_sql,
                 payload, producer_version="hakodate_best_method_pipeline")
             assert error is None
             assert workflow_delivery.acknowledge_claim(claim["delivery_id"], claim["generation"], claim["claim_token"])
-    result = read(f)
+    with f["factory"]() as session:
+        from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
+        row = session.get(WorkflowOcrDelivery, queued["delivery"]["id"])
+        job = session.get(OcrJob, row.job_id)
+        state = session.get(OrderWorkflowState, row.order_id)
+        expected = workflow_delivery._business_status_from_rows(row, job, state)
+        with patch.object(session, "get", wraps=session.get) as fresh_get:
+            assert workflow_delivery._business_status(session, row) == expected
+            assert len(fresh_get.call_args_list) == 2
+            assert all(call.kwargs.get("populate_existing") is True for call in fresh_get.call_args_list)
+    with patch.object(workflow_delivery, "_business_status", side_effect=AssertionError("read view must not reload command rows")):
+        result = read(f)
     current = result["items"][0]
     assert current["blockers"] == [], current["blockers"]
     assert current["status"] == ("succeeded" if terminal else "running"), result

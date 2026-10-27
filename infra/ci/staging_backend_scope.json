@@ -10,7 +10,9 @@
       "backend/tests/unit/test_workflow_demand_parity.py",
       "backend/tests/unit/test_recorded_ocr_job_projection.py",
       "backend/tests/unit/test_modernization_workflow_read_receipt.py",
-      "backend/tests/unit/test_current_ocr_operations.py"
+      "backend/tests/unit/test_current_ocr_operations.py",
+      "backend/tests/unit/test_read_model_lifetime.py",
+      "backend/tests/unit/test_snapshot_serialization_db_free.py"
     ],
     "ocr-original-targets-artifacts-and-operator-values": [
       "backend/tests/unit/test_acceptance_validation_dataflow.py",

@@ -160,24 +160,27 @@ export default function HomePage() {
   const [error, setError] = useState("");
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [systemLoading, setSystemLoading] = useState(true);
   const [shippingToday, setShippingToday] = useState<ShippingTodayPayload | null>(null);
   const [facilityNameMap, setFacilityNameMap] = useState<FacilityNameMap>({});
   const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint>>({});
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     const loadOrders = async () => {
       setOrdersLoading(true);
       const maxAttempts = 2;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
-          const res = await apiClient.get<OrderDashboard>("/orders/dashboard");
+          const res = await apiClient.get<OrderDashboard>("/orders/dashboard", { signal: controller.signal });
           if (cancelled) return;
           setOrderDashboard(res.data);
           setError("");
           setOrdersLoading(false);
           return;
         } catch {
+          if (cancelled) return;
           if (attempt < maxAttempts) {
             await new Promise((resolve) => window.setTimeout(resolve, 800));
             if (cancelled) return;
@@ -194,18 +197,21 @@ export default function HomePage() {
     void loadOrders();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, []);
 
   useEffect(() => {
+    const controller = new AbortController();
     apiClient
-      .get("/system/status", {params: {view: "operations"}})
+      .get("/system/status", {params: {view: "operations"}, signal: controller.signal})
       .then((res) => {
-        setSystemStatus(res.data || null);
+        if (!controller.signal.aborted) setSystemStatus(res.data || null);
       })
       .catch(() => {
-        setSystemStatus(null);
-      });
+        if (!controller.signal.aborted) setSystemStatus(null);
+      }).finally(() => { if (!controller.signal.aborted) setSystemLoading(false); });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -414,30 +420,30 @@ export default function HomePage() {
       <section className="summary-strip">
         <article className="summary-tile tone-new" style={{ animationDelay: "40ms" }}>
           <p className="summary-label">未着</p>
-          <p className="summary-value">{stats.counts["未着"]}</p>
+          <p className="summary-value">{orderDashboard ? stats.counts["未着"] : "未取得"}</p>
         </article>
         <article className="summary-tile tone-warn" style={{ animationDelay: "80ms" }}>
           <p className="summary-label">未確定申請</p>
-          <p className="summary-value">{stats.counts["要確認"]}</p>
+          <p className="summary-value">{orderDashboard ? stats.counts["要確認"] : "未取得"}</p>
         </article>
         <article className="summary-tile tone-ok" style={{ animationDelay: "120ms" }}>
           <p className="summary-label">確定</p>
-          <p className="summary-value">{stats.counts["確定"]}</p>
+          <p className="summary-value">{orderDashboard ? stats.counts["確定"] : "未取得"}</p>
         </article>
         <article className="summary-tile tone-error" style={{ animationDelay: "160ms" }}>
           <p className="summary-label">エラー</p>
-          <p className="summary-value">{stats.counts["エラー"]}</p>
+          <p className="summary-value">{orderDashboard ? stats.counts["エラー"] : "未取得"}</p>
         </article>
         <article className="summary-tile tone-muted" style={{ animationDelay: "200ms" }}>
           <p className="summary-label">施設未確定</p>
-          <p className="summary-value">{stats.unresolved}</p>
+          <p className="summary-value">{orderDashboard ? stats.unresolved : "未取得"}</p>
         </article>
         <article className="summary-tile summary-tile-wide" style={{ animationDelay: "240ms" }}>
           <p className="summary-label">OCR / 取込状況</p>
           <div className="summary-inline">
             <span>最新取込: {formatDate(stats.latestReceived)}</span>
-            <span>総注文数: {stats.total}</span>
-            <span>エラー件数: {stats.counts["エラー"]}</span>
+            <span>総注文数: {orderDashboard ? stats.total : "未取得"}</span>
+            <span>エラー件数: {orderDashboard ? stats.counts["エラー"] : "未取得"}</span>
           </div>
         </article>
       </section>
@@ -447,7 +453,7 @@ export default function HomePage() {
           <header className="panel-header">
             <h2>システム状態</h2>
             <span className="badge">
-              {systemStatus?.intake?.mode === "manual_upload" ? "PDF取込" : "自動取込"}
+              {systemStatus == null ? "未取得" : systemStatus.intake?.mode === "manual_upload" ? "PDF取込" : "自動取込"}
             </span>
             <Link href="/system-status" className="ghost-link">
               管理画面
@@ -466,7 +472,7 @@ export default function HomePage() {
                 保存先: {systemStatus?.intake?.manual_upload_storage?.mode ?? "未取得"}
               </p>
               <p className="system-meta">
-                永続化: {systemStatus?.intake?.manual_upload_storage?.persisted ? "あり" : "なし"}
+                永続化: {systemStatus?.intake?.manual_upload_storage?.persisted == null ? "未取得" : systemStatus.intake.manual_upload_storage.persisted ? "あり" : "なし"}
               </p>
               {systemStatus?.intake?.manual_upload_enabled &&
                 !systemStatus?.intake?.manual_upload_storage?.configured && (
@@ -478,7 +484,7 @@ export default function HomePage() {
             <div className="system-card">
               <p className="system-label">Google 認証</p>
               <p className="system-value">
-                {systemStatus?.oauth_config?.configured ? "OK" : "未設定"}
+                {systemStatus?.oauth_config == null ? "未取得" : systemStatus.oauth_config.configured ? "OK" : "未設定"}
               </p>
               <p className="system-meta">
                 ログイン不具合時はOAuth Client ID / Origin / Redirect設定を確認
@@ -486,7 +492,7 @@ export default function HomePage() {
             </div>
             <div className="system-card">
               <p className="system-label">現行の注文OCR</p>
-              <OcrOperationsSummary operations={systemStatus?.ocr_operations} />
+              {systemLoading ? <p role="status">OCR状態を取得中...</p> : <OcrOperationsSummary operations={systemStatus?.ocr_operations} />}
             </div>
           </div>
         </article>
@@ -513,7 +519,7 @@ export default function HomePage() {
               <tbody>
                 {weekRows.length === 0 ? (
                   <tr>
-                    <td colSpan={6}>データがありません。</td>
+                    <td colSpan={6}>{orderDashboard == null ? (ordersLoading ? "読み込み中です。" : "未取得") : "データがありません。"}</td>
                   </tr>
                 ) : (
                   weekRows.map((row) => (
@@ -535,11 +541,11 @@ export default function HomePage() {
         <article className="panel">
           <header className="panel-header">
             <h2>未確定申請</h2>
-            <span className="badge">{stats.counts["要確認"]}</span>
+            <span className="badge">{orderDashboard ? stats.counts["要確認"] : "未取得"}</span>
           </header>
           <div className="pending-list">
             {pendingOrders.length === 0 ? (
-              <p className="subtle">未確定申請はありません。</p>
+              <p className="subtle">{orderDashboard == null ? (ordersLoading ? "読み込み中です。" : "未取得") : "未確定申請はありません。"}</p>
             ) : (
               pendingOrders.map((order) => (
                 <Link key={order.id} href={order.source_kind === "uploaded_pdf" ? `/pdf-upload?uploaded_pdf_id=${encodeURIComponent(order.uploaded_pdf_id || "")}` : `/orders/${order.id}`} className="pending-item">
@@ -617,7 +623,7 @@ export default function HomePage() {
         </header>
         <div className="menu-grid">
           {weekList.length === 0 ? (
-            <p className="subtle">月次メニューの対象月がありません。</p>
+            <p className="subtle">{orderDashboard == null ? (ordersLoading ? "読み込み中です。" : "未取得") : "月次メニューの対象月がありません。"}</p>
           ) : (
             weekList.map((week) => {
               const info = menuInfo[week];

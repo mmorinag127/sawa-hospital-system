@@ -2,8 +2,8 @@ import os
 from functools import lru_cache
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import Session, sessionmaker, declarative_base
 from src.maintenance.database_target import explicit_database_uri
 from src import staging_data
 
@@ -82,6 +82,25 @@ def control_session_scope():
     with staging_data.dataset_context("test"):
         with session_scope() as session:
             yield session
+
+
+@contextmanager
+def retain_read_models(session):
+    """Keep one operation's loaded rows alive until all read consumers finish."""
+    if not isinstance(session, Session):
+        yield
+        return
+    references = {id(row): row for row in session.identity_map.values()}
+
+    def retain(_session, row):
+        references[id(row)] = row
+
+    event.listen(session, 'loaded_as_persistent', retain)
+    try:
+        yield
+    finally:
+        event.remove(session, 'loaded_as_persistent', retain)
+        references.clear()
 
 
 @contextmanager

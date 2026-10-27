@@ -100,6 +100,26 @@ def published(tmp_path, local_storage):
     return persist(tmp_path / "producer")
 
 
+def test_read_only_target_views_preserve_values_and_default_callers_keep_defensive_copies():
+    from src.services import order_service
+    target = {"sheet_cell": "E11", "source": "recognizer", "metadata": {"original": ["", "symbol"]}}
+    payload = {"hakodate_preprocessing": {"target_cell_map": [target]}}
+    before = deepcopy(payload)
+    analysis = artifacts._EvidenceAnalysis()
+    copied = analysis.target_cells(payload)
+    viewed = analysis.target_cells(payload, copy_records=False)
+    assert copied == viewed == [target]
+    assert copied[0] is not target
+    assert viewed[0] is target
+    assert payload == before
+    copied[0]["metadata"]["original"].append("edited")
+    assert payload == before
+    payload["hakodate_target_cell_map"] = [{**target, "sheet_cell": "F11"}]
+    for copy_records in (True, False):
+        with pytest.raises(ValueError, match="hakodate_own_artifact_representations_conflict"):
+            order_service._extract_hakodate_target_cells_from_payload(payload, copy_records=copy_records)
+
+
 def test_packet_reads_bound_parallelism_and_preserve_pinned_dataset(published, monkeypatch):
     from collections import Counter
     from threading import Barrier, Lock, current_thread

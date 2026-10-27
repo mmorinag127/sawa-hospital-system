@@ -9110,8 +9110,8 @@ def _validate_hakodate_owned_artifacts(payload, expected_source, *, allow_review
         raise ValueError("hakodate_expected_cells_changed")
     if not isinstance(expected, list) or not expected or any(not isinstance(cell, str) or not cell for cell in expected) or len(set(expected)) != len(expected):
         raise ValueError("hakodate_expected_cells_missing")
-    targets = (_extract_hakodate_target_cells_from_payload(payload) if _analysis is None
-               else _analysis.target_cells(payload))
+    targets = (_extract_hakodate_target_cells_from_payload(payload, copy_records=False) if _analysis is None
+               else _analysis.target_cells(payload, copy_records=False))
     _validate_hakodate_target_identities(targets)
     from src.services.hakodate_step_review_pipeline_service import canonical_target_semantics
     if any(not isinstance(cell.get("metadata"), dict) for cell in targets):
@@ -9129,8 +9129,8 @@ def _validate_hakodate_owned_artifacts(payload, expected_source, *, allow_review
     record_evidence_ids = [record.get("evidence_id") for record in raw_records]
     if any(not isinstance(identity, str) or not identity for identity in record_evidence_ids) or len(set(record_evidence_ids)) != len(record_evidence_ids):
         raise ValueError("hakodate_own_record_identity_missing")
-    records = (_extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=expected_source["selected_pdf_receipt"]["order_id"])
-               if _analysis is None else _analysis.evidence_records(payload, order_id=expected_source["selected_pdf_receipt"]["order_id"]))
+    records = (_extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=expected_source["selected_pdf_receipt"]["order_id"], copy_records=False)
+               if _analysis is None else _analysis.evidence_records(payload, order_id=expected_source["selected_pdf_receipt"]["order_id"], copy_records=False))
     recognizer_regions = []
     for record in records:
         metadata = record.get("engine_metadata") or {}
@@ -23241,7 +23241,7 @@ def _first_hakodate_payload_list(payload: dict[str, Any], paths: list[tuple[str,
     return deepcopy(canonical) if copy_records else canonical
 
 
-def _extract_hakodate_target_cells_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _extract_hakodate_target_cells_from_payload(payload: dict[str, Any] | None, *, copy_records: bool = True) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
     raw_cells = _first_hakodate_payload_list(
@@ -23251,6 +23251,7 @@ def _extract_hakodate_target_cells_from_payload(payload: dict[str, Any] | None) 
             ("hakodate_preprocessing", "target_cells"),
             ("hakodate_target_cell_map",),
         ],
+        copy_records=copy_records,
     )
     cells: list[dict[str, Any]] = []
     for cell in raw_cells:

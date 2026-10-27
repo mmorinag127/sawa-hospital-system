@@ -138,6 +138,11 @@ def _business_status(session, row):
     """Only an exact persisted terminal receipt permits a business-result ACK."""
     job = session.get(OcrJob, row.job_id, populate_existing=True)
     workflow = session.get(OrderWorkflowState, row.order_id, populate_existing=True)
+    return _business_status_from_rows(row, job, workflow)
+
+
+def _business_status_from_rows(row, job, workflow):
+    """Evaluate a captured read view; command callers still reload above."""
     if job is None or workflow is None:
         raise ValueError("workflow_ocr_delivery_business_owner_missing")
     metrics = job.metrics if isinstance(job.metrics, dict) else {}

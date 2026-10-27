@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -24,6 +25,10 @@ CONTACT_CLOSURE_AST_SHA256 = '43a4777c44b109fb0c77407807975e7aa34005c93cc4a90d5a
 
 def _original_canonical_snapshot_json(value: Any) -> str:
     return json.dumps(_json_snapshot(value), sort_keys=True, ensure_ascii=False, allow_nan=False)
+
+
+def _original_snapshots_equal(left: Any, right: Any) -> bool:
+    return _original_canonical_snapshot_json(left) == _original_canonical_snapshot_json(right)
 
 
 def test_contact_closure_matches_pinned_original_and_runtime_aliases():
@@ -57,9 +62,14 @@ def test_snapshot_functions_match_pinned_original_outputs_hashes_and_errors():
     baseline = next(node for node in original.body if isinstance(node, ast.FunctionDef) and node.name == '_original_canonical_snapshot_json')
     baseline.name = 'canonical_snapshot_json'
     assert hashlib.sha256(ast.dump(baseline).encode()).hexdigest() == ORIGINAL_AST_SHA256['canonical_snapshot_json']
-    assert {node.name: hashlib.sha256(ast.dump(node).encode()).hexdigest()
-            for node in functions if node.name != 'canonical_snapshot_json'} == {
-                name: digest for name, digest in ORIGINAL_AST_SHA256.items() if name != 'canonical_snapshot_json'}
+    baseline_equal = next(node for node in original.body if isinstance(node, ast.FunctionDef) and node.name == '_original_snapshots_equal')
+    baseline_equal.name = 'snapshots_equal'
+    for node in ast.walk(baseline_equal):
+        if isinstance(node, ast.Name) and node.id == '_original_canonical_snapshot_json':
+            node.id = 'canonical_snapshot_json'
+    assert hashlib.sha256(ast.dump(baseline_equal).encode()).hexdigest() == ORIGINAL_AST_SHA256['snapshots_equal']
+    unchanged = next(node for node in functions if node.name == '_json_snapshot')
+    assert hashlib.sha256(ast.dump(unchanged).encode()).hexdigest() == ORIGINAL_AST_SHA256['_json_snapshot']
     samples = [(None, 'null'), (False, 'false'), (True, 'true'), (0, '0'), (1, '1'),
                ('', '""'), ('日本語', '"日本語"'),
                ([False, 0, True, 1], '[false, 0, true, 1]'),
@@ -99,6 +109,33 @@ def test_snapshot_functions_match_pinned_original_outputs_hashes_and_errors():
                 assert str(error) == message
             else:
                 raise AssertionError('invalid snapshot accepted')
+
+
+def test_identical_native_snapshot_serializes_once_without_changing_errors():
+    from src.services import snapshot_serialization as pure
+    payload = {'nested': [1, 1.0, -0.0, True, None, '日本語']}
+    with patch.object(pure.json, 'dumps', wraps=json.dumps) as dumps:
+        assert pure.snapshots_equal(payload, payload)
+        assert dumps.call_count == 1
+    cyclic = []
+    cyclic.append(cyclic)
+    deep = []
+    for _ in range(1500):
+        deep = [deep]
+    shared = []
+    for value in [float('nan'), float('inf'), {'nested': [float('-inf')]}, cyclic, deep,
+                  {'integer': 10 ** 5000}, object(), {1: 'numeric key'}, [shared, shared]]:
+        try:
+            expected = pure.canonical_snapshot_json(value) == pure.canonical_snapshot_json(value)
+        except Exception as original_error:
+            try:
+                pure.snapshots_equal(value, value)
+            except Exception as actual_error:
+                assert type(actual_error) is type(original_error)
+            else:
+                raise AssertionError('original serialization error was suppressed')
+        else:
+            assert pure.snapshots_equal(value, value) is expected
 
 
 def test_guard_reexports_identical_pure_functions():

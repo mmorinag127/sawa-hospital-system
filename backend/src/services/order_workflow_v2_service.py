@@ -22,7 +22,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.exc import IntegrityError
 from loguru import logger
 
-from src.db import session_scope
+from src.db import retain_read_models, session_scope
 from src.models.facility_template_version import FacilityTemplateVersion
 from src.models.order import Order, OrderLine
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
@@ -755,7 +755,7 @@ def ensure_ocr_prerequisites(order_id: str) -> tuple[dict[str, Any] | None, str 
         return _serialize_workflow(row, ocr_job=ocr_job), None
 
 
-def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None) -> dict[str, Any] | None:
+def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None, _analysis=None) -> dict[str, Any] | None:
     if job is None:
         return None
     metrics = job.metrics if isinstance(job.metrics, dict) else {}
@@ -775,7 +775,7 @@ def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None) -> dict[str, 
                 and execution.get("evidence_run_id") == evidence.id and execution.get("disposition") == "rejected"):
             from src.services.ocr_failure_diagnostics import recognition_failure_details
             diagnostics = recognition_failure_details(payload, evidence_run_id=evidence.id)
-            quantity_content_editable = ocr_evidence_service.evidence_run_is_selectable(evidence)
+            quantity_content_editable = ocr_evidence_service.evidence_run_is_selectable(evidence, _analysis=_analysis)
     elapsed_seconds = _coerce_float(metrics.get("ocr_elapsed_seconds") or metrics.get("elapsed_seconds"))
     started_at = _coerce_datetime(metrics.get("ocr_started_at") or metrics.get("run_started_at"))
     finished_at = _coerce_datetime(
@@ -1049,6 +1049,7 @@ def _serialize_workflow(
     ocr_job: OcrJob | None = None,
     meta_override: dict[str, Any] | None = None,
     session: Any = None,
+    _analysis=None,
 ) -> dict[str, Any]:
     meta = meta_override if isinstance(meta_override, dict) else _workflow_meta(row)
     effective_template_id = _effective_workflow_template_id(meta)
@@ -1083,7 +1084,7 @@ def _serialize_workflow(
         "bagging_result_id": meta.get("bagging_result_id"),
         "output_bundle_id": meta.get("output_bundle_id"),
         "pre_save_checks": _workflow_pre_save_checks(meta),
-        "ocr_job": _serialize_ocr_job(ocr_job, session=session),
+        "ocr_job": _serialize_ocr_job(ocr_job, session=session, _analysis=_analysis),
         "ocr_job_binding_error": None,
         "common_job_status": _recorded_workflow_job_status(row, meta, ocr_job),
         "blockers": list(row.blockers_json or []),
@@ -1430,7 +1431,7 @@ def _serialize_workflow_checked(
         [order.id], read_session=session, _loaded_jobs=loaded_jobs,
     ).get(order.id) or {}
     ocr_job = loaded_jobs.get(job_binding["job_id"]) if job_binding.get("job") is not None else None
-    serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta, session=session)
+    serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta, session=session, _analysis=_analysis)
     if job_binding.get("error"):
         serialized["ocr_job_binding_error"] = job_binding["error"]
         serialized["common_job_status"] = None
@@ -1735,21 +1736,22 @@ def _workflow_menu_amount_resolution(session, order, workflow, *, _analysis=None
 
 
 def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflowState | None, *, _analysis=None, _checked_workflow=None) -> dict[str, Any]:
-    if _checked_workflow is not None:
-        serialized = copy.deepcopy(_checked_workflow)
-    elif workflow is None:
-        serialized = _serialize_uninitialized_workflow(order)
-    else:
-        serialized = _serialize_workflow_checked(
-            session, order=order, workflow=workflow, _analysis=_analysis,
-        )
-    resolution = _workflow_menu_amount_resolution(session, order, workflow, _analysis=_analysis)
-    serialized["menu_amount_resolution"] = resolution
-    if resolution["status"] == "unresolved" and resolution["blocker"] not in serialized.get("blockers", []):
-        serialized["blockers"] = list(serialized.get("blockers") or []) + [resolution["blocker"]]
-    if not serialized.get("context_suggestion"):
-        serialized["context_suggestion"] = _order_context_suggestion(order)
-    return serialized
+    with retain_read_models(session):
+        if _checked_workflow is not None:
+            serialized = copy.deepcopy(_checked_workflow)
+        elif workflow is None:
+            serialized = _serialize_uninitialized_workflow(order)
+        else:
+            serialized = _serialize_workflow_checked(
+                session, order=order, workflow=workflow, _analysis=_analysis,
+            )
+        resolution = _workflow_menu_amount_resolution(session, order, workflow, _analysis=_analysis)
+        serialized["menu_amount_resolution"] = resolution
+        if resolution["status"] == "unresolved" and resolution["blocker"] not in serialized.get("blockers", []):
+            serialized["blockers"] = list(serialized.get("blockers") or []) + [resolution["blocker"]]
+        if not serialized.get("context_suggestion"):
+            serialized["context_suggestion"] = _order_context_suggestion(order)
+        return serialized
 
 
 def get_workflow_readonly(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -4933,7 +4935,7 @@ def final_confirm(
 def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_details: bool = True, include_order_header: bool = False) -> tuple[dict[str, Any] | None, str | None]:
     from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
     analysis = _EvidenceAnalysis()
-    with session_scope() as session, session.no_autoflush:
+    with session_scope() as session, session.no_autoflush, retain_read_models(session):
         _inspection_next("order")
         order, error = _get_order_or_error(session, order_id)
         if error:
@@ -5069,7 +5071,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
 
 
 def get_inspection_detail(order_id: str, evidence_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    with session_scope() as session, session.no_autoflush:
+    with session_scope() as session, session.no_autoflush, retain_read_models(session):
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error

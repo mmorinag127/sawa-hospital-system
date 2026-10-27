@@ -59,13 +59,13 @@ class _EvidenceAnalysis:
         from src.services.recognition_acceptance_service import accepted_values
         return accepted_values(payload)
 
-    def target_cells(self, payload):
+    def target_cells(self, payload, *, copy_records=True):
         from src.services.order_service import _extract_hakodate_target_cells_from_payload
-        return _extract_hakodate_target_cells_from_payload(payload)
+        return _extract_hakodate_target_cells_from_payload(payload, copy_records=copy_records)
 
-    def evidence_records(self, payload, *, order_id):
+    def evidence_records(self, payload, *, order_id, copy_records=True):
         from src.services.order_service import _extract_hakodate_ocr_evidence_records_from_payload
-        return _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id)
+        return _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id=order_id, copy_records=copy_records)
 
     def assign(self, *, evidence_records, target_cells, accepted_values):
         from src.services.hakodate_ocr_evidence_service import assign_evidence_to_target_cells

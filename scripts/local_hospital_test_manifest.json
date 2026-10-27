@@ -194,7 +194,7 @@
     },
     {
       "name": "image-source-contracts",
-      "command": "python3 scripts/test_modernization_image_ci.py -v",
+      "command": "python3 scripts/test_modernization_image_ci.py -v && python3 scripts/test_resolve_backend_base_image.py -v",
       "legacy_steps": []
     },
     {

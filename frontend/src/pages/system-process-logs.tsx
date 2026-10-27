@@ -1,7 +1,7 @@
 import { Button } from "@mui/material";
 import { ThemeProvider } from "@mui/material/styles";
 import { sawaTheme } from "@sawa/ui";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
 
@@ -67,8 +67,9 @@ export default function SystemProcessLogsPage() {
   const [selectedId, setSelectedId] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [detail, setDetail] = useState<ProcessLogItem | null>(null);
-  const [detailError, setDetailError] = useState("");
+  const [downloadBusy, setDownloadBusy] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
+  const downloadController = useRef<AbortController | null>(null);
 
   const selected = useMemo(
     () => items.find((item) => item.id === selectedId) || items[0] || null,
@@ -99,16 +100,46 @@ export default function SystemProcessLogsPage() {
   }, []);
 
   useEffect(() => {
+    downloadController.current?.abort();
+    downloadController.current = null;
+    setDownloadBusy(false);
+    setDownloadError("");
+    return () => downloadController.current?.abort();
+  }, [selected?.id]);
+
+  const downloadOriginal = async () => {
+    if (!selected || downloadBusy) return;
     const controller = new AbortController();
-    setDetail(null);
-    setDetailError("");
-    if (selected) {
-      apiClient.get<ProcessLogItem>(`/system/process-logs/${encodeURIComponent(selected.id)}`, { signal: controller.signal })
-        .then(({ data }) => { if (!controller.signal.aborted) setDetail(data); })
-        .catch(() => { if (!controller.signal.aborted) setDetailError("詳細の取得に失敗しました。"); });
+    downloadController.current = controller;
+    setDownloadBusy(true);
+    setDownloadError("");
+    try {
+      const { data } = await apiClient.get<Blob>(`/system/process-logs/${encodeURIComponent(selected.id)}`, {
+        signal: controller.signal, responseType: "blob",
+      });
+      if (controller.signal.aborted || downloadController.current !== controller) return;
+      const url = URL.createObjectURL(data);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "process-log.json";
+      document.body.appendChild(anchor);
+      try {
+        anchor.click();
+      } finally {
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      }
+    } catch {
+      if (!controller.signal.aborted && downloadController.current === controller) {
+        setDownloadError("元データのダウンロードに失敗しました。");
+      }
+    } finally {
+      if (downloadController.current === controller) {
+        downloadController.current = null;
+        setDownloadBusy(false);
+      }
     }
-    return () => controller.abort();
-  }, [selected]);
+  };
 
   return (
     <ThemeProvider theme={sawaTheme}>
@@ -193,8 +224,10 @@ export default function SystemProcessLogsPage() {
                   <dd>{selected.summary || "-"}</dd>
                 </div>
               </dl>
-              {detailError ? <p className="error">{detailError}</p> : null}
-              <pre className="json">{detail?.id === selected.id ? JSON.stringify(detail.details, null, 2) : detailError ? "" : "読込中"}</pre>
+              {downloadError ? <p className="error" role="alert">{downloadError}</p> : null}
+              <Button type="button" onClick={downloadOriginal} disabled={downloadBusy}>
+                {downloadBusy ? "ダウンロード中..." : "元データをダウンロード"}
+              </Button>
             </>
           ) : (
             <p className="empty">行を選択すると詳細を表示します。</p>
