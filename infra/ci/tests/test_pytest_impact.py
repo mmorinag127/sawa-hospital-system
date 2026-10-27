@@ -262,6 +262,53 @@ def test_nested_tracking():
         self.assertEqual(report['selected'], ['test_example.py::test_changes'])
         self.assertIn('changing-file-input', report['untracked']['test_example.py::test_changes'])
 
+    def test_listdir_names_ignore_unobserved_child_access_metadata(self):
+        (self.root / 'inputs').mkdir()
+        self.write('inputs/first.txt', 'first')
+        self.write('test_example.py', "import os\ndef test_names():\n    assert os.listdir('inputs') == ['first.txt']\n")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        path = self.root / 'inputs/first.txt'
+        info = path.stat()
+        os.utime(path, ns=(info.st_atime_ns + 1_000_000_000, info.st_mtime_ns))
+        self.assertEqual(self.run_tests()['selected'], [])
+        self.write('inputs/second.txt', 'second')
+        self.assertEqual(self.run_tests(1)['selected'], ['test_example.py::test_names'])
+
+    def test_walk_tracks_membership_without_child_access_times(self):
+        (self.root / 'inputs').mkdir()
+        self.write('inputs/first.txt', 'first')
+        self.write('test_example.py', "import os\ndef test_walk():\n    assert [(root, dirs, files) for root, dirs, files in os.walk('inputs')] == [('inputs', [], ['first.txt'])]\n")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        path = self.root / 'inputs/first.txt'
+        info = path.stat()
+        os.utime(path, ns=(info.st_atime_ns + 1_000_000_000, info.st_mtime_ns))
+        self.assertEqual(self.run_tests()['selected'], [])
+        self.write('inputs/second.txt', 'second')
+        self.assertEqual(self.run_tests(1)['selected'], ['test_example.py::test_walk'])
+
+    def test_linecache_source_reads_track_bytes_not_access_times(self):
+        self.write('test_example.py', "from pathlib import Path\nimport linecache\nSOURCE = ''.join(linecache.getlines(str(Path('leaf.py').resolve())))\ndef test_source():\n    assert 'return 1' in SOURCE\ndef test_unrelated():\n    assert True\n")
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        path = self.root / 'leaf.py'
+        info = path.stat()
+        os.utime(path, ns=(info.st_atime_ns + 1_000_000_000, info.st_mtime_ns))
+        self.assertEqual(self.run_tests()['selected'], [])
+        self.write('leaf.py', 'def value():\n    return 2\n')
+        report = self.run_tests(1)
+        self.assertIn('test_example.py::test_source', report['selected'])
+
+    def test_lazy_collection_observation_is_retained_and_revalidated(self):
+        self.write('conftest.py', "import sys\nfrom pathlib import Path\nif 'sqlite3.dump' not in sys.modules:\n    Path('data.txt').exists()\n")
+        self.write('test_example.py', 'def test_first():\n    assert True\ndef test_second():\n    assert True\n')
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        self.assertEqual(self.run_tests()['selected'], [])
+        (self.root / 'data.txt').unlink()
+        self.assertEqual(len(self.run_tests()['selected']), 2)
+
     def test_environment_changes_during_a_case_cannot_authorize_reuse(self):
         self.env['NODE_TEST_WORKER_ID'] = 'original'
         self.write('test_example.py', "import os\ndef test_changes():\n    assert os.environ['NODE_TEST_WORKER_ID'] == 'original'\n    os.environ['NODE_TEST_WORKER_ID'] = 'changed'\n    assert os.environ['NODE_TEST_WORKER_ID'] == 'changed'\n")

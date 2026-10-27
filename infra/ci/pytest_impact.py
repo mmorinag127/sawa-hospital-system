@@ -140,12 +140,20 @@ def input_digest(name):
         except KeyError:
             value = None
         return hashlib.sha256(json.dumps(value).encode()).hexdigest()
-    if not name.startswith('directory:'):
+    directory_kind, _, directory_path = name.partition(':')
+    if directory_kind not in {'directory', 'directory-names', 'walk-directory'}:
         return digest(ROOT / name)
-    path = (ROOT / name.removeprefix('directory:')).resolve()
+    path = (ROOT / directory_path).resolve()
     if not path.is_relative_to(ROOT):
         return None
     try:
+        if directory_kind == 'directory-names':
+            return hashlib.sha256(json.dumps(os.listdir(path)).encode()).hexdigest()
+        if directory_kind == 'walk-directory':
+            with os.scandir(path) as children:
+                entries = [(child.name, child.is_dir(), child.stat(follow_symlinks=False).st_mode,
+                    os.readlink(child.path) if child.is_symlink() else None) for child in children]
+            return hashlib.sha256(json.dumps(entries).encode()).hexdigest()
         entries = []
         for child in path.iterdir():
             info = child.lstat()
@@ -219,7 +227,7 @@ def valid_input_record(name, value):
         return False
     if kind in ('path-exists', 'path-is_file', 'path-is_dir'):
         return True
-    if kind in ('directory', 'source-link', 'stat', 'lstat'):
+    if kind in ('directory', 'directory-names', 'walk-directory', 'source-link', 'stat', 'lstat'):
         return not Path(path).is_absolute()
     return kind in ('runtime', 'runtime-link', 'absent') and Path(path).is_absolute()
 
@@ -641,7 +649,11 @@ def audit(event, args):
             if generated_input(original_path):
                 return
             if path.is_relative_to(ROOT) and path.name not in {"__pycache__", ".pytest_cache"}:
-                name = 'directory:' + str(path.relative_to(ROOT))
+                caller = sys._getframe(1)
+                kind = ('directory-names' if event == 'os.listdir' else
+                    'walk-directory' if caller.f_globals.get('__name__') == 'os'
+                        and caller.f_code.co_name == '_walk' else 'directory')
+                name = kind + ':' + str(path.relative_to(ROOT))
                 value = input_digest(name)
                 if value is None:
                     UNSAFE_PATHS.add(str(path.relative_to(ROOT)))
@@ -777,10 +789,18 @@ def pytest_sessionstart(session):
                         frame = sys._getframe(1)
                         transport_stat = (frame.f_globals.get('__name__') == 'shutil'
                                           and frame.f_code.co_name == '_stat')
+                        source_stat = (frame.f_globals.get('__name__') == 'linecache'
+                            and frame.f_code.co_name in {'checkcache', 'updatecache'}
+                            and os.path.realpath(frame.f_code.co_filename) == STDLIB + 'linecache.py')
                         if transport_stat and generated_input(path):
                             pass
                         elif path.is_relative_to(ROOT):
-                            record_input(_method + ':' + str(path.relative_to(ROOT)), metadata_digest(path, _method))
+                            relative = str(path.relative_to(ROOT))
+                            if source_stat:
+                                record_input(relative, digest(path))
+                                record_input('source-link:' + relative, resolution_digest(path))
+                            else:
+                                record_input(_method + ':' + relative, metadata_digest(path, _method))
                         elif not any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
                             record_unsafe('file-metadata')
                     else:
@@ -831,7 +851,13 @@ def pytest_collection_modifyitems(session, config, items):
         key = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
         INPUT_SETS.setdefault(key, dict(values))
         COLLECTION_SETS[path] = key
-    collection_changed = PREVIOUS_GLOBAL_INPUTS != GLOBAL_INPUTS
+    collection_changed = (not unchanged(PREVIOUS_GLOBAL_INPUTS)
+                          or any(name not in PREVIOUS_GLOBAL_INPUTS for name in GLOBAL_INPUTS))
+    if not collection_changed:
+        # A previously observed input can be read later by a lazy import. Its
+        # verified value remains a dependency even when collection did not reread it.
+        for name, value in PREVIOUS_GLOBAL_INPUTS.items():
+            GLOBAL_INPUTS.setdefault(name, value)
     for item in items:
         COLLECTED_DEPENDENCIES[item.nodeid] = COLLECTION_INPUTS.dependencies(item.path)
         previous = PREVIOUS.get(item.nodeid)
