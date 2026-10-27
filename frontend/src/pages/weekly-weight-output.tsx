@@ -219,7 +219,7 @@ function WeeklyWeightOutputScreen() {
   const weekHistoryQuery = useQuery({
     queryKey: ["weekly-weight-output", "history"],
     queryFn: async () => {
-      const response = await apiClient.get("/orders", { params: { include_ocr: false, limit: 500 } });
+      const response = await apiClient.get("/orders", { params: { include_ocr: false, include_runtime: false, response_view: "stored_facts", limit: 500 } });
       const grouped = new Map<string, WeekHistoryItem>();
       (response.data?.orders || []).forEach((order: OrderSummary) => {
         const history = weekHistoryFromOrder(order);

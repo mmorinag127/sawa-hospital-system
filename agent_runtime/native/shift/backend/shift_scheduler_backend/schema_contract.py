@@ -13,6 +13,7 @@ import tempfile
 
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
+from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import OperationalError
 
@@ -153,9 +154,29 @@ def catalog_document(connection: Connection) -> dict:
     if connection.dialect.name == "postgresql":
         sequences, _ = _postgres_sequences(connection)
         document["sequences"] = sequences
-    for table_name in sorted(inspector.get_table_names()):
+    names = sorted(inspector.get_table_names())
+    reflected = None
+    if connection.dialect.name == "postgresql" and names:
+        options = dict(schema=None, filter_names=names, scope=ObjectScope.ANY, kind=ObjectKind.ANY)
+        reflected = {
+            "columns": inspector.get_multi_columns(**options),
+            "primary_key": inspector.get_multi_pk_constraint(**options),
+            "foreign_keys": inspector.get_multi_foreign_keys(**options),
+            "unique": inspector.get_multi_unique_constraints(**options),
+            "checks": inspector.get_multi_check_constraints(**options),
+            "indexes": inspector.get_multi_indexes(**options),
+        }
+    for table_name in names:
+        shape = ({key: values[(None, table_name)] for key, values in reflected.items()} if reflected is not None else {
+            "columns": inspector.get_columns(table_name),
+            "primary_key": inspector.get_pk_constraint(table_name),
+            "foreign_keys": inspector.get_foreign_keys(table_name),
+            "unique": inspector.get_unique_constraints(table_name),
+            "checks": inspector.get_check_constraints(table_name),
+            "indexes": inspector.get_indexes(table_name),
+        })
         columns = []
-        for column in inspector.get_columns(table_name):
+        for column in shape["columns"]:
             type_object = column["type"]
             columns.append(
                 {
@@ -172,17 +193,17 @@ def catalog_document(connection: Connection) -> dict:
             )
         document["tables"][table_name] = {
             "columns": columns,
-            "primary_key": inspector.get_pk_constraint(table_name),
+            "primary_key": shape["primary_key"],
             "foreign_keys": sorted(
-                inspector.get_foreign_keys(table_name), key=lambda item: item.get("name") or ""
+                shape["foreign_keys"], key=lambda item: item.get("name") or ""
             ),
             "unique": sorted(
-                inspector.get_unique_constraints(table_name), key=lambda item: item.get("name") or ""
+                shape["unique"], key=lambda item: item.get("name") or ""
             ),
             "checks": sorted(
-                inspector.get_check_constraints(table_name), key=lambda item: item.get("name") or ""
+                shape["checks"], key=lambda item: item.get("name") or ""
             ),
-            "indexes": sorted(inspector.get_indexes(table_name), key=lambda item: item.get("name") or ""),
+            "indexes": sorted(shape["indexes"], key=lambda item: item.get("name") or ""),
         }
     if connection.dialect.name == "sqlite":
         document["sqlite_master"] = [

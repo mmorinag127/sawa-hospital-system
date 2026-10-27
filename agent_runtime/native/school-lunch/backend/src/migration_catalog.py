@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from sqlalchemy import inspect, text
+from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from sqlalchemy.engine import URL, make_url
 
 CATALOG_HEAD = "0030_shared_menus"
@@ -145,12 +146,13 @@ def _postgresql_sequences(connection):
         "LEFT JOIN pg_attribute owner_attribute ON owner_attribute.attrelid=owner_relation.oid "
         "AND owner_attribute.attnum=dependency.refobjsubid "
         "WHERE sequence_namespace.nspname=current_schema() AND sequence.relkind='S' "
-        "ORDER BY sequence.relname"))
+        "ORDER BY sequence.relname")).all()
     sequences = {}
+    current_schema = connection.scalar(text("SELECT current_schema()")) if rows else None
     for row in rows:
         (name, value_type, start, minimum, maximum, increment, cache, cycle,
          owner_schema, owner_table, owner_column) = row
-        if owner_schema != connection.scalar(text("SELECT current_schema()")) or not owner_table or not owner_column:
+        if owner_schema != current_schema or not owner_table or not owner_column:
             raise RuntimeError("Unsupported catalog object: standalone or cross-schema sequence: " + name)
         sequences[name] = {
             "type": value_type,
@@ -222,40 +224,69 @@ def read_catalog(connection):
     if connection.dialect.name == "postgresql":
         _require_supported_postgresql_catalog(connection, inspector)
     tables = {}
-    for name in sorted(inspector.get_table_names()):
+    names = sorted(inspector.get_table_names())
+    reflected, native = None, {}
+    if connection.dialect.name == "postgresql" and names:
+        options = dict(schema=None, filter_names=names, scope=ObjectScope.ANY, kind=ObjectKind.ANY)
+        reflected = {
+            "columns": inspector.get_multi_columns(**options),
+            "pk": inspector.get_multi_pk_constraint(**options),
+            "unique": inspector.get_multi_unique_constraints(**options),
+            "foreign_keys": inspector.get_multi_foreign_keys(**options),
+            "checks": inspector.get_multi_check_constraints(**options),
+            "indexes": inspector.get_multi_indexes(**options),
+        }
+        statements = {
+            "native_indexes": (
+                "SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() "
+                "ORDER BY tablename,indexname"),
+            "native_columns": (
+                "SELECT t.relname,a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),"
+                "a.attcollation::regcollation::text,a.attidentity,a.attgenerated "
+                "FROM pg_attribute a JOIN pg_class t ON t.oid=a.attrelid "
+                "JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=current_schema() "
+                "AND a.attnum>0 AND NOT a.attisdropped ORDER BY t.relname,a.attnum"),
+            "native_constraints": (
+                "SELECT t.relname,c.conname,c.contype,c.convalidated,c.condeferrable,c.condeferred,"
+                "c.conislocal,c.coninhcount,c.connoinherit,pg_get_constraintdef(c.oid,true) "
+                "FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid "
+                "JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=current_schema() "
+                "ORDER BY t.relname,c.conname"),
+        }
+        for field, statement in statements.items():
+            native[field] = {name: [] for name in names}
+            for row in connection.execute(text(statement)):
+                if row[0] in native[field]:
+                    native[field][row[0]].append(list(row[1:]))
+    for name in names:
+        shape = ({key: values[(None, name)] for key, values in reflected.items()} if reflected is not None else {
+            "columns": inspector.get_columns(name),
+            "pk": inspector.get_pk_constraint(name),
+            "unique": inspector.get_unique_constraints(name),
+            "foreign_keys": inspector.get_foreign_keys(name),
+            "checks": inspector.get_check_constraints(name),
+            "indexes": inspector.get_indexes(name),
+        })
         columns = []
-        for column in inspector.get_columns(name):
+        for column in shape["columns"]:
             columns.append({key: column.get(key) for key in
                 ("name", "nullable", "default", "autoincrement", "computed", "identity")}
                 | {"type": str(column["type"].compile(dialect=connection.dialect))})
         tables[name] = {
             "columns": columns,
-            "pk": inspector.get_pk_constraint(name),
-            "unique": _ordered(inspector.get_unique_constraints(name)),
-            "foreign_keys": _ordered(inspector.get_foreign_keys(name)),
-            "checks": _ordered(inspector.get_check_constraints(name)),
-            "indexes": _ordered(inspector.get_indexes(name)),
+            "pk": shape["pk"],
+            "unique": _ordered(shape["unique"]),
+            "foreign_keys": _ordered(shape["foreign_keys"]),
+            "checks": _ordered(shape["checks"]),
+            "indexes": _ordered(shape["indexes"]),
         }
         if connection.dialect.name == "sqlite":
             tables[name]["native"] = [list(row) for row in connection.execute(text(
                 "SELECT type, name, sql FROM sqlite_master WHERE tbl_name=:name "
                 "AND type IN ('table','index','trigger') ORDER BY type,name"), {"name": name})]
         elif connection.dialect.name == "postgresql":
-            tables[name]["native_indexes"] = [list(row) for row in connection.execute(text(
-                "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() "
-                "AND tablename=:name ORDER BY indexname"), {"name": name})]
-            tables[name]["native_columns"] = [list(row) for row in connection.execute(text(
-                "SELECT a.attname, pg_catalog.format_type(a.atttypid,a.atttypmod), "
-                "a.attcollation::regcollation::text, a.attidentity, a.attgenerated "
-                "FROM pg_attribute a JOIN pg_class t ON t.oid=a.attrelid "
-                "JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=current_schema() "
-                "AND t.relname=:name AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum"), {"name": name})]
-            tables[name]["native_constraints"] = [list(row) for row in connection.execute(text(
-                "SELECT c.conname,c.contype,c.convalidated,c.condeferrable,c.condeferred, "
-                "c.conislocal,c.coninhcount,c.connoinherit,pg_get_constraintdef(c.oid,true) "
-                "FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid "
-                "JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=current_schema() "
-                "AND t.relname=:name ORDER BY c.conname"), {"name": name})]
+            for field, values in native.items():
+                tables[name][field] = values[name]
         else:
             raise RuntimeError("Unsupported migration dialect")
     return {"tables": tables, "views": {

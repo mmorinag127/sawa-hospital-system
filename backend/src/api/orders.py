@@ -690,9 +690,13 @@ def list_orders(
     limit: int | None = Query(default=None, ge=1, le=1000),
     before_received_at: str | None = None,
     before_id: str | None = None,
-    response_view: Literal["ocr_monitor"] | None = None,
+    response_view: Literal["ocr_monitor", "stored_facts"] | None = None,
+    only_unassigned: bool = False,
 ):
     include_archived_flag = True if include_archived is None else include_archived
+    include_runtime_flag = (include_ocr is not None) if include_runtime is None else include_runtime
+    if response_view == "stored_facts" and include_runtime_flag:
+        raise HTTPException(status_code=422, detail="stored_facts_requires_include_runtime_false")
     bindings: dict = {}
     page = order_service.list_orders_page(
         status=status,
@@ -701,9 +705,10 @@ def list_orders(
         before_received_at=before_received_at,
         before_id=before_id,
         job_bindings_out=bindings,
+        only_unassigned=only_unassigned,
+        include_job_bindings=response_view != "stored_facts",
     )
     orders = page["orders"]
-    include_runtime_flag = (include_ocr is not None) if include_runtime is None else include_runtime
     if not include_runtime_flag:
         return _order_list_response(page, response_view)
     jobs = {}
@@ -786,6 +791,22 @@ def _order_list_response(page: dict, view: str | None) -> dict:
 @router.get("/dashboard", dependencies=[Depends(require_role("operator"))])
 def get_order_dashboard():
     return order_service.get_order_dashboard()
+
+
+@router.get("/facility-candidates", dependencies=[Depends(require_role("operator"))])
+def get_facility_candidates(order_ids: list[str] = Query(min_length=1, max_length=50)):
+    results = {}
+    for order_id in dict.fromkeys(order_ids):
+        try:
+            payload, error = order_service.get_ocr_output(order_id, persist_cache=False)
+        except ValueError as exc:
+            results[order_id] = {"candidates": [], "error": str(exc)}
+            continue
+        candidates = payload.get("facility_candidates") if isinstance(payload, dict) else None
+        results[order_id] = {"candidates": candidates if isinstance(candidates, list) else []}
+        if error:
+            results[order_id]["error"] = error
+    return {"results": results}
 
 
 @router.get("/facility-overview", dependencies=[Depends(require_role("operator"))])

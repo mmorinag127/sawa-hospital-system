@@ -21,6 +21,27 @@ BASE = "be6675e209d249d0bda862601ea0abcfa65175fc"
 ROOT = Path(__file__).resolve().parents[3]
 
 
+@pytest.mark.parametrize("mode", ["ready", "accepted", "review", "diagnostic", "operatorEdited"])
+def test_summary_borrows_only_internal_fields_and_returns_owned_metadata(packet_row, mode):
+    row = packet_row(mode)
+    before = deepcopy(vars(row))
+    full = evidence._serialize_evidence_run(row, include_payload=True)
+    summary = evidence._serialize_evidence_run(row, include_payload=False)
+    assert vars(row) == before
+    assert summary == {key: value for key, value in full.items() if key != "payload_json"}
+    assert "payload_json" not in summary
+    for key, source in (("artifact_manifest_json", row.artifact_manifest_json),
+                        ("execution_lineage", row.payload_json.get("_ocr_execution"))):
+        if isinstance(summary[key], dict):
+            assert summary[key] is not source
+            summary[key]["response_only"] = ["changed"]
+    full["payload_json"]["response_only"] = {"changed": True}
+    assert vars(row) == before
+    assert evidence._serialize_evidence_run(row, include_payload=False) == {
+        key: value for key, value in evidence._serialize_evidence_run(row, include_payload=True).items() if key != "payload_json"
+    }
+
+
 @pytest.fixture(scope="module")
 def old_functions():
     result = []

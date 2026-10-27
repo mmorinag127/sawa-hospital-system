@@ -1,13 +1,13 @@
 import Link from "next/link";
 import { useMemo, useState, useSyncExternalStore } from "react";
 import { Box, Button, MenuItem, Stack, Typography } from "@mui/material";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { DataTable, FormTextField, RequestState, SawaProvider, type TableColumn } from "@sawa/ui";
 import { FormProvider, useForm } from "react-hook-form";
 import TopNav from "./TopNav";
 import { apiClient } from "../services/apiClient";
 import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
-import { fetchFacilityNameMap, fetchOrderFacilityCandidates, type FacilityCandidate } from "../services/facilityData";
+import { fetchFacilityNameMap, fetchOrderFacilityCandidateBatch, type FacilityCandidate } from "../services/facilityData";
 
 type OrderSummary = {
   source_kind?: string;
@@ -64,20 +64,19 @@ function OrdersListContent() {
   const visibleDailyRows = dailyRows.slice(dailyPage * dailyRowsPerPage, (dailyPage + 1) * dailyRowsPerPage);
   const candidateRows = Array.from(new Map([...visibleRows, ...visibleDailyRows]
     .filter(row => !row.facility && row.source_kind !== "uploaded_pdf").map(row => [row.id, row])).values());
-  const candidates = useQueries({
-    queries: candidateRows.map((row) => ({
-      queryKey: ["order-facility-candidates", row.id],
-      queryFn: () => fetchOrderFacilityCandidates(row.id),
-      staleTime: 30_000,
-    })),
+  const candidates = useQuery({
+    queryKey: ["order-facility-candidates", candidateRows.map(row => row.id)],
+    enabled: candidateRows.length > 0,
+    queryFn: ({ signal }) => fetchOrderFacilityCandidateBatch(candidateRows.map(row => row.id), signal),
   });
   const candidateByOrder = useMemo(() => {
     const result: Record<string, { values?: FacilityCandidate[]; failure?: string; pending?: boolean }> = {};
-    candidateRows.forEach((row, index) => {
-      const query = candidates[index];
-      if (query?.isPending || query?.isFetching) result[row.id] = { pending: true };
-      else if (query?.isError) result[row.id] = { failure: error(query.error) };
-      else if (query?.data) result[row.id] = { values: query.data };
+    candidateRows.forEach(row => {
+      const item = candidates.data?.[row.id];
+      if (candidates.isPending || candidates.isFetching) result[row.id] = { pending: true };
+      else if (candidates.isError) result[row.id] = { failure: error(candidates.error) };
+      else if (item?.error) result[row.id] = { failure: item.error };
+      else if (item) result[row.id] = { values: item.candidates };
     });
     return result;
   }, [candidateRows, candidates]);

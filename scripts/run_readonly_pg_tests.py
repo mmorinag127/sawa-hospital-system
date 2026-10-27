@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 PG_BIN = Path(os.environ.get('PG_BIN', '/usr/lib/postgresql/16/bin'))
 MODULE = 'backend/tests/integration/test_menu_readonly_boundary.py'
 MODULES = {
-    'readonly': [MODULE],
+    'readonly': [MODULE, 'backend/tests/integration/test_native_startup_reflection.py'],
     'c1': ['backend/tests/integration/test_menu_master_revision.py',
            'backend/tests/integration/test_menu_editor_revision_contract.py'],
     'c1-guards': ['backend/tests/integration/test_stg_menu_master_live.py',

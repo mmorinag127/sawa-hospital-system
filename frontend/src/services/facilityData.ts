@@ -191,6 +191,31 @@ export const fetchOrderFacilityCandidates = async (
     .filter((item: FacilityCandidate) => Boolean(item.facility_id));
 };
 
+export type FacilityCandidateResult = { candidates: FacilityCandidate[]; error?: string };
+
+export const fetchOrderFacilityCandidateBatch = async (
+  orderIds: string[], signal?: AbortSignal
+): Promise<Record<string, FacilityCandidateResult>> => {
+  const ids = [...new Set(orderIds)];
+  const results: Record<string, FacilityCandidateResult> = Object.create(null);
+  for (let start = 0; start < ids.length; start += 50) {
+    const batch = ids.slice(start, start + 50);
+    const query = new URLSearchParams(batch.map(id => ["order_ids", id]));
+    const response = await apiClient.get(`/orders/facility-candidates?${query}`, { signal });
+    for (const id of batch) {
+      const values = response.data?.results;
+      const item = values && Object.prototype.hasOwnProperty.call(values, id) ? values[id] : undefined;
+      if (!item || !Array.isArray(item.candidates)) throw new Error("施設候補の取得結果が欠落しています。");
+      results[id] = { candidates: item.candidates.map((value: any) => ({
+        facility_id: String(value?.facility_id || ""), facility_name: value?.facility_name ?? null,
+        score: value?.score ?? null, reason: value?.reason ?? null, auto: value?.auto ?? null,
+      })).filter((value: FacilityCandidate) => Boolean(value.facility_id)),
+      ...(item.error ? { error: String(item.error) } : {}) };
+    }
+  }
+  return results;
+};
+
 export const pickBestFacilityCandidate = (
   candidates: FacilityCandidate[]
 ): FacilityCandidate | null => {

@@ -74,13 +74,13 @@ export async function verifyOcrAdminReadonlyPages({ page, expect, check, receipt
     const candidates = new Map();
     const listener = response => {
       const url = new URL(response.url());
-      const match = url.pathname.match(/^\/api\/orders\/([^/]+)\/ocr-output$/);
-      if (url.origin !== origin || !match || response.request().method() !== 'GET') return;
-      candidates.set(match[1], response.json().then(data => ({ data, status: response.status() }), () => ({ failed: true })));
+      if (url.origin !== origin || url.pathname !== '/api/orders/facility-candidates' || response.request().method() !== 'GET') return;
+      const result = response.json().then(data => ({ data, status: response.status() }), () => ({ failed: true }));
+      for (const id of url.searchParams.getAll('order_ids')) candidates.set(id, result);
     };
     page.on('response', listener);
     try {
-      const [data, facilities] = await readTogether(receipt, [{ path: '/api/orders', query: { include_ocr: 'true', response_view: 'ocr_monitor' } },
+      const [data, facilities] = await readTogether(receipt, [{ path: '/api/orders', query: { include_ocr: 'true', response_view: 'ocr_monitor', limit: '25', only_unassigned: 'false' } },
         { path: '/api/facilities' }], () => navigate('/hospital/ocr-results'));
       mark('ocr-results-shape');
       const orders = records(data, 'orders');
@@ -90,18 +90,26 @@ export async function verifyOcrAdminReadonlyPages({ page, expect, check, receipt
       for (const name of names.values()) assert.ok(typeof name === 'string' && name.trim());
       await page.waitForLoadState('networkidle');
       const hints = new Map();
-      for (const order of orders.filter(row => !row.facility).slice(0, 80)) {
+      assert.ok(orders.length <= 25);
+      for (const order of orders.filter(row => !row.facility)) {
         mark('ocr-results-candidate-response');
         assert.ok(candidates.has(order.id));
         const value = await candidates.get(order.id);
         assert.equal(value.status, 200);
-        assert.ok(Array.isArray(value.data.facility_candidates));
-        hints.set(order.id, value.data.facility_candidates.filter(row => row.facility_id)[0]);
+        const item = value.data.results?.[order.id];
+        assert.ok(item && Array.isArray(item.candidates));
+        hints.set(order.id, item.error ? null : item.candidates.filter(row => row.facility_id)[0]);
       }
       const sorted = [...orders].sort((a, b) => (b.received_at ? new Date(b.received_at).getTime() : 0) - (a.received_at ? new Date(a.received_at).getTime() : 0));
       const times = await page.evaluate(values => values.map(value => !value ? '-' : Number.isNaN(new Date(value).getTime()) ? value : new Date(value).toLocaleString('ja-JP')), sorted.map(row => row.received_at));
       await expect(page.getByRole('heading', { name: 'OCR結果監視', exact: true })).toBeVisible();
-      await expect(page.locator('.badge')).toHaveText(`合計 ${sorted.length} 件`);
+      await expect(page.locator('.badge')).toHaveText(`1ページ / ${sorted.length} 件`);
+      await expect(page.getByRole('button', { name: '前へ', exact: true })).toBeDisabled();
+      const next = page.getByRole('button', { name: '次へ', exact: true });
+      if (data.has_more) {
+        assert.ok(data.next_cursor?.received_at && data.next_cursor?.id);
+        await expect(next).toBeEnabled();
+      } else await expect(next).toBeDisabled();
       await exactTable(page, expect, sorted.map((row, i) => {
         const hint = hints.get(row.id);
         const facility = row.facility ? names.has(row.facility) ? `${names.get(row.facility)} (${row.facility})` : row.facility

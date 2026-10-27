@@ -11,7 +11,7 @@ import { browserSessionKey, subscribeBrowserSession } from "../../services/brows
 import { BulkOcrCommandFailure, runBulkOcrOrder } from "../../services/bulkOcrCommand";
 import {
   fetchFacilityNameMap,
-  fetchOrderFacilityCandidates,
+  fetchOrderFacilityCandidateBatch,
   type FacilityCandidate,
   type FacilityNameMap,
 } from "../../services/facilityData";
@@ -317,14 +317,17 @@ export default function OrdersPage() {
           include_ocr: false,
           include_archived: showArchived,
           include_runtime: false,
+          response_view: "stored_facts",
           limit: ORDER_LIST_PAGE_SIZE,
         }
       : {
           include_ocr: false,
           include_archived: showArchived,
           include_runtime: false,
+          response_view: "stored_facts",
           limit: ORDER_LIST_PAGE_SIZE,
         };
+    const controller = new AbortController();
     setIsLoading(true);
     setLoadError("");
     setIsHydratingRuntime(false);
@@ -333,7 +336,7 @@ export default function OrdersPage() {
     setHasMoreOrders(false);
     setExpandedWeekGroups({});
     apiClient
-      .get("/orders", { params })
+      .get("/orders", { params, signal: controller.signal })
       .then((res) => {
         if (cancelled) return;
         const baseOrders = Array.isArray(res.data?.orders) ? res.data.orders : [];
@@ -357,6 +360,7 @@ export default function OrdersPage() {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [statusFilter, reloadToken, showArchived]);
 
@@ -371,6 +375,7 @@ export default function OrdersPage() {
           include_ocr: false,
           include_archived: showArchived,
           include_runtime: false,
+          response_view: "stored_facts",
           limit: ORDER_LIST_PAGE_SIZE,
           before_received_at: cursorReceivedAt,
           before_id: cursorId,
@@ -379,6 +384,7 @@ export default function OrdersPage() {
           include_ocr: false,
           include_archived: showArchived,
           include_runtime: false,
+          response_view: "stored_facts",
           limit: ORDER_LIST_PAGE_SIZE,
           before_received_at: cursorReceivedAt,
           before_id: cursorId,
@@ -448,6 +454,7 @@ export default function OrdersPage() {
   useEffect(() => {
     let cancelled = false;
     if (!unresolvedOnly) return;
+    const controller = new AbortController();
     const orderIds = orders
       .filter((order) => !hasRegisteredFacility(order) && order.id && !inlineFacilityHint(order))
       .sort(compareOrdersByReceivedAt)
@@ -456,21 +463,23 @@ export default function OrdersPage() {
       .filter((orderId) => orderId && facilityCandidates[orderId] === undefined && facilityCandidateErrors[orderId] === undefined);
     if (!orderIds.length) return;
 
-    void Promise.all(orderIds.map(async (orderId) => {
-      try {
-        const candidates = await fetchOrderFacilityCandidates(orderId);
-        if (!cancelled) {
-          setFacilityCandidates((current) => ({ ...current, [orderId]: candidates }));
-        }
-      } catch (err: any) {
-        const detail = err?.response?.data?.detail || err?.response?.data?.message || err?.message || "候補を取得できませんでした。";
-        if (!cancelled) {
-          setFacilityCandidateErrors((current) => ({ ...current, [orderId]: String(detail) }));
-        }
+    void fetchOrderFacilityCandidateBatch(orderIds, controller.signal).then(results => {
+      if (cancelled) return;
+      const values: Record<string, FacilityCandidate[]> = {}, errors: Record<string, string> = {};
+      for (const id of orderIds) {
+        if (results[id].error) errors[id] = results[id].error!;
+        else values[id] = results[id].candidates;
       }
-    }));
+      setFacilityCandidates(current => ({ ...current, ...values }));
+      setFacilityCandidateErrors(current => ({ ...current, ...errors }));
+    }).catch((err: any) => {
+      if (cancelled) return;
+      const detail = String(err?.response?.data?.detail || err?.message || "候補を取得できませんでした。");
+      setFacilityCandidateErrors(current => ({ ...current, ...Object.fromEntries(orderIds.map(id => [id, detail])) }));
+    });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [facilityCandidateErrors, facilityCandidates, orders, unresolvedOnly]);
 

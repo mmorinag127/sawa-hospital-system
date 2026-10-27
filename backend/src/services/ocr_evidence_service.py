@@ -128,18 +128,18 @@ def hakodate_evidence_record_allowed(record: dict[str, Any]) -> bool:
     return not source_scope and not engine and not str(record.get("evidence_id") or "").strip()
 
 
-def _extract_hakodate_target_cells(payload: dict[str, Any], *, _analysis=None) -> list[dict[str, Any]]:
+def _extract_hakodate_target_cells(payload: dict[str, Any], *, _analysis=None, copy_records=True) -> list[dict[str, Any]]:
     if _analysis is not None:
-        return _analysis.target_cells(payload)
+        return _analysis.target_cells(payload, copy_records=copy_records)
     from src.services.order_service import _extract_hakodate_target_cells_from_payload
-    return _extract_hakodate_target_cells_from_payload(payload)
+    return _extract_hakodate_target_cells_from_payload(payload, copy_records=copy_records)
 
 
-def _extract_hakodate_evidence_records(payload: dict[str, Any], *, _analysis=None) -> list[dict[str, Any]]:
+def _extract_hakodate_evidence_records(payload: dict[str, Any], *, _analysis=None, copy_records=True) -> list[dict[str, Any]]:
     if _analysis is not None:
-        return _analysis.evidence_records(payload, order_id="")
+        return _analysis.evidence_records(payload, order_id="", copy_records=copy_records)
     from src.services.order_service import _extract_hakodate_ocr_evidence_records_from_payload
-    return _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id="")
+    return _extract_hakodate_ocr_evidence_records_from_payload(payload, order_id="", copy_records=copy_records)
 
 
 def _summarize_hakodate_payload(payload: dict[str, Any], *, expected_source: dict | None = None,
@@ -149,8 +149,8 @@ def _summarize_hakodate_payload(payload: dict[str, Any], *, expected_source: dic
     try:
         accepted = (recognition_acceptance.accepted_values(payload) if _analysis is None
                     else _analysis.accepted_values(payload))
-        target_cells = _extract_hakodate_target_cells(payload, _analysis=_analysis)
-        evidence_records = _extract_hakodate_evidence_records(payload, _analysis=_analysis)
+        target_cells = _extract_hakodate_target_cells(payload, _analysis=_analysis, copy_records=False)
+        evidence_records = _extract_hakodate_evidence_records(payload, _analysis=_analysis, copy_records=False)
     except ValueError as exc:
         return {"target_cell_count": 0, "evidence_record_count": 0, "assigned_target_count": 0, "assignment_blockers": [], "blockers": [str(exc)]}
     canonical_pipeline = (
@@ -318,11 +318,11 @@ def classify_evidence_payload(payload: object, *, expected_hakodate_source: dict
     }
 
 
-def _extract_evidence_payload(payload: dict[str, Any], *, _analysis=None) -> dict[str, Any]:
+def _extract_evidence_payload(payload: dict[str, Any], *, _analysis=None, copy_fields=True) -> dict[str, Any]:
     extracted: dict[str, Any] = {}
     for key in _EVIDENCE_META_KEYS + _EVIDENCE_ARTIFACT_KEYS:
         if key in payload:
-            extracted[key] = copy.deepcopy(payload.get(key))
+            extracted[key] = copy.deepcopy(payload.get(key)) if copy_fields else payload.get(key)
     resolution = template_resolution_service.normalize_template_resolution_state(
         extracted.get("template_resolution") if isinstance(extracted.get("template_resolution"), dict) else None
     )
@@ -816,8 +816,8 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None
                 raise ValueError("hakodate_artifact_source_mismatch")
             assign = hakodate_ocr_evidence_service.assign_evidence_to_target_cells if _analysis is None else _analysis.assign
             assignment = assign(
-                evidence_records=_extract_hakodate_evidence_records(payload, _analysis=_analysis),
-                target_cells=_extract_hakodate_target_cells(payload, _analysis=_analysis),
+                evidence_records=_extract_hakodate_evidence_records(payload, _analysis=_analysis, copy_records=False),
+                target_cells=_extract_hakodate_target_cells(payload, _analysis=_analysis, copy_records=False),
                 accepted_values=accepted,
             )
             if assignment.get("blockers"):
@@ -870,12 +870,14 @@ def _serialize_evidence_run(
     from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
     if _analysis is None:
         _analysis = _EvidenceAnalysis()
-    payload_json = _extract_evidence_payload(row.payload_json if isinstance(row.payload_json, dict) else {}, _analysis=_analysis)
+    payload_json = _extract_evidence_payload(row.payload_json if isinstance(row.payload_json, dict) else {},
+        _analysis=_analysis, copy_fields=include_payload)
     acceptance = (row.artifact_manifest_json or {}).get(recognition_acceptance.KEY)
     if acceptance is not None:
-        payload_json = copy.deepcopy(row.payload_json)
+        payload_json = copy.deepcopy(row.payload_json) if include_payload else dict(row.payload_json)
     manifest = copy.deepcopy(row.artifact_manifest_json) if isinstance(row.artifact_manifest_json, dict) else None
-    capabilities = _build_capabilities(recognition_acceptance.payload_for_evidence(row) if acceptance is not None else payload_json, _analysis=_analysis)
+    capabilities = _build_capabilities(recognition_acceptance.payload_for_evidence(row, copy_payload=include_payload)
+        if acceptance is not None else payload_json, _analysis=_analysis)
     capabilities["legacy_editable"] = bool(str(row.schema_version or "").startswith("v1_legacy"))
     if row.status == "diagnostic_only" and acceptance is None and not evidence_run_is_selectable(row, _analysis=_analysis):
         capabilities = {key: False for key in capabilities}

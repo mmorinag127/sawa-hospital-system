@@ -7,7 +7,7 @@ import TopNav from "../components/TopNav";
 import { apiClient } from "../services/apiClient";
 import {
   fetchFacilityNameMap,
-  fetchOrderFacilityCandidates,
+  fetchOrderFacilityCandidateBatch,
   pickBestFacilityCandidate,
   type FacilityHint,
   type FacilityNameMap,
@@ -23,6 +23,8 @@ type OrderSummary = {
   ocr_error?: string | null;
 };
 
+type OrderCursor = { received_at: string; id: string };
+
 const formatTimestamp = (value?: string | null) => {
   if (!value) return "-";
   const date = new Date(value);
@@ -33,29 +35,36 @@ const formatTimestamp = (value?: string | null) => {
 export default function OcrResultsPage() {
   const [orders, setOrders] = useState<OrderSummary[]>([]);
   const [facilityNameMap, setFacilityNameMap] = useState<FacilityNameMap>({});
-  const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint>>({});
-  const [loading, setLoading] = useState(false);
+  const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint | null>>({});
+  const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [showOnlyUnassigned, setShowOnlyUnassigned] = useState(false);
-
-  const loadOrders = async () => {
-    setLoading(true);
-    setMessage("");
-    try {
-      const res = await apiClient.get("/orders", { params: { include_ocr: true, response_view: "ocr_monitor" } });
-      setOrders(res.data?.orders || []);
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      setMessage(detail ? `取得に失敗しました: ${detail}` : "取得に失敗しました。");
-      setOrders([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [cursors, setCursors] = useState<Array<OrderCursor | null>>([null]);
+  const [nextCursor, setNextCursor] = useState<OrderCursor | null>(null);
+  const [refresh, setRefresh] = useState(0);
+  const cursor = cursors[cursors.length - 1];
 
   useEffect(() => {
-    loadOrders();
-  }, []);
+    const controller = new AbortController();
+    setLoading(true);
+    setMessage("");
+    setOrders([]);
+    setFacilityHints({});
+    setNextCursor(null);
+    apiClient.get("/orders", { params: {
+      include_ocr: true, response_view: "ocr_monitor", limit: 25, only_unassigned: showOnlyUnassigned,
+      before_received_at: cursor?.received_at, before_id: cursor?.id,
+    }, signal: controller.signal }).then(res => {
+      if (controller.signal.aborted) return;
+      setOrders(res.data?.orders || []);
+      setNextCursor(res.data?.has_more ? res.data.next_cursor : null);
+    }).catch((err: any) => {
+      if (controller.signal.aborted) return;
+      const detail = err?.response?.data?.detail;
+      setMessage(detail ? `取得に失敗しました: ${detail}` : "取得に失敗しました。");
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [cursor?.received_at, cursor?.id, showOnlyUnassigned, refresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,38 +82,29 @@ export default function OcrResultsPage() {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     const unresolved = orders
       .filter((order) => !order.facility && order.id)
-      .slice(0, 80)
       .map((order) => String(order.id || ""))
-      .filter((orderId) => orderId && !facilityHints[orderId]);
+      .filter((orderId) => orderId && !Object.prototype.hasOwnProperty.call(facilityHints, orderId));
 
     if (unresolved.length === 0) return;
 
-    const queue = [...unresolved];
-    const results: Record<string, FacilityHint> = {};
-    const workers = Array.from({ length: 3 }, async () => {
-      while (queue.length > 0) {
-        const orderId = queue.shift();
-        if (!orderId) continue;
-        try {
-          const candidates = await fetchOrderFacilityCandidates(orderId);
-          const best = pickBestFacilityCandidate(candidates);
-          if (best) results[orderId] = { ...best, order_id: orderId };
-        } catch {
-          // ignore
-        }
-      }
-    });
-
-    Promise.all(workers).then(() => {
+    fetchOrderFacilityCandidateBatch(unresolved, controller.signal).then(batch => {
       if (cancelled) return;
-      if (Object.keys(results).length === 0) return;
+      const results: Record<string, FacilityHint | null> = {};
+      for (const orderId of unresolved) {
+        const best = batch[orderId].error ? null : pickBestFacilityCandidate(batch[orderId].candidates);
+        results[orderId] = best ? { ...best, order_id: orderId } : null;
+      }
       setFacilityHints((prev) => ({ ...prev, ...results }));
+    }).catch(() => {
+      if (!cancelled) setFacilityHints(prev => ({ ...prev, ...Object.fromEntries(unresolved.map(id => [id, null])) }));
     });
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [orders, facilityHints]);
 
@@ -123,18 +123,13 @@ export default function OcrResultsPage() {
     return "未確定";
   };
 
-  const filtered = useMemo(() => {
-    if (!showOnlyUnassigned) return orders;
-    return orders.filter((order) => !order.facility || !order.week);
-  }, [orders, showOnlyUnassigned]);
-
   const sorted = useMemo(() => {
-    return [...filtered].sort((a, b) => {
+    return [...orders].sort((a, b) => {
       const at = a.received_at ? new Date(a.received_at).getTime() : 0;
       const bt = b.received_at ? new Date(b.received_at).getTime() : 0;
       return bt - at;
     });
-  }, [filtered]);
+  }, [orders]);
 
   return (
     <ThemeProvider theme={sawaTheme}><main className="page">
@@ -150,18 +145,18 @@ export default function OcrResultsPage() {
       <section className="panel">
         <header className="panel-header">
           <h2>フィルタ</h2>
-          <span className="badge">合計 {sorted.length} 件</span>
+          <span className="badge">{cursors.length}ページ / {sorted.length} 件</span>
         </header>
         <div className="filters">
           <label className="field checkbox">
             <span className="field-label">未確定</span>
             <Checkbox
               checked={showOnlyUnassigned}
-              onChange={(e) => setShowOnlyUnassigned(e.target.checked)}
+              onChange={(e) => { setCursors([null]); setShowOnlyUnassigned(e.target.checked); }}
             />
             施設/週が未確定のみ
           </label>
-          <Button type="submit" className="btn primary" onClick={loadOrders} disabled={loading}>
+          <Button type="button" className="btn primary" onClick={() => { setCursors([null]); setRefresh(value => value + 1); }} disabled={loading}>
             {loading ? "更新中..." : "更新"}
           </Button>
         </div>
@@ -188,7 +183,7 @@ export default function OcrResultsPage() {
             <tbody>
               {sorted.length === 0 ? (
                 <tr>
-                  <td colSpan={6}>該当データなし</td>
+                  <td colSpan={6}>{loading ? "読み込み中..." : message ? "未取得" : "該当データなし"}</td>
                 </tr>
               ) : (
                 sorted.map((order) => (
@@ -209,6 +204,10 @@ export default function OcrResultsPage() {
             </tbody>
           </table>
         </div>
+        <nav aria-label="OCR結果のページ">
+          <Button type="button" disabled={loading || cursors.length <= 1} onClick={() => setCursors(values => values.slice(0, -1))}>前へ</Button>
+          <Button type="button" disabled={loading || !nextCursor} onClick={() => { if (nextCursor) setCursors(values => [...values, nextCursor]); }}>次へ</Button>
+        </nav>
       </section>
 
       <style jsx>{`

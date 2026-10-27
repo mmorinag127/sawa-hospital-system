@@ -27,6 +27,38 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class ReceiptContractTest(unittest.TestCase):
+    def test_native_selection_keeps_full_for_business_changes_and_unknown_base(self):
+        full_paths = ('experiments/agent_assistant/runtime.py', 'agent_runtime/native/shift/backend/app.py',
+                      'agent_runtime/baselines/shift.json', 'agent_runtime/Dockerfile',
+                      'backend/requirements.txt', 'frontend/public/assistant-workflow.css', '')
+        for path in full_paths:
+            with self.subTest(path=path), patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
+                 patch.object(AGENT_RUNNER, 'git', side_effect=['a' * 40, path + '\0' if path else '']):
+                self.assertEqual(AGENT_RUNNER.select_test_targets()['mode'], 'full')
+        with patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
+             patch.object(AGENT_RUNNER, 'git', side_effect=subprocess.CalledProcessError(1, 'git')):
+            self.assertEqual(AGENT_RUNNER.select_test_targets()['mode'], 'full')
+        with patch.object(AGENT_RUNNER, 'focused_staging', return_value=False), patch.object(AGENT_RUNNER, 'git') as git:
+            self.assertEqual(AGENT_RUNNER.select_test_targets()['mode'], 'full')
+            git.assert_not_called()
+
+    def test_native_read_selection_includes_auth_and_both_native_contracts(self):
+        paths = 'backend/src/services/order_service.py\0agent_runtime/native/shift/backend/shift_scheduler_backend/schema_contract.py\0'
+        with patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
+             patch.object(AGENT_RUNNER, 'git', side_effect=['a' * 40, paths]):
+            selected = AGENT_RUNNER.select_test_targets()
+        self.assertEqual(selected['mode'], 'focused-read-and-startup')
+        self.assertEqual(selected['base_sha'], 'a' * 40)
+        self.assertEqual(selected['changed_paths'], paths.rstrip('\0').split('\0'))
+        self.assertEqual(len(selected['targets']), 8)
+        self.assertIn('experiments/agent_assistant/tests/test_native_contract_comparison.py', selected['targets'])
+        self.assertIn('experiments/agent_assistant/tests/test_native_workflows.py::test_packaged_api_auth_and_extensions_with_latest_contracts', selected['targets'])
+        with tempfile.TemporaryDirectory() as directory, patch.object(AGENT_RUNNER, 'ROOT', Path(directory)), \
+             patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
+             patch.object(AGENT_RUNNER, 'git', side_effect=['a' * 40, paths]):
+            with self.assertRaisesRegex(ValueError, 'target is missing'):
+                AGENT_RUNNER.select_test_targets()
+
     def test_missing_or_unknown_tracker_version_stops_before_backend_execution(self):
         for value in ('unknown', None):
             with self.subTest(value=value), patch.object(BACKEND_RUNNER, 'version') as installed:

@@ -7,7 +7,41 @@ import subprocess
 import time
 from uuid import uuid4
 
-from local_hospital_test_runner import ROOT, clean_tree, git, reject_hosted_runner
+from local_hospital_test_runner import ROOT, clean_tree, focused_staging, git, reject_hosted_runner
+
+
+def select_test_targets():
+    full = {"mode": "full", "targets": ["experiments/agent_assistant/tests"]}
+    if not focused_staging():
+        return full
+    try:
+        base = git("merge-base", "HEAD", "origin/develop")
+        paths = [path for path in git("diff", "--name-only", "-z", base, "HEAD").split("\0") if path]
+    except subprocess.CalledProcessError:
+        return full
+    if not paths or any(
+        path.startswith("experiments/agent_assistant/")
+        or path.startswith("agent_runtime/baselines/")
+        or (path.startswith("agent_runtime/native/") and path not in {
+            "agent_runtime/native/shift/backend/shift_scheduler_backend/schema_contract.py",
+            "agent_runtime/native/school-lunch/backend/src/migration_catalog.py",
+        })
+        or path in {"agent_runtime/Dockerfile", "agent_runtime/release.json", "local-checks/agent-tests.Dockerfile"}
+        or path == "frontend/public/assistant-workflow.css"
+        or "requirements" in Path(path).name or Path(path).name == "pyproject.toml"
+        for path in paths
+    ):
+        return full
+    names = (
+        "test_native_contract_comparison.py", "test_prepare_packaged.py", "test_staging_runtime.py",
+        "test_native_lifecycle.py", "test_runtime_gateway.py", "test_fax_workflow.py",
+        "test_hospital_output_completion.py",
+        "test_native_workflows.py::test_packaged_api_auth_and_extensions_with_latest_contracts",
+    )
+    targets = ["experiments/agent_assistant/tests/" + name for name in names]
+    if any(not (ROOT / target.split("::", 1)[0]).is_file() for target in targets):
+        raise ValueError("Focused native verification target is missing")
+    return {"mode": "focused-read-and-startup", "targets": targets, "base_sha": base, "changed_paths": paths}
 
 
 def docker(*args, **kwargs):
@@ -58,6 +92,7 @@ def main():
     if not clean_tree():
         raise ValueError("Native tests require a clean fixed source")
     source, owner = git("rev-parse", "HEAD"), uuid4().hex
+    selection = select_test_targets()
     image = os.environ["SAWA_LOCAL_TEST_IMAGE_AGENT_RUNTIME"]
     base = inspect(image)
     if (base["Os"] != "linux" or base["Architecture"] != "amd64"
@@ -80,7 +115,8 @@ def main():
     record = {"source_sha": source, "runtime_image_id": base["Id"],
               "test_image_id": dev_image["Id"], "database_image_id": postgres["Id"], "test_only_dependencies": [
                   "git", "SQLAlchemy==2.1.6", "alembic==1.20.1",
-                  "openpyxl==3.1.5", "et-xmlfile==2.0.0"], "run_id": owner}
+                  "openpyxl==3.1.5", "et-xmlfile==2.0.0"], "run_id": owner,
+              "test_selection": selection}
     (evidence / "source.json").write_text(json.dumps(record, indent=2))
     try:
         docker("run", "-d", "--name", database, *labels, "--network", "none", "--memory", "256m",
@@ -117,7 +153,7 @@ def main():
         for key, value in environment.items():
             args += ["-e", key + "=" + value]
         args += ["--entrypoint", "/opt/agent/gateway/bin/python", dev_image["Id"], "-m", "pytest",
-                 "experiments/agent_assistant/tests", "-v", "-p", "no:cacheprovider",
+                 *selection["targets"], "-v", "-p", "no:cacheprovider",
                  "-o", "faulthandler_timeout=120",
                  "--basetemp=/tmp/sawa-native-tests", "--junitxml=/evidence/results.xml"]
         result = subprocess.run(["docker", *args])

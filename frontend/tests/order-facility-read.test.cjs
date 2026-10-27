@@ -8,6 +8,31 @@ function compile(input, bindings = {}) {
   return exports;
 }
 const helpers = compile(fs.readFileSync(path.join(root, 'services/orderFacilityRead.ts'), 'utf8'));
+test('candidate batch is bounded, deduplicated, abortable, and never accepts missing identities', async () => {
+  const calls = [], controller = new AbortController();
+  const apiClient = { get: async (url, options) => {
+    calls.push({ url, options });
+    const ids = new URLSearchParams(url.split('?')[1]).getAll('order_ids');
+    return { data: { results: Object.fromEntries(ids.map(id => [id, { candidates: [{ facility_id: 'F', score: 0 }], ...(id === 'pending' ? { error: 'ocr_output_pending' } : {}) }])) } };
+  } };
+  const module = compile(fs.readFileSync(path.join(root, 'services/facilityData.ts'), 'utf8'), {
+    require: name => { assert.equal(name, './apiClient'); return { apiClient }; }, URLSearchParams,
+  });
+  const ids = ['__proto__', 'pending', ...Array.from({ length: 50 }, (_, i) => String(i))];
+  const results = await module.fetchOrderFacilityCandidateBatch([...ids, 'pending'], controller.signal);
+  assert.equal(calls.length, 2);
+  assert.equal(new URLSearchParams(calls[0].url.split('?')[1]).getAll('order_ids').length, 50);
+  assert.equal(calls[0].options.signal, controller.signal);
+  assert.equal(results.pending.error, 'ocr_output_pending');
+  assert.equal(results.__proto__.candidates[0].score, 0);
+  assert.equal(Object.getPrototypeOf(results), null);
+  await module.fetchOrderFacilityCandidateBatch([], controller.signal);
+  assert.equal(calls.length, 2);
+  apiClient.get = async () => ({ data: { results: {} } });
+  await assert.rejects(module.fetchOrderFacilityCandidateBatch(['missing']), /欠落/);
+  apiClient.get = async () => { throw new Error('transport failed'); };
+  await assert.rejects(module.fetchOrderFacilityCandidateBatch(['failed']), /transport failed/);
+});
 const source = fs.readFileSync(path.join(root, 'pages/orders/[id]/workflow-v2.tsx'), 'utf8');
 const ast = ts.createSourceFile('page.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let expression;

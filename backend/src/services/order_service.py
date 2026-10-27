@@ -4862,6 +4862,8 @@ def _fetch_orders(
     before_received_at: str | None = None,
     before_id: str | None = None,
     job_bindings_out: dict[str, dict[str, Any]] | None = None,
+    only_unassigned: bool = False,
+    include_job_bindings: bool = True,
 ) -> list[dict]:
     normalized_limit = _normalize_order_list_limit(limit)
     cursor_received_at = _parse_order_list_cursor_received_at(before_received_at)
@@ -4885,6 +4887,11 @@ def _fetch_orders(
             query = query.where(Order.status == status)
         if not include_archived:
             query = query.where(Order.archived_at.is_(None))
+        if only_unassigned:
+            unresolved_weeks = [value for value in session.scalars(select(Order.week_code).distinct())
+                                if not _to_sheet_month_id(value)]
+            query = query.where(or_(Order.facility_code.is_(None), Order.facility_code == "",
+                                    Order.week_code.is_(None), Order.week_code.in_(unresolved_weeks)))
         if cursor_received_at is not None:
             if cursor_id:
                 query = query.where(
@@ -4899,9 +4906,6 @@ def _fetch_orders(
         if normalized_limit is not None:
             query = query.limit(normalized_limit)
         rows = session.execute(query).mappings().all()
-        job_bindings = get_recorded_order_job_bindings([row["id"] for row in rows], read_session=session)
-        if job_bindings_out is not None:
-            job_bindings_out.update(job_bindings)
         payloads: list[dict[str, Any]] = []
         for row in rows:
             week_code = row["week_code"]
@@ -4912,7 +4916,6 @@ def _fetch_orders(
             payloads.append(
                 {
                     "id": row["id"],
-                    **recorded_order_job_fields(job_bindings.get(row["id"])),
                     "facility": row["facility_code"],
                     "week": week_month_id,
                     "week_value": week_value,
@@ -4945,7 +4948,15 @@ def _fetch_orders(
                 UploadedPdf.current_document_id,
                 UploadedPdf.last_error_code,
                 UploadedPdf.last_error_message,
-            ).where(UploadedPdf.current_order_id.is_(None))
+            ).where(UploadedPdf.current_order_id.is_(None)).where(or_(
+                func.lower(func.trim(func.coalesce(UploadedPdf.status, ""))) != "completed",
+                UploadedPdf.current_document_id.is_(None), UploadedPdf.current_document_id == "",
+            ))
+            if only_unassigned:
+                unresolved_weeks = [value for value in session.scalars(select(UploadedPdf.week_hint).distinct())
+                                    if not _to_sheet_month_id(value)]
+                upload_query = upload_query.where(or_(UploadedPdf.facility_hint.is_(None), UploadedPdf.facility_hint == "",
+                    UploadedPdf.week_hint.is_(None), UploadedPdf.week_hint.in_(unresolved_weeks)))
             if cursor_received_at is not None:
                 if cursor_id:
                     upload_cursor_id = cursor_id.removeprefix("UPLOAD-")
@@ -5017,6 +5028,14 @@ def _fetch_orders(
         payloads.sort(key=_order_list_sort_key, reverse=True)
         if normalized_limit is not None:
             payloads = payloads[:normalized_limit]
+        if include_job_bindings:
+            order_ids = [row["id"] for row in payloads if row.get("source_kind") != "uploaded_pdf"]
+            job_bindings = get_recorded_order_job_bindings(order_ids, read_session=session)
+            if job_bindings_out is not None:
+                job_bindings_out.update(job_bindings)
+            for row in payloads:
+                if row.get("source_kind") != "uploaded_pdf":
+                    row.update(recorded_order_job_fields(job_bindings.get(row["id"])))
         return payloads
 
 
@@ -5091,6 +5110,8 @@ def list_orders_page(
     before_received_at: str | None = None,
     before_id: str | None = None,
     job_bindings_out: dict[str, dict[str, Any]] | None = None,
+    only_unassigned: bool = False,
+    include_job_bindings: bool = True,
 ) -> dict[str, Any]:
     normalized_limit = _normalize_order_list_limit(limit)
     cursor_received_at = _parse_order_list_cursor_received_at(before_received_at)
@@ -5098,7 +5119,7 @@ def list_orders_page(
     if cursor_received_at is None and cursor_id:
         cursor_id = ""
     has_cursor = cursor_received_at is not None
-    if not has_cursor and job_bindings_out is None:
+    if not has_cursor and job_bindings_out is None and not only_unassigned and include_job_bindings:
         orders = list_orders(status=status, include_archived=include_archived, limit=normalized_limit)
     else:
         orders = _fetch_orders(
@@ -5108,6 +5129,8 @@ def list_orders_page(
             before_received_at=cursor_received_at.isoformat() if cursor_received_at is not None else None,
             before_id=cursor_id,
             job_bindings_out=job_bindings_out,
+            only_unassigned=only_unassigned,
+            include_job_bindings=include_job_bindings,
         )
     has_more = normalized_limit is not None and len(orders) >= normalized_limit
     return {

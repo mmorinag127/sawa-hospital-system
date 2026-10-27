@@ -59,12 +59,12 @@ test('real DOM training rows/options match API; success message exception is exa
 }));
 
 test('empty result monitor is compared with actual empty orders and canonical facilities', async () => withPage(async page => {
-  await page.setContent('<h1>OCR結果監視</h1><span class="badge">合計 0 件</span><table><tbody><tr><td>該当データなし</td></tr></tbody></table>');
+  await page.setContent('<h1>OCR結果監視</h1><span class="badge">1ページ / 0 件</span><table><tbody><tr><td>該当データなし</td></tr></tbody></table><button disabled>前へ</button><button disabled>次へ</button>');
   const paths = [];
   await verifyOcrAdminReadonlyPages({ page, expect, origin: 'https://fixture.invalid',
     check: async (name, action) => { if (name === 'ocr-results') await action(); },
     receipt: async (path, action, query) => { paths.push(path); await action();
-      if (path === '/api/orders') { assert.deepEqual(query, { include_ocr: 'true', response_view: 'ocr_monitor' }); return { orders: [] }; }
+      if (path === '/api/orders') { assert.deepEqual(query, { include_ocr: 'true', response_view: 'ocr_monitor', limit: '25', only_unassigned: 'false' }); return { orders: [], has_more: false, next_cursor: null }; }
       return { source: 'canonical_json', revision: 'r1', facilities: [] }; },
     navigate: async path => { assert.equal(paths.length, 2); assert.equal(path, '/hospital/ocr-results'); }, mark() {} });
 }));

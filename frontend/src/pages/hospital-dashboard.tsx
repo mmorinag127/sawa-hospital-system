@@ -7,7 +7,7 @@ import TopNav from "../components/TopNav";
 import { OcrOperationsPayload, OcrOperationsSummary } from "../components/OcrOperations";
 import {
   fetchFacilityNameMap,
-  fetchOrderFacilityCandidates,
+  fetchOrderFacilityCandidateBatch,
   pickBestFacilityCandidate,
   type FacilityHint,
   type FacilityNameMap,
@@ -163,7 +163,7 @@ export default function HomePage() {
   const [systemLoading, setSystemLoading] = useState(true);
   const [shippingToday, setShippingToday] = useState<ShippingTodayPayload | null>(null);
   const [facilityNameMap, setFacilityNameMap] = useState<FacilityNameMap>({});
-  const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint>>({});
+  const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint | null>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -282,40 +282,29 @@ export default function HomePage() {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     const unresolved = pendingOrders
       .filter((order) => order.source_kind !== "uploaded_pdf" && !order.facility && order.id && !inlineFacilityHint(order))
       .map((order) => String(order.id || ""))
-      .filter((orderId) => orderId && !facilityHints[orderId]);
+      .filter((orderId) => orderId && !Object.prototype.hasOwnProperty.call(facilityHints, orderId));
 
     if (unresolved.length === 0) return;
 
-    const queue = [...unresolved];
-    const results: Record<string, FacilityHint> = {};
-
-    const workers = Array.from({ length: 2 }, async () => {
-      while (queue.length > 0) {
-        const orderId = queue.shift();
-        if (!orderId) continue;
-        try {
-          const candidates = await fetchOrderFacilityCandidates(orderId);
-          const best = pickBestFacilityCandidate(candidates);
-          if (best) {
-            results[orderId] = { ...best, order_id: orderId };
-          }
-        } catch {
-          // ignore
-        }
-      }
-    });
-
-    Promise.all(workers).then(() => {
+    fetchOrderFacilityCandidateBatch(unresolved, controller.signal).then(batch => {
       if (cancelled) return;
-      if (Object.keys(results).length === 0) return;
+      const results: Record<string, FacilityHint | null> = {};
+      for (const orderId of unresolved) {
+        const best = batch[orderId].error ? null : pickBestFacilityCandidate(batch[orderId].candidates);
+        results[orderId] = best ? { ...best, order_id: orderId } : null;
+      }
       setFacilityHints((prev) => ({ ...prev, ...results }));
+    }).catch(() => {
+      if (!cancelled) setFacilityHints(prev => ({ ...prev, ...Object.fromEntries(unresolved.map(id => [id, null])) }));
     });
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [pendingOrders, facilityHints]);
 

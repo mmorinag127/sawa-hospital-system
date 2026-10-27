@@ -25,7 +25,10 @@ async function mountPage(name, apiClient, run) {
     } }).outputText;
     vm.compileFunction(compiled, ['exports', 'require', 'React'])(exports, name => {
       if (name === 'react') return React;
-      if (name === '@mui/material') return { Button: ({ children, ...props }) => React.createElement('button', props, children) };
+      if (name === '@mui/material') return {
+        Button: ({ children, ...props }) => React.createElement('button', props, children),
+        Checkbox: props => React.createElement('input', { ...props, type: 'checkbox' }),
+      };
       if (name === '@mui/material/styles') return { ThemeProvider: ({ children }) => children };
       if (name === '@sawa/ui') return { sawaTheme: {} };
       if (name === 'next/link') return { default: ({ children, ...props }) => React.createElement('a', props, children) };
@@ -34,7 +37,10 @@ async function mountPage(name, apiClient, run) {
       if (name === '../services/dashboardMenuInfo') return load('services/dashboardMenuInfo.ts');
       if (name === '../services/facilityData') return {
         fetchFacilityNameMap: async () => ({}),
-        fetchOrderFacilityCandidates: async () => { throw new Error('unexpected fallback read'); },
+        fetchOrderFacilityCandidateBatch: async (ids, signal) => {
+          const query = new URLSearchParams(ids.map(id => ['order_ids', id]));
+          return (await apiClient.get(`/orders/facility-candidates?${query}`, { signal })).data.results;
+        },
         pickBestFacilityCandidate: () => null,
       };
       if (name === '../services/apiClient') return { apiClient };
@@ -100,6 +106,48 @@ test('process log reads summaries only; explicit raw download never parses or re
     URL.createObjectURL = oldCreate;
     URL.revokeObjectURL = oldRevoke;
   }
+});
+
+test('OCR monitor pages and filters on the server, batches visible candidates, and rejects late responses', async () => {
+  const calls = [];
+  const apiClient = { get: (path, options) => new Promise((resolve, reject) => calls.push({ path, options, resolve, reject })) };
+  await mountPage('ocr-results', apiClient, async ({ act, unmount }) => {
+    const button = name => [...document.querySelectorAll('button')].find(node => node.textContent === name);
+    const first = calls[0];
+    assert.equal(first.path, '/orders');
+    assert.equal(first.options.params.limit, 25);
+    assert.equal(first.options.params.only_unassigned, false);
+    assert.match(document.querySelector('tbody').textContent, /読み込み中/);
+    assert.equal(button('次へ').disabled, true);
+    const cursor = { received_at: '2026-10-27T00:00:00', id: 'first' };
+    await act(async () => first.resolve({ data: { orders: [{ id: 'first', week: '2026-10' }], has_more: true, next_cursor: cursor } }));
+    const candidate = calls.find(call => call.path.startsWith('/orders/facility-candidates?'));
+    assert.deepEqual(new URLSearchParams(candidate.path.split('?')[1]).getAll('order_ids'), ['first']);
+    assert.equal(button('次へ').disabled, false);
+    await act(async () => button('次へ').click());
+    assert.equal(first.options.signal.aborted, true);
+    assert.equal(candidate.options.signal.aborted, true);
+    const second = calls.filter(call => call.path === '/orders').at(-1);
+    assert.equal(second.options.params.before_id, cursor.id);
+    assert.equal(second.options.params.before_received_at, cursor.received_at);
+    await act(async () => second.resolve({ data: { orders: [{ id: 'second', facility: 'F2', week: '2026-10' }], has_more: false } }));
+    assert.match(document.querySelector('.badge').textContent, /2ページ \/ 1 件/);
+    assert.equal(button('次へ').disabled, true);
+    await act(async () => candidate.resolve({ data: { results: { first: { candidates: [{ facility_id: 'STALE', facility_name: 'stale' }] } } } }));
+    assert.doesNotMatch(document.querySelector('tbody').textContent, /stale/);
+    await act(async () => document.querySelector('input[type="checkbox"]').click());
+    const filtered = calls.filter(call => call.path === '/orders').at(-1);
+    assert.equal(filtered.options.params.only_unassigned, true);
+    assert.equal(filtered.options.params.before_id, undefined);
+    await act(async () => filtered.reject(new Error('read unavailable')));
+    assert.match(document.querySelector('tbody').textContent, /未取得/);
+    assert.doesNotMatch(document.querySelector('tbody').textContent, /該当データなし/);
+    await act(async () => button('更新').click());
+    const refreshed = calls.filter(call => call.path === '/orders').at(-1);
+    assert.equal(refreshed.options.params.only_unassigned, true);
+    await unmount();
+    assert.equal(refreshed.options.signal.aborted, true);
+  });
 });
 
 test('dashboard pending data is unknown, not zero or an OCR error; resolved empty data remains a valid zero', async () => {
