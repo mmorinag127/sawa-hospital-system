@@ -279,18 +279,20 @@ def test_ocr_progress_reads_only_the_recorded_owned_job(monkeypatch, authored_sh
     order_id = case.id
     attempt = case.queued["ocr_job"]["workflow_attempt_id"]
     calls = []
-    original = service._recorded_workflow_job_status
-    def recorded(*args):
-        calls.append(args[0].order_id)
-        return original(*args)
-    monkeypatch.setattr(service, "_recorded_workflow_job_status", recorded)
+    from src.services import workflow_display_read_service as display
+    original = display.read_recorded_job_values
+    def recorded(session, identities):
+        calls.append(list(identities))
+        return original(session, identities)
+    monkeypatch.setattr(display, "read_recorded_job_values", recorded)
     progress, error = service.get_ocr_progress(order_id)
     assert error is None
     assert progress["order_id"] == order_id
     assert progress["state"] == "ocr_running"
     assert progress["ocr_job"]["ocr_job_id"] == case.job
     assert progress["ocr_job"]["workflow_attempt_id"] == attempt
-    assert calls == [order_id]
+    assert calls == [[case.job]]
+    assert progress["validation_state"] == "references_only"
     assert progress["common_job_status"]["jobId"] == case.job
     assert progress["common_job_status"]["attemptIdentity"] == attempt
 

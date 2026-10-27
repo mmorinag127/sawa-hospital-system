@@ -3,6 +3,7 @@ from copy import deepcopy
 from unittest.mock import patch
 
 from sqlalchemy import event
+from sqlalchemy.sql import Select, visitors
 
 from test_current_ocr_operations import store  # noqa: F401
 from test_native_ingest_sql_component import (  # noqa: F401
@@ -17,15 +18,23 @@ def read_without_work(fixture, call):
     engine = fixture["factory"].kw["bind"]
     def observe(_connection, _cursor, sql, *_args):
         statements.append(sql)
+    def reject_full_payload(_connection, statement, *_args):
+        from src.models.order_version import OrderVersion
+        for query in visitors.iterate(statement):
+            if isinstance(query, Select):
+                for selected in query.selected_columns:
+                    assert not selected.compare(OcrJob.metrics.__clause_element__()), "full job metrics selected"
+                    assert not selected.compare(OrderVersion.line_snapshot.__clause_element__()), "full version lines selected"
     event.listen(engine, "before_cursor_execute", observe)
+    event.listen(engine, "before_execute", reject_full_payload)
     try:
         with patch("socket.socket", side_effect=AssertionError("display performed network I/O")):
             result = call()
     finally:
         event.remove(engine, "before_cursor_execute", observe)
+        event.remove(engine, "before_execute", reject_full_payload)
     assert snapshot(fixture) == before
     assert all(sql.lstrip().upper().startswith("SELECT") for sql in statements)
-    assert not any("ocr_jobs.metrics," in sql or "order_versions.line_snapshot" in sql for sql in statements)
     return result
 
 

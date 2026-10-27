@@ -41,7 +41,7 @@ def test_card_summary_matches_full_read_identity_count_without_quantity_reads(en
     with Session(engine) as session:
         rows = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.facility_override.is_(None)).all()
         entries = session.query(MonthlyMenuEntry).all()
-        full = service._normalize_menu_payload_items({"items": original(session, month, rows, entries)})
+        full = service._normalize_menu_payload_items({"items": original(session, month, rows, entries, None)})
     statements = []
     def observe(_conn, _cursor, sql, *_args):
         statements.append(sql)
