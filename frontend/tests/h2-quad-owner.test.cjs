@@ -23,7 +23,7 @@ function harness(){
     axisReadGenerationRef:{current:{header:0,row:0}},axisSourceRef:{current:{}},
     quadSourceRef:{current:null},sheetEditGenerationRef:{current:0},activeOrderIdRef:{current:'order-A'},workflowRevisionRef:{current:{revision:8,bootstrap:false}},workflowEditorVersionsRef:{current:{}},
     selectedOcrResultRef:{current:undefined},pendingSheetCellEditsRef:{current:new Map()},sheetPayloadRef:{current:null},sheetDirtyRef:{current:false},unsavedSessionRef:{current:null},sheetPayload:null,
-    window:{confirm:()=>state.confirmReplacement},AbortController,
+    window:{confirm:()=>state.confirmReplacement},AbortController,visibleStep:1.5,displayLoading:false,displayReadyRef:{current:'summary'},
     CANONICAL_SOURCE_READ_TIMEOUT_MS:actual('CANONICAL_SOURCE_READ_TIMEOUT_MS',{}),
     WORKFLOW_READ_PENDING_MESSAGE:actual('WORKFLOW_READ_PENDING_MESSAGE',{}),
     rawInspectionRequestRef:{current:0},setRawInspection:()=>{},
@@ -362,17 +362,18 @@ for(const missing of ['saved','selected','both','null','empty'])test(`missing st
 function refreshHarness(){
   const h=harness();
   Object.assign(h.context,{refreshGenerationRef:{current:0},sheetDirtyRef:{current:false},pendingSheetCellEditsRef:{current:new Map()},
+    displayReadyRef:{current:''},setDisplayEpoch:()=>{},
     ocrDetailRequestRef:{current:0},ocrDetailAbortRef:{current:null},rawInspectionRequestRef:{current:0},
     rawInspectionAbortRef:{current:null},rawInspectionOpenRef:{current:false},ocrCompletionRefreshRef:{current:null},setRawInspection:()=>{},
     workflowJobRef:{current:{orderId:'order-A',jobId:'recorded-job',attemptId:'recorded-attempt',state:'ocr_running'}},
     setWorkflow:value=>{const next=typeof value==='function'?value(h.context.workflow):value;h.state.workflow=next;h.context.workflow=next;},setOrderDetail:value=>{h.state.order=value;},applyPreSaveState:()=>{},
-    setOcrResults:value=>{h.state.ocr=value;},setInspection:value=>{h.state.inspection=value;},normalizeSheetPayload:value=>value,
+    setOcrResults:value=>{h.state.ocr=value;},setInspection:value=>{h.state.inspection=typeof value==='function'?value(h.state.inspection):value;},normalizeSheetPayload:value=>value,
     setSheetPayload:()=>{},setSheetJsonStale:()=>{},setContextForm:()=>{},setWeekDraft:()=>{},weekValueFromRange:()=>'',emptyContext:{facility_id:'',week_start:'',week_end:''}});
   h.context.refreshAll=(...args)=>actual('refreshAll',h.context)(...args);
   h.response=url=>{
     const workflow={order_id:'order-A',revision:8,state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt',status:'queued',attempt_count:0}};
     return {data:url.endsWith('/ocr-progress')?{...workflow,workflow_revision:8}:
-      url.includes('/inspection?')?{order_header:{id:'order-A'},workflow,saved_sheet:null,ocr_candidates:require('./helpers/ocr-candidates.cjs')('order-A')}:
+      url.includes('/display?')?{display_scope:'summary',loaded_sections:[],order_header:{id:'order-A'},workflow,saved_sheet:null}:
       url.endsWith('/workflow-v2')?workflow:{id:'order-A'}};
   };
   return h;

@@ -4,7 +4,7 @@ import harness from "./helpers/modernization-react-dom.cjs";
 
 const { mount, transport, deferred } = harness;
 const page = "src/pages/orders/[id]/inspection-v2.tsx";
-const url = id => `/orders/${id}/workflow-v2/inspection`;
+const url = id => `/orders/${id}/workflow-v2/display`;
 const detailUrl = id => `/orders/${id}/workflow-v2/inspection-detail/candidate-${id}`;
 const value = (id, revision = 7) => ({
   workflow: { order_id: id, revision, state: "ocr_selected", selected_ocr_result_id: `selected-${id}` },
@@ -45,7 +45,7 @@ test("initial reads are parallel summary/PDF only; detail is verified on demand,
   });
   try {
     assert.deepEqual(t.calls.map(c => c.url), [url("A"), "/orders/A/document"]);
-    assert.equal(t.calls[0].config.params.history_details, false);
+    assert.equal(t.calls[0].config.params.scope, "inspection");
     assert.match(h.document.body.textContent, /詳細未取得・採用可否未検証/);
     assert.equal(h.document.querySelector("details pre"), null);
     assert.equal(h.document.querySelectorAll("img").length, 1);

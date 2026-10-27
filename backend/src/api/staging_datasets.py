@@ -28,10 +28,18 @@ def ready(response: Response):
 
 
 @router.get("/staging-datasets")
-def choices(request: Request, response: Response):
+def choices(request: Request, response: Response, include_refresh: bool = False):
     response.headers["Cache-Control"] = "no-store"
     if not datasets.staging_runtime():
         return {"enabled": False}
+    refresh_info = {}
+    if include_refresh:
+        try:
+            refresh_info["refresh"] = refresh_status(response)
+        except HTTPException as exc:
+            if exc.status_code != 503:
+                raise
+            refresh_info.update(refresh=None, refresh_error="コピー更新の状態を取得できません。")
     selected = request.cookies.get(datasets.COOKIE, "test")
     options = [{"id": "test", "label": "テスト用", "available": True}]
     try:
@@ -40,7 +48,7 @@ def choices(request: Request, response: Response):
     except datasets.DatasetUnavailable:
         options.append({"id": "unavailable", "label": "本番再現用（準備未完了）", "available": False})
         error = None if selected == "test" else "本番コピーを確認できません。テスト用へ戻すか管理者に確認してください。"
-    return {"enabled": True, "selected": selected, "options": options, "error": error}
+    return {"enabled": True, "selected": selected, "options": options, "error": error, **refresh_info}
 
 
 @router.put("/staging-datasets")

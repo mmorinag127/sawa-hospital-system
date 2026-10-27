@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 
 import pytest
+from tests.contract.test_orders_ocr_sheet_history_api import history_case  # noqa: F401
 
 from src.services import snapshot_serialization as snapshots
 from src.services import system_process_log_service as logs
@@ -93,3 +94,173 @@ def test_terminal_read_borrows_internal_payload_but_persister_owns_copy(monkeypa
     write["receipt"]["status"] = "changed"
     assert captured["orders"]["order"]["original"] == ["value"]
     assert terminal["status"] == "done"
+
+
+@pytest.mark.parametrize("phase", ["uploaded", "running", "selected", "saved"])
+def test_display_summary_never_rebuilds_or_verifies_ocr_on_read(history_case, monkeypatch, phase):
+    from src.services import order_workflow_v2_service as workflow
+    from src.services import workflow_display_read_service as display
+    from src.services import canonical_ocr_artifact_service as artifacts
+    case = history_case()
+    if phase == "running":
+        case.queue()
+    elif phase in {"selected", "saved"}:
+        produced = case.produce(cell_values="5")
+        if phase == "saved":
+            case.save(produced["sheet"])
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("display invoked an upstream producer or physical OCR verification")
+    monkeypatch.setattr(workflow, "_build_materialization_candidate_for_saved_sheet", forbidden)
+    monkeypatch.setattr(workflow, "_serialize_workflow_checked", forbidden)
+    monkeypatch.setattr(workflow, "_serialize_ocr_result", forbidden)
+    monkeypatch.setattr(artifacts, "_verify", forbidden)
+    with case.readonly():
+        value, error = display.get_display(case.id)
+    assert error is None
+    assert value["order_id"] == case.id
+    assert value["workflow"]["validation_state"] == "references_only"
+    assert value["loaded_sections"] == []
+    assert "ocr_candidates" not in value
+    assert "menu_amount_resolution" not in value["workflow"]
+    assert "sheet" not in (value.get("saved_sheet") or {})
+
+
+def test_saved_output_display_does_not_materialize_and_sheet_scope_preserves_edits(history_case, monkeypatch):
+    from src.services import workflow_display_read_service as display
+    from src.services import order_workflow_v2_service as workflow
+    case = history_case()
+    source = case.produce(cell_values="5")
+    sheet = source["sheet"]
+    case.save(sheet)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("read rebuilt output")
+    monkeypatch.setattr(workflow, "_build_materialization_candidate_for_saved_sheet", forbidden)
+    with case.readonly():
+        output, error = display.get_display(case.id, scope="output")
+        assert error is None
+        assert output["loaded_sections"] == ["output"]
+        assert output["bagging_result"] is None and output["output_bundle"] is None
+        saved, error = display.get_display(case.id, scope="sheet")
+    assert error is None
+    assert saved["saved_sheet"]["sheet"]["rows"] == sheet["rows"]
+    assert saved["loaded_sections"] == ["ocr", "sheet"]
+    assert all(row["detail_state"] == "not_loaded" for row in saved["ocr_candidates"]["results"])
+
+
+def test_display_rejects_missing_saved_reference_instead_of_rebuilding(history_case):
+    from src.db import session_scope
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.services import workflow_display_read_service as display
+    case = history_case()
+    source = case.produce(cell_values="5")
+    case.save(source["sheet"])
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, case.id)
+        actions = dict(state.secondary_actions_json)
+        actions["workflow_v2"] = {**actions["workflow_v2"], "output_bundle_id": "missing-output"}
+        state.secondary_actions_json = actions
+    with case.readonly():
+        value, error = display.get_display(case.id)
+        assert error is None
+        assert "output_bundle_artifact_missing" in value["workflow"]["blockers"]
+        value, error = display.get_display(case.id, scope="output")
+    assert value is None and error == "output_bundle_artifact_missing"
+
+
+def test_confirmed_display_reads_snapshot_without_rebuilding_ocr(history_case, monkeypatch):
+    from src.services import workflow_display_read_service as display
+    from src.services import order_workflow_v2_service as workflow
+    case = history_case()
+    source = case.produce(cell_values="5")
+    case.save(source["sheet"])
+    case.command("POST", "bagging")
+    confirmed = case.command("POST", "confirm", {"confirmed_by": "operator"})
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("confirmed display rebuilt its producer")
+    monkeypatch.setattr(workflow, "_build_materialization_candidate_for_saved_sheet", forbidden)
+    monkeypatch.setattr(workflow, "_serialize_ocr_result", forbidden)
+    with case.readonly():
+        value, error = display.get_display(case.id, scope="output")
+    assert error is None
+    assert value["workflow"]["state"] == "confirmed"
+    assert value["workflow"]["confirmed_snapshot_id"] == confirmed["confirmed_snapshot_id"]
+    assert value["output_bundle"]["confirmed_snapshot_id"] == confirmed["confirmed_snapshot_id"]
+
+
+def test_read_operation_never_survives_response_or_changed_input(monkeypatch):
+    from sqlalchemy.orm import Session
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+    from src.services import ocr_evidence_service as evidence
+    calls = []
+    row = OrderOcrEvidenceRun(id="owned", order_id="order", payload_json={"unknown": [1, "1"]},
+        artifact_manifest_json={}, capabilities_json={}, degraded_reasons_json=[])
+    monkeypatch.setattr(evidence, "evidence_run_selectability_error", lambda actual, **kwargs: calls.append(actual) or None)
+    with Session() as session:
+        session.add(row)
+        with evidence._EvidenceReadOperation(session) as operation:
+            assert operation.selectability_error(row) is None
+            assert operation.selectability_error(row) is None
+            assert len(calls) == 1
+            row.payload_json = {"unknown": [1, "changed"]}
+            assert operation.selectability_error(row) is None
+            assert len(calls) == 2
+        with pytest.raises(ValueError, match="evidence_read_operation_closed"):
+            operation.selectability_error(row)
+        with evidence._EvidenceReadOperation(session) as next_response:
+            assert next_response.selectability_error(row) is None
+            assert len(calls) == 3
+
+
+def test_read_operation_is_not_a_command_receipt():
+    from sqlalchemy.orm import Session
+    from src.services import ocr_evidence_service as evidence, order_service
+    with Session() as session, evidence._EvidenceReadOperation(session) as operation:
+        with pytest.raises(ValueError, match="evidence_read_operation_not_command_proof"):
+            order_service._capture_synchronous_cache_write_input("order", write_session=session, _read_operation=operation)
+
+
+def test_dataset_choices_combine_status_before_reading_fresh_choices(monkeypatch):
+    from starlette.requests import Request
+    from starlette.responses import Response
+    from src.api import staging_datasets as api
+    calls = []
+    monkeypatch.setattr(api.datasets, "staging_runtime", lambda: True)
+    monkeypatch.setattr(api, "refresh_status", lambda response: calls.append("refresh") or {"configured": True, "job": None})
+    monkeypatch.setattr(api.datasets, "snapshot_choices", lambda: calls.append("choices") or [])
+    request = Request({"type": "http", "headers": []})
+    plain = api.choices(request, Response())
+    assert calls == ["choices"] and "refresh" not in plain
+    calls.clear()
+    combined = api.choices(request, Response(), include_refresh=True)
+    assert calls == ["refresh", "choices"]
+    assert combined["refresh"] == {"configured": True, "job": None}
+    assert combined["selected"] == "test"
+
+
+def test_failed_refresh_status_does_not_hide_dataset_choices(monkeypatch):
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from starlette.responses import Response
+    from src.api import staging_datasets as api
+    monkeypatch.setattr(api.datasets, "staging_runtime", lambda: True)
+    monkeypatch.setattr(api.datasets, "snapshot_choices", lambda: [])
+    def unavailable(response):
+        raise HTTPException(503, "private refresh failure")
+    monkeypatch.setattr(api, "refresh_status", unavailable)
+    value = api.choices(Request({"type": "http", "headers": []}), Response(), include_refresh=True)
+    assert value["selected"] == "test" and value["refresh"] is None
+    assert value["refresh_error"] and "private" not in value["refresh_error"]
+
+
+def test_http_startup_does_not_import_native_image_recognition():
+    import os
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable, "-c",
+        "import sys; import src.main; assert 'cv2' not in sys.modules, 'HTTP startup imported cv2'"],
+        env={**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"},
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr[-2000:]

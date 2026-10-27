@@ -638,7 +638,12 @@ def lock_selected_version_input(session, order_id, captured, *, read_only=False)
     if not isinstance(captured, dict) or captured.get("order_id") != order_id:
         return False
     version = session.get(OrderVersion, captured.get("id"), populate_existing=True, with_for_update={"read": True} if read_only else True)
-    return version is not None and snapshots_equal(selected_version_snapshot(version), captured)
+    return selected_version_input_matches(version, order_id, captured)
+
+
+def selected_version_input_matches(version, order_id, captured):
+    return (isinstance(captured, dict) and captured.get("order_id") == order_id
+            and version is not None and snapshots_equal(selected_version_snapshot(version), captured))
 
 
 @contextmanager

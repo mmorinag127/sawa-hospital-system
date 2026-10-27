@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import axios from "axios";
-import { Transform } from "stream";
+import { Transform, type Readable } from "stream";
 import { pipeline } from "stream/promises";
 
 const getTarget = () => {
@@ -75,6 +75,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.status(413).json({ error: "request_too_large" });
     return;
   }
+  const controller = new AbortController();
+  let upstream: Readable | undefined;
+  const abort = () => controller.abort();
+  const onClose = () => { if (!res.writableFinished) abort(); };
+  req.once("aborted", abort);
+  res.once("close", onClose);
   try {
     const target = getTarget();
     const path = Array.isArray(req.query.path) ? req.query.path.join("/") : req.query.path || "";
@@ -95,24 +101,33 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       maxBodyLength: PROXY_MAX_BODY_BYTES,
       maxContentLength: PROXY_MAX_RESPONSE_BYTES,
       maxRedirects: 0,
+      signal: controller.signal,
     });
+    upstream = response.data;
 
     if (contentLengthExceeds(response.headers["content-length"] as string | string[] | undefined, PROXY_MAX_RESPONSE_BYTES)) {
+      upstream?.destroy();
       res.status(502).json({ error: "upstream_response_too_large" });
       return;
     }
     res.status(response.status);
     copyResponseHeaders(res, response.headers);
     if (req.method === "HEAD") {
+      upstream?.destroy();
       res.end();
       return;
     }
     await pipeline(response.data, limitStream(PROXY_MAX_RESPONSE_BYTES), res);
   } catch (err) {
+    if (controller.signal.aborted || res.destroyed) return;
     if (res.headersSent) {
-      res.end();
+      res.destroy(err instanceof Error ? err : new Error("proxy_stream_failed"));
       return;
     }
     res.status(502).json({ error: "proxy_failed" });
+  } finally {
+    req.removeListener("aborted", abort);
+    res.removeListener("close", onClose);
+    if (upstream && !upstream.readableEnded) upstream.destroy();
   }
 }

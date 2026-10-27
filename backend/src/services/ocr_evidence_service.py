@@ -780,7 +780,52 @@ class SelectedEvidenceRejected(ValueError):
     """A selected persisted result cannot be used by a dependent operation."""
 
 
-def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None) -> str | None:
+class _EvidenceReadOperation:
+    """One read response's validated inputs; never a command or later-read proof."""
+
+    def __init__(self, session):
+        self.session = session
+        self.active = False
+        self._selected = None
+
+    def __enter__(self):
+        self.active = True
+        return self
+
+    def __exit__(self, *_exception):
+        self.active = False
+        self._selected = None
+
+    def selectability_error(self, row, *, _analysis=None):
+        from sqlalchemy import inspect
+        from src.services.canonical_ocr_artifact_service import _analysis_input_bytes
+
+        if not self.active:
+            raise ValueError("evidence_read_operation_closed")
+        model = inspect(row, raiseerr=False)
+        if model is None or model.session is not self.session:
+            return evidence_run_selectability_error(row, _analysis=_analysis)
+        binding = _analysis_input_bytes([
+            row.id, row.order_id, row.template_version_id, row.schema_version,
+            row.producer_version, row.source, row.status, row.artifact_digest,
+            row.payload_json, row.artifact_manifest_json, row.capabilities_json,
+            row.degraded_reasons_json,
+        ])
+        if (binding is not None and self._selected is not None
+                and self._selected[0] is row and self._selected[1] == binding):
+            return None
+        self._selected = None
+        error = evidence_run_selectability_error(row, _analysis=_analysis)
+        if error is None and binding is not None and len(binding) <= 64 * 1024 * 1024:
+            self._selected = (row, binding)
+        return error
+
+
+def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None, _read_operation=None) -> str | None:
+    if _read_operation is not None:
+        if not isinstance(_read_operation, _EvidenceReadOperation):
+            raise ValueError("evidence_read_operation_invalid")
+        return _read_operation.selectability_error(row, _analysis=_analysis)
     try:
         payload, accepted = recognition_acceptance._payload_for_evidence_with_accepted_values(row, copy_payload=False)
         if accepted is None:
@@ -843,8 +888,8 @@ def evidence_run_selectability_error(row: OrderOcrEvidenceRun, *, _analysis=None
     return None
 
 
-def evidence_run_is_selectable(row: OrderOcrEvidenceRun, *, _analysis=None) -> bool:
-    return evidence_run_selectability_error(row, _analysis=_analysis) is None
+def evidence_run_is_selectable(row: OrderOcrEvidenceRun, *, _analysis=None, _read_operation=None) -> bool:
+    return evidence_run_selectability_error(row, _analysis=_analysis, _read_operation=_read_operation) is None
 
 
 def list_evidence_runs(order_id: str) -> list[dict[str, Any]]:

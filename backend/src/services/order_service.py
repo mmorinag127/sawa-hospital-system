@@ -75,7 +75,6 @@ from src.services import (
     ocr_evidence_service,
     position_column_mapping_service,
     hakodate_assignment_service,
-    hakodate_cell_ocr_batch_service,
     hakodate_ocr_evidence_service,
     draft_sheet_service,
     order_current_state_service,
@@ -184,8 +183,13 @@ def _capture_selected_order_config(session: Any, order: Order, *, read_only: boo
     return _order_execution_input(session, order, lock=True)["configured_input"]
 
 
-def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any = None, for_materialization: bool = False, _analysis=None, _for_read_projection: bool = False) -> dict[str, Any] | None:
+def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any = None, for_materialization: bool = False, _analysis=None, _for_read_projection: bool = False, _read_operation=None) -> dict[str, Any] | None:
     """Capture the exact operator-read inputs required for a later cache CAS."""
+    if _read_operation is not None and (
+            not _for_read_projection
+            or not isinstance(_read_operation, ocr_evidence_service._EvidenceReadOperation)
+            or not _read_operation.active or _read_operation.session is not write_session):
+        raise ValueError("evidence_read_operation_not_command_proof")
     with (nullcontext(write_session) if write_session is not None else session_scope()) as session:
         from src.services.initial_saved_import_service import get_binding, execution_input, processing_input
         from src.services.initial_saved_source_service import source_receipt
@@ -215,7 +219,8 @@ def _capture_synchronous_cache_write_input(order_id: str, *, write_session: Any 
         evidence = session.get(OrderOcrEvidenceRun, evidence_run_id) if evidence_run_id else None
         if evidence is None or evidence.order_id != order_id:
             return None
-        rejection = ocr_evidence_service.evidence_run_selectability_error(evidence, _analysis=_analysis)
+        rejection = ocr_evidence_service.evidence_run_selectability_error(
+            evidence, _analysis=_analysis, _read_operation=_read_operation)
         if rejection == "evidence_unusable":
             return None
         if rejection is not None:
@@ -9027,6 +9032,8 @@ def _payload_has_hakodate_evidence_records(payload: dict[str, Any], *, order_id:
 
 
 def _hakodate_owned_source(configured_input, pdf_receipt, synchronous_write_input=None, *, original_input=None, _analysis=None):
+    from src.services import hakodate_cell_ocr_batch_service
+
     execution = current_nonworkflow_execution() or {}
     start = original_input if original_input is not None else synchronous_write_input if synchronous_write_input is not None else processing_start_read_input()
     entries = start.get("physical_menu_entries")
@@ -9390,6 +9397,8 @@ def _build_live_hakodate_manifest_item(
     synchronous_write_input: dict[str, Any] | None = None,
     review_start_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from src.services import hakodate_cell_ocr_batch_service
+
     if review_start_input is None and synchronous_write_input is None and (current_nonworkflow_execution() is not None or _workflow_ocr_job_id.get()):
         review_start_input = processing_start_read_input()
     if synchronous_write_input is None and review_start_input is None:
@@ -9563,6 +9572,8 @@ def _build_live_hakodate_manifest_item(
 
 
 def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, start_input: dict) -> dict[str, Any]:
+    from src.services import hakodate_cell_ocr_batch_service
+
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
@@ -9678,6 +9689,8 @@ def _load_axis_review_pdf(source_receipt):
 
 
 def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start_input: dict) -> dict[str, Any]:
+    from src.services import hakodate_cell_ocr_batch_service
+
     with session_scope() as session:
         order = session.get(Order, order_id)
         if not order:
@@ -9845,6 +9858,8 @@ def _hakodate_canonical_payload_from_manifest_item(
     configured_input: dict[str, Any] | None = None,
     synchronous_write_input: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    from src.services import hakodate_cell_ocr_batch_service
+
     draft_sheet = _hakodate_best_method_draft_sheet(order_id, synchronous_write_input=synchronous_write_input)
     if not isinstance(draft_sheet, dict):
         raise ValueError("hakodate_best_method_draft_sheet_missing")

@@ -162,11 +162,21 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
       });
       return;
     }
-    if (path.endsWith(`/orders/${orderId}/workflow-v2/inspection`) && method === "GET") {
+    if (path.includes(`/orders/${orderId}/workflow-v2/inspection-detail/`) && method === "GET") {
+      const id = path.slice(path.lastIndexOf("/") + 1);
+      const detail = currentResults().find((row) => row.ocr_result_id === id);
+      await route.fulfill({status: detail ? 200 : 404, json: detail ? {...detail, workflow_revision: currentWorkflow().revision} : {detail: "ocr_result_not_found"}});
+      return;
+    }
+    if ((path.endsWith(`/orders/${orderId}/workflow-v2/inspection`) || path.endsWith(`/orders/${orderId}/workflow-v2/display`)) && method === "GET") {
       await options.beforeInspectionRead?.();
+      const scope = url.searchParams.get("scope") || "inspection";
       await route.fulfill({
         status: 200,
         json: {
+          display_scope: scope,
+          loaded_sections: scope === "summary" ? [] : scope === "sheet" ? ["ocr", "sheet"] : [scope],
+          ocr_result_count: currentResults().length,
           order_header: {
             id: orderId,
             version_count: 1,
@@ -174,16 +184,17 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
             versions: [{ document_id: documentId, is_current: true }],
           },
           workflow: currentWorkflow(),
-          ocr_candidates: {
+          ocr_candidates: scope === "summary" || scope === "output" ? undefined : {
             order_id: orderId, workflow_state: currentWorkflow().state,
             blockers: [], selected_ocr_result_id: currentWorkflow().selected_ocr_result_id,
             candidate_template_version_id: "TEMPLATE-E2E-001", hidden_template_mismatch_result_count: 0,
-            results: currentResults(),
+            results: currentResults().map((row) => ({ocr_result_id: row.ocr_result_id, selected: row.selected,
+              status: row.status, source: row.source, created_at: row.created_at, detail_state: "not_loaded"})),
           },
           saved_sheet: currentWorkflow().saved_sheet_id && currentWorkflow().selected_ocr_result_id ? {
             saved_sheet_id: currentWorkflow().saved_sheet_id,
             source_ocr_result_id: currentWorkflow().selected_ocr_result_id,
-            sheet: sheetPayload,
+            sheet: scope === "sheet" || scope === "inspection" ? sheetPayload : undefined,
             edited_at: "2026-05-22T00:00:00Z",
           } : null,
           pre_save_status: {

@@ -282,6 +282,9 @@ type OcrResult = {
 };
 
 type InspectionPayload = {
+  display_scope?: "summary" | "ocr" | "sheet" | "output";
+  loaded_sections?: string[];
+  ocr_result_count?: number;
   order_id?: string;
   order_header?: OrderDetail;
   ocr_candidates?: {
@@ -1393,6 +1396,11 @@ export default function OrderWorkflowV2Page() {
   const [sheetJsonStale, setSheetJsonStale] = useState(false);
   const [sheetPayload, setSheetPayloadState] = useState<SheetPayload | null>(null);
   const [visibleStep, setVisibleStep] = useState(1);
+  const [visibleStepReady, setVisibleStepReady] = useState(false);
+  const [displayEpoch, setDisplayEpoch] = useState(0);
+  const [displayLoading, setDisplayLoading] = useState(false);
+  const displayRequestRef = useRef(0);
+  const displayReadyRef = useRef("");
   const [storedQuadReview, setQuadReview] = useState<QuadReviewPayload | null>(null);
   const [quadReviewLoading, setQuadReviewLoading] = useState(false);
   const [quadReviewMessage, setQuadReviewMessage] = useState("");
@@ -1929,7 +1937,7 @@ export default function OrderWorkflowV2Page() {
   const effectiveAnomalyReviewConfirmed = Boolean(preSaveStatus.anomaly_review_confirmed);
   const effectiveSheetReviewConfirmed = Boolean(preSaveStatus.sheet_review_confirmed);
   const canSaveSheet = Boolean(
-    workflow?.selected_ocr_result_id
+    !displayLoading && displayReadyRef.current === "sheet" && workflow?.selected_ocr_result_id
     && sheetPayload
     && effectiveAnomalyReviewConfirmed
     && effectiveSheetReviewConfirmed,
@@ -1994,8 +2002,7 @@ export default function OrderWorkflowV2Page() {
     ? workflow.menu_amount_resolution
     : orderDetail?.menu_amount_resolution;
   const menuAmountBlocker = menuAmountResolution?.blocker || "menu_amount_unresolved";
-  const menuAmountUnresolved = Boolean(workflow?.saved_sheet_id && !menuAmountResolution)
-    || menuAmountResolution?.status === "unresolved"
+  const menuAmountUnresolved = menuAmountResolution?.status === "unresolved"
     || workflowBlockers.includes("menu_amount_unresolved");
   if (menuAmountUnresolved && !workflowBlockers.includes(menuAmountBlocker)) {
     workflowBlockers.push(menuAmountBlocker);
@@ -2400,6 +2407,8 @@ export default function OrderWorkflowV2Page() {
     callerCurrent: () => boolean = () => true,
     expectedJob: {jobId:string;attemptId:string} | NativeOcrOwner | null = null,
     adopt: ActionAdoption = (publish) => publish(),
+    displayScope: "summary" | "ocr" | "sheet" | "output" = "summary",
+    signal?: AbortSignal,
   ) => {
     if (!orderId) return;
     const own=capturePageOwner();
@@ -2411,7 +2420,9 @@ export default function OrderWorkflowV2Page() {
     ocrDetailAbortRef.current?.abort();
     rawInspectionRequestRef.current += 1;
     rawInspectionAbortRef.current?.abort();
-    const inspectionRes = await apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}).catch(err=>{
+    const requestedRevision = workflowRevisionRef.current?.revision;
+    const inspectionRes = await apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/display?scope=${displayScope}`, {signal, timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}).catch(err=>{
+      if (signal?.aborted) return null;
       if (refreshGeneration===refreshGenerationRef.current && requestedOrderId===activeOrderIdRef.current
         && ownsPageInput(own) && callerCurrent()) throw err;
       return null;
@@ -2423,6 +2434,10 @@ export default function OrderWorkflowV2Page() {
       || !ownsPageInput(own) || !callerCurrent();
     if (staleRead) return;
     if (!workflowRes.data) throw new Error("workflow 読取応答が不正です。");
+    if (inspectionRes.data.display_scope !== displayScope) throw new Error("表示範囲の読取応答が不正です。");
+    if (displayScope !== "summary" && requestedRevision !== workflowRes.data.revision) {
+      throw new Error("状態更新のため再読込が必要です。");
+    }
     if (workflowRes.data.order_id !== requestedOrderId) {
       throw new Error("workflow 読取応答の注文が一致しません。");
     }
@@ -2440,7 +2455,7 @@ export default function OrderWorkflowV2Page() {
           || workflowRes.data.ocr_job?.workflow_attempt_id!==expectedJob.attemptId) return false;
     }
     const {ocr_candidates: candidates, ...inspectionData} = inspectionRes.data;
-    if (!candidates || candidates.order_id !== requestedOrderId
+    if (displayScope !== "summary" && displayScope !== "output" && (!candidates || candidates.order_id !== requestedOrderId
       || !Array.isArray(candidates.results)
       || candidates.results.some(item => !item || typeof item.ocr_result_id !== "string")
       || typeof candidates.workflow_state !== "string"
@@ -2448,33 +2463,38 @@ export default function OrderWorkflowV2Page() {
       || !(candidates.selected_ocr_result_id === null || typeof candidates.selected_ocr_result_id === "string")
       || !(candidates.candidate_template_version_id === null || typeof candidates.candidate_template_version_id === "string")
       || !Number.isInteger(candidates.hidden_template_mismatch_result_count)
-      || candidates.hidden_template_mismatch_result_count < 0) {
+      || candidates.hidden_template_mismatch_result_count < 0)) {
       throw new Error("OCR候補の読取応答が不正です。");
     }
     const adopted = adopt(() => {
       adoptReadWorkflow(workflowRes.data);
       setOrderDetail(orderHeader);
-      applyPreSaveState(
+      if (inspectionRes.data.loaded_sections?.includes("sheet")) applyPreSaveState(
         inspectionRes.data.pre_save_checks || workflowRes.data.pre_save_checks || {},
         inspectionRes.data.pre_save_status || null,
       );
       if (canAdoptReadEditorInput("expandedCellCopy")) {
         setExpandedCellCopyMode(normalizeExpandedCellCopyMode(workflowRes.data.expanded_cell_copy_mode));
       }
-      setOcrResults(candidates.results);
-      setInspection(inspectionData);
+      if (candidates) setOcrResults(candidates.results);
+      setInspection((previous) => displayScope === "summary" ? inspectionData : {...previous, ...inspectionData});
+      if (displayScope === "summary") {
+        displayReadyRef.current = "";
+        setOcrResults([]);
+        setDisplayEpoch((epoch) => epoch + 1);
+      }
       rawInspectionRequestRef.current += 1;
       setRawInspection(null);
       const savedSheet = inspectionRes.data.saved_sheet?.sheet;
       const canReplaceSheet = !sheetDirtyRef.current && pendingSheetCellEditsRef.current.size === 0 && canAdoptReadEditorInput("sheet");
-      if (savedSheet && canReplaceSheet) {
+      if (inspectionRes.data.loaded_sections?.includes("sheet") && savedSheet && canReplaceSheet) {
         const normalizedSavedSheet = normalizeSheetPayload(savedSheet);
         if (!sameRecordedValue(sheetPayloadRef.current, normalizedSavedSheet)) {
           ++sheetEditGenerationRef.current;
         }
         setSheetPayload(normalizedSavedSheet);
         setSheetJsonStale(true);
-      } else if (!savedSheet && canReplaceSheet) {
+      } else if (inspectionRes.data.loaded_sections?.includes("sheet") && !savedSheet && canReplaceSheet) {
         discardSheetDraft();
       }
       const confirmedContext = {
@@ -2526,7 +2546,7 @@ export default function OrderWorkflowV2Page() {
       || response.data.workflow_revision !== revision || workflowRevisionRef.current?.revision !== revision) {
       throw new Error("状態更新のため再読込が必要です。");
     }
-    setOcrResults((current) => current.map((item) => item.ocr_result_id === ocrResultId ? response.data : item));
+    setOcrResults((current) => current.map((item) => item.ocr_result_id === ocrResultId ? {...response.data, detail_state: undefined} : item));
     return response.data;
   };
 
@@ -2565,6 +2585,10 @@ export default function OrderWorkflowV2Page() {
 
   useEffect(() => {
     refreshGenerationRef.current += 1;
+    setVisibleStepReady(false);
+    displayReadyRef.current = "";
+    displayRequestRef.current += 1;
+    setOcrResults([]);
     sheetEditGenerationRef.current += 1;
     sheetDirtyRef.current = false;
     workflowEditorVersionsRef.current = {};
@@ -2598,12 +2622,38 @@ export default function OrderWorkflowV2Page() {
     if (!orderId) return;
     const own=capturePageOwner();
     let active=true;
+    const controller = new AbortController();
     const current=()=>active && ownsPageInput(own);
-    void refreshAll(current).catch((err) => {
+    void refreshAll(current, null, (publish) => publish(), "summary", controller.signal).catch((err) => {
       if (current()) setError(formatApiError(err, "workflow-v2 の取得に失敗しました"));
     });
-    return ()=>{active=false;};
+    return ()=>{active=false;controller.abort();};
   }, [orderId,effectiveSelectedDocumentId,router.asPath]);
+
+  useEffect(() => {
+    if (!visibleStepReady || !orderId || workflow?.order_id !== orderId || !Number.isInteger(workflow?.revision)) return;
+    const scope = visibleStep === 2 ? "ocr" : visibleStep === 3 ? "sheet" : visibleStep === 4 ? "output" : null;
+    if (!scope) { setDisplayLoading(false); displayReadyRef.current = "summary"; return; }
+    const own = capturePageOwner();
+    const request = ++displayRequestRef.current;
+    const controller = new AbortController();
+    let active = true;
+    const current = () => active && request === displayRequestRef.current && ownsPageInput(own);
+    setDisplayLoading(true);
+    displayReadyRef.current = "";
+    void (async () => {
+      const adopted = await refreshAll(current, null, (publish) => publish(), scope, controller.signal);
+      if (!adopted || !current()) return;
+      if (scope === "sheet" && workflow.selected_ocr_result_id) {
+        await loadOcrResultDetail(workflow.selected_ocr_result_id, current);
+        if (!current()) return;
+      }
+      displayReadyRef.current = scope;
+    })().catch((err) => {
+      if (current() && !controller.signal.aborted) setError(formatApiError(err, "表示データの取得に失敗しました"));
+    }).finally(() => { if (current()) setDisplayLoading(false); });
+    return () => { active = false; controller.abort(); };
+  }, [orderId, workflow?.order_id, workflow?.revision, visibleStep, visibleStepReady, displayEpoch]);
 
   useEffect(() => {
     if (!orderDetail || !currentDocumentId) return;
@@ -2877,8 +2927,9 @@ export default function OrderWorkflowV2Page() {
 
   useEffect(() => {
     if (facilitySaveReadOwnerRef.current?.()) return;
+    if (!visibleStepReady || (visibleStep !== 3 && (visibleStep < 1 || visibleStep >= 2))) return;
     void loadFacilityTemplateStatus(contextForm.facility_id);
-  }, [facilityConfigReadKey]);
+  }, [facilityConfigReadKey, visibleStep, visibleStepReady]);
 
   useEffect(() => {
     const indices = new Set(facilityTemplateColumnDraft.map((column, idx) => String(column.index ?? idx)));
@@ -2938,15 +2989,17 @@ export default function OrderWorkflowV2Page() {
         if (active) setWeekOptionsLoading(false);
       }
     };
+    if (!visibleStepReady || visibleStep !== 1) return;
     loadWeekOptions();
     return () => {
       active = false;
     };
-  }, [router.isReady, orderId, workflow?.week_end, workflow?.week_start]);
+  }, [router.isReady, orderId, workflow?.week_end, workflow?.week_start, visibleStep, visibleStepReady]);
 
   useEffect(() => {
     if (workflow?.state) {
       setVisibleStep(stepIndexForState(workflow.state));
+      setVisibleStepReady(true);
     }
   }, [workflow?.state]);
 
@@ -2967,7 +3020,7 @@ export default function OrderWorkflowV2Page() {
   }, [selectedOcrOverlayUrl, selectedOcrSheetReviewBaseUrl, step3LayoutMode, visibleStep]);
 
   useEffect(() => {
-    if (!router.isReady || !orderId) return;
+    if (!router.isReady || !orderId || !visibleStepReady) return;
     const own=capturePageOwner();
     let active = true;
     let objectUrl = "";
@@ -2982,6 +3035,12 @@ export default function OrderWorkflowV2Page() {
     router.events.on("routeChangeStart",retire);
     setPdfUrl("");
     setPdfError("");
+    const needsOriginalPdf = visibleStep === 1 || visibleStep === 1.5
+      || ((visibleStep === 2 || visibleStep === 3) && ocrPreviewMode === "original");
+    if (!needsOriginalPdf) {
+      return () => { active = false; unsubscribe(); router.events.off("routeChangeStart", retire); };
+    }
+    const controller = new AbortController();
     if (!current() || !own.context.documentId) {
       setPdfError("選択PDF・注文・認証を確認してから再取得してください。");
       return ()=>{active=false;unsubscribe();router.events.off("routeChangeStart",retire);};
@@ -2990,6 +3049,7 @@ export default function OrderWorkflowV2Page() {
       .get<Blob>(`/orders/${own.context.orderId}/document`, {
         params: { document_id: own.context.documentId },
         responseType: "blob",
+        signal: controller.signal,
       })
       .then((res) => {
         if (!current()) return;
@@ -2998,16 +3058,17 @@ export default function OrderWorkflowV2Page() {
         setPdfUrl(objectUrl);
       })
       .catch((err) => {
-        if (!current()) return;
+        if (!current() || controller.signal.aborted) return;
         const status = err?.response?.status;
         setPdfError(status === 404 ? "原本FAX PDFを現在取得できません。" : "PDFの取得に失敗しました。");
       });
     return () => {
       active = false;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       unsubscribe(); router.events.off("routeChangeStart",retire);
     };
-  }, [router.isReady, orderId, effectiveSelectedDocumentId,router.asPath,router.events]);
+  }, [router.isReady, orderId, effectiveSelectedDocumentId,router.asPath,router.events,visibleStep,visibleStepReady,ocrPreviewMode]);
 
   const runAction = async (
     label: string,
@@ -3020,6 +3081,11 @@ export default function OrderWorkflowV2Page() {
   ) => {
     if (workflowRevisionRef.current === null) {
       setError(WORKFLOW_READ_PENDING_MESSAGE);
+      return;
+    }
+    const neededScope = visibleStep === 2 ? "ocr" : visibleStep === 3 ? "sheet" : visibleStep === 4 ? "output" : "summary";
+    if (displayLoading || displayReadyRef.current !== neededScope) {
+      setError("表示データの取得完了後に操作してください。");
       return;
     }
     if (options.replacesInput && !confirmWorkflowReplacement(options.preservedEditor)) return;
@@ -4756,7 +4822,7 @@ export default function OrderWorkflowV2Page() {
           </div>
           <div className="summary-primary-card">
             <span className="field-label">OCR</span>
-            <p className="summary-value">{ocrResults.length}件 / {quantityContentEditable ? "読み取り完了" : recognitionReviewPending ? "読み取り結果の確認待ち" : formatOcrProgress(workflow)}</p>
+            <p className="summary-value">{inspection?.ocr_result_count ?? ocrResults.length}件 / {quantityContentEditable ? "読み取り完了" : recognitionReviewPending ? "読み取り結果の確認待ち" : formatOcrProgress(workflow)}</p>
             <p className="summary-subline">処理時間: {formatElapsedSeconds(workflow?.ocr_job?.elapsed_seconds)}</p>
           </div>
           <div className="summary-primary-card">
@@ -5733,6 +5799,7 @@ export default function OrderWorkflowV2Page() {
               </Button>
             </div>
           </header>
+          {displayLoading ? <p role="status">OCR候補を取得中...</p> : null}
           <div className="ocr-result-list">
             {ocrResults.length ? (
               ocrResults.map((item) => (
@@ -5840,7 +5907,7 @@ export default function OrderWorkflowV2Page() {
                 </div>
               ))
             ) : (
-              <p className="subtle">OCR result はまだありません。Step1 から OCR を実行してください。</p>
+              !displayLoading && displayReadyRef.current === "ocr" ? <p className="subtle">OCR result はまだありません。Step1 から OCR を実行してください。</p> : null
             )}
           </div>
         </section>
@@ -5848,6 +5915,8 @@ export default function OrderWorkflowV2Page() {
 
         {visibleStep === 3 ? (
         <section className="panel step3-panel">
+          {displayLoading ? <p role="status">編集シートを取得中...</p> : null}
+          <fieldset disabled={displayLoading || displayReadyRef.current !== "sheet"} style={{border: 0, margin: 0, padding: 0, minWidth: 0}}>
           <p className="step-tag">Step3</p>
           <h2>選択 OCR からシート作成 / 編集 / 保存</h2>
           {!workflow?.selected_ocr_result_id ? (
@@ -6404,6 +6473,7 @@ export default function OrderWorkflowV2Page() {
               }}
             />
           </details>
+          </fieldset>
         </section>
         ) : null}
 
@@ -6416,14 +6486,15 @@ export default function OrderWorkflowV2Page() {
               <p className="subtle">袋分け、ラベル、納品書、総量をまとめて確認して、問題なければ注文を確定します。</p>
             </div>
             <div className="row-actions">
-              <Button className="btn primary workflow-ordinary-control" type="button" onClick={runBagging} disabled={Boolean(busy || menuAmountUnresolved || !workflow?.saved_sheet_id)}>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={runBagging} disabled={Boolean(busy || displayLoading || displayReadyRef.current !== "output" || menuAmountUnresolved || !workflow?.saved_sheet_id)}>
                 出力確認を作成
               </Button>
-              <Button className="btn primary workflow-ordinary-control" type="button" onClick={finalConfirm} disabled={Boolean(busy || (workflow?.state !== "confirmed" && (menuAmountUnresolved || !workflow?.output_bundle_id)))}>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={finalConfirm} disabled={Boolean(busy || displayLoading || displayReadyRef.current !== "output" || (workflow?.state !== "confirmed" && (menuAmountUnresolved || !workflow?.output_bundle_id)))}>
                 {workflow?.state === "confirmed" ? "一覧にもどる" : "確定して一覧にもどる"}
               </Button>
             </div>
           </header>
+          {displayLoading ? <p role="status">保存出力を取得中...</p> : null}
           {inspection?.bagging_result ? (
             <div className="result-summary">
               <h3>袋分け結果</h3>

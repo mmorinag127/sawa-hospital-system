@@ -91,7 +91,7 @@ for (const [stage, action, label] of [
     headline: 'generic failure', blockers: ['generic-code'], ocr_job: {order_id: id, ocr_job_id: 'job',
       processing_stage: stage, recovery_action: action, error_detail: 'exact-original-cause'}}}));
   t.on('get', `${root}/workflow-v2/ocr-results`, () => ({data: {results: []}}));
-  t.onWorkflowInspection(`${root}/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => ({data: { workflow: {order_id:id,revision:7,state:'ocr_failed',headline:'generic failure',blockers:['generic-code'],
+  t.onWorkflowInspection(`${root}/workflow-v2/display?scope=summary`, () => ({data: { workflow: {order_id:id,revision:7,state:'ocr_failed',headline:'generic failure',blockers:['generic-code'],
     ocr_job:{order_id:id,ocr_job_id:'job',processing_stage:stage,recovery_action:action,error_detail:'exact-original-cause'}},
     ocr_candidates: require('./helpers/ocr-candidates.cjs')(id),saved_sheet: null, pre_save_checks: {}}}));
   t.on('get', root, () => ({data: {id, current_version: {document_id: 'pdf'}, versions: [{document_id: 'pdf', is_current: true}]}}));

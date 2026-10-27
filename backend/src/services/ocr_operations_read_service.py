@@ -12,6 +12,7 @@ from src.models.ingest_job import IngestJob
 from src.models.ocr_job import OcrJob
 from src.models.order import Order
 from src.models.order_workflow_state import OrderWorkflowState
+from src.models.order_version import OrderVersion
 from src.models.uploaded_pdf import UploadedPdf
 from src.models.workflow_ocr_delivery import WorkflowOcrDelivery
 from src.services import ingest_delivery_service as ingest_delivery
@@ -35,7 +36,8 @@ def _source(session, order, job, receipt, *, native, selected=None):
         if (native or not isinstance(selected, dict) or not isinstance(selected.get("id"), str)
                 or selected.get("document_id") != receipt["document_id"]
                 or selected.get("storage_uri") != receipt["storage_uri"]
-                or not execution_guard.lock_selected_version_input(session, order.id, selected, read_only=True)):
+                or not execution_guard.selected_version_input_matches(
+                    session.get(OrderVersion, selected["id"]), order.id, selected)):
             raise ValueError("ocr_selected_version_source_changed")
         document_id = selected["document_id"]
     document = session.get(OrderDocument, document_id) if document_id else None
@@ -233,7 +235,7 @@ def read_operations(session):
         orders.extend(session.scalars(select(Order).where(Order.id.in_(chunk))))
     orders.sort(key=lambda row: row.id)
     current = [jobs[key] for key in references if key in jobs]
-    native_ids, document_ids, upload_ids, evidence_ids, delivery_ids = set(), set(), set(), set(), set()
+    native_ids, document_ids, upload_ids, evidence_ids, delivery_ids, version_ids = set(), set(), set(), set(), set(), set()
     for job in current:
         metrics = job.metrics if isinstance(job.metrics, dict) else {}
         capture = metrics.get("nonworkflow_execution")
@@ -250,12 +252,15 @@ def read_operations(session):
             evidence_ids.add(terminal["evidence_run_id"])
         if isinstance(metrics.get("workflow_ocr_delivery_id"), str):
             delivery_ids.add(metrics["workflow_ocr_delivery_id"])
+        selected = metrics.get("selected_version_input")
+        if isinstance(selected, dict) and isinstance(selected.get("id"), str):
+            version_ids.add(selected["id"])
     document_ids.update(order.current_document_id for order in orders if order.current_document_id)
     # Strong references keep SQLAlchemy's weak identity map populated. Guarded
     # populate_existing reads still execute; no fence or refresh is intercepted.
     canonical_rows = []
     for model, identities in ((OrderDocument, document_ids), (UploadedPdf, upload_ids),
-                              (WorkflowOcrDelivery, delivery_ids)):
+                              (WorkflowOcrDelivery, delivery_ids), (OrderVersion, version_ids)):
         for chunk in _chunks(identities):
             canonical_rows.extend(session.scalars(select(model).where(model.id.in_(chunk))))
     evidence_reads = read_terminal_evidence(session, evidence_ids)

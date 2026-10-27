@@ -1815,6 +1815,15 @@ def confirm_order_workflow_v2(
     )
 
 
+@router.get("/{order_id}/workflow-v2/display", dependencies=[Depends(require_role("operator"))])
+def get_order_workflow_v2_display(
+    order_id: str, response: Response, scope: Literal["summary", "ocr", "sheet", "output", "inspection"] = "summary",
+):
+    from src.services.workflow_display_read_service import get_display
+    response.headers["Cache-Control"] = "no-store"
+    return _workflow_v2_or_404(get_display(order_id, scope=scope))
+
+
 @router.get("/{order_id}/workflow-v2/inspection", dependencies=[Depends(require_role("operator"))])
 def get_order_workflow_v2_inspection(
     order_id: str,

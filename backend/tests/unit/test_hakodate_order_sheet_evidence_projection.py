@@ -416,7 +416,8 @@ def _canonical_component_records(case, monkeypatch, *, raw, predicted, accepted_
             outputs=outputs, ocr_engine="component-external-recognizer",
         ), None
 
-    monkeypatch.setattr(order_service.hakodate_cell_ocr_batch_service,
+    from src.services import hakodate_cell_ocr_batch_service
+    monkeypatch.setattr(hakodate_cell_ocr_batch_service,
                         "build_hakodate_best_method_for_manifest_item", recognize)
     with case.execution():
         payload = order_service._hakodate_canonical_payload_from_manifest_item(

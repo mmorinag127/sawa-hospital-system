@@ -16,7 +16,7 @@ async function setup() {
   const order = {id: 'race', current_version: {document_id: 'pdf'}, versions: [{document_id: 'pdf', is_current: true}]};
   t.on('get', '/auth/me', () => ({data: {role: 'operator'}}));
   t.on('get', '/facilities', () => ({data: {source: 'canonical_json', revision: 'fixture', facilities: []}}));
-  t.onWorkflowInspection('/orders/race/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true', () => ({data: inspection}));
+  t.onWorkflowInspection('/orders/race/workflow-v2/display?scope=summary', () => ({data: inspection}));
   t.on('get', '/orders/race', () => pendingOrder.promise);
   t.on('get', '/orders/race/week-options', () => ({data: {options: []}}));
   t.on('get', '/orders/race/document', () => ({data: new Blob(['synthetic'])}));

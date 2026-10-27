@@ -167,8 +167,8 @@ function InspectionView({ orderId }: { orderId: string }) {
     setLoading(true);
     setError("");
     setPdfError("");
-    apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/inspection`, {
-      params: { history_details: false }, signal: controller.signal,
+    apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/display`, {
+      params: { scope: "inspection" }, signal: controller.signal,
     }).then((response) => {
       if (!controller.signal.aborted && generation === requestGeneration.current) setInspection(response.data);
     }).catch((err) => {

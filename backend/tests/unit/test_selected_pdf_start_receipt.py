@@ -144,7 +144,8 @@ def test_native_cell_recognition_does_not_reload_original_uri(monkeypatch, conne
         assert kwargs["item"]["_verified_pdf_bytes"] is loaded
         expected = item["original_expected_sheet_cells"]
         return SimpleNamespace(metrics={"expected_sheet_cells": expected}, expected_sheet_cells=expected, outputs={}), None
-    monkeypatch.setattr(order_service.hakodate_cell_ocr_batch_service, "build_hakodate_best_method_for_manifest_item", recognize)
+    from src.services import hakodate_cell_ocr_batch_service
+    monkeypatch.setattr(hakodate_cell_ocr_batch_service, "build_hakodate_best_method_for_manifest_item", recognize)
     monkeypatch.setattr(storage_service, "load_selected_pdf_bytes", lambda *a, **k: pytest.fail("duplicate URI body read"))
     with pytest.raises(ValueError, match="^hakodate_canonical_regions_missing$"):
         order_service._hakodate_canonical_payload_from_manifest_item(
@@ -158,7 +159,8 @@ def test_native_cell_recognition_does_not_reload_original_uri(monkeypatch, conne
 
 def test_unbound_prebuilt_manifest_never_runs_native_recognizer(monkeypatch):
     monkeypatch.setattr(order_service, "_hakodate_best_method_draft_sheet", lambda order, *, synchronous_write_input=None: {"rows": [[0]]})
-    monkeypatch.setattr(order_service.hakodate_cell_ocr_batch_service, "build_hakodate_best_method_for_manifest_item", lambda **k: pytest.fail("unbound PDF recognized"))
+    from src.services import hakodate_cell_ocr_batch_service
+    monkeypatch.setattr(hakodate_cell_ocr_batch_service, "build_hakodate_best_method_for_manifest_item", lambda **k: pytest.fail("unbound PDF recognized"))
     with pytest.raises(ValueError, match="^configured_execution_input_changed$"):
         order_service._hakodate_canonical_payload_from_manifest_item(
             order_id="order", facility_id="facility", item={"fax_pdf": "old.pdf", "template_pdf": "template.pdf", "step2_png": "old.png"},

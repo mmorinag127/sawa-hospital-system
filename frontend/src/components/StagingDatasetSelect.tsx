@@ -3,7 +3,7 @@ import { DATASET_KEY, DATASET_GENERATION, documentDatasetMatches } from "../serv
 
 type Choice = { id: string; label: string; available: boolean; snapshot_at?: string };
 type Refresh = { configured: boolean; blocked_reason?: string; refresh_components?: string[]; retained_components?: string[]; job?: { id: string; phase: string; component?: string; error?: string; missing_at_source?: Record<string, number> } | null };
-type State = { enabled: boolean; selected?: string; options?: Choice[]; error?: string | null };
+type State = { enabled: boolean; selected?: string; options?: Choice[]; error?: string | null; refresh?: Refresh | null; refresh_error?: string };
 
 function headers(): Record<string, string> {
   const authorization = window.sessionStorage.getItem("auth_header");
@@ -33,7 +33,7 @@ export default function StagingDatasetSelect() {
       controller.abort();
       controller = new AbortController();
       const requestController = controller;
-      void fetch("/api/staging-datasets", { headers: headers(), credentials: "same-origin", cache: "no-store", signal: requestController.signal })
+      void fetch("/api/staging-datasets?include_refresh=true", { headers: headers(), credentials: "same-origin", cache: "no-store", signal: requestController.signal })
       .then(async response => {
         if (!response.ok) throw new Error("unavailable");
         const value: State = await response.json();
@@ -45,6 +45,10 @@ export default function StagingDatasetSelect() {
           }
         }
         setError("");
+        if (value.enabled) {
+          setRefresh(value.refresh || null);
+          setRefreshError(value.refresh_error || (value.refresh ? "" : "コピー更新の状態を取得できません。"));
+        }
         setState(value);
       }).catch(() => {
         if (!requestController.signal.aborted && window.location.hostname.includes("-stg")) setError("参照DBを確認できません。");
@@ -68,15 +72,6 @@ export default function StagingDatasetSelect() {
       if (choices.ok && !signal?.aborted) setState(await choices.json());
     }
   };
-
-  useEffect(() => {
-    if (!state?.enabled) return;
-    const controller = new AbortController();
-    void loadRefresh(controller.signal).catch(() => {
-      if (!controller.signal.aborted) setRefreshError("コピー更新の状態を取得できません。");
-    });
-    return () => controller.abort();
-  }, [state?.enabled]);
 
   const refreshPhase = refresh?.job?.phase;
   useEffect(() => {

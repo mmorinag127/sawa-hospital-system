@@ -4,7 +4,7 @@ import test from 'node:test';
 import { firstJsonRequest } from '../../scripts/ocr-first-request.mjs';
 import { settleResponse } from '../../scripts/verify-ocr-live.mjs';
 
-const url = 'https://worker.example/api/orders/O/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true';
+const url = 'https://worker.example/api/orders/O/workflow-v2/display?scope=summary';
 function setup() {
   let time = 0, sequence = 0;
   const timers = new Map(), page = new EventEmitter(), timing = {};

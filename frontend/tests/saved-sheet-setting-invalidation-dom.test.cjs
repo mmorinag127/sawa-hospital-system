@@ -30,7 +30,7 @@ async function setup() {
     facilities: [{id: 'own-facility', name: 'Authored facility'}]}}));
   t.on('get', BASE, () => ({data: clone(state.workflow)}));
   t.on('get', `${BASE}/facility-config`, () => ({data: clone(config)}));
-  t.onWorkflowInspection(`${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => ({data: {
+  t.onWorkflowInspection(`${BASE}/display?scope=summary`, () => ({data: {
     workflow: clone(state.workflow), pre_save_checks: clone(state.checks), pre_save_status: clone(state.status),
     saved_sheet: {saved_sheet_id: 'own-saved', source_ocr_result_id: 'own-evidence', sheet: clone(state.saved)},
     ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER,

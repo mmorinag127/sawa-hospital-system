@@ -14,7 +14,7 @@ test("failed readiness keeps selection and credentials and does not send a switc
   const calls = [];
   global.fetch = async (url, init = {}) => {
     calls.push({ url, init });
-    if (url === "/api/staging-datasets") return Response.json({ enabled: true, selected: "test", options: [
+    if (url.split("?")[0] === "/api/staging-datasets") return Response.json({ enabled: true, selected: "test", options: [
       { id: "test", label: "テスト用", available: true }, { id: "replay-synthetic", label: "本番再現用", available: true },
     ] });
     if (url.endsWith("shared-auth/me")) return Response.json({ session_generation: "synthetic-school-generation" });
@@ -84,7 +84,7 @@ test("successful switch waits for all systems before publishing one selection", 
   global.fetch = async (url, init = {}) => {
     calls.push({ url, init });
     if (url === "/api/staging-datasets" && init.method === "PUT") return Response.json({ selected: JSON.parse(init.body).dataset });
-    if (url === "/api/staging-datasets") return Response.json({ enabled: true, selected: "test", options: [
+    if (url.split("?")[0] === "/api/staging-datasets") return Response.json({ enabled: true, selected: "test", options: [
       { id: "test", label: "テスト用", available: true }, { id: "replay-synthetic", label: "本番再現用", available: true },
     ] });
     if (url.endsWith("shared-auth/me")) return Response.json({ session_generation: "synthetic-school-generation" });

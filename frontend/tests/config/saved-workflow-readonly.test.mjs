@@ -48,12 +48,14 @@ function response(path, body, status = 200, method = 'GET', host = origin) {
 }
 function listeners() {
   const waits = [];
-  return { waits, page: { waitForResponse: predicate => new Promise((resolve, reject) => waits.push({ predicate, resolve, reject })) },
+  return { waits, page: { waitForResponse: predicate => new Promise((resolve, reject) => waits.push({ predicate, resolve, reject })),
+    locator: () => ({filter: () => ({click: async () => {}})}) },
     emit(value) { for (const wait of waits) if (wait.predicate(value)) wait.resolve(value); } };
 }
 function emitJSON(events, data, status = 200) {
   events.emit(response(`/api/orders/${id}/workflow-v2`, data.workflow, status));
-  events.emit(response(`/api/orders/${id}/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, data.inspection));
+  events.emit(response(`/api/orders/${id}/workflow-v2/display?scope=summary`, {...data.inspection, order_header: data.order}));
+  events.emit(response(`/api/orders/${id}/workflow-v2/display?scope=sheet`, {...data.inspection, order_header: data.order}));
   events.emit(response(`/api/orders/${id}`, data.order));
 }
 test('all four waiters precede navigation and delayed PDF body prevents early success', async () => {

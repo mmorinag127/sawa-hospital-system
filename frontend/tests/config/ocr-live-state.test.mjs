@@ -40,10 +40,11 @@ function fixture(selected, mutate = () => {}, failure = null,
     evidence.producer_version = 'hakodate_best_method_pipeline';
   }
   const inspection = () => ({order_id: identity.orderId, workflow: structuredClone(workflow),
+    order_header: {id: identity.orderId, current_version: {document_id: identity.documentId}},
     saved_sheet: {sheet: {rows: [{quantity: 0}, {quantity: null}, {quantity: 12}]}},
     artifact_lineage: {selected_ocr_result_id: workflow.selected_ocr_result_id},
     ocr_candidates: {order_id: identity.orderId, selected_ocr_result_id: workflow.selected_ocr_result_id,
-      results: [selected ? structuredClone(evidence) : {ocr_result_id: identity.evidenceId, selected: false, detail_state: 'not_loaded'}]}});
+      results: [{ocr_result_id: identity.evidenceId, selected, detail_state: 'not_loaded'}]}});
   const events = new EventEmitter(), page = new EventEmitter();
   const clicks = [], requests = [], screenshots = []; let reloaded = false, blank = false, connected = true, rawOpen = false;
   const base = `/api/orders/${identity.orderId}`;
@@ -61,7 +62,7 @@ function fixture(selected, mutate = () => {}, failure = null,
     let data = inspection();
     if (reloaded) mutate(data, evidence);
     respond(base, {id: identity.orderId, current_version: {document_id: identity.documentId}});
-    respond(base + '/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true', data);
+    respond(base + '/workflow-v2/display?scope=summary', data);
   }
   const text = () => `${evidence.recognition_acceptance ? '確認済み' : '要確認'}: 1セル ${identity.evidenceId}`;
   function locator(name = '') {
@@ -69,7 +70,7 @@ function fixture(selected, mutate = () => {}, failure = null,
       filter: () => locator(name), locator: child => locator(name === 'details.json-details' ? `raw-${child}` : 'image-parent'),
       getByRole: (role, options = {}) => locator(options.name || role),
       getByLabel: label => locator(label), getByText: label => locator(label),
-      count: async () => name === '詳細を表示' ? (selected ? 0 : 1) : name === 'input[type="password"]' ? 0 : 1,
+      count: async () => name === 'input[type="password"]' ? 0 : 1,
       innerText: async () => name === 'raw-pre' ? JSON.stringify(inspection()) : text(),
       getAttribute: async () => evidence.overlay_url,
       evaluate: async fn => fn({complete: true, naturalWidth: 100, naturalHeight: 80}),
@@ -80,7 +81,6 @@ function fixture(selected, mutate = () => {}, failure = null,
           rawOpen = !rawOpen;
           if (rawOpen) respond(base + '/workflow-v2/inspection?history_details=true', inspection());
         } else if (name === '詳細を表示') {
-          assert.equal(selected, false);
           const failNow = failure && failure.reload === reloaded;
           if (failNow && failure.mode === 'click') throw Error('synthetic click failure');
           respond(base + `/workflow-v2/inspection-detail/${identity.evidenceId}`,
@@ -97,7 +97,12 @@ function fixture(selected, mutate = () => {}, failure = null,
           assert.equal(accepted, true);
           blank = true;
         }
-        else assert.equal(name, '.step-nav button', 'unexpected click, including submission');
+        else {
+          assert.equal(name, '.step-nav button', 'unexpected click, including submission');
+          let data = inspection();
+          if (reloaded) mutate(data, evidence);
+          respond(base + '/workflow-v2/display?scope=ocr', data);
+        }
       },
       name,
     };
@@ -159,7 +164,7 @@ for (const selected of [false, true]) test(`full OCR verifier executes ${selecte
   try {
     const result = await verifyOcrBrowser({origin, ...f, token: 'synthetic-token', source: 'c'.repeat(40), output});
     assert.equal(result.status, 'passed', JSON.stringify(result.failure));
-    assert.equal(f.clicks.filter(x => x === '詳細を表示').length, selected ? 0 : 2);
+    assert.equal(f.clicks.filter(x => x === '詳細を表示').length, 2);
     assert.equal(f.clicks.includes('確認して正解にする'), false);
     assert.equal(result.review.selectionBlocked, !selected);
     assert.ok(result.timings.some(x => x.check === 'open-ocr-detail'));

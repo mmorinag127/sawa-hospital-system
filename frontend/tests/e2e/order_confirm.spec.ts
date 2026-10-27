@@ -33,6 +33,7 @@ for (const status of [200, 409] as const) test(`current OCR selection uses the e
     await route.fulfill({ status, json: { workflow: mounted.workflow } });
   });
   await expect(page.getByRole("heading", { name: "正解 OCR を一つ選ぶ", exact: true })).toBeVisible();
+  await page.locator(".ocr-card").filter({hasText: "OCR-E2E-002"}).getByRole("button", {name: "詳細を表示", exact: true}).click();
   await page.locator(".ocr-card").filter({ has: page.locator("strong").filter({ hasText: /^OCR-E2E-002$/ }) })
     .getByRole("button", { name: "正解にする", exact: true }).click();
   await expect.poll(() => calls).toEqual([{ path: `/api/orders/${mounted.orderId}/workflow-v2/ocr-results/OCR-E2E-002/select`, revision: '"7"' }]);
@@ -61,6 +62,7 @@ test("saved OCR history refusal shows its actual reason and retains the selected
       detail_state: "loaded", overlay_url: "", sheet_review_base_url: "" }],
   });
   await page.getByRole("button", { name: /Step2.*OCR選択/ }).click();
+  await page.getByRole("button", {name: "詳細を表示", exact: true}).click();
   let deletes = 0;
   await page.route("**/workflow-v2/ocr-results/OCR-E2E-001", async route => {
     expect(route.request().method()).toBe("DELETE");
@@ -120,7 +122,7 @@ for (const failPostConfirmRead of [false, true]) test(`successful confirmation r
   const mounted = await mountWorkflowV2SheetPage(page, { workflowState: "output_review",
     workflow: { saved_sheet_id: "SHEET-E2E-001", bagging_result_id: "BAG-E2E-001", output_bundle_id: "BUNDLE-E2E-001" } });
   let confirmations = 0, postConfirmReads = 0;
-  await page.route(/\/workflow-v2\/inspection(?:\?|$)/, async route => {
+  await page.route(/\/workflow-v2\/display(?:\?|$)/, async route => {
     if (confirmations) {
       postConfirmReads++;
       return route.fulfill({ status: failPostConfirmRead ? 500 : 200, json: failPostConfirmRead

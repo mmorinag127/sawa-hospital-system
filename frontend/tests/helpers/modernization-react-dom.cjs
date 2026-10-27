@@ -17,22 +17,37 @@ function transport() {
   for (const method of ['get', 'put', 'post', 'delete']) api[method] = (url, body, config) => {
     const call = { method, url, body: method === 'get' ? undefined : body, config: method === 'get' ? body : config };
     calls.push(call);
-    const handler = handlers.get(`${method} ${url}`);
+    const detailPrefix = url.includes('/workflow-v2/inspection-detail/') ? url.slice(0, url.lastIndexOf('/') + 1) : null;
+    const handler = handlers.get(`${method} ${url}`) || (detailPrefix && handlers.get(`${method} ${detailPrefix}`));
     if (!handler) return Promise.reject(new Error(`Unhandled mocked transport ${method} ${url}`));
     try { return Promise.resolve(handler(call)); } catch (reason) { return Promise.reject(reason); }
   };
   return { api, calls, on(method, url, handler) { handlers.set(`${method} ${url}`, handler); },
     onWorkflowInspection(url, handler) {
-      assert.ok(url.includes('include_order_header=true'));
-      const orderUrl = url.slice(0, url.indexOf('/workflow-v2/inspection'));
-      handlers.set(`get ${url}`, async call => {
+      assert.ok(url.endsWith('/display?scope=summary'));
+      const orderUrl = url.slice(0, url.indexOf('/workflow-v2/'));
+      const fixture = async (call, scope) => {
         const response = await handler(call);
-        // Compose the new single-response fixture from the same explicitly
-        // authored header input; this is not another request by the page.
         const headerFixture = handlers.get(`get ${orderUrl}`);
         assert.equal(typeof headerFixture, 'function', `header fixture ${orderUrl}`);
         const header = await headerFixture({method: 'get', url: orderUrl, config: call.config});
-        return {...response, data: {...response.data, order_header: header.data}};
+        const data = {...response.data, order_header: header.data, display_scope: scope,
+          ocr_result_count: response.data.ocr_candidates?.results?.length ?? 0,
+          loaded_sections: scope === 'summary' ? [] : scope === 'sheet' ? ['ocr', 'sheet'] : [scope]};
+        if (scope === 'summary' || scope === 'output') delete data.ocr_candidates;
+        if (scope !== 'sheet' && data.saved_sheet) { data.saved_sheet = {...data.saved_sheet}; delete data.saved_sheet.sheet; }
+        return {...response, data};
+      };
+      for (const scope of ['summary', 'ocr', 'sheet', 'output']) {
+        handlers.set(`get ${orderUrl}/workflow-v2/display?scope=${scope}`, call => fixture(call, scope));
+      }
+      const detailPrefix = `get ${orderUrl}/workflow-v2/inspection-detail/`;
+      handlers.set(detailPrefix, async call => {
+        const response = await handler(call);
+        const id = call.url.slice(call.url.lastIndexOf('/') + 1);
+        const row = response.data.ocr_candidates?.results?.find(row => row.ocr_result_id === id);
+        assert.ok(row, `authored detail fixture ${id}`);
+        return {data: {...row, workflow_revision: response.data.workflow?.revision}};
       });
     },
   };

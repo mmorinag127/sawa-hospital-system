@@ -27,7 +27,7 @@ async function setup(initial = value()) {
     if (state.pending) { const pending = state.pending; state.pending = null; return pending.promise; }
     return { data: clone(state.value) };
   });
-  t.onWorkflowInspection(`${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => ({ data: { saved_sheet: null,
+  t.onWorkflowInspection(`${BASE}/display?scope=summary`, () => ({ data: { saved_sheet: null,
     workflow: clone(state.value), pre_save_checks: {}, ocr_candidates: require('./helpers/ocr-candidates.cjs')(ORDER, [], state.value) } }));
   t.on('get', `${BASE}/ocr-progress`, () => {
     if (state.pending) { const pending = state.pending; state.pending = null; return pending.promise; }

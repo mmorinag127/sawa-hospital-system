@@ -360,7 +360,7 @@ function workflowTransport() {
     t.on('get', `/orders/${id}/workflow-v2`, () => ({ data: { order_id: id, revision: state.revision, state: 'output_review',
       output_bundle_id: state.withCurrent ? 'recorded-current' : null, blockers: [], warnings: [] } }));
     t.on('get', `/orders/${id}/workflow-v2/ocr-results`, () => ({ data: { results: [] } }));
-    t.onWorkflowInspection(`/orders/${id}/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true`, () => ({ data: { workflow: { order_id: id, revision: state.revision, state: 'output_review', output_bundle_id: state.withCurrent ? 'recorded-current' : null, blockers: [], warnings: [] }, ocr_candidates: require('./helpers/ocr-candidates.cjs')(id), pre_save_checks: {},
+    t.onWorkflowInspection(`/orders/${id}/workflow-v2/display?scope=summary`, () => ({ data: { workflow: { order_id: id, revision: state.revision, state: 'output_review', output_bundle_id: state.withCurrent ? 'recorded-current' : null, blockers: [], warnings: [] }, ocr_candidates: require('./helpers/ocr-candidates.cjs')(id), pre_save_checks: {},
       output_bundle: { output_bundle_id: 'recorded-current', status: 'ready', quantities: [0, null, 6, 9] } } }));
     t.on('get', `/orders/${id}`, () => ({ data: { id, current_version: { document_id: 'pdf-A' }, versions: [
       { document_id: 'pdf-A', version_no: 1, is_current: true }, { document_id: 'pdf-B', version_no: 2, is_current: false }] } }));

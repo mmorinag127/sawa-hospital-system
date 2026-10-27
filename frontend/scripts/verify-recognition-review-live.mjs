@@ -64,22 +64,28 @@ export async function inspectReview({ identity, source, token, output, playwrigh
       return item.promise.then(response => ({ response }), () => ({ response: null }));
     };
     const base = `/api/orders/${identity.orderId}`;
-    const initialReads = [watch(base), watch(base + '/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true')];
+    const initialRead = watch(base + '/workflow-v2/display?scope=summary');
+    const candidateRead = watch(base + '/workflow-v2/display?scope=ocr');
     result.phase = 'open-exact-order';
     const navigation = await page.goto(`${origin}/hospital/orders/${identity.orderId}/workflow-v2`, { waitUntil: 'domcontentloaded' });
     assert.equal(navigation.status(), 200);
     await expect(page.getByRole('contentinfo', { name: 'deploy version' })).toContainText(source.slice(0, 12));
-    const responses = await Promise.all(initialReads);
-    assert.ok(responses.every(item => item.response));
-    const [order, inspection] = await Promise.all(responses.map(item => item.response.json()));
+    const initialResponse = await initialRead;
+    assert.ok(initialResponse.response);
+    const inspection = await initialResponse.response.json();
+    const order = inspection.order_header;
     const workflow = inspection.workflow;
     await waitForWorkflowReadiness({page, expect, inspection, order, identity, revision: workflow.revision});
     assert.equal(order.id, identity.orderId);
     assert.equal(order.current_version?.document_id, identity.documentId);
     assert.equal(workflow.order_id, identity.orderId);
-    assert.equal(inspection.ocr_candidates?.order_id, identity.orderId);
     result.phase = 'open-step2';
     const evidence = await readLiveCandidate({inspection, workflow, identity, page, requireUnselected: true,
+      readCandidates: async () => {
+        const receipt = await candidateRead;
+        assert.ok(receipt.response);
+        return receipt.response.json();
+      },
       readDetail: async () => {
         const detailResponse = await watch(base + `/workflow-v2/inspection-detail/${identity.evidenceId}`);
         assert.ok(detailResponse.response);
@@ -143,21 +149,24 @@ export async function inspectReview({ identity, source, token, output, playwrigh
     await expect(dialog.getByRole('button', { name: '確認した値を採用して次へ', exact: true })).toBeEnabled();
     await page.screenshot({ path: resolve(output, 'review-dialog-local-choice-not-submitted.png'), fullPage: true });
     result.phase = 'verify-state-preserved';
-    const finalRead = watch(base + '/workflow-v2/inspection?include_ocr_results=true&history_details=false&include_order_header=true');
-    const finalOrderRead = watch(base);
+    const finalRead = watch(base + '/workflow-v2/display?scope=summary');
+    const finalCandidateRead = watch(base + '/workflow-v2/display?scope=ocr');
     page.once('dialog', dialog => dialog.type() === 'beforeunload' ? dialog.accept() : dialog.dismiss());
     await page.reload({ waitUntil: 'domcontentloaded' });
-    const [finalResponse, finalOrderResponse] = await Promise.all([finalRead, finalOrderRead]);
+    const finalResponse = await finalRead;
     assert.ok(finalResponse.response);
-    assert.ok(finalOrderResponse.response);
     assert.equal(finalResponse.response.status(), 200);
-    assert.equal(finalOrderResponse.response.status(), 200);
     const finalInspection = await finalResponse.response.json();
-    const finalOrder = await finalOrderResponse.response.json();
+    const finalOrder = finalInspection.order_header;
     assert.equal(finalInspection.workflow.revision, workflow.revision);
     await waitForWorkflowReadiness({page, expect, inspection: finalInspection, order: finalOrder, identity,
       revision: workflow.revision});
     const finalEvidence = await readLiveCandidate({inspection: finalInspection, workflow, identity, page, requireUnselected: true,
+      readCandidates: async () => {
+        const receipt = await finalCandidateRead;
+        assert.ok(receipt.response);
+        return receipt.response.json();
+      },
       readDetail: async () => {
         const receipt = await watch(base + `/workflow-v2/inspection-detail/${identity.evidenceId}`);
         assert.ok(receipt.response);

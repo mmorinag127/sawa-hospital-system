@@ -5,16 +5,18 @@ const test = require("node:test");
 const {mount, transport, deferred} = require('./helpers/modernization-react-dom.cjs');
 const PAGE = 'src/pages/orders/[id]/workflow-v2.tsx';
 const BASE = '/orders/demand/workflow-v2';
-const READ = `${BASE}/inspection?include_ocr_results=true&history_details=false&include_order_header=true`;
+const READ = `${BASE}/display?scope=summary`;
 const RAW = `${BASE}/inspection?history_details=true`;
 const DETAIL = `${BASE}/inspection-detail/evidence`;
-async function setup(running = false) {
+async function setup(running = false, overrides = {}) {
   const t = transport(), timers = new Map();
   const state = {workflow: {order_id:'demand',revision:7,state:running?'ocr_running':'ocr_completed',
     blockers:[],warnings:[],ocr_job:{order_id:'demand',ocr_job_id:'job',workflow_attempt_id:'attempt',status:'running'},
-    common_job_status:null}, results:[{ocr_result_id:'evidence',detail_state:'not_loaded'}]};
+    common_job_status:null,...overrides}, results:[{ocr_result_id:'evidence',detail_state:'not_loaded'}]};
   const payload = () => ({order_id:'demand',workflow:structuredClone(state.workflow),
-    ocr_candidates:require('./helpers/ocr-candidates.cjs')('demand',structuredClone(state.results),state.workflow)});
+    ocr_candidates:require('./helpers/ocr-candidates.cjs')('demand',structuredClone(state.results),state.workflow),
+    saved_sheet:state.workflow.saved_sheet_id?{saved_sheet_id:state.workflow.saved_sheet_id,
+      source_ocr_result_id:'evidence',sheet:{fields:['quantity'],header:['数量'],rows:[['001']],unknown:{preserved:true}}}:null});
   t.on('get','/auth/me',()=>({data:{role:'operator'}}));
   t.on('get','/facilities',()=>({data:{source:'canonical_json',revision:'fixture',facilities:[]}}));
   t.onWorkflowInspection(READ,()=>({data:payload()}));
@@ -251,7 +253,9 @@ test('same revision detail refresh generation rejects old bytes after newer deta
 const source = fs.readFileSync(path.join(__dirname, "../src/pages/orders/[id]/workflow-v2.tsx"), "utf8");
 
 test("workflow demand reads retain filtered summaries and defer candidate details", () => {
-  assert.match(source, /inspection\?include_ocr_results=true&history_details=false&include_order_header=true/);
+  assert.match(source, /display\?scope=\$\{displayScope\}/);
+  assert.match(source, /displayScope !== "summary"/);
+  assert.match(source, /loaded_sections\?\.includes\("sheet"\)/);
   assert.match(source, /inspection-detail\/\$\{ocrResultId\}/);
   assert.match(source, /workflow_revision !== revision/);
   assert.match(source, /状態更新のため再読込が必要です/);
@@ -259,6 +263,23 @@ test("workflow demand reads retain filtered summaries and defer candidate detail
   assert.match(source, /item\.detail_state === "not_loaded"/);
   assert.match(source, /item\.detail_state === "not_loaded" \|\| \(item\.selectable !== true/);
   assert.doesNotMatch(source, /setOcrResults\(inspectionData\.ocr_results\)/);
+});
+
+for (const state of ['sheet_saved', 'confirmed']) test(`${state} initial view does not read OCR detail, saved cells or PDF`, async () => {
+  const f = await setup(false, {state, selected_ocr_result_id:'evidence', saved_sheet_id:'saved',
+    ...(state === 'confirmed' ? {confirmed_snapshot_id:'snapshot'} : {})});
+  try {
+    assert.ok(f.t.calls.some(call => call.url === `${BASE}/display?scope=output`));
+    assert.equal(f.t.calls.some(call => call.url === DETAIL || call.url.endsWith('/document')
+      || call.url === `${BASE}/display?scope=sheet` || call.url === `${BASE}/display?scope=ocr`), false);
+    await f.h.settle(() => f.probe.current.setVisibleStep(2));
+    assert.ok(f.t.calls.some(call => call.url === `${BASE}/display?scope=ocr`));
+    assert.equal(f.t.calls.some(call => call.url === DETAIL), false);
+    await f.h.settle(() => f.probe.current.setVisibleStep(3));
+    assert.ok(f.t.calls.some(call => call.url === `${BASE}/display?scope=sheet`));
+    assert.ok(f.t.calls.some(call => call.url === DETAIL));
+    assert.equal(f.h.document.querySelector('input[data-sheet-row="0"][data-sheet-col="0"]').value, '001');
+  } finally { await f.h.close(); }
 });
 
 test("workflow progress polling is owned, single-flight, and refreshes on completion", () => {

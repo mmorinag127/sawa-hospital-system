@@ -12,7 +12,7 @@ const button = (h, text) => [...h.document.querySelectorAll('button')].find(b =>
 test('missing production source is explicit and does not trigger refresh or change Test selection', async () => {
   const previous = global.fetch;
   const calls = [];
-  global.fetch = async (url, init={}) => {calls.push({url,init}); return Response.json(url.endsWith('/refresh') ? {configured:false,blocked_reason:'production_sources_not_configured',job:null} : choices);};
+  global.fetch = async (url, init={}) => {calls.push({url,init}); return Response.json({...choices, refresh:{configured:false,blocked_reason:'production_sources_not_configured',job:null}});};
   let h;
   try {
     h = await mount();
@@ -31,7 +31,7 @@ test('double click submits one durable request and leaves Test selected while pr
       if(init.method==='POST'){posts.push(JSON.parse(init.body));job={id:posts[0].request_id,phase:'copying_database',component:'order'};return Response.json(job,{status:202});}
       return Response.json({configured:true,job});
     }
-    return Response.json(choices);
+    return Response.json({...choices,refresh:{configured:true,job}});
   };
   let h;
   try {
@@ -54,7 +54,7 @@ test('queued dispatch retry resends the same request id', async () => {
       if(init.method==='POST'){posted=JSON.parse(init.body);return Response.json(job,{status:202});}
       return Response.json({configured:true,job});
     }
-    return Response.json(choices);
+    return Response.json({...choices,refresh:{configured:true,job}});
   };
   let h;
   try{
@@ -72,7 +72,7 @@ test('successful refresh exposes new copy but does not silently retarget existin
       if(init.method==='POST'){done=true;return Response.json({id:'a'.repeat(32),phase:'succeeded'},{status:202});}
       return Response.json({configured:true,job:done?{id:'a'.repeat(32),phase:'succeeded'}:null});
     }
-    return Response.json(done?{...choices,options:[...choices.options,{id:'replay-new',label:'本番再現用（最新）',available:true}]}:choices);
+    return Response.json({...choices,refresh:{configured:true,job:done?{id:'a'.repeat(32),phase:'succeeded'}:null},options:done?[...choices.options,{id:'replay-new',label:'本番再現用（最新）',available:true}]:choices.options});
   };
   let h;
   try{
@@ -87,7 +87,7 @@ test('successful refresh exposes new copy but does not silently retarget existin
 
 test('failed refresh reports preservation and keeps selection', async()=>{
   const previous=global.fetch;
-  global.fetch=async url=>Response.json(url.endsWith('/refresh')?{configured:true,job:{id:'a'.repeat(32),phase:'failed'}}:choices);
+  global.fetch=async url=>Response.json({...choices,refresh:{configured:true,job:{id:'a'.repeat(32),phase:'failed'}}});
   let h;
   try{
     h=await mount();await h.waitFor(()=>h.document.body.textContent.includes('更新失敗。現在のコピーを維持'));

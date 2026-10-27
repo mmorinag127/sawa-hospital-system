@@ -43,17 +43,20 @@ export function savedWorkflowContract({ workflow, inspection, order }, orderId) 
 export async function readSavedWorkflow({ page, origin, orderId, action, mark }) {
   assert.match(orderId, /^[A-Za-z0-9_-]+$/);
   const base = `/api/orders/${orderId}`;
-  const specs = [[base + '/workflow-v2', 'workflow'],
-    [base + '/workflow-v2/inspection', 'inspection'], [base, 'order'], [base + '/document', 'pdf']];
+  const specs = [[base + '/workflow-v2/display', 'workflow'],
+    [base + '/workflow-v2/display', 'inspection'], [base + '/workflow-v2/display', 'order'], [base + '/document', 'pdf']];
   const pending = specs.map(([path, name]) => page.waitForResponse(response => {
     const url = new URL(response.url());
     return url.origin === origin && url.pathname === path && response.request().method() === 'GET'
-      && (name !== 'inspection' || url.searchParams.getAll('include_ocr_results').join() === 'true');
+      && (name === 'pdf' || url.searchParams.getAll('scope').join() === (name === 'inspection' ? 'sheet' : 'summary'));
   }).then(async response => {
     mark(`saved-${name}-http`);
     assert.equal(response.status(), 200);
     mark(`saved-${name}-body`);
-    if (name !== 'pdf') return [name, await response.json()];
+    if (name !== 'pdf') {
+      const payload = await response.json();
+      return [name, name === 'workflow' ? payload.workflow : name === 'order' ? payload.order_header : payload];
+    }
     const body = await response.body();
     assert.ok(body.length > 5);
     assert.equal(body.subarray(0, 5).toString(), '%PDF-');
@@ -61,6 +64,10 @@ export async function readSavedWorkflow({ page, origin, orderId, action, mark })
   }));
   const ready = Promise.all(pending).then(values => ({ values }), () => ({ failed: true }));
   await action();
+  await pending[0];
+  await page.locator('.step-nav button').filter({hasText: 'PDF/施設/週次'}).click();
+  await pending[3];
+  await page.locator('.step-nav button').filter({hasText: 'シート編集'}).click();
   const outcome = await ready;
   mark('saved-responses-complete');
   assert.equal(outcome.failed, undefined);
@@ -114,10 +121,20 @@ export async function verifySavedWorkflowPages({ page, expect, origin, orderId, 
       .toHaveText(data.saved.saved_sheet_id);
     // Compare the existing read-only inspection display, without leaving raw URLs open in PNGs.
     const details = page.locator('details').filter({ has: page.locator('summary', { hasText: /^デバッグ用 raw JSON を開く$/ }) });
+    const rawResponse = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.origin === origin && url.pathname === `/api/orders/${orderId}/workflow-v2/inspection`
+        && url.searchParams.getAll('history_details').join() === 'true' && response.request().method() === 'GET';
+    });
     await details.locator('summary').click();
     try {
+      const response = await rawResponse;
+      assert.equal(response.status(), 200);
+      const raw = await response.json();
+      const rawContract = savedWorkflowContract({...data, inspection: raw}, orderId);
+      assert.deepEqual(rawContract.saved, data.saved);
       mark('saved-inspection-display-exact');
-      assertSavedInspectionDisplay(await details.locator('pre').innerText(), data.inspection);
+      assertSavedInspectionDisplay(await details.locator('pre').innerText(), raw);
     } finally { await details.locator('summary').click(); }
   }
   await check('saved-workflow-step1', async () => {

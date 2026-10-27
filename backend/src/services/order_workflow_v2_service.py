@@ -33,7 +33,7 @@ from src.models.order_sheet_patch_candidate import OrderSheetPatchCandidate
 from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import workflow_ocr_delivery_service
-from src.services.ocr_history_read import history_row_view, read_history, read_history_detail, read_history_summary
+from src.services.ocr_history_read import read_history, read_history_summary
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
 from src.services import config_service, facility_template_version_service, ocr_job_service, sheet_week_service, workflow_v2_sheet_review_service
@@ -757,7 +757,7 @@ def ensure_ocr_prerequisites(order_id: str) -> tuple[dict[str, Any] | None, str 
         return _serialize_workflow(row, ocr_job=ocr_job), None
 
 
-def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None, _analysis=None) -> dict[str, Any] | None:
+def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None, _analysis=None, _read_operation=None) -> dict[str, Any] | None:
     if job is None:
         return None
     metrics = job.metrics if isinstance(job.metrics, dict) else {}
@@ -777,7 +777,8 @@ def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None, _analysis=Non
                 and execution.get("evidence_run_id") == evidence.id and execution.get("disposition") == "rejected"):
             from src.services.ocr_failure_diagnostics import recognition_failure_details
             diagnostics = recognition_failure_details(payload, evidence_run_id=evidence.id)
-            quantity_content_editable = ocr_evidence_service.evidence_run_is_selectable(evidence, _analysis=_analysis)
+            quantity_content_editable = ocr_evidence_service.evidence_run_is_selectable(
+                evidence, _analysis=_analysis, _read_operation=_read_operation)
     elapsed_seconds = _coerce_float(metrics.get("ocr_elapsed_seconds") or metrics.get("elapsed_seconds"))
     started_at = _coerce_datetime(metrics.get("ocr_started_at") or metrics.get("run_started_at"))
     finished_at = _coerce_datetime(
@@ -955,16 +956,16 @@ def _ensure_ocr_job_lineage(
     return None
 
 
-def _evidence_selection_blocker(row: OrderOcrEvidenceRun, *, _analysis=None) -> str | None:
+def _evidence_selection_blocker(row: OrderOcrEvidenceRun, *, _analysis=None, _read_operation=None) -> str | None:
     from src.services.recognition_acceptance_service import KEY
     if row.status == "diagnostic_only" and KEY not in (row.artifact_manifest_json or {}):
         # Shared selectability also permits historic quantity-content rejections
         # after validating the original artifacts and target identities.
-        error = ocr_evidence_service.evidence_run_selectability_error(row, _analysis=_analysis)
+        error = ocr_evidence_service.evidence_run_selectability_error(row, _analysis=_analysis, _read_operation=_read_operation)
         return "ocr_diagnostic_result_not_selectable" if error else None
     if row.status == "repair_blocked" or row.source in {"legacy-cache-backfill", "legacy-cache-mirror"} or row.producer_version == "legacy-cache-mirror/v1":
         return "legacy_ocr_evidence_not_selectable"
-    if not ocr_evidence_service.evidence_run_is_selectable(row, _analysis=_analysis):
+    if not ocr_evidence_service.evidence_run_is_selectable(row, _analysis=_analysis, _read_operation=_read_operation):
         return "ocr_result_execution_lineage_mismatch"
     return None
 
@@ -1054,6 +1055,7 @@ def _serialize_workflow(
     meta_override: dict[str, Any] | None = None,
     session: Any = None,
     _analysis=None,
+    _read_operation=None,
 ) -> dict[str, Any]:
     meta = meta_override if isinstance(meta_override, dict) else _workflow_meta(row)
     effective_template_id = _effective_workflow_template_id(meta)
@@ -1088,7 +1090,7 @@ def _serialize_workflow(
         "bagging_result_id": meta.get("bagging_result_id"),
         "output_bundle_id": meta.get("output_bundle_id"),
         "pre_save_checks": _workflow_pre_save_checks(meta),
-        "ocr_job": _serialize_ocr_job(ocr_job, session=session, _analysis=_analysis),
+        "ocr_job": _serialize_ocr_job(ocr_job, session=session, _analysis=_analysis, _read_operation=_read_operation),
         "ocr_job_binding_error": None,
         "common_job_status": _recorded_workflow_job_status(row, meta, ocr_job),
         "blockers": list(row.blockers_json or []),
@@ -1310,6 +1312,7 @@ def _workflow_lineage_error(
     workflow: OrderWorkflowState,
     meta_override: dict[str, Any] | None = None,
     _analysis=None,
+    _read_operation=None,
 ) -> str | None:
     meta = meta_override if isinstance(meta_override, dict) else _workflow_meta(workflow)
     from src.services.initial_saved_import_service import get_binding
@@ -1336,7 +1339,7 @@ def _workflow_lineage_error(
         evidence = session.get(OrderOcrEvidenceRun, workflow.evidence_run_id)
         if evidence is None or evidence.order_id != order.id:
             return "selected_ocr_missing"
-        selection_blocker = _evidence_selection_blocker(evidence, _analysis=_analysis)
+        selection_blocker = _evidence_selection_blocker(evidence, _analysis=_analysis, _read_operation=_read_operation)
         if selection_blocker:
             return selection_blocker
         _evidence_template_version_id, template_error = _resolve_evidence_template_version(
@@ -1423,6 +1426,7 @@ def _serialize_workflow_checked(
     ocr_job: OcrJob | None = None,
     _analysis=None,
     _read_context=None,
+    _read_operation=None,
 ) -> dict[str, Any]:
     meta = _workflow_meta_with_step4_artifacts(session, workflow)
     meta = _recover_confirmed_artifacts_from_snapshot(
@@ -1437,12 +1441,14 @@ def _serialize_workflow_checked(
         _read_context=_read_context,
     ).get(order.id) or {}
     ocr_job = loaded_jobs.get(job_binding["job_id"]) if job_binding.get("job") is not None else None
-    serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta, session=session, _analysis=_analysis)
+    serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta, session=session,
+                                     _analysis=_analysis, _read_operation=_read_operation)
     if job_binding.get("error"):
         serialized["ocr_job_binding_error"] = job_binding["error"]
         serialized["common_job_status"] = None
     canonical_state = _canonical_workflow_v2_state(workflow, meta)
-    lineage_error = _workflow_lineage_error(session, order=order, workflow=workflow, meta_override=meta, _analysis=_analysis)
+    lineage_error = _workflow_lineage_error(session, order=order, workflow=workflow, meta_override=meta,
+                                           _analysis=_analysis, _read_operation=_read_operation)
     if lineage_error:
         return _workflow_blocker_projection(serialized, lineage_error)
     serialized = _apply_canonical_workflow_state_projection(
@@ -1702,7 +1708,7 @@ def _selected_workflow_template_error(session, order, workflow):
     return error
 
 
-def _workflow_menu_amount_resolution(session, order, workflow, *, _analysis=None):
+def _workflow_menu_amount_resolution(session, order, workflow, *, _analysis=None, _read_operation=None):
     from src.services.initial_saved_import_service import get_binding
     imported = get_binding(session, order.id, template_version_id=order.template_version_id)
     if imported is not None:
@@ -1726,7 +1732,8 @@ def _workflow_menu_amount_resolution(session, order, workflow, *, _analysis=None
             error = "saved_sheet_template_mismatch"
     if error is None:
         try:
-            candidate = _build_materialization_candidate_for_saved_sheet(session=session, order=order, saved_sheet=draft, _analysis=_analysis, _for_read_projection=True)
+            candidate = _build_materialization_candidate_for_saved_sheet(session=session, order=order, saved_sheet=draft,
+                _analysis=_analysis, _for_read_projection=True, _read_operation=_read_operation)
         except SelectedPdfReceiptError as exc:
             error = str(exc)
         else:
@@ -1741,12 +1748,13 @@ def _workflow_menu_amount_resolution(session, order, workflow, *, _analysis=None
     return {"status": "unresolved", "blocker": error, "message": error, "affected_lines": []}
 
 
-def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflowState | None, *, _analysis=None, _checked_workflow=None) -> dict[str, Any]:
+def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflowState | None, *, _analysis=None, _checked_workflow=None, _read_operation=None) -> dict[str, Any]:
     from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
 
     if _analysis is None:
         _analysis = _EvidenceAnalysis()
-    with retain_read_models(session):
+    with (nullcontext(_read_operation) if _read_operation is not None
+          else ocr_evidence_service._EvidenceReadOperation(session)) as read_operation, retain_read_models(session):
         if _checked_workflow is not None:
             serialized = copy.deepcopy(_checked_workflow)
         elif workflow is None:
@@ -1755,8 +1763,10 @@ def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflo
             serialized = _serialize_workflow_checked(
                 session, order=order, workflow=workflow, _analysis=_analysis,
                 _read_context=(order, workflow),
+                _read_operation=read_operation,
             )
-        resolution = _workflow_menu_amount_resolution(session, order, workflow, _analysis=_analysis)
+        resolution = _workflow_menu_amount_resolution(session, order, workflow, _analysis=_analysis,
+                                                      _read_operation=read_operation)
         serialized["menu_amount_resolution"] = resolution
         if resolution["status"] == "unresolved" and resolution["blocker"] not in serialized.get("blockers", []):
             serialized["blockers"] = list(serialized.get("blockers") or []) + [resolution["blocker"]]
@@ -2916,7 +2926,7 @@ def mark_ocr_run_completed(
         return _serialize_workflow(workflow, ocr_job=ocr_job), None
 
 
-def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool, _analysis=None, include_execution_details: bool = True) -> dict[str, Any]:
+def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool, _analysis=None, include_execution_details: bool = True, _read_operation=None) -> dict[str, Any]:
     from src.services.recognition_acceptance_service import KEY
     payload = row.payload_json if isinstance(row.payload_json, dict) else {}
     manifest = row.artifact_manifest_json if isinstance(row.artifact_manifest_json, dict) else {}
@@ -2932,7 +2942,8 @@ def _serialize_ocr_result(row: OrderOcrEvidenceRun, *, selected: bool, _analysis
         signed_url = _inspection_call("sign_url", getattr(_get_order_service_module(), "_signed_url_from_uri", lambda _uri: None), sheet_review_base_uri)
         sheet_review_base_url = _normalize_id(signed_url)
     overlay_status = "ready" if overlay_url else "missing"
-    selectable = _inspection_call("selectability", ocr_evidence_service.evidence_run_is_selectable, row, _analysis=_analysis)
+    selectable = _inspection_call("selectability", ocr_evidence_service.evidence_run_is_selectable, row,
+                                  _analysis=_analysis, _read_operation=_read_operation)
     execution = payload.get("_ocr_execution")
     if not include_execution_details and isinstance(execution, dict):
         execution = {key: execution[key] for key in (
@@ -3038,15 +3049,16 @@ def _align_hakodate_sheet_payload_for_workflow(
 
 
 def list_ocr_results(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    with session_scope() as session, session.no_autoflush:
+    with session_scope() as session, session.no_autoflush, retain_read_models(session), \
+            ocr_evidence_service._EvidenceReadOperation(session) as read_operation:
         order, error = _get_order_or_error(session, order_id)
         if error:
             return None, error
         workflow = _get_workflow_readonly(session, order.id)
-        return _project_ocr_candidates(session, order=order, workflow=workflow)
+        return _project_ocr_candidates(session, order=order, workflow=workflow, _read_operation=read_operation)
 
 
-def _project_ocr_candidates(session, *, order, workflow, rows=None, serialized_rows=None, _analysis=None, checked_workflow=None):
+def _project_ocr_candidates(session, *, order, workflow, rows=None, serialized_rows=None, _analysis=None, checked_workflow=None, _read_operation=None):
     from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
     if _analysis is None:
         _analysis = _EvidenceAnalysis()
@@ -3073,9 +3085,23 @@ def _project_ocr_candidates(session, *, order, workflow, rows=None, serialized_r
             else:
                 hidden_template_mismatch_result_count += 1
     selected_ocr_result_id = workflow.evidence_run_id if workflow is not None else None
+    if serialized_rows is None:
+        from src.services.recognition_acceptance_service import KEY
+        canonical_rows = []
+        for row in visible_rows:
+            if ((row.id == selected_ocr_result_id or KEY in (row.artifact_manifest_json or {}))
+                    and not isinstance(row, OrderOcrEvidenceRun)):
+                canonical = session.get(OrderOcrEvidenceRun, row.id)
+                if canonical is None or canonical.order_id != order.id:
+                    return None, "ocr_result_not_found"
+                row = canonical
+            canonical_rows.append(row)
+        visible_rows = canonical_rows
     if checked_workflow is None and workflow is not None:
         checked_workflow = _serialize_workflow_checked(
             session, order=order, workflow=workflow, _analysis=_analysis,
+            _read_operation=_read_operation,
+            _read_context=(order, workflow) if _read_operation is not None else None,
         )
     return {
         "order_id": order.id,
@@ -3088,6 +3114,7 @@ def _project_ocr_candidates(session, *, order, workflow, rows=None, serialized_r
             serialized_rows[row.id] if serialized_rows is not None else _serialize_ocr_result(
                 row, selected=row.id == selected_ocr_result_id,
                 _analysis=_analysis if row.id == selected_ocr_result_id else _EvidenceAnalysis(),
+                _read_operation=_read_operation if row.id == selected_ocr_result_id else None,
             )
             for row in visible_rows
         ],
@@ -4060,6 +4087,7 @@ def _build_materialization_candidate_for_saved_sheet(
     saved_sheet: OrderSheetDraft,
     _analysis=None,
     _for_read_projection: bool = False,
+    _read_operation=None,
 ) -> dict[str, Any]:
     workflow = _get_workflow_readonly(session, order.id)
     if workflow is None:
@@ -4073,7 +4101,9 @@ def _build_materialization_candidate_for_saved_sheet(
         return {"error": "saved_sheet_template_mismatch", "lines": []}
     order_service_module = _get_order_service_module()
     try:
-        captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session, for_materialization=True, _analysis=_analysis, _for_read_projection=_for_read_projection)
+        captured = order_service_module._capture_synchronous_cache_write_input(order.id, write_session=session,
+            for_materialization=True, _analysis=_analysis, _for_read_projection=_for_read_projection,
+            _read_operation=_read_operation)
     except SelectedPdfReceiptError:
         raise
     except ValueError as exc:
@@ -4946,7 +4976,8 @@ def final_confirm(
 def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_details: bool = True, include_order_header: bool = False) -> tuple[dict[str, Any] | None, str | None]:
     from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
     analysis = _EvidenceAnalysis()
-    with session_scope() as session, session.no_autoflush, retain_read_models(session):
+    with session_scope() as session, session.no_autoflush, retain_read_models(session), \
+            ocr_evidence_service._EvidenceReadOperation(session) as read_operation:
         _inspection_next("order")
         order, error = _get_order_or_error(session, order_id)
         if error:
@@ -4960,13 +4991,17 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
         _inspection_next("history_query")
         ocr_results = read_history(session, order.id) if history_details else read_history_summary(session, order.id)
         selected_evidence = None
-        if not history_details and workflow is not None and workflow.evidence_run_id:
-            for index, row in enumerate(ocr_results):
-                if row.id == workflow.evidence_run_id:
-                    selected_evidence = session.get(OrderOcrEvidenceRun, row.id)
-                    if selected_evidence is None or selected_evidence.order_id != order.id:
-                        return None, "ocr_result_not_found"
-                    ocr_results[index] = history_row_view(selected_evidence)
+        from src.services.recognition_acceptance_service import KEY
+        for index, row in enumerate(ocr_results):
+            selected = workflow is not None and row.id == workflow.evidence_run_id
+            accepted = history_details and KEY in (getattr(row, "artifact_manifest_json", None) or {})
+            if selected or accepted:
+                canonical = session.get(OrderOcrEvidenceRun, row.id)
+                if canonical is None or canonical.order_id != order.id:
+                    return None, "ocr_result_not_found"
+                ocr_results[index] = canonical
+                if selected:
+                    selected_evidence = canonical
         _inspection_next("saved_sheet", count=len(ocr_results))
         saved_sheet = None
         saved_sheet_hash = ""
@@ -5006,6 +5041,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
                 order=order, workflow=workflow,
                 _analysis=analysis,
                 _read_context=(order, workflow),
+                _read_operation=read_operation,
             )
         else:
             checked_workflow = _inspection_call(
@@ -5017,12 +5053,14 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
             "workflow": _workflow_read_projection(
                 session, order, workflow,
                 _analysis=analysis, _checked_workflow=checked_workflow,
+                _read_operation=read_operation,
             ),
             "ocr_results": [
                 _inspection_call(
                     "ocr_row_serialize", _serialize_ocr_result, row, selected=row.id == (workflow.evidence_run_id if workflow is not None else None),
                     _analysis=analysis if workflow is not None and row.id == workflow.evidence_run_id else _EvidenceAnalysis(),
                     include_execution_details=history_details,
+                    _read_operation=read_operation if workflow is not None and row.id == workflow.evidence_run_id else None,
                 )
                 if history_details or (workflow is not None and row.id == workflow.evidence_run_id)
                 else {
@@ -5074,6 +5112,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
             candidates, error = _project_ocr_candidates(
                 session, order=order, workflow=workflow, rows=ocr_results, serialized_rows=serialized_rows,
                 _analysis=analysis, checked_workflow=checked_workflow if workflow is not None else None,
+                _read_operation=read_operation,
             )
             if error:
                 return None, error
@@ -5092,7 +5131,9 @@ def get_inspection_detail(order_id: str, evidence_id: str) -> tuple[dict[str, An
             template_error = _selected_workflow_template_error(session, order, workflow)
             if template_error:
                 return None, template_error
-        row = read_history_detail(session, order.id, evidence_id)
+        row = session.query(OrderOcrEvidenceRun).filter(
+            OrderOcrEvidenceRun.order_id == order.id, OrderOcrEvidenceRun.id == evidence_id,
+        ).one_or_none()
         if row is None:
             return None, "ocr_result_not_found"
         result = _serialize_ocr_result(

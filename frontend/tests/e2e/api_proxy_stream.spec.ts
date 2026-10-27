@@ -1,11 +1,12 @@
 import { expect, test } from "@playwright/test";
-import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import { createServer, get, type IncomingMessage, type ServerResponse } from "http";
 
 const upstreamPort = 39091;
 const upstreamBaseUrl = `http://127.0.0.1:${upstreamPort}`;
 
 let server: ReturnType<typeof createServer> | null = null;
 const requestBodies: Record<string, Buffer> = {};
+let cancelledUpstream = false;
 
 const readBody = (req: IncomingMessage) =>
   new Promise<Buffer>((resolve, reject) => {
@@ -40,6 +41,19 @@ test.beforeAll(async () => {
   const largePayload = Buffer.alloc(2 * 1024 * 1024 + 123, "x");
   server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", upstreamBaseUrl);
+    if (url.pathname === "/cancel.bin") {
+      res.writeHead(200, {"content-type": "application/octet-stream"});
+      res.write(Buffer.alloc(16384, "c"));
+      const timer = setInterval(() => res.write(Buffer.alloc(16384, "c")), 20);
+      res.once("close", () => { clearInterval(timer); cancelledUpstream = true; });
+      return;
+    }
+    if (url.pathname === "/truncated.bin") {
+      res.writeHead(200, {"content-type": "application/octet-stream", "content-length": "100000"});
+      res.write(Buffer.from("incomplete"));
+      setImmediate(() => res.destroy(new Error("synthetic upstream interruption")));
+      return;
+    }
     if (url.pathname === "/large.bin") {
       res.writeHead(200, {
         "content-type": "application/octet-stream",
@@ -94,4 +108,28 @@ test("api proxy forwards request bodies without buffering through Next bodyParse
   await expect(response.json()).resolves.toEqual({ received: uploadBody.length });
   expect(requestBodies.upload?.length).toBe(uploadBody.length);
   expect(requestBodies.upload?.subarray(-4).toString()).toBe("uuuu");
+});
+
+test("departed client cancels the upstream stream", async ({baseURL}) => {
+  cancelledUpstream = false;
+  await new Promise<void>((resolve, reject) => {
+    const req = get(`${baseURL}/api/cancel.bin`, res => {
+      res.once("data", () => {res.destroy(); req.destroy(); resolve();});
+      res.on("error", () => {});
+    });
+    req.on("error", reject);
+  });
+  await expect.poll(() => cancelledUpstream, {timeout: 5000}).toBe(true);
+});
+
+test("interrupted upstream cannot be accepted as a complete successful body", async ({request}) => {
+  let status: number;
+  try {
+    const response = await request.get("/api/truncated.bin");
+    await response.body();
+    status = response.status();
+  } catch {
+    return;
+  }
+  expect(status).not.toBe(200);
 });
