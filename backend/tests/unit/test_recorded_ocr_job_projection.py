@@ -145,8 +145,15 @@ def test_corrupted_recorded_job_is_not_replaced_or_repaired_on_read(history_case
         assert listed["ocr_job_binding_error"] == expected
         assert listed["ocr_status"] == "failed"
         progress = case.client.get(f"/orders/{case.id}/workflow-v2/ocr-progress", headers=case.actor.headers)
-        assert progress.status_code == 400
-        assert progress.json()["detail"] == expected
+        if damage == "input":
+            # Display reads do not authorize execution or verify the full captured input.
+            # The strict list assertions above must continue rejecting this corruption.
+            assert progress.status_code == 200
+            assert progress.json()["validation_state"] == "references_only"
+            assert progress.json()["ocr_job"]["ocr_job_id"] == actual_id
+        else:
+            assert progress.status_code == 400
+            assert progress.json()["detail"] == ("ocr_recorded_job_input_missing" if damage == "malformed" else expected)
         if damage not in {"document", "pdf_hash"}:
             assert order_service.get_current_sheet_context(case.id)["rows"] == source["sheet"]["rows"]
         with case.engine.connect() as connection:

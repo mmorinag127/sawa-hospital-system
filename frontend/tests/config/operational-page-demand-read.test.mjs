@@ -44,6 +44,7 @@ async function mountPage(name, apiClient, run) {
         pickBestFacilityCandidate: () => null,
       };
       if (name === '../services/apiClient') return { apiClient };
+      if (name === '../services/browserSession') return {browserSessionKey: () => 'fixture-session', subscribeBrowserSession: () => () => {}};
       throw new Error('Unexpected import ' + name);
     }, React);
     return exports;
@@ -121,6 +122,11 @@ test('OCR monitor pages and filters on the server, batches visible candidates, a
     assert.equal(button('次へ').disabled, true);
     const cursor = { received_at: '2026-10-27T00:00:00', id: 'first' };
     await act(async () => first.resolve({ data: { orders: [{ id: 'first', week: '2026-10' }], has_more: true, next_cursor: cursor } }));
+    assert.equal(calls.filter(call => call.path.startsWith('/orders/facility-candidates?')).length, 0);
+    const candidateToggle = [...document.querySelectorAll('input[type="checkbox"]')]
+      .find(node => node.closest('label')?.textContent.includes('施設候補'));
+    assert.ok(candidateToggle);
+    await act(async () => candidateToggle.click());
     const candidate = calls.find(call => call.path.startsWith('/orders/facility-candidates?'));
     assert.deepEqual(new URLSearchParams(candidate.path.split('?')[1]).getAll('order_ids'), ['first']);
     assert.equal(button('次へ').disabled, false);
@@ -169,7 +175,7 @@ test('dashboard pending data is unknown, not zero or an OCR error; resolved empt
     assert.ok([...document.querySelectorAll('.summary-value')].every(node => node.textContent === '0'));
     assert.match(document.body.textContent, /未確定申請はありません/);
     const status = calls.find(call => call.path === '/system/status');
-    assert.equal(status.options.params.view, 'operations');
+    assert.equal(status.options.params.view, 'operations-summary');
     await act(async () => status.finish.reject(new Error('operations unavailable')));
     assert.equal(document.querySelector('[role="status"]'), null);
     assert.match(document.querySelector('[role="alert"]').textContent, /未取得|取得でき/);

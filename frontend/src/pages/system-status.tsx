@@ -199,9 +199,9 @@ export default function SystemStatusPage() {
   const [detailsBusy, setDetailsBusy] = useState(false);
   const [operationsPending, setOperationsPending] = useState(true);
 
-  const loadDetails = async (section: "operations" | "quality" | "quota" | "full") => {
+  const loadDetails = async (section: "operations" | "operations-summary" | "quality" | "quota" | "full") => {
     setDetailsBusy(true);
-    if (section === "operations" || section === "full") setOperationsPending(true);
+    if (section === "operations" || section === "operations-summary" || section === "full") setOperationsPending(true);
     try {
       const res = section === "quota"
         ? await apiClient.get("/system/db/quota")
@@ -215,7 +215,7 @@ export default function SystemStatusPage() {
         const next = { ...current };
         if (section === "quota") delete next.db_quota;
         if (section === "quality") delete next.ocr_reparse_quality;
-        if (section === "operations") {
+        if (section === "operations" || section === "operations-summary") {
           delete next.ocr_operations;
           delete next.ocr_pipeline;
           delete next.uploaded_pdfs;
@@ -225,7 +225,7 @@ export default function SystemStatusPage() {
       });
       setError("システム状態の詳細取得に失敗しました。");
     } finally {
-      if (section === "operations" || section === "full") setOperationsPending(false);
+      if (section === "operations" || section === "operations-summary" || section === "full") setOperationsPending(false);
       setDetailsBusy(false);
     }
   };
@@ -239,7 +239,7 @@ export default function SystemStatusPage() {
       if (!silent) {
         setMaintenanceMessage("");
       }
-      await loadDetails("operations");
+      await loadDetails("operations-summary");
     } catch {
       setOperationsPending(false);
       setStatus(null);

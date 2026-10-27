@@ -2,10 +2,12 @@
 from copy import deepcopy
 from types import SimpleNamespace
 
-from sqlalchemy import JSON, case, column, func, literal, select, true
+from sqlalchemy import JSON, case, column, func, literal, or_, select, true
 
 from src.db import retain_read_models, session_scope
 from src.models.ocr_job import OcrJob
+from src.models.document import OrderDocument
+from src.models.uploaded_pdf import UploadedPdf
 from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
@@ -79,15 +81,18 @@ def _reference_error(session, order, state, meta):
     return None
 
 
-def _job_summary(session, order, state, meta):
-    identity = meta.get("ocr_job_id")
-    if not identity:
-        missing = state.state in {"ocr_running", "ocr_completed", "ocr_failed"} or "ocr_job_id" in meta or "ocr_job_attempt_id" in meta
-        return None, "ocr_job_not_recorded" if missing else None, None
-    keys = ("workflow_attempt_id", "workflow_completion_revision", "ocr_started_at", "run_started_at", "ocr_finished_at",
+_JOB_KEYS = ("workflow_attempt_id", "workflow_completion_revision", "ocr_started_at", "run_started_at", "ocr_finished_at",
             "run_finished_at", "stage_updated_at", "ocr_elapsed_seconds", "elapsed_seconds",
             "processing_stage", "result_state", "progress_step", "progress_total", "progress_label",
-            "error", "error_detail", "error_user_message", "recovery_action", "evidence_run_id", "rerun_terminal_receipt")
+            "error", "error_detail", "error_user_message", "recovery_action", "evidence_run_id", "rerun_terminal_receipt",
+            "auto_recovery_count", "next_recovery_at", "selected_pdf_receipt")
+_VERSION_KEYS = tuple(item.key for item in OrderVersion.__table__.columns if item.key != "line_snapshot")
+
+
+def read_recorded_job_values(session, identities):
+    if not identities:
+        return {}
+    keys = _JOB_KEYS
     metrics = OcrJob.metrics
     fields = [
         OcrJob.id, OcrJob.order_id, OcrJob.order_document_id, OcrJob.uploaded_pdf_id,
@@ -98,13 +103,14 @@ def _job_summary(session, order, state, meta):
     if session.get_bind().dialect.name == "postgresql":
         object_metrics = case((func.json_typeof(metrics) == "object", metrics), else_=literal({}, type_=JSON))
         projected = func.json_to_record(object_metrics).table_valued(
-            *(column(key, JSON) for key in (*keys, "nonworkflow_execution")),
+            *(column(key, JSON) for key in (*keys, "nonworkflow_execution", "reparse_read_input", "selected_version_input")),
         ).render_derived(with_types=True).lateral("display_metrics")
         native = projected.c.nonworkflow_execution
         native_object = case((func.json_typeof(native) == "object", native), else_=literal({}, type_=JSON))
         native_fields = func.json_to_record(native_object).table_valued(
             column("execution_id", JSON), column("ingest_ocr_mode", JSON), column("intake_protocol", JSON),
             column("job_id", JSON), column("order_id", JSON),
+            column("selected_pdf_receipt", JSON), column("selected_version_input", JSON), column("orders", JSON),
         ).render_derived(with_types=True).lateral("display_execution")
         statement = select(*fields, *(projected.c[key] for key in keys),
             native_fields.c.execution_id.label("native_execution_id"),
@@ -112,36 +118,148 @@ def _job_summary(session, order, state, meta):
             native_fields.c.intake_protocol.label("native_protocol"),
             native_fields.c.job_id.label("native_job_id"), native_fields.c.order_id.label("native_order_id"),
         ).select_from(OcrJob).join(projected, true()).join(native_fields, true())
+        captured = projected.c.reparse_read_input
+        native_pdf = native_fields.c.selected_pdf_receipt
+        native_orders = native_fields.c.orders
+        version = case((or_(projected.c.workflow_attempt_id.is_(None),
+            func.json_typeof(projected.c.workflow_attempt_id) == "null"), native_fields.c.selected_version_input),
+            else_=projected.c.selected_version_input)
+        version_kind = func.json_typeof(version)
+        version_fields = func.json_to_record(case((version_kind == "object", version),
+            else_=literal({}, type_=JSON))).table_valued(
+                *(column(key, JSON) for key in _VERSION_KEYS)).render_derived(with_types=True).lateral("display_version")
+        statement = statement.join(version_fields, true()).add_columns(
+            *(version_fields.c[key].label("version_" + key) for key in _VERSION_KEYS))
     else:
+        native = metrics["nonworkflow_execution"]
+        captured = metrics["reparse_read_input"]
         statement = select(*fields, *(metrics[key].label(key) for key in keys),
             metrics["nonworkflow_execution"]["execution_id"].label("native_execution_id"),
             metrics["nonworkflow_execution"]["ingest_ocr_mode"].label("native_mode"),
             metrics["nonworkflow_execution"]["intake_protocol"].label("native_protocol"),
             metrics["nonworkflow_execution"]["job_id"].label("native_job_id"),
             metrics["nonworkflow_execution"]["order_id"].label("native_order_id"))
-    row = session.execute(statement.where(OcrJob.id == identity)).mappings().first()
+        native_pdf = native["selected_pdf_receipt"]
+        native_orders = native["orders"]
+        version = case((metrics["workflow_attempt_id"].as_string().is_(None), native["selected_version_input"]),
+            else_=metrics["selected_version_input"])
+        version_kind = func.json_type(version)
+        statement = statement.add_columns(*(version[key].label("version_" + key) for key in _VERSION_KEYS))
+    statement = statement.add_columns(
+        native_pdf.label("native_pdf"), version_kind.label("version_kind"),
+        native["ingest_lease"]["generation"].label("native_generation"),
+        native_orders.op("->")(OcrJob.order_id)["order"]["current_document_id"].label("native_current_document"),
+        captured["order"]["current_document_id"].label("workflow_current_document"))
+    rows = {row["id"]: dict(row) for row in session.execute(statement.where(OcrJob.id.in_(identities))).mappings()}
+    for row in rows.values():
+        native_owner = row["workflow_attempt_id"] is None
+        row["_pdf"] = row["native_pdf"] if native_owner else row["selected_pdf_receipt"]
+        row["_version"] = {key: row["version_" + key] for key in _VERSION_KEYS} if row["version_kind"] == "object" else None
+        row["_current_document"] = row["native_current_document"] if native_owner else row["workflow_current_document"]
+    def source_rows(model, identity_key, columns):
+        selected_ids = {value[identity_key] for row in rows.values()
+            if isinstance((value := row["_version"] if model is OrderVersion else row["_pdf"]), dict)
+            and isinstance(value.get(identity_key), str) and value[identity_key]}
+        if not selected_ids:
+            return {}
+        return {item.id: item for item in session.execute(select(model.id, *columns).where(model.id.in_(selected_ids)))}
+    documents = source_rows(OrderDocument, "document_id", (OrderDocument.storage_uri, OrderDocument.source_email_id))
+    uploads = source_rows(UploadedPdf, "uploaded_pdf_id", (UploadedPdf.storage_uri, UploadedPdf.message_id,
+        UploadedPdf.content_sha256, UploadedPdf.current_order_id, UploadedPdf.current_document_id))
+    versions = source_rows(OrderVersion, "id", (OrderVersion.order_id, OrderVersion.version_no,
+        OrderVersion.document_id, OrderVersion.message_id, OrderVersion.storage_uri, OrderVersion.facility_code,
+        OrderVersion.week_code, OrderVersion.received_at, OrderVersion.is_current, OrderVersion.created_at))
+    for row in rows.values():
+        pdf, version = row["_pdf"], row["_version"]
+        row["_document"] = documents.get(pdf["document_id"]) if isinstance(pdf, dict) and isinstance(pdf.get("document_id"), str) else None
+        row["_upload"] = uploads.get(pdf["uploaded_pdf_id"]) if isinstance(pdf, dict) and isinstance(pdf.get("uploaded_pdf_id"), str) else None
+        row["_version_row"] = versions.get(version["id"]) if isinstance(version, dict) and isinstance(version.get("id"), str) else None
+    return rows
+
+
+def _job_summary(session, order, state, meta, *, _rows=None):
+    identity = meta.get("ocr_job_id")
+    if not identity:
+        missing = state.state in {"ocr_running", "ocr_completed", "ocr_failed"} or "ocr_job_id" in meta or "ocr_job_attempt_id" in meta
+        return None, "ocr_job_not_recorded" if missing else None, None
+    if not isinstance(identity, str):
+        return None, "ocr_recorded_job_reference_invalid", None
+    keys = _JOB_KEYS
+    row = (_rows if _rows is not None else read_recorded_job_values(session, [identity])).get(identity)
     if row is None:
         return None, "ocr_recorded_job_missing", None
     if row["order_id"] != order.id:
         return None, "ocr_recorded_job_order_mismatch", None
     if type(row["workflow_attempt_id"]) is not type(meta.get("ocr_job_attempt_id")) or row["workflow_attempt_id"] != meta.get("ocr_job_attempt_id"):
         return None, "ocr_recorded_job_attempt_mismatch", None
-    if row["order_document_id"] != order.current_document_id:
-        return None, "ocr_recorded_job_document_mismatch", None
+    if not isinstance(row["_current_document"], str) or not row["_current_document"]:
+        return None, "ocr_recorded_job_input_missing", None
+    if row["_current_document"] != order.current_document_id:
+        return None, "ocr_recorded_job_document_changed", None
+    pdf = row["_pdf"]
+    if (not isinstance(pdf, dict) or pdf.get("order_id") != order.id
+            or not all(isinstance(pdf.get(key), str) and pdf[key]
+                for key in ("document_id", "uploaded_pdf_id", "message_id", "storage_uri", "sha256"))
+            or pdf["storage_uri"] != row["input_reference"]):
+        return None, "ocr_recorded_job_pdf_mismatch", None
+    document, upload = row["_document"], row["_upload"]
+    if (document is None or upload is None
+            or (document.storage_uri, document.source_email_id) != (pdf["storage_uri"], pdf["message_id"])
+            or (upload.storage_uri, upload.message_id, upload.content_sha256) != (pdf["storage_uri"], pdf["message_id"], pdf["sha256"])):
+        return None, "ocr_recorded_job_pdf_mismatch", None
+    native_owner = row["workflow_attempt_id"] is None
+    for recorded, expected in ((row["order_document_id"], pdf["document_id"]),
+            (row["uploaded_pdf_id"], pdf["uploaded_pdf_id"]), (row["input_artifact_digest"], pdf["sha256"])):
+        if (native_owner or recorded is not None) and recorded != expected:
+            return None, "ocr_recorded_job_pdf_mismatch", None
+    if native_owner and (upload.current_order_id != order.id or upload.current_document_id != pdf["document_id"]):
+        return None, "ocr_recorded_job_pdf_mismatch", None
+    version = row["_version"]
+    if row["version_kind"] not in {None, "null", "object"}:
+        return None, "ocr_recorded_job_pdf_mismatch", None
+    if version is None:
+        if pdf["document_id"] != order.current_document_id:
+            return None, "ocr_recorded_job_document_changed", None
+    else:
+        from src.services.workflow_attempt_guard_service import _json_snapshot, snapshots_equal
+        actual = row["_version_row"]
+        # Version identity is checked here; the potentially large line snapshot
+        # remains an execution/selection check, not a display-time input proof.
+        if (actual is None or actual.order_id != order.id or not isinstance(version, dict)
+                or not snapshots_equal(_json_snapshot(dict(actual._mapping)),
+                    {key: version.get(key) for key in actual._mapping})):
+            return None, "ocr_recorded_job_pdf_mismatch", None
+        if version.get("document_id") != pdf["document_id"]:
+            return None, "ocr_recorded_job_pdf_mismatch", None
     if row["template_version_id"] != state.template_version_id:
         return None, "template_version_mismatch", None
+    attempt = row["workflow_attempt_id"]
+    if attempt is not None and (not isinstance(attempt, str) or not attempt):
+        return None, "ocr_recorded_job_attempt_mismatch", None
+    if attempt is None and row["native_mode"] != "hakodate":
+        return None, "ocr_recorded_job_input_missing", None
+    if attempt is not None and row["native_mode"] is not None:
+        return None, "ocr_recorded_job_attempt_mismatch", None
     values = dict(row)
     values["metrics"] = {key: values.pop(key) for key in keys}
     if values.pop("native_mode") == "hakodate":
+        if (values["native_job_id"] != identity or values["native_order_id"] != order.id
+                or not isinstance(values["native_execution_id"], str) or not values["native_execution_id"]
+                or values["native_protocol"] != "native_ingest_v2"):
+            return None, "ocr_job_ownership_mismatch", None
         values["metrics"]["nonworkflow_execution"] = {
             "ingest_ocr_mode": "hakodate", "execution_id": values["native_execution_id"],
             "intake_protocol": values["native_protocol"],
             "job_id": values["native_job_id"], "order_id": values["native_order_id"],
         }
     # A recorded terminal summary is not a selectable result or a command proof.
-    status = str(values["status"] or "").strip().lower()
-    common = workflow._recorded_hospital_job_status(values, {"status": status})
-    return workflow._serialize_ocr_job(SimpleNamespace(**values)), None, common
+    described = workflow.ocr_job_service.describe_recorded_job_state(values)
+    common = workflow._recorded_hospital_job_status(values, described)
+    serialized = workflow._serialize_ocr_job(SimpleNamespace(**values))
+    serialized["recorded_state"] = described["status"]
+    generation = row["native_generation"]
+    serialized["recorded_generation"] = generation if type(generation) in {str, int} else None
+    return serialized, None, common
 
 
 def _candidates(session, order, state, meta):

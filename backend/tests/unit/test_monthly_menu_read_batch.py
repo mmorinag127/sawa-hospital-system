@@ -10,6 +10,53 @@ from src.services import menu_service as service
 from src.models.menu import MenuMaster, MenuFacilityOverride, MonthlyMenuItem, MonthlyMenuEntry
 from src.models.facility import FacilityConfig
 
+
+def test_card_summary_matches_full_read_identity_count_without_quantity_reads(engine, monkeypatch):
+    from contextlib import contextmanager
+    from src.models.menu import MonthlyMenu
+    from src.models.user import AuditLog
+    metadata = MetaData()
+    for model in (MenuMaster, MonthlyMenu, MonthlyMenuItem, MonthlyMenuEntry, AuditLog):
+        model.__table__.to_metadata(metadata)
+    metadata.create_all(engine)
+    month = "2026-09"
+    with Session(engine) as session:
+        session.add(MonthlyMenu(id=month, month_start=date(2026, 9, 1), filename="owned-summary.xlsx"))
+        session.flush()
+        session.add(MonthlyMenuItem(id="base-summary", monthly_menu_id=month, name="base", daypart="昼",
+            category="main", diet_type="regular", qty_per_serving=0))
+        session.add(MonthlyMenuItem(id="scoped-summary", monthly_menu_id=month, name="scoped", daypart="昼",
+            category="main", diet_type="regular", facility_override="A", qty_per_serving=999))
+        for index in range(3):
+            session.add(MonthlyMenuEntry(id=f"summary-entry-{index}", monthly_menu_id=month,
+                name="entry-only", menu_date=date(2026, 9, index + 1), daypart="昼", diet_type="regular"))
+        session.commit()
+    @contextmanager
+    def owned_read():
+        with Session(engine) as session, session.no_autoflush:
+            yield session
+            assert not session.new and not session.dirty and not session.deleted
+    monkeypatch.setattr(service, "ensure_menu_schema", lambda: None)
+    monkeypatch.setattr(service, "_menu_read_session", owned_read)
+    with Session(engine) as session:
+        rows = session.query(MonthlyMenuItem).filter(MonthlyMenuItem.facility_override.is_(None)).all()
+        entries = session.query(MonthlyMenuEntry).all()
+        full = service._normalize_menu_payload_items({"items": original(session, month, rows, entries)})
+    statements = []
+    def observe(_conn, _cursor, sql, *_args):
+        statements.append(sql)
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        values = service.get_menu_summaries([month, "2026-10"])
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+    assert values[month]["item_count"] == len(full["items"]) == 2
+    assert values[month]["menu"]["filename"] == "owned-summary.xlsx"
+    assert values["2026-10"] == {"month_id": "2026-10", "status": "missing", "menu": None, "item_count": 0}
+    assert len(statements) == 4
+    assert all(sql.lstrip().upper().startswith("SELECT") for sql in statements)
+    assert not any("qty_per_serving" in sql or "menu_masters" in sql or "bag_max_qty" in sql for sql in statements)
+
 def _original_monthly_items(session, month_id, items, entries, facility_id=None):
     payloads = [serialize_item(item) for item in items]
     keys = {_monthly_item_identity_key_from_item(item) for item in items}

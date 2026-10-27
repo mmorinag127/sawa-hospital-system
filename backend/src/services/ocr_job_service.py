@@ -529,7 +529,8 @@ def has_recorded_execution_input(job: dict[str, Any]) -> bool:
     return True
 
 
-def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
+def describe_recorded_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
+    """Describe stored progress only; this is not execution-input validation."""
     if not isinstance(job, dict):
         return {
             "status": "idle",
@@ -542,12 +543,6 @@ def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
     effective_status = normalized_status
     metrics = job.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
-    missing_execution_input = (
-        (metrics.get("request_mode") in {"ingest_first_pass", "ocr_rerun", "ocr_reparse", "llm_reparse"}
-         or metrics.get("ingest_ocr_mode") == "hakodate")
-        and metrics.get("workflow_attempt_id") is None
-        and not has_recorded_execution_input(job)
-    )
     if is_job_recoverable(job):
         effective_status = "recovering" if is_job_recovery_due(job) else "awaiting_output"
     elif normalized_status in {"running", "pending"} and is_job_stale(job):
@@ -556,8 +551,6 @@ def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
         effective_status = "hard_failed"
     elif normalized_status in {"done", "success", "completed"}:
         effective_status = "done"
-    if missing_execution_input:
-        effective_status = "hard_failed"
     progress_updated_at = get_job_progress_updated_at(job)
     stale_at = get_job_stale_at(job) if effective_status == "stalled" else None
     recovery_due_at = get_job_next_recovery_at(job) if is_job_recoverable(job) else None
@@ -571,8 +564,23 @@ def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
         "recovery_attempts": get_job_recovery_attempts(job),
         "stale_threshold_seconds": max(get_stale_minutes(), 0) * 60,
         "job_id": str(job.get("id") or "").strip() or None,
-        "blockers": ["ocr_execution_input_required"] if missing_execution_input else [],
+        "blockers": [],
     }
+
+
+def describe_job_state(job: dict[str, Any] | None) -> dict[str, Any]:
+    described = describe_recorded_job_state(job)
+    if not isinstance(job, dict):
+        return described
+    metrics = job.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    if ((metrics.get("request_mode") in {"ingest_first_pass", "ocr_rerun", "ocr_reparse", "llm_reparse"}
+            or metrics.get("ingest_ocr_mode") == "hakodate")
+            and metrics.get("workflow_attempt_id") is None and not has_recorded_execution_input(job)):
+        described["status"] = "hard_failed"
+        described["stale_at"] = None
+        described["blockers"] = ["ocr_execution_input_required"]
+    return described
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:

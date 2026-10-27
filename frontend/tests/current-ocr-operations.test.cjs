@@ -23,10 +23,23 @@ function compile(relative, overrides = {}) {
   const exports = {};
   const load = name => name in overrides ? overrides[name] : name === 'next/link'
     ? {__esModule: true, default: ({children, ...props}) => React.createElement('a', props, children)} : require(name);
-  vm.runInNewContext(output, {exports, require: load, console, setTimeout, clearTimeout});
+  vm.runInNewContext(output, {exports, require: load, console, setTimeout, clearTimeout, AbortController});
   return exports;
 }
-const shared = compile('src/components/OcrOperations.tsx');
+const shared = compile('src/components/OcrOperations.tsx', {
+  '../services/apiClient': {apiClient: {get: async () => {throw new Error('unexpected history read');}}},
+  '../services/browserSession': {browserSessionKey: () => 'fixture-session', subscribeBrowserSession: () => () => {}},
+});
+
+test('display-only summary explicitly distinguishes recorded completion from input verification', () => {
+  const data = payload();
+  data.source = 'recorded_sql_workflow_display/v1'; data.validation_state = 'references_only';
+  const html = renderToStaticMarkup(React.createElement(shared.OcrOperationsSummary, {operations: data}));
+  assert.match(html, /記録状態/);
+  assert.match(html, /原本・実行入力の整合性: 未検証/);
+  delete data.validation_state;
+  assert.match(renderToStaticMarkup(React.createElement(shared.OcrOperationsSummary, {operations: data})), /role="alert"/);
+});
 
 test('shared current projection never adopts historical running/error and review never says success', () => {
   const html = renderToStaticMarkup(React.createElement(shared.OcrOperationsSummary, {operations: payload()}));
@@ -118,5 +131,39 @@ test('all three source consumers render the identical current SQL component', ()
     assert.match(source, /\.ocr_operations/);
     assert.doesNotMatch(source, /\?\.ocr_pipeline\?/);
     assert.doesNotMatch(source, /\/ocr\/unclassified/);
+  }
+});
+
+test('closed history does not fetch; opening fetches a page and closing aborts stale response', async () => {
+  const dom = new JSDOM('<div id="root"></div>', {url: 'https://fixture.invalid/ocr-queue'});
+  global.window = dom.window; global.document = dom.window.document; global.navigator = dom.window.navigator;
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  const calls = [];
+  let resolve;
+  const components = compile('src/components/OcrOperations.tsx', {
+    '../services/apiClient': {apiClient: {get: (url, options) => {
+      calls.push({url, options}); return new Promise(done => {resolve = done;});
+    }}},
+    '../services/browserSession': {browserSessionKey: () => 'fixture-session', subscribeBrowserSession: () => () => {}},
+  });
+  const root = createRoot(document.getElementById('root'));
+  const data = {...payload(), source: 'recorded_sql_workflow_display/v1', validation_state: 'references_only',
+    history: [], history_loaded: false, history_count: 3};
+  try {
+    await act(async () => root.render(React.createElement(components.OcrOperationsHistory, {operations: data})));
+    assert.equal(calls.length, 0);
+    const details = document.querySelector('details');
+    Object.defineProperty(details, 'open', {value: false, writable: true});
+    await act(async () => {details.open = true; details.dispatchEvent(new dom.window.Event('toggle'));});
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, '/system/ocr-history');
+    assert.equal(calls[0].options.params.limit, 50);
+    await act(async () => {details.open = false; details.dispatchEvent(new dom.window.Event('toggle'));});
+    assert.equal(calls[0].options.signal.aborted, true);
+    await act(async () => resolve({data: {source: data.source, history: [{job_id: 'stale-result'}], next_cursor: null}}));
+    assert.doesNotMatch(document.body.textContent, /stale-result/);
+  } finally {
+    await act(async () => root.unmount()); dom.window.close();
+    delete global.window; delete global.document; delete global.navigator; delete global.IS_REACT_ACT_ENVIRONMENT;
   }
 });

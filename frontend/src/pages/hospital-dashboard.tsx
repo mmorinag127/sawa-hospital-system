@@ -1,8 +1,8 @@
-import { Button } from "@mui/material";
+import { Button, Checkbox } from "@mui/material";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { apiClient } from "../services/apiClient";
-import { classifyDashboardMenuRead, type MenuInfo } from "../services/dashboardMenuInfo";
+import { classifyDashboardMenuSummary, type MenuInfo } from "../services/dashboardMenuInfo";
 import TopNav from "../components/TopNav";
 import { OcrOperationsPayload, OcrOperationsSummary } from "../components/OcrOperations";
 import {
@@ -164,6 +164,7 @@ export default function HomePage() {
   const [shippingToday, setShippingToday] = useState<ShippingTodayPayload | null>(null);
   const [facilityNameMap, setFacilityNameMap] = useState<FacilityNameMap>({});
   const [facilityHints, setFacilityHints] = useState<Record<string, FacilityHint | null>>({});
+  const [showFacilityHints, setShowFacilityHints] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,7 +205,7 @@ export default function HomePage() {
   useEffect(() => {
     const controller = new AbortController();
     apiClient
-      .get("/system/status", {params: {view: "operations"}, signal: controller.signal})
+      .get("/system/status", {params: {view: "operations-summary"}, signal: controller.signal})
       .then((res) => {
         if (!controller.signal.aborted) setSystemStatus(res.data || null);
       })
@@ -248,33 +249,32 @@ export default function HomePage() {
       setMenuInfo({});
       return;
     }
-    let cancelled = false;
+    const controller = new AbortController();
     const baseInfo: Record<string, MenuInfo> = {};
     weekList.forEach((week) => {
       baseInfo[week] = { status: "確認中" };
     });
     setMenuInfo(baseInfo);
     const loadMenus = async () => {
-      const entries = await Promise.all(
-        weekList.map(async (week) => {
-          try {
-            const res = await apiClient.get(`/monthly-menus/${week}`);
-            return [week, classifyDashboardMenuRead(week, res)] as const;
-          } catch (error: any) {
-            return [week, classifyDashboardMenuRead(week, error?.response)] as const;
-          }
-        })
-      );
-      if (cancelled) return;
       const next: Record<string, MenuInfo> = {};
-      entries.forEach(([week, info]) => {
-        next[week] = info;
-      });
+      for (let offset = 0; offset < weekList.length; offset += 100) {
+        if (controller.signal.aborted) return;
+        const months = weekList.slice(offset, offset + 100);
+        const params = new URLSearchParams();
+        months.forEach(month => params.append("month_ids", month));
+        try {
+          const response = await apiClient.get(`/monthly-menus/summaries?${params}`, {signal: controller.signal});
+          months.forEach(month => { next[month] = classifyDashboardMenuSummary(month, response.data?.items?.[month]); });
+        } catch {
+          months.forEach(month => { next[month] = {status: "取得失敗"}; });
+        }
+      }
+      if (controller.signal.aborted) return;
       setMenuInfo(next);
     };
     loadMenus();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [weekList.join("|")]);
 
@@ -283,6 +283,7 @@ export default function HomePage() {
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
+    if (!showFacilityHints) return () => controller.abort();
     const unresolved = pendingOrders
       .filter((order) => order.source_kind !== "uploaded_pdf" && !order.facility && order.id && !inlineFacilityHint(order))
       .map((order) => String(order.id || ""))
@@ -306,7 +307,7 @@ export default function HomePage() {
       cancelled = true;
       controller.abort();
     };
-  }, [pendingOrders, facilityHints]);
+  }, [pendingOrders, facilityHints, showFacilityHints]);
 
   const facilityLabel = (order: Order) => {
     const facilityId = order.facility || "";
@@ -314,13 +315,13 @@ export default function HomePage() {
       const name = facilityNameMap[facilityId];
       return name ? `${name} (${facilityId})` : facilityId;
     }
-    const inlineHint = inlineFacilityHint(order);
+    const inlineHint = showFacilityHints ? inlineFacilityHint(order) : null;
     if (inlineHint?.facility_name) {
       const score = inlineHint.score != null ? ` / score=${inlineHint.score}` : "";
       return `推定: ${inlineHint.facility_name} (${inlineHint.facility_id}${score})`;
     }
     const orderId = order.id || "";
-    const hint = orderId ? facilityHints[orderId] : null;
+    const hint = showFacilityHints && orderId ? facilityHints[orderId] : null;
     if (hint?.facility_name) {
       const score = hint.score != null ? ` / score=${hint.score}` : "";
       return `推定: ${hint.facility_name} (${hint.facility_id}${score})`;
@@ -530,6 +531,7 @@ export default function HomePage() {
         <article className="panel">
           <header className="panel-header">
             <h2>未確定申請</h2>
+            <label><Checkbox checked={showFacilityHints} onChange={event => setShowFacilityHints(event.target.checked)} />施設候補</label>
             <span className="badge">{orderDashboard ? stats.counts["要確認"] : "未取得"}</span>
           </header>
           <div className="pending-list">

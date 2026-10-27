@@ -88,8 +88,8 @@ test('system status uses dashboard link and GET; current/historical pipeline err
     ocr_reparse_quality: { gate: { status: 'pass' } } };
   const options = { navigate: async path => paths.push(path), receipt: async (path, action, query) => {
     assert.equal(path, '/api/system/status');
-    assert.ok(['operations', 'quality'].includes(query.view));
-    if (query.view === 'operations') assert.deepEqual(paths, ['/hospital']);
+    assert.ok(['operations-summary', 'quality'].includes(query.view));
+    if (query.view === 'operations-summary') assert.deepEqual(paths, ['/hospital']);
     else assert.deepEqual(paths, ['/hospital', '/system-status']);
     await action(); return data;
   } };
@@ -136,7 +136,7 @@ test('source routes, lifecycle and no-action boundary remain grounded in current
   const qualityRead = "page.getByRole('button', { name: '品質を取得', exact: true }).click()";
   assert.equal(helper.split(qualityRead).length - 1, 1);
   assert.doesNotMatch(helper.replace(qualityRead, ''), /getByRole\('button'.*\.click\(/);
-  assert.ok(helper.includes("{ view: 'operations' }"));
+  assert.ok(helper.includes("{ view: 'operations-summary' }"));
   assert.ok(helper.includes("{ view: 'quality' }"));
   const shared = read('../../scripts/hospital-readonly-pages.mjs');
   assert.ok(shared.indexOf('await verifyOperatorEntryPages') < shared.indexOf("await check('manual-library'"));

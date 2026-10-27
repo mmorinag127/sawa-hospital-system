@@ -13,3 +13,8 @@ if __name__ == '__main__':
                     str(verifier) + ':/tmp/verify_tls_trust.mjs:ro',
                     'sawa-frontend-proof:' + git('rev-parse', 'HEAD'),
                     '/tmp/verify_tls_trust.mjs'], check=True)
+    smoke = Path(__file__).resolve().with_name('verify_frontend_standalone.mjs')
+    subprocess.run(['docker', 'run', '--rm', '--entrypoint', 'node', '-v',
+                    str(smoke) + ':/tmp/verify_frontend_standalone.mjs:ro',
+                    'sawa-frontend-proof:' + git('rev-parse', 'HEAD'),
+                    '/tmp/verify_frontend_standalone.mjs'], check=True)

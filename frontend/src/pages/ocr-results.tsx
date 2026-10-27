@@ -21,6 +21,7 @@ type OrderSummary = {
   received_at?: string | null;
   ocr_status?: string | null;
   ocr_error?: string | null;
+  ocr_validation_state?: "references_only";
 };
 
 type OrderCursor = { received_at: string; id: string };
@@ -39,6 +40,7 @@ export default function OcrResultsPage() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [showOnlyUnassigned, setShowOnlyUnassigned] = useState(false);
+  const [showFacilityHints, setShowFacilityHints] = useState(false);
   const [cursors, setCursors] = useState<Array<OrderCursor | null>>([null]);
   const [nextCursor, setNextCursor] = useState<OrderCursor | null>(null);
   const [refresh, setRefresh] = useState(0);
@@ -83,6 +85,7 @@ export default function OcrResultsPage() {
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
+    if (!showFacilityHints) return () => controller.abort();
     const unresolved = orders
       .filter((order) => !order.facility && order.id)
       .map((order) => String(order.id || ""))
@@ -106,7 +109,7 @@ export default function OcrResultsPage() {
       cancelled = true;
       controller.abort();
     };
-  }, [orders, facilityHints]);
+  }, [orders, facilityHints, showFacilityHints]);
 
   const facilityLabel = (order: OrderSummary) => {
     const facilityId = order.facility || "";
@@ -115,7 +118,7 @@ export default function OcrResultsPage() {
       return name ? `${name} (${facilityId})` : facilityId;
     }
     const orderId = order.id || "";
-    const hint = orderId ? facilityHints[orderId] : null;
+    const hint = showFacilityHints && orderId ? facilityHints[orderId] : null;
     if (hint?.facility_name) {
       const score = hint.score != null ? ` / score=${hint.score}` : "";
       return `推定: ${hint.facility_name} (${hint.facility_id}${score})`;
@@ -156,6 +159,7 @@ export default function OcrResultsPage() {
             />
             施設/週が未確定のみ
           </label>
+          <label className="field checkbox"><Checkbox checked={showFacilityHints} onChange={event => setShowFacilityHints(event.target.checked)} />施設候補</label>
           <Button type="button" className="btn primary" onClick={() => { setCursors([null]); setRefresh(value => value + 1); }} disabled={loading}>
             {loading ? "更新中..." : "更新"}
           </Button>
@@ -190,7 +194,10 @@ export default function OcrResultsPage() {
                   <tr key={order.id}>
                     <td>{facilityLabel(order)}</td>
                     <td>{order.week || "未確定"}</td>
-                    <td>{order.ocr_status || "-"}</td>
+                    <td>{order.ocr_status || "-"}
+                      {order.ocr_error ? <p role="alert">{order.ocr_error}</p> : null}
+                      {order.ocr_validation_state === "references_only" ? <p>原本・実行入力: 未検証</p> : null}
+                    </td>
                     <td>{order.status || "-"}</td>
                     <td>{formatTimestamp(order.received_at)}</td>
                     <td>

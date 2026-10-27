@@ -49,6 +49,9 @@ test('actual queue uses native ingest rows and preserves recovery, refresh, erro
       const moduleSource=readFileSync(new URL('../../src/components/OcrOperations.tsx',import.meta.url),'utf8');
       const compiled=ts.transpileModule(moduleSource,{compilerOptions:{target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.React,module:ts.ModuleKind.CommonJS}}).outputText;
       vm.compileFunction(compiled,['exports','require','React'])(actual,name=>{
+        if(name==='react')return React;
+        if(name==='../services/apiClient')return {apiClient};
+        if(name==='../services/browserSession')return {browserSessionKey:()=> 'fixture-session',subscribeBrowserSession:()=>()=>{}};
         assert.equal(name,'next/link');return {default:({children,...props})=>React.createElement('a',props,children)};
       },React);
       return actual;

@@ -706,10 +706,22 @@ def list_orders(
         before_id=before_id,
         job_bindings_out=bindings,
         only_unassigned=only_unassigned,
-        include_job_bindings=response_view != "stored_facts",
+        include_job_bindings=response_view not in {"stored_facts", "ocr_monitor"},
     )
     orders = page["orders"]
     if not include_runtime_flag:
+        return _order_list_response(page, response_view)
+    if response_view == "ocr_monitor":
+        from src.services.ocr_operations_display_service import get_order_job_displays
+        displays = get_order_job_displays([order["id"] for order in orders if order.get("source_kind") != "uploaded_pdf"])
+        for order in orders:
+            display = displays.get(order["id"])
+            if display is None:
+                continue
+            job = display["job"]
+            order["ocr_validation_state"] = display["validation_state"]
+            order["ocr_status"] = "blocked" if display["error"] else job["status"] if job else None
+            order["ocr_error"] = display["error"] or (job.get("error_message") or job.get("error") if job else None)
         return _order_list_response(page, response_view)
     jobs = {}
     for order in orders:
@@ -718,12 +730,6 @@ def list_orders(
             order.update(recorded_order_job_fields(binding))
             if binding["job"] is not None:
                 jobs[binding["job_id"]] = binding["job"]
-    if response_view == "ocr_monitor" and include_ocr is not False:
-        for order in orders:
-            job = jobs.get(order.get("ocr_job_id"))
-            _apply_job_status_to_order(order, job)
-            _apply_stale_ocr_status(order, job)
-        return _order_list_response(page, response_view)
     order_ids = [str(order.get("id") or "").strip() for order in orders if str(order.get("id") or "").strip()]
     lightweight_mode = include_ocr is False
     cache_map = order_service._load_order_ocr_cache_map(order_ids) if (not lightweight_mode or include_candidate_summary) else {}
@@ -781,11 +787,17 @@ def list_orders(
 def _order_list_response(page: dict, view: str | None) -> dict:
     if view != "ocr_monitor":
         return page
-    fields = ("id", "facility", "week", "status", "received_at", "ocr_status", "ocr_error")
+    fields = ("id", "facility", "week", "status", "received_at", "ocr_status", "ocr_error", "ocr_validation_state")
     return {**page, "orders": [
         {field: order[field] for field in fields if field in order}
         for order in page["orders"]
     ]}
+
+
+@router.get("/display-context", dependencies=[Depends(require_role("operator"))])
+def get_order_display_context(order_ids: list[str] = Query(min_length=1, max_length=100)):
+    from src.services.ocr_operations_display_service import get_order_job_displays
+    return {"orders": get_order_job_displays(order_ids)}
 
 
 @router.get("/dashboard", dependencies=[Depends(require_role("operator"))])

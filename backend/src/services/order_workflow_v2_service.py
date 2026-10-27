@@ -1800,22 +1800,22 @@ def get_ocr_progress(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
                 "workflow_revision": 0,
                 "state": "not_initialized",
                 "ocr_job": None,
+                "common_job_status": None,
+                "validation_state": "references_only",
             }, None
-        binding = ocr_job_service.get_recorded_order_job_bindings(
-            [order.id], read_session=session,
-        ).get(order.id) or {}
-        if binding.get("error"):
-            return None, binding["error"]
-        job = session.get(OcrJob, binding["job_id"]) if binding.get("job") is not None else None
-        serialized = _serialize_workflow(workflow, ocr_job=job, session=session)
-        if job is not None and serialized["common_job_status"] is None:
+        from src.services.workflow_display_read_service import _job_summary
+        job, error, common = _job_summary(session, order, workflow, _workflow_meta(workflow, copy_meta=False))
+        if error:
+            return None, error
+        if job is not None and common is None:
             return None, "ocr_job_ownership_mismatch"
         return {
             "order_id": order.id,
             "workflow_revision": _workflow_revision(workflow),
-            "state": serialized["state"],
-            "ocr_job": serialized["ocr_job"],
-            "common_job_status": serialized["common_job_status"],
+            "state": workflow.state,
+            "ocr_job": job,
+            "common_job_status": common,
+            "validation_state": "references_only",
         }, None
 
 

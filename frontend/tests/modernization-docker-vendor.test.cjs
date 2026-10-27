@@ -46,7 +46,11 @@ test('deps stage copies every declared committed local dependency before npm ci'
   const expected = trustedBase + old.replace(/^COPY vendor\/.*$/m, 'COPY vendor ./vendor')
     .replaceAll('FROM node:20-slim', 'FROM trusted-base')
     .replace('ARG NEXT_PUBLIC_DEPLOYED_AT=unknown\n', 'ARG NEXT_PUBLIC_DEPLOYED_AT=unknown\nARG NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=false\n')
-    .replace('ENV NEXT_PUBLIC_PORTAL_URL=${NEXT_PUBLIC_PORTAL_URL}\n', 'ENV NEXT_PUBLIC_PORTAL_URL=${NEXT_PUBLIC_PORTAL_URL}\nENV NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=${NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED}\n');
+    .replace('ENV NEXT_PUBLIC_PORTAL_URL=${NEXT_PUBLIC_PORTAL_URL}\n', 'ENV NEXT_PUBLIC_PORTAL_URL=${NEXT_PUBLIC_PORTAL_URL}\nENV NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=${NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED}\n')
+    .replace('COPY --from=builder /app/package.json ./package.json\nCOPY --from=builder /app/next.config.js ./next.config.js',
+      'COPY --from=builder /app/.next/standalone ./')
+    .replace('COPY --from=builder /app/.next ./.next\nCOPY --from=builder /app/node_modules ./node_modules\nCMD ["npm", "run", "start"]',
+      'COPY --from=builder /app/.next/static ./.next/static\nCOPY --from=builder /app/node_modules/@sawa/ui ./node_modules/@sawa/ui\nCMD ["node", "server.js"]');
   assert.equal(docker, expected);
   for (const relative of localDependencies(frontend)) {
     const committed = execFileSync('git', ['show', `HEAD:frontend/${relative}`], { cwd: root });

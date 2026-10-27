@@ -142,7 +142,7 @@ export async function verifyOperatorEntryPages({ page, expect, check, receipt, n
   });
   await check('system-status-entry', async () => {
     await navigate('/hospital');
-    const data = await receipt('/api/system/status', () => navigate('/system-status'), { view: 'operations' });
+    const data = await receipt('/api/system/status', () => navigate('/system-status'), { view: 'operations-summary' });
     mark('system-entry-response-shape');
     assert.ok(data?.intake && data.oauth_config && data.ocr_pipeline && data.uploaded_pdfs && data.ingest_jobs);
     await expect(page.getByRole('heading', { name: 'システム状態と復帰手順', exact: true })).toBeVisible();

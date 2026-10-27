@@ -75,6 +75,13 @@ def list_recent_menus(limit: int = Query(default=12, ge=1, le=36)):
     return {"items": menu_service.list_recent_menus(limit=limit)}
 
 
+@router.get("/summaries", dependencies=[Depends(require_role("operator"))])
+def get_menu_summaries(month_ids: list[str] = Query(min_length=1, max_length=100)):
+    if any(not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month) for month in month_ids):
+        raise HTTPException(422, "explicit YYYY-MM months are required")
+    return {"items": menu_service.get_menu_summaries(month_ids)}
+
+
 @router.get("/{month_id}", dependencies=[Depends(require_role("operator"))])
 def get_menu(month_id: str, facility_id: str | None = Query(default=None), editor: bool = Query(default=False)):
     if editor and facility_id:

@@ -54,6 +54,7 @@ type Order = {
   received_at?: string | null;
   message_id?: string | null;
   ocr_status?: string | null;
+  ocr_error?: string | null;
   ocr_review_state?: string | null;
   ocr_review_badges?: string[] | null;
   ocr_has_saved_draft?: boolean | null;
@@ -249,11 +250,12 @@ export default function OrdersPage() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [search, setSearch] = useState<string>("");
   const [unresolvedOnly, setUnresolvedOnly] = useState<boolean>(false);
+  const [showFacilityHints, setShowFacilityHints] = useState(false);
   const [showArchived, setShowArchived] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
   const [isHydratingRuntime, setIsHydratingRuntime] = useState<boolean>(false);
-  const [runtimeHydrated, setRuntimeHydrated] = useState<boolean>(false);
+  const runtimeOperation = useRef<AbortController | null>(null);
   const [nextCursor, setNextCursor] = useState<OrderListCursor | null>(null);
   const [hasMoreOrders, setHasMoreOrders] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string>("");
@@ -266,6 +268,16 @@ export default function OrdersPage() {
   const [bulkOcrProgress, setBulkOcrProgress] = useState<string>("");
   const bulkOcrOperation = useRef<AbortController | null>(null);
   const bulkOcrMounted = useRef(false);
+
+  useEffect(() => {
+    const retire = () => {
+      runtimeOperation.current?.abort();
+      runtimeOperation.current = null;
+      setIsHydratingRuntime(false);
+    };
+    const unsubscribe = subscribeBrowserSession(retire);
+    return () => { unsubscribe(); retire(); };
+  }, [reloadToken, showArchived, statusFilter]);
 
   useEffect(() => {
     bulkOcrMounted.current = true;
@@ -331,7 +343,6 @@ export default function OrdersPage() {
     setIsLoading(true);
     setLoadError("");
     setIsHydratingRuntime(false);
-    setRuntimeHydrated(false);
     setNextCursor(null);
     setHasMoreOrders(false);
     setExpandedWeekGroups({});
@@ -397,7 +408,6 @@ export default function OrdersPage() {
       setOrders((current) => mergeOrdersById(current, incomingOrders));
       setNextCursor(res.data?.next_cursor || null);
       setHasMoreOrders(Boolean(res.data?.has_more && res.data?.next_cursor));
-      setRuntimeHydrated(false);
     } catch (err: any) {
       const detail =
         err?.response?.data?.detail ||
@@ -410,50 +420,46 @@ export default function OrdersPage() {
     }
   }, [hasMoreOrders, isLoading, isLoadingMore, nextCursor, showArchived, statusFilter]);
 
-  const hydrateRuntimeOrders = useCallback(async () => {
-    if (runtimeHydrated || isHydratingRuntime) return;
-    const runtimeLimit = Math.min(Math.max(orders.length, ORDER_LIST_PAGE_SIZE), 1000);
-    const runtimeParams = statusFilter
-      ? {
-          status: statusFilter,
-          include_ocr: false,
-          include_archived: showArchived,
-          include_candidate_summary: true,
-          limit: runtimeLimit,
-        }
-      : {
-          include_ocr: false,
-          include_archived: showArchived,
-          include_candidate_summary: true,
-          limit: runtimeLimit,
-        };
+  const hydrateRuntimeOrders = useCallback(async (groupOrders: Order[]) => {
+    runtimeOperation.current?.abort();
+    const controller = new AbortController();
+    runtimeOperation.current = controller;
+    const session = browserSessionKey();
+    const identities = groupOrders.filter(order => order.source_kind !== "uploaded_pdf")
+      .map(order => String(order.id || "")).filter(Boolean);
     setIsHydratingRuntime(true);
     try {
-      const runtimeRes = await apiClient.get("/orders", { params: runtimeParams });
-      const runtimeOrders = Array.isArray(runtimeRes.data?.orders) ? runtimeRes.data.orders : [];
-      const runtimeById = new Map<string, Order>();
-      runtimeOrders.forEach((runtimeOrder: Order) => {
-        const orderId = String(runtimeOrder.id || "").trim();
-        if (orderId) runtimeById.set(orderId, runtimeOrder);
-      });
-      setOrders((prev) =>
-        prev.map((order) => {
-          const orderId = String(order.id || "").trim();
-          const runtimeOrder = runtimeById.get(orderId);
-          return runtimeOrder ? { ...order, ...runtimeOrder } : order;
-        }),
-      );
-      setRuntimeHydrated(true);
-    } catch {
-      // The base list remains usable; runtime context is retried on the next expansion.
+      for (let offset = 0; offset < identities.length; offset += 100) {
+        const params = new URLSearchParams();
+        identities.slice(offset, offset + 100).forEach(id => params.append("order_ids", id));
+        const response = await apiClient.get(`/orders/display-context?${params}`, { signal: controller.signal });
+        if (controller.signal.aborted || runtimeOperation.current !== controller || session !== browserSessionKey()) return;
+        const contexts = response.data?.orders;
+        if (!contexts || typeof contexts !== "object" || Array.isArray(contexts)) throw new Error("表示情報の応答が不正です。");
+        setOrders(previous => previous.map(order => {
+          const id = String(order.id || "");
+          if (!identities.slice(offset, offset + 100).includes(id)) return order;
+          const context = contexts[id];
+          if (!context || context.validation_state !== "references_only") return order;
+          return { ...order, workflow_state: context.workflow_state,
+            ocr_status: context.error ? "blocked" : context.job?.status,
+            ocr_error: context.error || context.job?.error_message || context.job?.error };
+        }));
+      }
+    } catch (error: any) {
+      if (!controller.signal.aborted && runtimeOperation.current === controller)
+        setLoadError(String(error?.message || "表示情報を取得できませんでした。"));
     } finally {
-      setIsHydratingRuntime(false);
+      if (runtimeOperation.current === controller) {
+        runtimeOperation.current = null;
+        setIsHydratingRuntime(false);
+      }
     }
-  }, [isHydratingRuntime, orders.length, runtimeHydrated, showArchived, statusFilter]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    if (!unresolvedOnly) return;
+    if (!showFacilityHints) return;
     const controller = new AbortController();
     const orderIds = orders
       .filter((order) => !hasRegisteredFacility(order) && order.id && !inlineFacilityHint(order))
@@ -481,7 +487,7 @@ export default function OrdersPage() {
       cancelled = true;
       controller.abort();
     };
-  }, [facilityCandidateErrors, facilityCandidates, orders, unresolvedOnly]);
+  }, [facilityCandidateErrors, facilityCandidates, orders, showFacilityHints]);
 
   const facilityLabel = (order: Order) => {
     const facilityId = order.facility || "";
@@ -495,11 +501,11 @@ export default function OrdersPage() {
       return `未確定候補: ${inlineHint.facility_name} (${inlineHint.facility_id}${score})`;
     }
     const orderId = String(order.id || "");
-    const candidates = facilityCandidates[orderId] || [];
+    const candidates = showFacilityHints ? facilityCandidates[orderId] || [] : [];
     if (candidates.length) {
       return `未確定候補: ${candidates.map((candidate) => candidate.facility_name || candidate.facility_id).join(" / ")}`;
     }
-    if (facilityCandidateErrors[orderId]) return `候補取得失敗: ${facilityCandidateErrors[orderId]}`;
+    if (showFacilityHints && facilityCandidateErrors[orderId]) return `候補取得失敗: ${facilityCandidateErrors[orderId]}`;
     return "未確定";
   };
 
@@ -513,7 +519,7 @@ export default function OrdersPage() {
       const facilityName = facilityId ? facilityNameMap[facilityId] || "" : "";
       const inlineHint = inlineFacilityHint(order);
       const inlineHintName = inlineHint?.facility_name ? String(inlineHint.facility_name) : "";
-      const candidateNames = (facilityCandidates[String(order.id || "")] || [])
+      const candidateNames = (showFacilityHints ? facilityCandidates[String(order.id || "")] || [] : [])
         .map((candidate) => `${candidate.facility_id} ${candidate.facility_name || ""}`)
         .join(" ");
       return (
@@ -529,7 +535,7 @@ export default function OrdersPage() {
         (order.document || "").toLowerCase().includes(token)
       );
     });
-  }, [facilityCandidates, facilityNameMap, orders, search, unresolvedOnly]);
+  }, [facilityCandidates, facilityNameMap, orders, search, unresolvedOnly, showFacilityHints]);
 
   const sortedOrders = useMemo(() => [...filteredOrders].sort(compareOrdersByReceivedAt), [filteredOrders]);
 
@@ -1017,9 +1023,15 @@ export default function OrdersPage() {
   const isWeekGroupExpanded = (groupKey: string) => expandedWeekGroups[groupKey] === true;
 
   const toggleWeekGroup = (groupKey: string) => {
+    const nextExpanded = expandedWeekGroups[groupKey] !== true;
+    const group = weekGroups.find(item => item.key === groupKey);
+    if (nextExpanded && group) void hydrateRuntimeOrders(group.orders);
+    if (!nextExpanded) {
+      runtimeOperation.current?.abort();
+      runtimeOperation.current = null;
+      setIsHydratingRuntime(false);
+    }
     setExpandedWeekGroups((current) => {
-      const nextExpanded = current[groupKey] !== true;
-      if (nextExpanded) void hydrateRuntimeOrders();
       return {
         ...current,
         [groupKey]: nextExpanded,
@@ -1043,6 +1055,10 @@ export default function OrdersPage() {
           <span className={`status-pill ${statusClass(displayStatus)}`}>{displayStatus}</span>
         </div>
         <p className="order-card-week">{weekBucket.label}</p>
+        {order.ocr_error ? <p className="list-workflow-support" role="alert">{order.ocr_error}</p> : null}
+        {!isUploadedPdf && order.workflow_state ? (
+          <p className="list-workflow-support">記録状態の表示です。原本・実行入力の整合性は未検証です。</p>
+        ) : null}
         {candidateBoundaryWarning(order) ? (
           <p className="list-workflow-support" role="alert">{candidateBoundaryWarning(order)}</p>
         ) : null}
@@ -1225,6 +1241,10 @@ export default function OrdersPage() {
               checked={unresolvedOnly}
               onChange={(e) => setUnresolvedOnly(e.target.checked)}
             />
+          </label>
+          <label className="field checkbox">
+            <span className="field-label">施設候補を取得</span>
+            <Checkbox checked={showFacilityHints} onChange={e => setShowFacilityHints(e.target.checked)} />
           </label>
           <label className="field checkbox">
             <span className="field-label">アーカイブ済みを表示</span>

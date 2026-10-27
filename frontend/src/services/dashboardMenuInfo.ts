@@ -20,3 +20,14 @@ export function classifyDashboardMenuRead(month: string, response: { status?: un
     displayName: data.menu.display_name || data.menu.filename || null,
   };
 }
+
+export function classifyDashboardMenuSummary(month: string, value: any): MenuInfo {
+  if (!value || value.month_id !== month) return {status: "取得失敗"};
+  if (value.status === "missing" && value.menu === null && value.item_count === 0) return {status: "未登録"};
+  if (value.status !== "registered" || value.menu?.id !== month || !Number.isInteger(value.item_count)
+      || value.item_count < 0 || ![value.menu.filename, value.menu.display_name].every(item => item == null || typeof item === "string")) {
+    return {status: "取得失敗"};
+  }
+  return {status: "登録済み", itemCount: value.item_count,
+    filename: value.menu.filename || null, displayName: value.menu.display_name || value.menu.filename || null};
+}

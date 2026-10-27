@@ -3693,8 +3693,7 @@ def require_resolved_menu_items(items: list[dict]) -> None:
         raise MenuReadUnresolved(unresolved)
 
 
-def _readonly_monthly_items(session, month_id, items, entries, facility_id=None):
-    payloads = [serialize_item(item) for item in items]
+def _unmatched_monthly_entries(items, entries, facility_id=None):
     keys = {_monthly_item_identity_key_from_item(item) for item in items}
     for entry in entries:
         key = _monthly_item_identity_key_from_entry(entry)
@@ -3704,6 +3703,12 @@ def _readonly_monthly_items(session, month_id, items, entries, facility_id=None)
         if matched or (not key[2] and generic_key in keys):
             continue
         keys.add(key)
+        yield entry
+
+
+def _readonly_monthly_items(session, month_id, items, entries, facility_id=None):
+    payloads = [serialize_item(item) for item in items]
+    for entry in _unmatched_monthly_entries(items, entries, facility_id):
         payloads.append({
             "id": f"{_REPAIRED_MENU_ITEM_ID_PREFIX}{entry.id}",
             "month_id": month_id, "menu_master_id": None, "name": entry.name,
@@ -4029,6 +4034,59 @@ def get_menu(month_id: str, *, allow_unresolved: bool = False, session=None) -> 
             require_resolved_menu_items(payload["items"])
         return _normalize_menu_payload_items(payload)
     return None
+
+
+def get_menu_summaries(month_ids: list[str]) -> dict[str, dict]:
+    """Read card metadata and exact identity counts, not recipes or output inputs."""
+    from types import SimpleNamespace
+    identities = list(dict.fromkeys(month_ids))
+    ensure_menu_schema()
+    with _menu_read_session() as session:
+        menus = {row.id: row for row in session.execute(select(
+            MonthlyMenu.id, MonthlyMenu.filename, MonthlyMenu.month_start,
+        ).where(MonthlyMenu.id.in_(identities)))}
+        grouped = {}
+        for model in (MonthlyMenuItem, MonthlyMenuEntry):
+            values = {month: [] for month in identities}
+            for row in session.execute(select(model.monthly_menu_id, model.name, model.daypart,
+                    model.category, model.diet_type, model.facility_override).where(
+                    model.monthly_menu_id.in_(identities),
+                    or_(model.facility_override.is_(None), model.facility_override == ""))):
+                values[row.monthly_menu_id].append(row)
+            grouped[model] = values
+        uploads = {}
+        invalid_uploads = set()
+        metadata_kind = (func.json_typeof(AuditLog.metadata_json)
+            if session.get_bind().dialect.name == "postgresql" else func.json_type(AuditLog.metadata_json))
+        for row in session.execute(select(AuditLog.target, AuditLog.created_at,
+                AuditLog.metadata_json["scope_override"].label("scope_override"), metadata_kind.label("metadata_kind")).where(
+                AuditLog.action == "menu_upload", AuditLog.target.in_(identities))
+                .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())):
+            log = SimpleNamespace(created_at=row.created_at, metadata_json={"scope_override": row.scope_override})
+            if row.target not in uploads and row.metadata_kind not in {None, "null", "object"}:
+                invalid_uploads.add(row.target)
+                continue
+            if row.target not in uploads and not _is_scoped_menu_upload_log(log):
+                uploads[row.target] = log
+        result = {}
+        for month in identities:
+            if month in invalid_uploads:
+                result[month] = {"month_id": month, "status": "unavailable", "menu": None, "item_count": None}
+                continue
+            menu, upload = menus.get(month), uploads.get(month)
+            items, entries = grouped[MonthlyMenuItem][month], grouped[MonthlyMenuEntry][month]
+            exists = bool(items or entries or menu and (upload or menu.month_start))
+            if not exists:
+                result[month] = {"month_id": month, "status": "missing", "menu": None, "item_count": 0}
+                continue
+            valid_items = [row for row in items if _monthly_item_identity_key_from_item(row)[0]]
+            keys = {_monthly_item_identity_key_from_item(row) for row in valid_items}
+            keys.update(_monthly_item_identity_key_from_entry(row)
+                for row in _unmatched_monthly_entries(valid_items, entries))
+            count = sum(bool(key[0]) for key in keys)
+            result[month] = {"month_id": month, "status": "registered", "item_count": count,
+                "menu": serialize_menu(menu, upload) if menu else _serialize_synthetic_menu(month, upload)}
+        return result
 
 
 def list_recent_menus(limit: int = 12) -> list[dict]:

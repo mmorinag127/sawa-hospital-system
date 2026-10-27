@@ -27,7 +27,7 @@ test('status renders configuration before operations and fetches costly sections
     if (path === '/system/db/quota') return { data: { resource: 'test-db', used: 7, limit: 10 } };
     assert.equal(path, '/system/status');
     if (view === 'configuration') return { data: configuration };
-    if (view === 'operations') return new Promise(resolve => { releaseOperations = resolve; });
+    if (view === 'operations-summary') return new Promise(resolve => { releaseOperations = resolve; });
     if (view === 'quality') {
       if (failQuality) throw new Error('authored-quality-failure');
       return { data: { ...configuration, ocr_reparse_quality: quality } };
@@ -54,6 +54,9 @@ test('status renders configuration before operations and fetches costly sections
         jsx: ts.JsxEmit.React, module: ts.ModuleKind.CommonJS,
       } }).outputText;
       vm.compileFunction(output, ['exports', 'require', 'React'])(actual, name => {
+        if (name === 'react') return React;
+        if (name === '../services/apiClient') return {apiClient};
+        if (name === '../services/browserSession') return {browserSessionKey: () => 'fixture-session', subscribeBrowserSession: () => () => {}};
         assert.equal(name, 'next/link');
         return { default: ({ children, ...props }) => React.createElement('a', props, children) };
       }, React);
@@ -66,19 +69,20 @@ test('status renders configuration before operations and fetches costly sections
   const button = label => [...document.querySelectorAll('button')].find(node => node.textContent === label);
   try {
     await act(async () => root.render(React.createElement(exports.default)));
-    assert.deepEqual(calls, [['/system/status', 'configuration'], ['/system/status', 'operations']]);
+    assert.deepEqual(calls, [['/system/status', 'configuration'], ['/system/status', 'operations-summary']]);
     assert.match(document.body.textContent, /設定数: 2/);
     assert.match(document.querySelector('[role="status"]').textContent, /OCR状態を取得中/);
     assert.equal(document.querySelector('[role="alert"]'), null);
     assert.equal(document.querySelector('.ocr-backlog-badge').textContent, '未取得');
     assert.equal(button('品質を取得').disabled, true);
     await act(async () => releaseOperations({ data: {
-      ocr_operations: { source: 'recorded_sql_workflow/v1', observed_at: '2026-10-27',
+      ocr_operations: { source: 'recorded_sql_workflow_display/v1', validation_state: 'references_only', observed_at: '2026-10-27',
         summary: { status: 'idle', total: 0, counts: {} }, items: [], history: [] },
       uploaded_pdfs: { pending_count: 0 }, ingest_jobs: { pending_count: 0 },
     } }));
     assert.equal(document.querySelector('[role="status"]'), null);
     assert.match(document.querySelector('[aria-label="現行SQL OCR状態"]').textContent, /現在のOCRジョブなし/);
+    assert.match(document.querySelector('[aria-label="現行SQL OCR状態"]').textContent, /原本・実行入力の整合性: 未検証/);
     assert.equal(document.querySelector('.ocr-backlog-badge').textContent, '正常');
     assert.match(document.querySelector('.quality-table').textContent, /未取得/);
     await act(async () => button('使用量を取得').click());

@@ -11,6 +11,8 @@
       "backend/tests/unit/test_recorded_ocr_job_projection.py",
       "backend/tests/unit/test_modernization_workflow_read_receipt.py",
       "backend/tests/unit/test_current_ocr_operations.py",
+      "backend/tests/unit/test_ocr_display_operations.py",
+      "backend/tests/unit/test_monthly_menu_read_batch.py",
       "backend/tests/unit/test_read_model_lifetime.py",
       "backend/tests/unit/test_snapshot_serialization_db_free.py"
     ],

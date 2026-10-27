@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { useMemo, useState, useSyncExternalStore } from "react";
-import { Box, Button, MenuItem, Stack, Typography } from "@mui/material";
+import { Box, Button, Checkbox, MenuItem, Stack, Typography } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { DataTable, FormTextField, RequestState, SawaProvider, type TableColumn } from "@sawa/ui";
 import { FormProvider, useForm } from "react-hook-form";
@@ -39,6 +39,7 @@ function OrdersListContent() {
   const [progressRowsPerPage, setProgressRowsPerPage] = useState(25);
   const [dailyPage, setDailyPage] = useState(0);
   const [dailyRowsPerPage, setDailyRowsPerPage] = useState(25);
+  const [showFacilityHints, setShowFacilityHints] = useState(false);
   const facilities = useQuery({ queryKey: ["order-list", "facilities"], queryFn: fetchFacilityNameMap });
   const orders = useQuery({
     queryKey: ["facility-order-list", applied, page, rowsPerPage],
@@ -65,8 +66,8 @@ function OrdersListContent() {
   const candidateRows = Array.from(new Map([...visibleRows, ...visibleDailyRows]
     .filter(row => !row.facility && row.source_kind !== "uploaded_pdf").map(row => [row.id, row])).values());
   const candidates = useQuery({
-    queryKey: ["order-facility-candidates", candidateRows.map(row => row.id)],
-    enabled: candidateRows.length > 0,
+    queryKey: ["order-facility-candidates", showFacilityHints, candidateRows.map(row => row.id), orders.dataUpdatedAt, daily.dataUpdatedAt],
+    enabled: showFacilityHints && candidateRows.length > 0,
     queryFn: ({ signal }) => fetchOrderFacilityCandidateBatch(candidateRows.map(row => row.id), signal),
   });
   const candidateByOrder = useMemo(() => {
@@ -87,6 +88,7 @@ function OrdersListContent() {
     { id: "facility", label: "施設", render: (row) => row.facility ? (facilities.data?.[row.facility] ? `${facilities.data[row.facility]} (${row.facility})` : row.facility) : "未確定" },
     { id: "candidate", label: "未確定候補", render: (row) => {
       if (row.facility) return "-";
+      if (!showFacilityHints) return "未取得";
       const state = candidateByOrder[row.id];
       if (state?.pending) return "候補取得中...";
       if (state?.failure) return `候補取得失敗: ${state.failure}`;
@@ -125,6 +127,7 @@ function OrdersListContent() {
         <FormTextField<Conditions> name="facility" label="施設" select><MenuItem value="">全施設</MenuItem><MenuItem value="__unresolved__">未確定</MenuItem>{facilityOptions.map((id) => <MenuItem key={id} value={id}>{facilities.data?.[id] || id} ({id})</MenuItem>)}</FormTextField>
         <FormTextField<Conditions> name="status" label="状態" select>{statuses.map((value) => <MenuItem key={value || "all"} value={value}>{value || "全状態"}</MenuItem>)}</FormTextField>
         <Button type="submit" variant="contained" disabled={orders.isFetching}>表示</Button>
+        <label><Checkbox checked={showFacilityHints} onChange={event => setShowFacilityHints(event.target.checked)} />施設候補</label>
       </Stack></Box></FormProvider>
       {facilities.isError ? <RequestState pending={false} error={error(facilities.error)} onRetry={() => void facilities.refetch()} /> : null}
       <DataTable label="週次進捗" rows={visibleProgressRows} columns={progressColumns} rowKey={(row) => row.week} total={progressRows.length} page={progressPage} rowsPerPage={progressRowsPerPage} onPageChange={setProgressPage} onRowsPerPageChange={(next) => { setProgressRowsPerPage(next); setProgressPage(0); }} pending={orders.isFetching} />

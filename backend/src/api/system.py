@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from src.api.auth import require_role, GOOGLE_OAUTH_CLIENT_IDS
@@ -32,7 +32,7 @@ def _is_production_runtime() -> bool:
 
 
 @router.get("/system/status", dependencies=[Depends(require_role("operator"))])
-def system_status(view: Literal["full", "operations", "configuration", "quality"] = "full"):
+def system_status(view: Literal["full", "operations", "operations-summary", "configuration", "quality"] = "full"):
     if view == "configuration":
         return {
             "intake": get_intake_status(),
@@ -48,8 +48,12 @@ def system_status(view: Literal["full", "operations", "configuration", "quality"
             "oauth_config": {"configured": bool(GOOGLE_OAUTH_CLIENT_IDS), "google_client_id_count": len(GOOGLE_OAUTH_CLIENT_IDS)},
             "ocr_reparse_quality": quality,
         }
-    if view == "operations":
-        operations = get_operations()
+    if view in {"operations", "operations-summary"}:
+        if view == "operations-summary":
+            from src.services.ocr_operations_display_service import get_operations_display
+            operations = get_operations_display()
+        else:
+            operations = get_operations()
         ingest_summary = summarize_ingest_jobs()
         uploaded_pdf_summary = summarize_uploaded_pdfs()
         operations["intake"] = {"uploaded_pdfs": uploaded_pdf_summary, "ingest_jobs": ingest_summary}
@@ -101,6 +105,12 @@ def system_status(view: Literal["full", "operations", "configuration", "quality"
         "db_quota": db_quota,
         "ocr_reparse_quality": ocr_reparse_quality,
     }
+
+
+@router.get("/system/ocr-history", dependencies=[Depends(require_role("operator"))])
+def ocr_history(limit: int = Query(50, ge=1, le=100), cursor: str | None = Query(None, min_length=1, max_length=1024)):
+    from src.services.ocr_operations_display_service import get_operations_history
+    return get_operations_history(limit=limit, cursor=cursor)
 
 
 @router.get("/system/db/quota", dependencies=[Depends(require_role("operator"))])
