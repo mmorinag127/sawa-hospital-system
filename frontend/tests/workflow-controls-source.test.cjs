@@ -14,7 +14,7 @@ const migration = 'd55763365c3d2159dc976b130e0cc7a6de5f162f';
 const current = cp.execFileSync('git', ['show', migration + ':' + filename], { cwd: root, encoding: 'utf8' });
 test('current approved output owner/history/action AI/feedback/PDF refusal and OCR diagnostics remain exact', () => {
   assert.equal(require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(root, filename))).digest('hex'),
-    '30a152edac7b1dc04e01911486ef0052312e0715c1053f0ed2d521dc1885dee1',
+    'edad40ae1dc348800885173e8442ce9e0b90901c55700e97f19c53caf045cc20',
     'Full current functions, protected grid, render callbacks, receipt and owner guards remain exact');
   const lineage = [base, migration, '4c33813', 'ded7f15', 'bdbc6de', '91d293c', '3c5a9ca', 'd26febd', 'd4b7d36', '227cae9', '2a180d57', 'HEAD'];
   for (let i = 1; i < lineage.length; i++)

@@ -187,6 +187,15 @@ def test_saved_cell_map_display_does_not_fetch_unused_evidence_payload(history_c
     from src.services import workflow_display_read_service as display
     case = history_case()
     source = case.produce(cell_values="5")
+    # This component's synthetic recognizer has no physical target assignment.
+    # Author a saved map explicitly to exercise the stored-map read branch.
+    source["sheet"]["target_cell_map"] = [{
+        "target_row_index": 0,
+        "target_col_index": source["sheet"]["fields"].index("qty.regular_2f"),
+        "field": "qty.regular_2f", "sheet_cell": "component-quantity",
+        "target_cell_id": "component-quantity", "bbox": [60.0, 0.0, 70.0, 10.0],
+        "center": [65.0, 5.0],
+    }]
     assert source["sheet"]["target_cell_map"]
     case.save(source["sheet"])
     statements = []

@@ -26,7 +26,7 @@ async function setup(running = false, overrides = {}) {
   t.on('get','/orders/demand/week-options',()=>({data:{options:[]}}));
   const probe={component:'OrderWorkflowV2Page',bindings:['workflow','ocrResults','refreshAll','loadOcrResultDetail',
     'loadRawInspection','rawInspection','workflowRevisionRef','setVisibleStep','error','adoptReadWorkflow',
-    'setError','setSelectedDocumentId','applyWeekValue']};
+    'setError','setSelectedDocumentId','applyWeekValue','inspection']};
   const h=await mount(PAGE,{api:t.api,probe,route:'/orders/demand/workflow-v2',routerState:{isReady:true,query:{id:'demand'}},component(loader){
     window.setInterval=(fn)=>{timers.set(1,fn);return 1;}; window.clearInterval=id=>timers.delete(id);
     return loader.load(PAGE,probe).default;
@@ -272,7 +272,10 @@ for (const state of ['sheet_saved', 'confirmed']) test(`${state} initial view do
   const f = await setup(false, {state, selected_ocr_result_id:'evidence', saved_sheet_id:'saved',
     ...(state === 'confirmed' ? {confirmed_snapshot_id:'snapshot'} : {})});
   try {
-    assert.ok(f.t.calls.some(call => call.url === `${BASE}/display?scope=output`));
+    assert.equal(f.t.calls.filter(call => call.url === `${BASE}/display?scope=initial`).length, 1);
+    assert.equal(f.probe.current.inspection.display_scope, 'output');
+    assert.deepEqual(Array.from(f.probe.current.inspection.loaded_sections), ['output']);
+    assert.equal(f.t.calls.some(call => call.url === `${BASE}/display?scope=output`), false);
     assert.equal(f.t.calls.some(call => call.url === DETAIL || call.url.endsWith('/document')
       || call.url === `${BASE}/display?scope=sheet` || call.url === `${BASE}/display?scope=ocr`), false);
     await f.h.settle(() => f.probe.current.setVisibleStep(2));
