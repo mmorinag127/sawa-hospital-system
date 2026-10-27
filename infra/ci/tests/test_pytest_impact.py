@@ -532,21 +532,24 @@ def test_unrelated():
         self.assertCountEqual(report['selected'], ['test_example.py::test_first', 'test_example.py::test_second'])
         self.assertEqual(report['reused'], ['test_example.py::test_unrelated'])
 
-    def test_only_empty_owned_bootstrap_is_reusable_and_checkouts_always_execute(self):
+    def _check_only_empty_owned_bootstrap(self, state_name):
+        self.state = self.root / state_name
+        self.env['SAWA_IMPACT_STATE'] = str(self.state)
+        self.env['TESTMON_DATAFILE'] = str(self.state / 'testmon.sqlite')
         (self.root / 'backend').mkdir()
-        self.write('backend/conftest.py', """from pathlib import Path
+        self.write('backend/conftest.py', f"""from pathlib import Path
 import sqlite3
 import sys
-connection = sqlite3.connect(str(Path('backend-runtime.sqlite').resolve()))
+connection = sqlite3.connect(str(Path('{state_name}-runtime.sqlite').resolve()))
 try:
-    sys.audit('sawa.test.database-checkout', str(Path('backend-runtime.sqlite').resolve()))
+    sys.audit('sawa.test.database-checkout', str(Path('{state_name}-runtime.sqlite').resolve()))
     connection.execute('CREATE TABLE IF NOT EXISTS seeded(value INTEGER)')
 finally:
     connection.close()
 """)
         self.write('conftest.py', "from pathlib import Path\nimport runpy\nrunpy.run_path(str(Path('backend/conftest.py').resolve()))\n")
         self.write('test_example.py', "import sys\ndef test_plain():\n    assert True\ndef test_checkout():\n    sys.audit('sawa.test.database-checkout')\n    assert True\n")
-        database = self.root / 'backend-runtime.sqlite'
+        database = self.root / (state_name + '-runtime.sqlite')
         database.touch()
         subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
         first = self.run_tests()
@@ -565,6 +568,12 @@ finally:
             foreign_checkout = self.run_tests()
             self.assertTrue(foreign_checkout['code_tracking_disabled'])
             self.assertEqual(foreign_checkout['reused'], [])
+
+    def test_only_empty_owned_bootstrap_is_reusable_and_checkouts_always_execute(self):
+        self._check_only_empty_owned_bootstrap('backend')
+
+    def test_focused_empty_owned_bootstrap_uses_its_own_database_name(self):
+        self._check_only_empty_owned_bootstrap('backend-focused')
 
     def test_tqdm_settings_remain_in_context_without_volatile_run_identity(self):
         self.write('test_example.py', "from tqdm import tqdm\ndef test_progress():\n    assert callable(tqdm)\n")

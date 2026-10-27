@@ -220,6 +220,10 @@ for (const artifactsAvailable of [true, false]) test(`owned OCR completion refre
   await expect.poll(() => mounted.requestCounts[`GET /api/orders/${orderId}/workflow-v2/ocr-progress`] ?? 0).toBeGreaterThan(0);
   expect(mounted.requestCounts[`GET /api/orders/${orderId}/workflow-v2/display`]).toBeGreaterThanOrEqual(2);
   expect(mounted.requestCounts[`GET /api/orders/${orderId}/workflow-v2/inspection`] ?? 0).toBe(0);
+  expect(mounted.requestCounts[`GET /api/orders/${orderId}/workflow-v2/inspection-detail/OCR-E2E-COMPLETED`] ?? 0).toBe(0);
+  await expect(card.getByRole("button", { name: "正解にする", exact: true })).toBeDisabled();
+  await card.getByRole("button", { name: "詳細を表示", exact: true }).click();
+  await expect.poll(() => mounted.requestCounts[`GET /api/orders/${orderId}/workflow-v2/inspection-detail/OCR-E2E-COMPLETED`] ?? 0).toBe(1);
   const select = card.getByRole("button", { name: "正解にする", exact: true });
   if (artifactsAvailable) await expect(select).toBeEnabled();
   else {

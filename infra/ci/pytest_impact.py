@@ -40,6 +40,7 @@ INPUTS = {}
 UNSAFE = set()
 GLOBAL_INPUTS = {}
 GLOBAL_UNSAFE = set()
+UNSAFE_ORIGINS = set()
 UNSAFE_PATHS = set()
 OUTCOMES = {}
 STARTED = []
@@ -400,6 +401,16 @@ def framework_read():
 
 
 def record_unsafe(reason):
+    if ACTIVE is None and len(UNSAFE_ORIGINS) < 64:
+        frame = sys._getframe(1)
+        origin, line = "outside-source", 0
+        while frame:
+            filename = Path(frame.f_code.co_filename)
+            if filename != Path(__file__) and filename.is_relative_to(ROOT):
+                origin, line = str(filename.relative_to(ROOT)), frame.f_lineno
+                break
+            frame = frame.f_back
+        UNSAFE_ORIGINS.add((reason, origin, line))
     if ACTIVE is None:
         owner = COLLECTION_INPUTS.owner() if COLLECTION_INPUTS is not None else None
         target = COLLECTION_INPUTS.unsafe.setdefault(owner, set()) if owner is not None else GLOBAL_UNSAFE
@@ -490,7 +501,7 @@ def empty_database_bootstrap(database):
     if ACTIVE is not None or BOOTSTRAP_DATABASE is not None or not isinstance(database, str):
         return False
     path = Path(database)
-    if path != STATE.parent / 'backend-runtime.sqlite' or not bootstrap_origin():
+    if path != STATE.parent / (STATE.name + '-runtime.sqlite') or not bootstrap_origin():
         return False
     try:
         empty = not path.is_symlink() and path.is_file() and path.stat().st_size == 0
@@ -1055,6 +1066,8 @@ def pytest_sessionfinish(session, exitstatus):
         "full": FULL, "exitstatus": int(exitstatus),
         "code_tracking_disabled": DISABLED_COLLECTOR is not None,
         "unsafe_paths": sorted(UNSAFE_PATHS),
+        "unsafe_origins": [{"reason": reason, "path": path, "line": line}
+                           for reason, path, line in sorted(UNSAFE_ORIGINS)],
         "context_sha256": CONTEXT, "baseline": BASELINE,
         "baseline_status": BASELINE_STATUS,
         "context_changes": sorted(CONTEXT_CHANGES),
