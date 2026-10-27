@@ -8,6 +8,7 @@ from sqlalchemy.orm import load_only
 from src import db
 from src.models.document import OrderDocument
 from src.models.ingest_delivery import IngestDelivery
+from src.models.ingest_job import IngestJob
 from src.models.ocr_job import OcrJob
 from src.models.order import Order
 from src.models.order_workflow_state import OrderWorkflowState
@@ -89,7 +90,11 @@ def _owner(session, order, state, job, meta, native_deliveries, evidence_reads):
         if len(rows) != 1:
             raise ValueError("ocr_native_generation_required")
         delivery = rows[0]
-        original = ingest_delivery._original(session, delivery, read_only=True)
+        original = ingest_delivery._validate_original_job(delivery, session.get(IngestJob, delivery.job_id))
+        if original is not None and delivery.uploaded_identity is not None:
+            ingest_delivery._validate_original_upload(
+                delivery, session.get(UploadedPdf, delivery.uploaded_identity["id"]),
+            )
         if (original is None or delivery.owner_lease != lease
                 or original.claim_id != lease.get("claim_id") or original.attempts != lease.get("attempts")
                 or original.input_digest != lease.get("input_digest") or original.payload != lease.get("payload")
@@ -114,8 +119,9 @@ def _owner(session, order, state, job, meta, native_deliveries, evidence_reads):
                 raise ValueError("ocr_native_terminal_changed")
             if original.status != ("done" if job.status == "done" else "error"):
                 raise ValueError("ocr_native_terminal_original_changed")
-            ingest_delivery._require_uploaded_terminal(session, delivery,
-                "completed" if job.status == "done" else "failed", read_only=True)
+            upload = session.get(UploadedPdf, delivery.uploaded_identity["id"]) if delivery.uploaded_identity is not None else None
+            ingest_delivery._validate_uploaded_terminal(delivery, upload,
+                "completed" if job.status == "done" else "failed")
         elif original.status != "processing" or delivery.state != "CLAIMED":
             raise ValueError("ocr_native_active_owner_changed")
         return "native_ingest_v2", capture["execution_id"], lease["generation"], receipt
@@ -165,14 +171,14 @@ def _entry(session, order, state, job, meta, native_deliveries, evidence_reads):
                 and not isinstance(terminal["evidence_run_id"], str)):
             raise ValueError("ocr_terminal_evidence_identity_invalid")
         kind, execution, generation, pdf = _owner(session, order, state, job, meta, native_deliveries, evidence_reads)
-        common = workflow._recorded_workflow_job_status(state, meta, job)
+        record = ocr_job_service._job_to_dict(job)
+        described = ocr_job_service.describe_job_state(record)
+        common = workflow._recorded_workflow_job_status(state, meta, job, _described_state=described)
         if common is None or common.get("attemptIdentity") != execution:
             raise ValueError("ocr_recorded_status_owner_changed")
         result.update(kind=kind, execution_id=execution, generation=generation,
                       document_id=pdf["document_id"],
                       common_job_status=common, job=workflow._serialize_ocr_job(job))
-        record = ocr_job_service._job_to_dict(job)
-        described = ocr_job_service.describe_job_state(record)
         result["status"] = {"hard_failed": "failed", "stalled": "stalled",
                             "done": "succeeded"}.get(described["status"], described["status"])
         if described.get("blockers"):
@@ -210,7 +216,7 @@ def read_operations(session):
     """No writes, network lookups, latest-job selection or transport renewal."""
     states = {row.order_id: row for row in session.scalars(select(OrderWorkflowState))}
     references = {meta["ocr_job_id"] for state in states.values()
-                  if isinstance((meta := workflow._workflow_meta(state)).get("ocr_job_id"), str)}
+                  if isinstance((meta := workflow._workflow_meta(state, copy_meta=False)).get("ocr_job_id"), str)}
     # History needs scalar columns, never the potentially large captured metrics.
     jobs = {job.id: job for job in session.scalars(select(OcrJob).options(load_only(
         OcrJob.id, OcrJob.order_id, OcrJob.order_document_id, OcrJob.status,
@@ -220,7 +226,7 @@ def read_operations(session):
             jobs[job.id] = job
     orders_with_jobs = {job.order_id for job in jobs.values()}
     order_ids = orders_with_jobs | {state.order_id for state in states.values()
-        if workflow._workflow_meta(state).get("ocr_job_id") is not None
+        if workflow._workflow_meta(state, copy_meta=False).get("ocr_job_id") is not None
         or state.state in {"ocr_running", "ocr_failed"}}
     orders = []
     for chunk in _chunks(order_ids - {None}):
@@ -257,10 +263,16 @@ def read_operations(session):
     for chunk in _chunks(native_ids):
         for row in session.scalars(select(IngestDelivery).where(IngestDelivery.job_id.in_(chunk))):
             native_deliveries.setdefault((row.job_id, row.business_generation), []).append(row)
+    for chunk in _chunks(native_ids):
+        canonical_rows.extend(session.scalars(select(IngestJob).where(IngestJob.id.in_(chunk))))
+    original_upload_ids = {row.uploaded_identity["id"] for rows in native_deliveries.values() for row in rows
+                          if isinstance(row.uploaded_identity, dict) and isinstance(row.uploaded_identity.get("id"), str)}
+    for chunk in _chunks(original_upload_ids - upload_ids):
+        canonical_rows.extend(session.scalars(select(UploadedPdf).where(UploadedPdf.id.in_(chunk))))
     items, referenced = [], set()
     for order in orders:
         state = states.get(order.id)
-        meta = workflow._workflow_meta(state) if state is not None else {}
+        meta = workflow._workflow_meta(state, copy_meta=False) if state is not None else {}
         job_id = meta.get("ocr_job_id")
         if job_id is not None:
             if isinstance(job_id, str):

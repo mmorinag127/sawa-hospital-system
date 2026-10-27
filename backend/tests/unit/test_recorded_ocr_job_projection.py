@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from tests.contract.test_orders_ocr_sheet_history_api import history_case  # noqa: F401
 from tests.contract.test_orders_ocr_status_api import _owned_status_case
@@ -16,6 +16,42 @@ from src.models.order_version import OrderVersion
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_workflow_state import OrderWorkflowState
 from src.services import ocr_job_service, order_service
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_loaded_workflow_binding_matches_fresh_read_without_reloading_metadata(history_case, corrupt):
+    from src.db import session_scope
+
+    case = _owned_status_case(history_case)
+    job_id = str(uuid4())
+    case.produce(cell_values="5", job_id=job_id)
+    if corrupt:
+        with case.engine.begin() as connection:
+            table = OcrJob.__table__
+            metrics = deepcopy(connection.execute(select(table.c.metrics).where(table.c.id == job_id)).scalar_one())
+            metrics["workflow_attempt_id"] = "foreign-attempt"
+            connection.execute(table.update().where(table.c.id == job_id).values(metrics=metrics))
+    with case.readonly():
+        expected = ocr_job_service.get_recorded_order_job_bindings([case.id])
+        with session_scope() as session:
+            order = session.get(Order, case.id)
+            state = session.get(OrderWorkflowState, case.id)
+            statements = []
+
+            def observe(connection, cursor, statement, *args):
+                statements.append(statement)
+
+            event.listen(case.engine, "before_cursor_execute", observe)
+            try:
+                actual = ocr_job_service.get_recorded_order_job_bindings(
+                    [case.id], read_session=session, _read_context=(order, state),
+                )
+            finally:
+                event.remove(case.engine, "before_cursor_execute", observe)
+            assert actual == expected
+            assert not any("FROM orders LEFT OUTER JOIN" in " ".join(sql.split()) for sql in statements)
+            assert not session.dirty and not session.new and not session.deleted
+        assert expected[case.id]["error"] == ("ocr_recorded_job_attempt_mismatch" if corrupt else None)
 
 
 @pytest.mark.parametrize("age", [-1, 1])

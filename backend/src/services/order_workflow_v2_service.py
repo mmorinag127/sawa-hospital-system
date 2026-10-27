@@ -436,11 +436,13 @@ def _week_range_from_week_code(week_code: object) -> tuple[str | None, str | Non
     return None, None
 
 
-def _workflow_meta(row: OrderWorkflowState | None) -> dict[str, Any]:
+def _workflow_meta(row: OrderWorkflowState | None, *, copy_meta: bool = True) -> dict[str, Any]:
     if row is None or not isinstance(row.secondary_actions_json, dict):
         return {}
     meta = row.secondary_actions_json.get(WORKFLOW_V2_META_KEY)
-    return copy.deepcopy(meta) if isinstance(meta, dict) else {}
+    if not isinstance(meta, dict):
+        return {}
+    return copy.deepcopy(meta) if copy_meta else meta
 
 
 def _write_workflow_meta(row: OrderWorkflowState, meta: dict[str, Any]) -> None:
@@ -1027,6 +1029,7 @@ def _finalize_workflow_blocker(
 
 def _recorded_workflow_job_status(
     row: OrderWorkflowState, meta: dict[str, Any], job: OcrJob | None,
+    *, _described_state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if job is None or not job.id or not row.order_id:
         return None
@@ -1040,7 +1043,8 @@ def _recorded_workflow_job_status(
     if type(expected_attempt) is not type(recorded_attempt) or expected_attempt != recorded_attempt:
         return None
     record = ocr_job_service._job_to_dict(job)
-    return _recorded_hospital_job_status(record, ocr_job_service.describe_job_state(record))
+    described = ocr_job_service.describe_job_state(record) if _described_state is None else _described_state
+    return _recorded_hospital_job_status(record, described)
 
 
 def _serialize_workflow(
@@ -1418,6 +1422,7 @@ def _serialize_workflow_checked(
     workflow: OrderWorkflowState,
     ocr_job: OcrJob | None = None,
     _analysis=None,
+    _read_context=None,
 ) -> dict[str, Any]:
     meta = _workflow_meta_with_step4_artifacts(session, workflow)
     meta = _recover_confirmed_artifacts_from_snapshot(
@@ -1429,6 +1434,7 @@ def _serialize_workflow_checked(
     loaded_jobs = {}
     job_binding = ocr_job_service.get_recorded_order_job_bindings(
         [order.id], read_session=session, _loaded_jobs=loaded_jobs,
+        _read_context=_read_context,
     ).get(order.id) or {}
     ocr_job = loaded_jobs.get(job_binding["job_id"]) if job_binding.get("job") is not None else None
     serialized = _serialize_workflow(workflow, ocr_job=ocr_job, meta_override=meta, session=session, _analysis=_analysis)
@@ -1736,6 +1742,10 @@ def _workflow_menu_amount_resolution(session, order, workflow, *, _analysis=None
 
 
 def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflowState | None, *, _analysis=None, _checked_workflow=None) -> dict[str, Any]:
+    from src.services.canonical_ocr_artifact_service import _EvidenceAnalysis
+
+    if _analysis is None:
+        _analysis = _EvidenceAnalysis()
     with retain_read_models(session):
         if _checked_workflow is not None:
             serialized = copy.deepcopy(_checked_workflow)
@@ -1744,6 +1754,7 @@ def _workflow_read_projection(session: Any, order: Order, workflow: OrderWorkflo
         else:
             serialized = _serialize_workflow_checked(
                 session, order=order, workflow=workflow, _analysis=_analysis,
+                _read_context=(order, workflow),
             )
         resolution = _workflow_menu_amount_resolution(session, order, workflow, _analysis=_analysis)
         serialized["menu_amount_resolution"] = resolution
@@ -4994,6 +5005,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
                 "workflow_serialize", _serialize_workflow_checked, session,
                 order=order, workflow=workflow,
                 _analysis=analysis,
+                _read_context=(order, workflow),
             )
         else:
             checked_workflow = _inspection_call(

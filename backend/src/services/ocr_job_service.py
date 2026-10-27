@@ -616,7 +616,7 @@ def _recorded_delivery_statement(dialect_name: str):
     ).join(captured, true())
 
 
-def get_recorded_order_job_bindings(order_ids: list[str], *, read_session=None, _loaded_jobs=None) -> dict[str, dict[str, Any]]:
+def get_recorded_order_job_bindings(order_ids: list[str], *, read_session=None, _loaded_jobs=None, _read_context=None) -> dict[str, dict[str, Any]]:
     """Read the workflow's explicit execution, never a name or latest-row guess."""
     from src.models.order import Order
     from src.models.order_workflow_state import OrderWorkflowState
@@ -631,12 +631,20 @@ def get_recorded_order_job_bindings(order_ids: list[str], *, read_session=None, 
         return {}
     context = nullcontext(read_session) if read_session is not None else session_scope()
     with context as session:
-        rows = session.execute(select(
-            Order.id, Order.current_document_id, OrderWorkflowState.state,
-            OrderWorkflowState.secondary_actions_json,
-        ).select_from(Order).outerjoin(
-            OrderWorkflowState, OrderWorkflowState.order_id == Order.id,
-        ).where(Order.id.in_(identities))).all()
+        rows = []
+        remaining = identities
+        if _read_context is not None and read_session is not None:
+            order, state = _read_context
+            if (order.id in identities and state.order_id == order.id):
+                rows.append((order.id, order.current_document_id, state.state, state.secondary_actions_json))
+                remaining = [identity for identity in identities if identity != order.id]
+        if remaining:
+            rows.extend(session.execute(select(
+                Order.id, Order.current_document_id, OrderWorkflowState.state,
+                OrderWorkflowState.secondary_actions_json,
+            ).select_from(Order).outerjoin(
+                OrderWorkflowState, OrderWorkflowState.order_id == Order.id,
+            ).where(Order.id.in_(remaining))).all())
         records = {}
         for order_id, document_id, state, secondary in rows:
             meta = secondary.get("workflow_v2") if isinstance(secondary, dict) else None

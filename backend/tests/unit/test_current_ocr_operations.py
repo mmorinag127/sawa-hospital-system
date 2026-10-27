@@ -101,6 +101,22 @@ def test_real_native_active_execution_is_visible(native_sql):
     assert result["items"][0]["execution_id"] == boundary["execution_id"]
 
 
+def test_current_read_uses_bulk_rows_and_describes_each_job_once(native_sql, monkeypatch):
+    f = native_sql
+    finish_authored_native(f, "1")
+
+    def command_read_forbidden(*args, **kwargs):
+        raise AssertionError("read model entered a refreshing command guard")
+
+    monkeypatch.setattr(delivery, "_original", command_read_forbidden)
+    monkeypatch.setattr(delivery, "_require_uploaded_terminal", command_read_forbidden)
+    real_describe = operations.ocr_job_service.describe_job_state
+    with patch.object(operations.ocr_job_service, "describe_job_state", wraps=real_describe) as describe:
+        result = read(f)
+    assert result["summary"]["counts"] == {"succeeded": 1}
+    assert describe.call_count == 1
+
+
 def test_many_missing_generations_are_batched_and_history_metrics_not_loaded(native_sql):
     from sqlalchemy import inspect
     f = native_sql

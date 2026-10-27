@@ -40,19 +40,32 @@ def _locked(session, delivery_id):
 
 
 def _original(session, row, *, read_only=False):
-    from src.services.ingest_job_service import payload_digest
     job = session.get(IngestJob, row.job_id, populate_existing=True, with_for_update={"read": True} if read_only else True)
+    if _validate_original_job(row, job) is None:
+        return None
+    if row.uploaded_identity is not None:
+        uploaded = session.get(UploadedPdf, row.uploaded_identity["id"], populate_existing=True, with_for_update={"read": True} if read_only else True)
+        _validate_original_upload(row, uploaded)
+    return job
+
+
+def _validate_original_job(row, job):
+    from src.services.ingest_job_service import payload_digest
     if job is None or job.generation != row.business_generation:
         return None
     if job.input_digest != row.input_digest or payload_digest(job.payload) != row.input_digest or not _same(job.payload, row.original_payload):
         raise ValueError("ingest_delivery_original_changed")
-    if row.uploaded_identity is not None:
-        uploaded = session.get(UploadedPdf, row.uploaded_identity["id"], populate_existing=True, with_for_update={"read": True} if read_only else True)
-        from src.services.uploaded_pdf_service import _serialize_uploaded_pdf
-        if uploaded is None or any(not _same(_serialize_uploaded_pdf(uploaded)[key], value)
-                                   for key, value in row.uploaded_identity.items()):
-            raise ValueError("ingest_delivery_uploaded_original_changed")
     return job
+
+
+def _validate_original_upload(row, uploaded):
+    if row.uploaded_identity is not None:
+        from src.services.uploaded_pdf_service import _serialize_uploaded_pdf
+        if uploaded is None:
+            raise ValueError("ingest_delivery_uploaded_original_changed")
+        values = _serialize_uploaded_pdf(uploaded)
+        if any(not _same(values[key], value) for key, value in row.uploaded_identity.items()):
+            raise ValueError("ingest_delivery_uploaded_original_changed")
 
 
 def create_intent(session, job, config):
@@ -236,6 +249,9 @@ def _receipt(session, row, job, *, validate_pipeline=True, _read_evidence=None):
             return None, None
         if not isinstance(terminal, dict) or terminal.get("execution_id") != captured.get("execution_id") or terminal.get("job_id") != job.id or terminal.get("status") != job.status:
             raise ValueError("ingest_delivery_terminal_receipt_missing")
+        # The read model only compares this view; persisters retain owned copies.
+        if _read_evidence is not None:
+            return "terminal", {"job_id": job.id, "capture": captured, "receipt": terminal}
         return "terminal", {"job_id": job.id, "capture": deepcopy(captured), "receipt": deepcopy(terminal)}
     pipeline = (job.metrics or {}).get("pipeline_delivery_receipt")
     if job.status == "awaiting_output" and isinstance(pipeline, dict) and job.input_reference and job.output_reference:
@@ -358,6 +374,12 @@ def _require_uploaded_terminal(session, row, status, *, read_only=False):
     if row.uploaded_identity is None:
         return
     upload = session.get(UploadedPdf, row.uploaded_identity["id"], populate_existing=True, with_for_update={"read": True} if read_only else True)
+    _validate_uploaded_terminal(row, upload, status)
+
+
+def _validate_uploaded_terminal(row, upload, status):
+    if row.uploaded_identity is None:
+        return
     owner = row.owner_lease.get("uploaded_lease") if isinstance(row.owner_lease, dict) else None
     if (upload is None or not isinstance(owner, dict) or upload.status != status
         or upload.lease_token != owner["lease_token"] or upload.attempt_count != owner["attempt_count"]):
