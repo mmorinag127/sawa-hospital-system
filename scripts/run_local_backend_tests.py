@@ -1,5 +1,6 @@
 """Run staging core or explicit wide suites; PostgreSQL retains dedicated runners."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -107,7 +108,7 @@ def preserve_baseline(state):
                         source.backup(destination)
             except sqlite3.DatabaseError:
                 shutil.copyfile(state / 'testmon.sqlite', root / 'testmon.sqlite')
-        checkpoint = SimpleNamespace(accepted=False, directory=root)
+        checkpoint = SimpleNamespace(accepted=False, invalidate=False, directory=root)
         try:
             yield checkpoint
         finally:
@@ -123,6 +124,56 @@ def preserve_baseline(state):
                         os.replace(root / name, state / name)
                     else:
                         shutil.copyfile(root / name, state / name)
+                if checkpoint.invalidate:
+                    (state / 'inputs.json').unlink(missing_ok=True)
+
+
+def valid_partial_history(state, selection, source):
+    """Accept only a completed assertion-failure report bound to its DB and metadata."""
+    metadata_path, database_path = state / 'inputs.json', state / 'testmon.sqlite'
+    try:
+        if (metadata_path.is_symlink() or database_path.is_symlink()
+                or not metadata_path.is_file() or not database_path.is_file()
+                or selection.get('normal_completion') is not True
+                or type(selection.get('assertion_failures')) is not int
+                or selection['assertion_failures'] < 1 or selection.get('exitstatus') != 1
+                or selection.get('source_sha') != source
+                or selection.get('incomplete') != [] or selection.get('not_started') != []):
+            return False
+        selected, executed, completed = (selection.get(key) for key in ('selected', 'executed', 'completed'))
+        passed, failed, skipped, reused = (selection.get(key) for key in ('passed', 'failed', 'skipped', 'reused'))
+        groups = (selected, executed, completed, passed, failed, skipped, reused)
+        if (any(not isinstance(group, list) or any(not isinstance(node, str) for node in group)
+                or len(group) != len(set(group)) for group in groups)
+                or set(selected) != set(executed) or set(selected) != set(completed)
+                or not failed or not set(failed) <= set(completed)
+                or not set(passed) <= set(completed) or not set(skipped) <= set(completed)
+                or set(passed) | set(failed) | set(skipped) != set(completed)
+                or set(passed) & (set(failed) | set(skipped))
+                or set(selected) & set(reused)):
+            return False
+        raw = metadata_path.read_bytes()
+        metadata = json.loads(raw)
+        if (hashlib.sha256(raw).hexdigest() != selection.get('inputs_sha256')
+                or not isinstance(metadata, dict) or metadata.get('source_sha') != source
+                or metadata.get('schema') != 2 or not isinstance(metadata.get('tests'), dict)
+                or not isinstance(metadata.get('context'), str) or len(metadata['context']) != 64
+                or metadata['context'] != selection.get('context_sha256')):
+            return False
+        entries = metadata['tests']
+        if (any(not isinstance(entries.get(node), dict) or entries[node].get('passed') is not True
+                for node in passed + reused)
+                or any(not isinstance(entries.get(node), dict) or entries[node].get('passed') is not False
+                       for node in failed)):
+            return False
+        with closing(sqlite3.connect(database_path.as_uri() + '?mode=ro', uri=True)) as connection:
+            if connection.execute('PRAGMA quick_check').fetchone() != ('ok',):
+                return False
+            tracking_hash = hashlib.sha256('\n'.join(connection.iterdump()).encode()).hexdigest()
+        return (tracking_hash == metadata.get('tracking_sha256')
+                and tracking_hash == selection.get('tracking_sha256'))
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        return False
 
 
 def run_pytest(argv, env):
@@ -157,14 +208,16 @@ def run_pytest(argv, env):
             signal.signal(kind, handler)
 
 
-def retain_failures(state, scratch, failed, *, successful=False):
+def retain_failures(state, scratch, failed, *, successful=False, resolved=()):
     previous_path = state / 'failed-tests.json'
     previous = json.loads(previous_path.read_text()) if previous_path.exists() else []
     if any(not isinstance(values, list) or any(not isinstance(node, str) for node in values)
            for values in (failed, previous)):
         raise ValueError('Invalid failed-test identities')
+    if not isinstance(resolved, (list, tuple)) or any(not isinstance(node, str) for node in resolved):
+        raise ValueError('Invalid resolved-test identities')
     temporary = scratch / 'failed-tests.json'
-    temporary.write_text(json.dumps(sorted(set(failed) | (set() if successful else set(previous)))))
+    temporary.write_text(json.dumps(sorted(set(failed) | (set() if successful else set(previous) - set(resolved)))))
     os.replace(temporary, previous_path)
 
 
@@ -279,6 +332,7 @@ def main():
             owned.unlink(missing_ok=True)
         runtime.touch(mode=0o600)
         with preserve_baseline(state) as checkpoint:
+            checkpoint.invalidate = True
             try:
                 result = run_pytest(argv, env)
             except BaseException:
@@ -305,11 +359,13 @@ def main():
                     or (mode == "full" and reused)):
                 raise ValueError("Invalid backend dependency selection evidence")
             (evidence / "selection.json").write_text(json.dumps(selection, indent=2))
-            retain_failures(state, checkpoint.directory, selection.get('failed', []),
-                            successful=result.returncode == 0)
             if not clean_tree() or git('rev-parse', 'HEAD') != source:
                 raise ValueError('Backend tests changed their fixed source')
-            checkpoint.accepted = result.returncode == 0
+            partial = result.returncode == 1 and valid_partial_history(state, selection, source)
+            retain_failures(state, checkpoint.directory, selection.get('failed', []),
+                            successful=result.returncode == 0,
+                            resolved=selection.get('passed', []) if partial else ())
+            checkpoint.accepted = result.returncode == 0 or partial
             from local_hospital_test_runner import digest
             print(json.dumps({"backend_selection": {"source_sha": source,
                 "mode": mode, "executed": len(executed), "reused": len(reused),

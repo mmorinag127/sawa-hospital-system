@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -179,6 +180,44 @@ def test_unstarted():
         self.assertEqual(report['incomplete'], ['test_example.py::test_first'])
         self.assertEqual(report['not_started'], ['test_example.py::test_unstarted'])
 
+    def test_interrupted_run_invalidates_all_case_history(self):
+        self.write('test_example.py', '''import pytest
+def test_success():
+    assert True
+def test_interrupted():
+    pytest.exit('controlled interruption', returncode=2)
+def test_unstarted():
+    assert True
+''')
+        self.run_tests(expected=2)
+        report = self.run_tests(expected=2)
+        self.assertEqual(report['reused'], [])
+        self.assertIn('test_example.py::test_interrupted', report['selected'])
+        self.assertIn('test_example.py::test_unstarted', report['not_started'])
+
+    def test_teardown_failure_invalidates_all_case_history(self):
+        self.write('test_example.py', '''import pytest
+@pytest.fixture
+def broken():
+    yield
+    raise RuntimeError('teardown')
+def test_success():
+    assert True
+def test_teardown(broken):
+    assert True
+''')
+        self.run_tests(expected=1)
+        report = self.run_tests(expected=1)
+        self.assertEqual(report['reused'], [])
+        self.assertEqual(len(report['selected']), 2)
+
+    def test_unexpected_call_error_invalidates_all_case_history(self):
+        self.write('test_example.py', 'def test_success():\n    assert True\ndef test_error():\n    raise RuntimeError("unexpected")\n')
+        self.run_tests(expected=1)
+        report = self.run_tests(expected=1)
+        self.assertEqual(report['reused'], [])
+        self.assertEqual(len(report['selected']), 2)
+
     def test_shared_inputs_are_saved_once_and_changed_fixture_cannot_be_reused(self):
         self.write('test_example.py', '''from pathlib import Path
 import pytest
@@ -264,16 +303,24 @@ def test_nested_tracking():
         self.assertIn("test_example.py::test_data", changed["selected"])
         self.assertEqual(changed["reasons"]["test_example.py::test_data"], "file-input-changed")
 
-    def test_failed_run_cannot_publish_reusable_history(self):
+    def test_failed_run_preserves_successful_cases_but_not_failed_case(self):
         self.run_tests()
         self.write('leaf.py', 'def value():\n    return 99\n')
         self.run_tests(expected=1)
-        self.assertFalse((self.state / 'inputs.json').exists())
+        history = json.loads((self.state / 'inputs.json').read_text())
+        self.assertFalse(history['tests']['test_example.py::test_first']['passed'])
+        self.assertTrue(history['tests']['test_example.py::test_second']['passed'])
         self.write('leaf.py', 'def value():\n    return 1\n')
         report = self.run_tests()
-        self.assertTrue(report['full'])
-        self.assertEqual(len(report['selected']), 3)
-        self.assertEqual(report['reused'], [])
+        self.assertIn('test_example.py::test_first', report['selected'])
+        self.assertIn('test_example.py::test_second', report['reused'])
+
+    def test_first_failed_run_retains_only_completed_successes(self):
+        self.write('test_example.py', 'def test_success():\n    assert True\ndef test_failure():\n    assert False\n')
+        self.run_tests(expected=1)
+        report = self.run_tests(expected=1)
+        self.assertEqual(report['selected'], ['test_example.py::test_failure'])
+        self.assertEqual(report['reused'], ['test_example.py::test_success'])
 
     def test_tracking_database_must_match_input_history(self):
         self.run_tests()
@@ -314,7 +361,8 @@ def test_nested_tracking():
         self.run_tests()
         report = self.run_tests()
         self.assertEqual(report['selected'], ['test_example.py::test_changes'])
-        self.assertIn('changing-file-input', report['untracked']['test_example.py::test_changes'])
+        self.assertEqual(report['reused'], [])
+        self.assertIn('unowned-file-write', report['untracked']['test_example.py::test_changes'])
 
     def test_listdir_names_ignore_unobserved_child_access_metadata(self):
         (self.root / 'inputs').mkdir()
@@ -362,6 +410,43 @@ def test_nested_tracking():
         self.assertEqual(self.run_tests()['selected'], [])
         (self.root / 'data.txt').unlink()
         self.assertEqual(len(self.run_tests()['selected']), 2)
+
+    def test_multiple_lazy_collection_changes_update_every_input(self):
+        self.write('first-input.txt', 'first old')
+        self.write('second-input.txt', 'second old')
+        self.write('conftest.py', "import sys\nfrom pathlib import Path\nif 'sqlite3.dump' not in sys.modules:\n    Path('first-input.txt').read_text()\n    Path('second-input.txt').read_text()\n")
+        self.write('test_example.py', 'def test_first():\n    assert True\ndef test_second():\n    assert True\n')
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        self.assertEqual(self.run_tests()['selected'], [])
+        self.write('first-input.txt', 'first new')
+        self.write('second-input.txt', 'second new')
+        report = self.run_tests()
+        self.assertEqual(len(report['selected']), 2)
+        history = json.loads((self.state / 'inputs.json').read_text())
+        for name in ('first-input.txt', 'second-input.txt'):
+            self.assertEqual(history['global_inputs'][name], hashlib.sha256((self.root / name).read_bytes()).hexdigest())
+        self.assertEqual(self.run_tests()['selected'], [])
+
+    def test_unreadable_later_lazy_collection_input_cannot_be_reused(self):
+        self.write('first-input.txt', 'first old')
+        self.write('second-input.txt', 'second old')
+        self.write('conftest.py', "import sys\nfrom pathlib import Path\nif 'sqlite3.dump' not in sys.modules:\n    Path('first-input.txt').read_text()\n    Path('second-input.txt').read_text()\n")
+        self.write('test_example.py', 'def test_first():\n    assert True\ndef test_second():\n    assert True\n')
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        self.run_tests()
+        self.assertEqual(self.run_tests()['selected'], [])
+        self.write('first-input.txt', 'first new')
+        (self.root / 'second-input.txt').unlink()
+        report = self.run_tests()
+        self.assertEqual(report['reused'], [])
+        self.assertEqual(len(report['selected']), 2)
+        self.assertEqual(set(report['untracked']), set(report['selected']))
+        self.assertTrue(all('unreadable-input' in reasons for reasons in report['untracked'].values()))
+        history = json.loads((self.state / 'inputs.json').read_text())
+        self.assertEqual(history['global_inputs']['first-input.txt'], hashlib.sha256((self.root / 'first-input.txt').read_bytes()).hexdigest())
+        self.assertNotIn('second-input.txt', history['global_inputs'])
+        self.assertEqual(self.run_tests()['reused'], [])
 
     def test_environment_changes_during_a_case_cannot_authorize_reuse(self):
         self.env['NODE_TEST_WORKER_ID'] = 'original'

@@ -56,6 +56,7 @@ try {
   previousContextMatches = saved.context === context;
   if (saved.context === context && saved.tests && typeof saved.tests === 'object') previous = saved.tests;
 } catch { /* Missing/corrupt dependency state executes tests. */ }
+try { fs.unlinkSync(destination); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 if (process.env.SAWA_IMPACT_FULL === '1') previous = {};
 
 const storage = new AsyncLocalStorage();
@@ -154,19 +155,22 @@ function wrapMethod(object, name, before) {
 let pathReadSyncDepth = 0;
 // Options getters can read unrelated descriptors during a path-based read.
 function nativePathRead() {
-  if (!pathReadSyncDepth) return false;
   const formatter = Object.getOwnPropertyDescriptor(NativeError, 'prepareStackTrace');
   const limit = Object.getOwnPropertyDescriptor(NativeError, 'stackTraceLimit');
   if (formatter?.get || formatter?.set || formatter?.value || limit?.get || limit?.set) return false;
   try {
-    const caller = new NativeError().stack.split('\n').slice(1).find(line => !line.includes(__filename + ':'));
-    return /\bat (?:tryReadSync|Object\.readFileSync) \(node:fs:\d+:\d+\)$/.test(caller || '');
+    const frames = new NativeError().stack.split('\n').slice(1).filter(line => !line.includes(__filename + ':'));
+    if (!/\bat (?:tryReadSync|Object\.readFileSync) \(node:fs:\d+:\d+\)$/.test(frames[0] || '')) return false;
+    if (pathReadSyncDepth) return true;
+    const afterFs = frames.find(line => !/\(node:fs:\d+:\d+\)$/.test(line));
+    return /\(node:internal\/modules\/(?:cjs|esm)\//.test(afterFs || '');
   } catch { return false; }
 }
 const originalReadFileSync = fs.readFileSync;
 fs.readFileSync = function (...args) {
   dependency(args[0]);
   const pathRead = rawPath(args[0]) !== null;
+  if (!pathRead) unsafe('file-descriptor-input');
   if (pathRead) pathReadSyncDepth++;
   try { return Reflect.apply(originalReadFileSync, this, args); }
   finally { if (pathRead) pathReadSyncDepth--; }

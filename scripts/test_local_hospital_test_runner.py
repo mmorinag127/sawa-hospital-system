@@ -293,6 +293,55 @@ class ReceiptContractTest(unittest.TestCase):
                 with BACKEND_RUNNER.preserve_baseline(state):
                     self.fail('must reject a linked sidecar')
 
+    def test_assert_failure_partial_history_requires_matching_report_and_database(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            source = 'a' * 40
+            db = state / 'testmon.sqlite'
+            with sqlite3.connect(db) as connection:
+                connection.execute('CREATE TABLE evidence(value INTEGER)')
+                connection.execute('INSERT INTO evidence VALUES (1)')
+            with sqlite3.connect(db) as connection:
+                db_hash = hashlib.sha256('\n'.join(connection.iterdump()).encode()).hexdigest()
+            meta = {'schema': 2, 'source_sha': source, 'tracking_sha256': db_hash, 'context': 'b' * 64,
+                    'tests': {'case::passed': {'passed': True}, 'case::failed': {'passed': False}}}
+            metadata = state / 'inputs.json'
+            metadata.write_text(json.dumps(meta))
+            selection = {'source_sha': source, 'exitstatus': 1, 'normal_completion': True,
+                         'assertion_failures': 1, 'selected': ['case::passed', 'case::failed'],
+                         'executed': ['case::passed', 'case::failed'],
+                         'completed': ['case::passed', 'case::failed'], 'passed': ['case::passed'],
+                         'failed': ['case::failed'], 'skipped': [], 'reused': [],
+                         'incomplete': [], 'not_started': [], 'tracking_sha256': db_hash,
+                         'inputs_sha256': hashlib.sha256(metadata.read_bytes()).hexdigest(),
+                         'context_sha256': 'b' * 64}
+            self.assertTrue(BACKEND_RUNNER.valid_partial_history(state, selection, source))
+            for changes in ({'normal_completion': False}, {'incomplete': ['case::passed']},
+                            {'assertion_failures': 0}, {'exitstatus': 2}, {'inputs_sha256': '0' * 64}):
+                with self.subTest(changes=changes):
+                    self.assertFalse(BACKEND_RUNNER.valid_partial_history(state, {**selection, **changes}, source))
+            with sqlite3.connect(db) as connection:
+                connection.execute('UPDATE evidence SET value = 2')
+            self.assertFalse(BACKEND_RUNNER.valid_partial_history(state, selection, source))
+
+    def test_invalidated_rollback_does_not_restore_reusable_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'state'
+            state.mkdir()
+            (state / 'inputs.json').write_text('previous history')
+            with BACKEND_RUNNER.preserve_baseline(state) as checkpoint:
+                checkpoint.invalidate = True
+                (state / 'inputs.json').write_text('interrupted history')
+            self.assertFalse((state / 'inputs.json').exists())
+
+    def test_partial_failure_resolves_only_completed_successes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / 'failed-tests.json').write_text(json.dumps(['case::passed', 'case::old']))
+            BACKEND_RUNNER.retain_failures(state, state, ['case::failed'], resolved=['case::passed'])
+            self.assertEqual(json.loads((state / 'failed-tests.json').read_text()), ['case::failed', 'case::old'])
+
     def test_interrupted_child_is_reaped_before_runner_returns(self):
         from unittest.mock import MagicMock
         process = MagicMock()

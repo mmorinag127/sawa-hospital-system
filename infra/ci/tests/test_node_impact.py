@@ -91,6 +91,76 @@ for (const method of ['read', 'readSync', 'readv', 'readvSync']) {
             self.assertIn(node, report['selected'])
             self.assertIn('file-descriptor-input', report['untracked'][node])
 
+    def test_failed_run_reexecutes_the_entire_module(self):
+        self.write('first.txt', 'broken')
+        self.run_tests(1)
+        report = self.run_tests(1)
+        self.assertEqual(report['selected'], ['example.test.mjs::first#0', 'example.test.mjs::second#0'])
+        self.assertEqual(report['reused'], [])
+
+    def test_timed_out_callback_is_not_reused_after_it_returns(self):
+        self.write('example.test.mjs', """
+import test from 'node:test';
+import assert from 'node:assert/strict';
+test('assertion failure', () => assert.fail('failure'));
+test('late callback', {timeout: 10}, async () => {
+  await new Promise(resolve => setTimeout(resolve, 50));
+});
+""")
+        self.run_tests(1)
+        report = self.run_tests(1)
+        self.assertEqual(report['reused'], [])
+        self.assertEqual(len(report['selected']), 2)
+
+    def test_read_file_sync_foreign_descriptor_is_not_reused(self):
+        self.write('example.test.mjs', """
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {openSync, closeSync, readFileSync} from 'node:fs';
+test('foreign fd', () => {
+  const fd = openSync('first.txt', 'r');
+  try { assert.equal(readFileSync(fd, 'utf8'), 'one'); }
+  finally { closeSync(fd); }
+});
+""")
+        self.run_tests()
+        report = self.run_tests()
+        self.assertEqual(report['reused'], [])
+        self.assertIn('file-descriptor-input', report['untracked']['example.test.mjs::foreign fd#0'])
+
+    def test_explicit_process_exit_invalidates_successful_case_history(self):
+        self.write('example.test.mjs', """
+import test from 'node:test';
+test('success', () => {});
+test('exit', () => process.exit(1));
+""")
+        self.run_tests(1)
+        report = self.run_tests(1)
+        self.assertEqual(report['reused'], [])
+
+    def test_uncaught_test_error_invalidates_successful_case_history(self):
+        self.write('example.test.mjs', """
+import test from 'node:test';
+test('success', () => {});
+test('error', () => { throw new Error('unexpected'); });
+""")
+        self.run_tests(1)
+        report = self.run_tests(1)
+        self.assertEqual(report['reused'], [])
+
+    def test_unhandled_rejection_invalidates_successful_case_history(self):
+        self.write('example.test.mjs', """
+import test from 'node:test';
+test('success', () => {});
+test('rejection', async () => {
+  Promise.reject(new Error('unexpected'));
+  await new Promise(resolve => setImmediate(resolve));
+});
+""")
+        self.run_tests(1)
+        report = self.run_tests(1)
+        self.assertEqual(report['reused'], [])
+
     def test_path_read_does_not_hide_descriptor_reads_in_options_getters(self):
         self.write('example.test.mjs', """
 import test from 'node:test';

@@ -23,7 +23,6 @@ import pytest
 from impact_collection import CollectionInputs
 from impact_owned_inputs import OwnedInputs
 
-
 SCHEMA = 2
 ROOT = Path(os.environ["SAWA_IMPACT_ROOT"]).resolve()
 STATE = Path(os.environ["SAWA_IMPACT_STATE"]).resolve()
@@ -46,6 +45,8 @@ GLOBAL_UNSAFE = set()
 UNSAFE_ORIGINS = set()
 UNSAFE_PATHS = set()
 OUTCOMES = {}
+ABNORMAL_RUN = False
+ASSERTION_FAILURES = 0
 STARTED = []
 SELECTED = []
 OMITTED = []
@@ -403,6 +404,7 @@ PREVIOUS_GLOBAL_INPUTS = {}
 PREVIOUS = load_previous()
 BASELINE = {"inputs_sha256": digest(META), "tracking_sha256": tracking_digest(),
             "source_sha": json.loads(META.read_text()).get("source_sha")} if PREVIOUS else None
+META.unlink(missing_ok=True)
 FULL = os.environ.get("SAWA_IMPACT_FULL") == "1" or not PREVIOUS
 if FULL:
     STATE.mkdir(parents=True, exist_ok=True)
@@ -723,6 +725,11 @@ def audit(event, args):
             return
         mode = args[1]
         flags = args[2] if len(args) > 2 else 0
+        frame = sys._getframe(1)
+        if (frame.f_code.co_filename == tempfile.__file__
+                and frame.f_code.co_name == 'NamedTemporaryFile'
+                and original_path == absolute_input_path(frame.f_locals.get('dir'))):
+            return
         if mode is None and not Path(os.fsdecode(args[0])).is_absolute():
             record_unsafe('relative-descriptor-input')
             return
@@ -782,6 +789,9 @@ def pytest_sessionstart(session):
     # Always collect node IDs: sidecar inputs cannot be checked if a whole file
     # is skipped by testmon before collection.
     selector.deselected_files = []
+
+
+def install_input_observers():
     def observe_resolution(original):
         def observed(path, *args, **kwargs):
             global BUSY
@@ -955,11 +965,15 @@ def pytest_collection_modifyitems(session, config, items):
         COLLECTION_SETS[path] = key
     collection_changed = (not unchanged(PREVIOUS_GLOBAL_INPUTS)
                           or any(name not in PREVIOUS_GLOBAL_INPUTS for name in GLOBAL_INPUTS))
-    if not collection_changed:
-        # A previously observed input can be read later by a lazy import. Its
-        # verified value remains a dependency even when collection did not reread it.
-        for name, value in PREVIOUS_GLOBAL_INPUTS.items():
-            GLOBAL_INPUTS.setdefault(name, value)
+    # Lazy imports may not repeat their initial reads in subsequent processes.
+    for name in PREVIOUS_GLOBAL_INPUTS:
+        if name not in initial_inputs:
+            initial_inputs[name] = input_digest(name)
+        observed = initial_inputs[name]
+        if observed is None:
+            GLOBAL_UNSAFE.add('unreadable-input')
+        else:
+            GLOBAL_INPUTS.setdefault(name, observed)
     for item in items:
         COLLECTED_DEPENDENCIES[item.nodeid] = COLLECTION_INPUTS.dependencies(item.path)
         previous = PREVIOUS.get(item.nodeid)
@@ -1049,6 +1063,29 @@ def pytest_runtest_protocol(item, nextitem):
 
 def pytest_runtest_logreport(report):
     OUTCOMES.setdefault(report.nodeid, {})[report.when] = report.outcome
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    global ABNORMAL_RUN, ASSERTION_FAILURES
+    outcome = yield
+    report = outcome.get_result()
+    if report.failed and (report.when != 'call' or call.excinfo is None
+                          or not isinstance(call.excinfo.value, AssertionError)):
+        ABNORMAL_RUN = True
+    elif report.failed:
+        ASSERTION_FAILURES += 1
+
+
+def pytest_collectreport(report):
+    global ABNORMAL_RUN
+    if report.failed:
+        ABNORMAL_RUN = True
+
+
+def pytest_internalerror(excrepr, excinfo):
+    global ABNORMAL_RUN
+    ABNORMAL_RUN = True
 
 
 def pytest_runtest_logstart(nodeid, location):
@@ -1144,6 +1181,9 @@ def pytest_sessionfinish(session, exitstatus):
         DISABLED_COLLECTOR.pytest_sessionfinish(session)
     STATE.mkdir(parents=True, exist_ok=True)
     current = {node: entry for node, entry in PREVIOUS.items() if node in COLLECTED_DEPENDENCIES}
+    for node in SELECTED:
+        if not completed_test(node):
+            current.pop(node, None)
     if OWNED is not None:
         OWNED.finish()
     final_inputs = {}
@@ -1168,7 +1208,10 @@ def pytest_sessionfinish(session, exitstatus):
         for path in COLLECTED_DEPENDENCIES[node]:
             unsafe.update(COLLECTION_INPUTS.unsafe.get(path, ()))
         entry['unsafe'] = sorted(unsafe)
-    if int(exitstatus) == 0:
+    normal_run = (((int(exitstatus) == 0 and ASSERTION_FAILURES == 0)
+                   or (int(exitstatus) == 1 and ASSERTION_FAILURES > 0)) and not ABNORMAL_RUN
+                  and all(completed_test(node) for node in SELECTED))
+    if normal_run and tracking_digest() is not None:
         atomic_json(META, {"schema": SCHEMA, "context": CONTEXT, "tests": current,
             "global_inputs": GLOBAL_INPUTS,
             "input_sets": {key: INPUT_SETS[key] for key in referenced},
@@ -1192,6 +1235,7 @@ def pytest_sessionfinish(session, exitstatus):
         "failed": [node for node, reports in OUTCOMES.items() if 'failed' in reports.values()],
         "untracked": {node: value["unsafe"] for node, value in PREVIOUS.items() if value.get("unsafe")},
         "full": FULL, "exitstatus": int(exitstatus),
+        "normal_completion": normal_run, "assertion_failures": ASSERTION_FAILURES,
         "code_tracking_disabled": DISABLED_COLLECTOR is not None,
         "unsafe_paths": sorted(UNSAFE_PATHS),
         "unsafe_origins": [{"reason": reason, "path": path, "line": line}
@@ -1279,6 +1323,23 @@ def observed_start_new_thread(*args, **kwargs):
 _thread.start_new_thread = observed_start_new_thread
 
 _mkstemp_inner = tempfile._mkstemp_inner
+_get_default_tempdir = tempfile._get_default_tempdir
+
+
+def observed_default_tempdir():
+    global BUSY
+    if BUSY:
+        return _get_default_tempdir()
+    for key in ('TMPDIR', 'TEMP', 'TMP'):
+        record_input('environment:' + key, input_digest('environment:' + key))
+    BUSY = True
+    try:
+        return _get_default_tempdir()
+    finally:
+        BUSY = False
+
+
+tempfile._get_default_tempdir = observed_default_tempdir
 
 
 def observed_mkstemp_inner(*args, **kwargs):
@@ -1308,3 +1369,34 @@ def observed_mkstemp_inner(*args, **kwargs):
 
 
 tempfile._mkstemp_inner = observed_mkstemp_inner
+install_input_observers()
+
+_check_output = subprocess.check_output
+
+
+def observed_check_output(*args, **kwargs):
+    global BUSY
+    command = args[0] if len(args) == 1 else None
+    cwd = kwargs.get('cwd')
+    if (not BUSY and type(command) in (list, tuple) and len(command) == 3
+            and all(type(value) is str for value in command)
+            and command[:2] in (['git', 'show'], ('git', 'show'))
+            and set(kwargs) == {'cwd'} and type(cwd) in (str, type(ROOT))
+            and os.path.abspath(cwd) == str(ROOT)):
+        name = 'git-blob:' + command[2]
+        if valid_input_record(name, '0' * 64) and command[2].partition(':')[2] in TRACKED:
+            BUSY = True
+            try:
+                before = input_digest(name)
+                if before is not None:
+                    record_input(name, before)
+                    result = _check_output(*args, **kwargs)
+                    if input_digest(name) != before:
+                        record_unsafe('changing-file-input')
+                    return result
+            finally:
+                BUSY = False
+    return _check_output(*args, **kwargs)
+
+
+subprocess.check_output = observed_check_output
