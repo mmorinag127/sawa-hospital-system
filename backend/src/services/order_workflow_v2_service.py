@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import or_
+from sqlalchemy import event, or_
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm.exc import StaleDataError
 from sqlalchemy.exc import IntegrityError
 from loguru import logger
@@ -82,6 +83,30 @@ def _inspection_call(name, function, *args, **kwargs):
         return function(*args, **kwargs)
     finally:
         _inspection_record(name, perf_counter() - started)
+
+
+@event.listens_for(Engine, "before_cursor_execute")
+def _inspection_sql_started(_connection, _cursor, _statement, _parameters, context, _many):
+    if _inspection_timing.get() is not None:
+        context._sawa_inspection_started = perf_counter()
+
+
+def _inspection_sql_finished(context):
+    started = getattr(context, "_sawa_inspection_started", None)
+    if started is not None:
+        del context._sawa_inspection_started
+        _inspection_record("database_execute", perf_counter() - started)
+
+
+@event.listens_for(Engine, "after_cursor_execute")
+def _inspection_sql_succeeded(_connection, _cursor, _statement, _parameters, context, _many):
+    _inspection_sql_finished(context)
+
+
+@event.listens_for(Engine, "handle_error")
+def _inspection_sql_failed(context):
+    if context.execution_context is not None:
+        _inspection_sql_finished(context.execution_context)
 
 
 def _measure_inspection(function):
@@ -1659,7 +1684,7 @@ def _require_existing_workflow_template_version(
 ) -> tuple[str | None, str | None]:
     from src.services.initial_saved_import_service import get_binding
     from src.services.facility_master_service import get_snapshot
-    master = get_snapshot().master
+    master = _inspection_call("facility_master_snapshot", get_snapshot).master
     imported = get_binding(session, order.id, template_version_id=order.template_version_id, master=master)
     if imported is not None:
         if imported["snapshot"]["template"] is None:

@@ -4,6 +4,7 @@
   "groups": {
     "page-read-results-and-response-ownership": [
       "backend/tests/unit/test_cold_start_work.py",
+      "backend/tests/unit/test_display_sql_timing.py",
       "backend/tests/unit/test_page_performance_projections.py",
       "backend/tests/unit/test_order_list_response_ownership.py",
       "backend/tests/unit/test_ocr_read_projection_ownership.py",
@@ -27,6 +28,8 @@
       "backend/tests/unit/test_native_quantity_projection_contract.py"
     ],
     "authentication-and-session": [
+      "backend/tests/unit/test_auth_first_entrypoint.py",
+      "backend/tests/unit/test_portal_auth_failure_contract.py",
       "backend/tests/contract/test_auth_guardrails.py",
       "backend/tests/contract/test_portal_google_auth.py",
       "backend/tests/unit/test_portal_session.py",

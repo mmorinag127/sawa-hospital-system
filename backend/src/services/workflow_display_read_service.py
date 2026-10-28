@@ -284,10 +284,12 @@ def _candidates(session, order, state, meta):
     }
 
 
+@workflow._measure_inspection
 def get_display(order_id, *, scope="summary"):
     if scope not in {"initial", "summary", "ocr", "sheet", "output", "inspection"}:
         return None, "workflow_display_scope_invalid"
     with session_scope() as session, session.no_autoflush, retain_read_models(session):
+        workflow._inspection_next("display_order")
         order, error = workflow._get_order_or_error(session, order_id)
         if error:
             return None, error
@@ -297,11 +299,11 @@ def get_display(order_id, *, scope="summary"):
         if state:
             if not workflow._workflow_meta_has_confirmed_context(meta) and not serialized.get("context_suggestion"):
                 serialized["context_suggestion"] = workflow._order_context_suggestion(order)
-            error = _reference_error(session, order, state, meta)
+            error = workflow._inspection_call("display_references", _reference_error, session, order, state, meta)
             serialized = (workflow._workflow_blocker_projection(serialized, error) if error else
                           workflow._apply_canonical_workflow_state_projection(serialized, row=state, meta=meta,
                             state=workflow._canonical_workflow_v2_state(state, meta)))
-            serialized["ocr_job"], serialized["ocr_job_binding_error"], serialized["common_job_status"] = _job_summary(session, order, state, meta)
+            serialized["ocr_job"], serialized["ocr_job_binding_error"], serialized["common_job_status"] = workflow._inspection_call("display_job", _job_summary, session, order, state, meta)
         serialized["validation_state"] = "references_only"
         if scope == "initial":
             current_state = serialized.get("state")
@@ -309,6 +311,7 @@ def get_display(order_id, *, scope="summary"):
                      "sheet" if current_state == "ocr_selected" else
                      "output" if current_state in {"sheet_saved", "bagging_ready", "bagging_confirmed", "output_review", "confirmed"} else
                      "summary")
+        workflow._inspection_next("display_header")
         versions = [dict(row) for row in session.execute(select(
             OrderVersion.version_no, OrderVersion.document_id, OrderVersion.message_id,
             OrderVersion.received_at, OrderVersion.is_current,
@@ -329,10 +332,12 @@ def get_display(order_id, *, scope="summary"):
                 result["saved_sheet"] = {"saved_sheet_id": saved.id, "source_ocr_result_id": saved.base_evidence_run_id,
                     "edited_at": workflow._serialize_datetime(saved.edited_at), "created_at": workflow._serialize_datetime(saved.created_at)}
         if scope in {"ocr", "sheet", "inspection"}:
+            workflow._inspection_next("display_candidates")
             result["ocr_candidates"] = _candidates(session, order, state, meta)
             result["ocr_results"] = result["ocr_candidates"]["results"]
             result["loaded_sections"].append("ocr")
         if scope in {"sheet", "inspection"}:
+            workflow._inspection_next("display_sheet")
             if error:
                 return None, error
             if state and state.draft_id:
@@ -350,6 +355,7 @@ def get_display(order_id, *, scope="summary"):
                 result["saved_sheet"] = None
             result["loaded_sections"].append("sheet")
         if scope in {"output", "inspection"}:
+            workflow._inspection_next("display_output")
             if error:
                 return None, error
             if state and workflow._canonical_workflow_v2_state(state, meta) == "confirmed":
@@ -368,6 +374,7 @@ def get_display(order_id, *, scope="summary"):
             result["anomaly_review"] = deepcopy(meta.get("anomaly_review"))
             result["loaded_sections"].append("output")
         if scope == "inspection" and state and state.evidence_run_id:
+            workflow._inspection_next("display_overlay")
             evidence = session.execute(select(
                 OrderOcrEvidenceRun.id,
                 OrderOcrEvidenceRun.payload_json["hakodate_overlay"].label("overlay"),
@@ -390,4 +397,5 @@ def get_display(order_id, *, scope="summary"):
             # Preview metadata is not evidence selectability or command validation.
             result["ocr_results"] = [{**row, **preview} if row["ocr_result_id"] == evidence.id else row for row in result["ocr_results"]]
             result["ocr_candidates"]["results"] = result["ocr_results"]
+        workflow._inspection_next("display_session_exit")
         return result, None

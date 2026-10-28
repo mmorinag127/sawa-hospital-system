@@ -1,8 +1,4 @@
-import os
-
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from src.api import (
@@ -28,19 +24,16 @@ from src.api import (
 )
 from src.services import facility_service, facility_template_version_service, menu_service
 from src.services.ocr_evidence_service import SelectedEvidenceRejected
-from src.services.read_only_request_guard_service import read_only_request_guard
+from src.http_middleware import configure_http_middleware
 from src import db
 from src.api import staging_datasets
-from src.staging_data import DatasetMiddleware
 from src.maintenance.formal_migration_schema import require_formal_head
 
 app = FastAPI(title="Hospital Order System API")
 from src.api import staging_source_probe, staging_source_settings
 app.include_router(staging_source_probe.router)
 app.include_router(staging_source_settings.router)
-app.add_middleware(DatasetMiddleware)
-# Full OCR evidence can exceed Cloud Run's buffered response limit.
-app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=1)
+configure_http_middleware(app)
 
 
 @app.exception_handler(SelectedEvidenceRejected)
@@ -48,27 +41,6 @@ async def _selected_evidence_rejected(request, exc: SelectedEvidenceRejected):
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
-@app.middleware("http")
-async def _block_canonical_writes_during_get(request, call_next):
-    if str(request.method or "").upper() != "GET":
-        return await call_next(request)
-    with read_only_request_guard(method=request.method, path=str(request.url.path)):
-        return await call_next(request)
-
-
-cors_origins = [
-    origin.strip()
-    for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",")
-    if origin.strip()
-]
-if cors_origins:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
 app.include_router(health.router, prefix="")
 app.include_router(auth_config.router, prefix="")
 app.include_router(ingest.router, prefix="/ingest")
