@@ -164,13 +164,21 @@ def test_inspection_preview_does_not_validate_or_deserialize_full_evidence(histo
     assert result["saved_sheet"]["sheet"]["rows"] == produced["sheet"]["rows"]
 
 
-def test_inspection_reads_each_reference_once_and_joins_job_sources(history_case):
+@pytest.mark.parametrize("saved_map", [False, True])
+def test_inspection_reads_each_reference_once_and_joins_job_sources(history_case, saved_map):
     from sqlalchemy import event
     from src.db import session_scope
     from src.models.order_workflow_state import OrderWorkflowState
     from src.services import workflow_display_read_service as display
     case = history_case()
     produced = case.produce(cell_values="5")
+    if saved_map:
+        produced["sheet"]["target_cell_map"] = [{
+            "target_row_index": 0, "target_col_index": produced["sheet"]["fields"].index("qty.regular_2f"),
+            "field": "qty.regular_2f", "sheet_cell": "component-quantity",
+            "target_cell_id": "component-quantity", "bbox": [60.0, 0.0, 70.0, 10.0],
+            "center": [65.0, 5.0],
+        }]
     case.save(produced["sheet"])
     statements = []
 
@@ -190,7 +198,10 @@ def test_inspection_reads_each_reference_once_and_joins_job_sources(history_case
     assert not any("count(*)" in sql.lower() and "order_ocr_evidence_runs" in sql for sql in statements)
     assert sum("FROM orders LEFT OUTER JOIN order_workflow_states" in sql for sql in statements) == 1
     assert sum("FROM order_sheet_drafts" in sql for sql in statements) == 2
-    assert sum("FROM order_ocr_evidence_runs" in sql for sql in statements) == 2
+    assert sum("FROM order_ocr_evidence_runs" in sql for sql in statements) == (2 if saved_map else 3)
+    full_evidence_reads = [sql for sql in statements if "FROM order_ocr_evidence_runs" in sql
+                          and "order_ocr_evidence_runs.payload_json," in sql]
+    assert len(full_evidence_reads) == (0 if saved_map else 1)
     assert result["saved_sheet"]["sheet"]["rows"] == produced["sheet"]["rows"]
     assert result["ocr_result_count"] == len(result["ocr_candidates"]["results"])
     with session_scope() as session:
