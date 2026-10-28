@@ -1920,7 +1920,7 @@ def _validate_accepted_read_receipt(session, order_id, workflow, draft, candidat
         raise ValueError("output original bagging input mismatch")
     # Compare persisted read inputs only: no current policy/menu recapture or locks.
     for key, row in (("draft", draft), ("evidence", evidence)):
-        current = {column.key: getattr(row, column.key) for column in row.__table__.columns}
+        current = {column.key: getattr(row, column.key) for column in row.__table__.columns if column.computed is None}
         if not snapshots_equal(versions.get(key), current):
             raise ValueError("output original bagging input mismatch")
     if not snapshots_equal(candidate.get("configured_input"), start.get("configured_input")):
