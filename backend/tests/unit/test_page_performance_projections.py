@@ -169,6 +169,7 @@ def test_inspection_reads_each_reference_once_and_joins_job_sources(history_case
     from sqlalchemy import event
     from src.db import session_scope
     from src.models.order_workflow_state import OrderWorkflowState
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
     from src.services import workflow_display_read_service as display
     case = history_case()
     produced = case.produce(cell_values="5")
@@ -181,9 +182,15 @@ def test_inspection_reads_each_reference_once_and_joins_job_sources(history_case
         }]
     case.save(produced["sheet"])
     statements = []
+    full_evidence_reads = []
 
     def observe(_connection, _cursor, sql, *_args):
         statements.append(" ".join(sql.split()))
+        compiled = _args[1].compiled
+        columns = getattr(compiled.statement, "selected_columns", ()) if compiled is not None else ()
+        if any(column.key == "payload_json" and getattr(column, "table", None) is OrderOcrEvidenceRun.__table__
+               for column in columns):
+            full_evidence_reads.append(sql)
 
     with case.readonly():
         event.listen(case.engine, "before_cursor_execute", observe)
@@ -199,8 +206,6 @@ def test_inspection_reads_each_reference_once_and_joins_job_sources(history_case
     assert sum("FROM orders LEFT OUTER JOIN order_workflow_states" in sql for sql in statements) == 1
     assert sum("FROM order_sheet_drafts" in sql for sql in statements) == 2
     assert sum("FROM order_ocr_evidence_runs" in sql for sql in statements) == (2 if saved_map else 3)
-    full_evidence_reads = [sql for sql in statements if "FROM order_ocr_evidence_runs" in sql
-                          and "order_ocr_evidence_runs.payload_json," in sql]
     assert len(full_evidence_reads) == (0 if saved_map else 1)
     assert result["saved_sheet"]["sheet"]["rows"] == produced["sheet"]["rows"]
     assert result["ocr_result_count"] == len(result["ocr_candidates"]["results"])
