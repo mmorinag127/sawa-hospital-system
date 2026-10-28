@@ -26,7 +26,7 @@ from src.schemas.intake_contract import (
 from src.api.school_scope import get_school_lunch_session, require_school_scope, require_facility, month_bounds
 from src.models.school_lunch import Facility
 from src.models.school_lunch_document import SchoolLunchDocument
-from sqlalchemy import select
+from sqlalchemy import select, or_, and_
 from sqlalchemy.exc import IntegrityError
 from src.db import session_scope
 from src.services import (
@@ -385,9 +385,11 @@ def list_menu_executions(facility_id: int = Query(gt=0), month: str = Query(), s
 def get_monthly_overview(
     month: str = Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
     session: Session = Depends(get_school_lunch_session),
+    after_id: int | None = None,
+    limit: int = Query(default=25, ge=1, le=100),
 ):
     try:
-        return school_lunch_common_service.get_monthly_overview(session, month)
+        return school_lunch_common_service.get_monthly_overview(session, month, after_id=after_id, limit=limit)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -606,10 +608,23 @@ def confirm_cooking_arrangement(
 
 
 @router.get("/cooking-arrangements/documents", responses={200: {"model": list[CookingDocumentSummaryResponse]}})
-def list_cooking_documents(facility_id: int = Query(gt=0), month: str = Query(), session: Session = Depends(get_school_lunch_session)):
+def list_cooking_documents(facility_id: int = Query(gt=0), month: str = Query(), session: Session = Depends(get_school_lunch_session),
+                           before_id: str | None = None, limit: int = Query(default=25, ge=1, le=100)):
     month_bounds(month)
-    rows = session.scalars(select(SchoolLunchDocument).where(SchoolLunchDocument.facility_id == facility_id,
-        SchoolLunchDocument.target_month == month).order_by(SchoolLunchDocument.created_at.desc())).all()
+    statement = select(SchoolLunchDocument.id, SchoolLunchDocument.filename,
+        SchoolLunchDocument.sha256, SchoolLunchDocument.created_at, SchoolLunchDocument.ocr_job_id,
+        SchoolLunchDocument.target_month).where(SchoolLunchDocument.facility_id == facility_id,
+        SchoolLunchDocument.target_month == month)
+    if before_id is not None:
+        cursor = session.execute(select(SchoolLunchDocument.id, SchoolLunchDocument.created_at).where(
+            SchoolLunchDocument.id == before_id, SchoolLunchDocument.facility_id == facility_id,
+            SchoolLunchDocument.target_month == month,
+        )).first()
+        if cursor is None:
+            raise HTTPException(422, "取込履歴のページ指定が不正です")
+        statement = statement.where(or_(SchoolLunchDocument.created_at < cursor.created_at,
+            and_(SchoolLunchDocument.created_at == cursor.created_at, SchoolLunchDocument.id < cursor.id)))
+    rows = session.execute(statement.order_by(SchoolLunchDocument.created_at.desc(), SchoolLunchDocument.id.desc()).limit(limit)).all()
     return [{"id": row.id, "filename": row.filename, "sha256": row.sha256, "created_at": row.created_at.isoformat() + "Z",
         "ocr_job_id": row.ocr_job_id, "target_month": row.target_month} for row in rows]
 

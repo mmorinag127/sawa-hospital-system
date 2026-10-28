@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import URL
 
 ROOT = Path(__file__).resolve().parents[1]
+_PHASE = "initialization"
 sys.path.insert(0, str(ROOT / "backend"))
 from run_stg_menu_master_migration import (
     require_staging_context, cloud_sql_proxy, _load_service_db_config,
@@ -22,16 +23,20 @@ from stg_replay_schema_targets import service_configuration, migration_configura
 
 
 def upgrade_connection(connection):
+    global _PHASE
+    _PHASE = "inspect_schema"
     tracked = inspect(connection).has_table("alembic_version")
     empty = not inspect(connection).get_table_names()
     connection.rollback()
     if not tracked and not empty:
+        _PHASE = "adopt_existing_schema"
         receipt = adopt(connection)
         print("Verified staging adoption: " + receipt["baseline"] + " -> " + receipt["revision"])
     else:
         previous = os.environ.get("ALEMBIC_DB_URI")
         os.environ["ALEMBIC_DB_URI"] = connection.engine.url.render_as_string(hide_password=False)
         try:
+            _PHASE = "formal_upgrade"
             config = Config(str(ROOT / "backend/alembic.ini"))
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
@@ -40,14 +45,18 @@ def upgrade_connection(connection):
                 os.environ.pop("ALEMBIC_DB_URI", None)
             else:
                 os.environ["ALEMBIC_DB_URI"] = previous
+    _PHASE = "verify_formal_head"
     require_formal_head(connection)
 
 
 def run():
+    global _PHASE
+    _PHASE = "staging_context"
     require_staging_context()
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     if os.environ.get("GITHUB_SHA") != sha:
         raise RuntimeError("adoption blocked: Actions source SHA mismatch")
+    _PHASE = "load_service_configuration"
     configs = [_load_service_db_config(os.environ["PROJECT_ID"], os.environ["REGION"], os.environ[key])
                for key in ("WEB_SERVICE", "WORKER_SERVICE")]
     for config in configs:
@@ -57,6 +66,7 @@ def run():
     web = configs[0]
     settings = migration_configuration(service_configuration(os.environ["WEB_SERVICE"]),
                                        service_configuration(os.environ["WORKER_SERVICE"]))
+    _PHASE = "start_proxy"
     with cloud_sql_proxy(web.instance_connection_name):
         url = URL.create("postgresql+psycopg2", username=web.db_user, password=web.db_password,
                          host="127.0.0.1", port=5432, database=web.db_name)
@@ -64,6 +74,7 @@ def run():
                                connect_args={"options": "-c lock_timeout=5000 -c statement_timeout=300000"})
         try:
             with engine.connect() as connection:
+                _PHASE = "verify_test_database_target"
                 verify_connection_target(connection)
                 connection.rollback()
                 upgrade_connection(connection)
@@ -81,6 +92,7 @@ def run():
                         connect_args={"options": "-c lock_timeout=5000 -c statement_timeout=300000"})
                     try:
                         with replay_engine.connect() as connection:
+                            _PHASE = "verify_replay_database_target"
                             verify_connection_target(connection, database=database)
                             connection.rollback()
                             upgrade_connection(connection)
@@ -98,6 +110,7 @@ if __name__ == "__main__":
     except StagingConfigBlocked as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(1)
-    except Exception:
-        print("Staging schema adoption/upgrade failed; database details suppressed", file=sys.stderr)
+    except Exception as error:
+        print("Staging schema adoption/upgrade failed; phase=" + _PHASE
+              + "; error_type=" + type(error).__name__ + "; database details suppressed", file=sys.stderr)
         raise SystemExit(1)

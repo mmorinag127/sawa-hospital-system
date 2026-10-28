@@ -6,6 +6,25 @@ import re
 from typing import Any
 
 
+_OCR_HEADER_TRANSLATION = str.maketrans("０１２３４５６７８９ｆＦ", "0123456789ff")
+
+
+def normalize_ocr_header_token(value: str) -> str:
+    return re.sub(r"\s+", "", value.strip().lower()).translate(_OCR_HEADER_TRANSLATION)
+
+
+def provider_row_fields(template: dict, *, default_fields: list[str]) -> list[str]:
+    derived = derive_row_fields_from_columns(template.get("columns"))
+    if bool(template.get("columns_authoritative")) and derived:
+        return derived
+    fields = template.get("main_ocr_row_fields")
+    if isinstance(fields, list):
+        normalized = [text for field in fields if (text := str(field or "").strip())]
+        if normalized:
+            return normalized
+    return derived if derived else list(default_fields)
+
+
 _TOKEN_PATTERN = re.compile(r"[^a-z0-9]+")
 _QTY_FIELD_PATTERN = re.compile(r"^qty\.(?P<diet>[a-z0-9_]+)_(?P<area>[a-z0-9_]+)$")
 _BLOCK_TOTAL_HEADER_TOKENS = {

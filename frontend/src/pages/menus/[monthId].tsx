@@ -152,7 +152,8 @@ type SavedImportReviewView = Omit<KnownImportFields<ImportComponents["schemas"][
 type SavedMenuImport = Omit<KnownImportFields<SavedMenuImportWire>, "review" | "current_review"> & {
   review: SavedImportReviewView; current_review: SavedImportReviewView;
 };
-type ImportListView = Omit<KnownImportFields<ImportComponents["schemas"]["ImportListResponse"]>, "items"> & { items: SavedMenuImport[] };
+type ImportSummary = Pick<SavedMenuImport, "id" | "month_id" | "state" | "source">;
+type ImportListView = {items: ImportSummary[]; next_before_id: string | null};
 type MonthlySnapshotView = Omit<KnownImportFields<MonthlySnapshotWire>, "menu" | "items" | "entries" | "master_checks"> & {
   menu: MonthlyMenu | null; items: MenuItem[]; entries: MenuEntry[];
   master_checks: Omit<KnownImportFields<MonthlySnapshotWire["master_checks"]>, "issues"> & { issues: MenuMasterReviewIssue[] };
@@ -652,7 +653,8 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   const { monthId } = router.query;
   const owner = useMenuInputOwner(router.asPath);
   const [revision, setRevision] = useState<string | null>(null);
-  const [savedImports, setSavedImports] = useState<SavedMenuImport[]>([]);
+  const [savedImports, setSavedImports] = useState<ImportSummary[]>([]);
+  const [importsBeforeId, setImportsBeforeId] = useState<string | null>(null);
   const [menu, setMenu] = useState<MonthlyMenu | null>(null);
   const [items, setItems] = useState<MenuItem[]>([]);
   const [itemPage, setItemPage] = useState(0);
@@ -666,6 +668,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   const [message, setMessage] = useState<string>("");
   const [lastUpload, setLastUpload] = useState<string>("");
   const [uploadHistory, setUploadHistory] = useState<MenuUploadEntry[]>([]);
+  const [uploadsBeforeId, setUploadsBeforeId] = useState<string | null>(null);
   const [uploadHistoryPage, setUploadHistoryPage] = useState(0);
   const [uploadHistoryRowsPerPage, setUploadHistoryRowsPerPage] = useState(25);
   const [uploading, setUploading] = useState<boolean>(false);
@@ -804,18 +807,20 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     ? items.find((item) => normalizeValue(item.name) === selectedGarnish.garnishName)
     : null;
 
-  const loadUploadHistory = async (expectedGeneration?: number) => {
+  const loadUploadHistory = async (expectedGeneration?: number, beforeId?: string) => {
     if (!monthId || Array.isArray(monthId)) return;
     const current = owner.capture("history", false);
     try {
-      const res = await apiClient.get(`/monthly-menus/${monthId}/uploads`);
+      const res = await apiClient.get(`/monthly-menus/${monthId}/uploads`, {params: beforeId ? {before_id: beforeId} : {}});
       if (!current()) return;
       if (expectedGeneration != null && expectedGeneration !== menuLoadGeneration.current) return;
-      setUploadHistory(res.data?.items || []);
+      if (!Array.isArray(res.data?.items) || res.data.next_before_id === beforeId) throw new Error("取込履歴の応答が不正です。");
+      setUploadHistory(rows => beforeId ? [...rows, ...res.data.items.filter((item:MenuUploadEntry) => !rows.some(row => row.id === item.id))] : res.data.items);
+      setUploadsBeforeId(res.data.next_before_id || null);
     } catch {
       if (!current()) return;
       if (expectedGeneration != null && expectedGeneration !== menuLoadGeneration.current) return;
-      setUploadHistory([]);
+      setMessage("取込履歴の取得に失敗しました。");
     }
   };
 
@@ -883,18 +888,18 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     owner.changed();
   };
 
-  const loadSavedImports = async () => {
+  const loadSavedImports = async (beforeId?: string) => {
     if (!monthId || Array.isArray(monthId)) return;
     const current = owner.capture("imports", false);
     try {
-      const res = await apiClient.get<ImportListView>(`/monthly-menus/${monthId}/imports`);
+      const res = await apiClient.get<ImportListView>(`/monthly-menus/${monthId}/imports`, {params: beforeId ? {before_id: beforeId} : {}});
       if (!current()) return;
       if (!Array.isArray(res.data?.items)) throw new Error("保存importの応答を確認できませんでした。");
-      if (res.data.items.some((receipt: SavedMenuImport) => receipt.month_id !== monthId || !hasSavedImportSource(receipt.source)
-        || !hasSavedImportReview(receipt.review, receipt.source) || !hasSavedImportReview(receipt.current_review, receipt.source))) {
+      if (res.data.next_before_id === beforeId || res.data.items.some(receipt => receipt.month_id !== monthId || !hasSavedImportSource(receipt.source))) {
         throw new Error("保存原本のscope・食種を確認できませんでした。");
       }
-      setSavedImports(res.data.items);
+      setSavedImports(rows => beforeId ? [...rows, ...res.data.items.filter(item => !rows.some(row => row.id === item.id))] : res.data.items);
+      setImportsBeforeId(res.data.next_before_id || null);
     } catch (error: any) {
       if (current()) setMessage(formatErrorDetail(error?.response?.data?.detail, "保存importの読込に失敗しました。"));
     }
@@ -960,6 +965,11 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
   };
 
   useEffect(() => {
+    setSavedImports([]);
+    setImportsBeforeId(null);
+    setUploadHistory([]);
+    setUploadsBeforeId(null);
+    setUploadHistoryPage(0);
     loadMenu();
     loadScopeOptions();
     loadRecentMenus();
@@ -1079,7 +1089,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
     }
   };
 
-  const downloadImport = async (receipt: SavedMenuImport) => {
+  const downloadImport = async (receipt: ImportSummary) => {
     if (!hasSavedImportSource(receipt.source) || receipt.month_id !== monthId) {
       setMessage("保存原本の対象を確認できませんでした。");
       return;
@@ -1728,6 +1738,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
         {message && <p className="message">{message}</p>}
         <h3>保存済みimport</h3>
         <Button className="btn" type="button" onClick={() => void loadSavedImports()}>一覧を再読込</Button>
+        {importsBeforeId && <Button type="button" onClick={()=>void loadSavedImports(importsBeforeId)}>過去のimportを表示</Button>}
         <ul>
           {savedImports.map((receipt) => <li key={receipt.id}>
             <Button className="btn" type="button" onClick={() => void resumeImport(receipt.id)}>
@@ -1752,6 +1763,7 @@ function MonthlyMenuEditorScreen({ authenticated }: { authenticated: boolean }) 
             onPageChange={setUploadHistoryPage}
             onRowsPerPageChange={(next) => { setUploadHistoryRowsPerPage(next); setUploadHistoryPage(0); }}
           />
+          {uploadsBeforeId && <Button type="button" onClick={()=>void loadUploadHistory(undefined, uploadsBeforeId)}>過去のアップロードを取得</Button>}
         </div>
       </section>
 

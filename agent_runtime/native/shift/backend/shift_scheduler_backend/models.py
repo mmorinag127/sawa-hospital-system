@@ -1,6 +1,6 @@
 from datetime import date, datetime, time
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, JSON, String, Time, UniqueConstraint, event, inspect, select
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, JSON, String, Time, UniqueConstraint, event, inspect, select, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -276,6 +276,56 @@ class SolveRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     config_json: Mapped[dict] = mapped_column(JSON, default=dict, active_history=True)
+    period_summary_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    period_end_key: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    display_period_end_key: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    period_known: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    period_display_error: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    prior_candidate_start_key: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    rotation_end_key: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    rotation_reference_error: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    __table_args__ = (
+        Index('ix_solve_runs_period_end_status_id', 'period_end_key', 'status', 'id'),
+        Index('ix_solve_runs_period_integrity', 'period_display_error', 'period_known', 'status', 'id'),
+        Index('ix_solve_runs_confirmed_period', 'status', 'period_known', 'display_period_end_key', 'id'),
+        Index('ix_solve_runs_rotation_integrity', 'rotation_reference_error', 'id'),
+    )
+
+
+class SolveRunRotationReference(Base):
+    __tablename__ = 'solve_run_rotation_references'
+
+    policy_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    solve_run_id: Mapped[int] = mapped_column(ForeignKey('solve_runs.id', ondelete='CASCADE'), primary_key=True, index=True)
+
+
+@event.listens_for(SolveRun, 'before_insert')
+@event.listens_for(SolveRun, 'before_update')
+def _period_metadata(_mapper, _connection, run):
+    from .period_metadata_v1 import period_metadata, rotation_metadata
+    values = {**period_metadata(run.target_month, run.config_json), **rotation_metadata(run.config_json)[0]}
+    for key, value in values.items():
+        setattr(run, key, value)
+
+
+def _write_rotation_references(connection, run):
+    from .period_metadata_v1 import rotation_metadata
+    table = SolveRunRotationReference.__table__
+    connection.execute(table.delete().where(table.c.solve_run_id == run.id))
+    references = rotation_metadata(run.config_json)[1]
+    if references:
+        connection.execute(table.insert(), [{'solve_run_id': run.id, 'policy_key': key} for key in references])
+
+
+@event.listens_for(SolveRun, 'after_insert')
+def _insert_rotation_references(_mapper, connection, run):
+    _write_rotation_references(connection, run)
+
+
+@event.listens_for(SolveRun, 'after_update')
+def _update_rotation_references(_mapper, connection, run):
+    if inspect(run).attrs.config_json.history.has_changes():
+        _write_rotation_references(connection, run)
 
 
 @event.listens_for(SolveRun, "before_update")
@@ -536,6 +586,7 @@ class RotationQueueState(Base):
     """The confirmed queue that becomes the starting point for the next period."""
 
     __tablename__ = "rotation_queue_states"
+    __table_args__ = (Index("ix_rotation_queue_policy_date_id", "rotation_policy_id", "effective_from", "id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     rotation_policy_id: Mapped[int] = mapped_column(ForeignKey("rotation_policies.id"), index=True)

@@ -1096,46 +1096,67 @@ def _find_menu_master_candidates(session, name: str, *, limit: int = 8, masters:
     match_key = _normalize_menu_match_key(name)
     if not normalized_name or not match_key:
         return []
-    if masters is None:
-        masters = session.execute(select(MenuMaster).order_by(MenuMaster.name.asc())).scalars().all()
-    scored: list[tuple[int, int, str, MenuMaster, str]] = []
-    for master in masters:
-        master_normalized = master.normalized_name or _normalize_menu_name(master.name or "")
-        master_key = _normalize_menu_match_key(master.name or "")
-        score = None
-        reason = None
-        if master_normalized == normalized_name:
-            continue
-        if not master_key:
-            continue
-        if master_key == match_key:
-            score = 95
-            reason = "normalized"
-        elif match_key in master_key or master_key in match_key:
-            score = 87
-            reason = "partial"
-        else:
-            ratio = SequenceMatcher(None, match_key, master_key).ratio()
-            if ratio >= 0.62:
-                score = round(ratio * 100)
-                reason = "similar"
-        if score is None:
-            continue
-        scored.append((score, abs(len(master_key) - len(match_key)), master.name or "", master, reason or "similar"))
-    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
-    payload: list[dict] = []
-    seen_ids: set[str] = set()
-    for score, _, _, master, reason in scored:
-        if master.id in seen_ids:
-            continue
-        seen_ids.add(master.id)
-        candidate = serialize_menu_master(master)
-        candidate["match_score"] = score
+    result = None
+    provided = masters is not None
+    if not provided:
+        result = session.execute(select(MenuMaster.id, MenuMaster.name, MenuMaster.normalized_name, MenuMaster.revision)
+            .order_by(MenuMaster.name.asc()).execution_options(yield_per=200))
+        masters = result
+    # Every candidate is compared; only the exact top distinct IDs are retained.
+    scored = {}
+    try:
+        for ordinal, master in enumerate(masters):
+            candidate = _score_menu_master_candidate(master, normalized_name, match_key, ordinal)
+            if candidate is None:
+                continue
+            previous = scored.get(master.id)
+            if previous is None or candidate[0] < previous[0]:
+                scored[master.id] = candidate
+            if len(scored) > max(1, limit):
+                del scored[max(scored, key=lambda key: scored[key][0])]
+    finally:
+        if result is not None:
+            result.close()
+    ordered = sorted(scored.values(), key=lambda item: item[0])
+    full_rows = {row.id: row for row in session.scalars(select(MenuMaster).where(
+        MenuMaster.id.in_(list(scored)),
+    ))} if not provided and scored else {}
+    payload = []
+    for ranking, master, reason in ordered:
+        selected = master if provided else full_rows.get(master.id)
+        if selected is None or (not provided and (selected.name, selected.normalized_name, selected.revision)
+                != (master.name, master.normalized_name, master.revision)):
+            raise ValueError("menu_master_candidate_changed")
+        candidate = serialize_menu_master(selected)
+        candidate["match_score"] = -ranking[0]
         candidate["match_reason"] = reason
         payload.append(candidate)
-        if len(payload) >= limit:
-            break
     return payload
+
+
+def _score_menu_master_candidate(master, normalized_name, match_key, ordinal):
+    master_normalized = master.normalized_name or _normalize_menu_name(master.name or "")
+    master_key = _normalize_menu_match_key(master.name or "")
+    score = None
+    reason = None
+    if master_normalized == normalized_name:
+        return None
+    if not master_key:
+        return None
+    if master_key == match_key:
+        score = 95
+        reason = "normalized"
+    elif match_key in master_key or master_key in match_key:
+        score = 87
+        reason = "partial"
+    else:
+        ratio = SequenceMatcher(None, match_key, master_key).ratio()
+        if ratio >= 0.62:
+            score = round(ratio * 100)
+            reason = "similar"
+    if score is None:
+        return None
+    return ((-score, abs(len(master_key) - len(match_key)), master.name or "", ordinal), master, reason or "similar")
 
 
 def _index_menu_master_resolutions(menu_master_resolutions: list[dict] | None) -> dict[str, dict]:
@@ -2407,12 +2428,23 @@ def read_menu_import(month_id, import_id):
         return receipt
 
 
-def list_menu_imports(month_id):
+def list_menu_imports(month_id, *, before_id=None):
     with session_scope() as session:
         menu_revision.begin_monthly_snapshot(session, write=False)
-        rows = session.execute(select(MonthlyMenuImport).where(MonthlyMenuImport.month_id == month_id)
-            .order_by(MonthlyMenuImport.created_at.desc(), MonthlyMenuImport.id)).scalars().all()
-        return [_serialize_import(session, row) for row in rows]
+        query = select(MonthlyMenuImport.id, MonthlyMenuImport.month_id, MonthlyMenuImport.state,
+                       MonthlyMenuImport.source_json, MonthlyMenuImport.created_at).where(MonthlyMenuImport.month_id == month_id)
+        if before_id:
+            cursor = session.execute(select(MonthlyMenuImport.id, MonthlyMenuImport.created_at).where(
+                MonthlyMenuImport.month_id == month_id, MonthlyMenuImport.id == before_id,
+            )).first()
+            if cursor is None:
+                raise ValueError("menu_import_cursor_invalid")
+            query = query.where(or_(MonthlyMenuImport.created_at < cursor.created_at,
+                (MonthlyMenuImport.created_at == cursor.created_at) & (MonthlyMenuImport.id > cursor.id)))
+        rows = session.execute(query.order_by(MonthlyMenuImport.created_at.desc(), MonthlyMenuImport.id).limit(26)).all()
+        return {"items": [{"id": row.id, "month_id": row.month_id, "state": row.state,
+                           "source": dict(row.source_json), "created_at": row.created_at.isoformat()} for row in rows[:25]],
+                "next_before_id": rows[24].id if len(rows) > 25 else None}
 
 
 def get_menu_import_download(month_id, import_id):
@@ -2732,18 +2764,28 @@ def create_menu(
 
 
 
-def list_menu_uploads(month_id: str) -> list[dict]:
+def list_menu_uploads(month_id: str, *, before_id=None) -> dict:
     ensure_menu_schema()
     with session_scope() as session:
-        logs = (
+        query = (
             session.query(AuditLog)
             .filter(AuditLog.action == "menu_upload")
             .filter(AuditLog.target == month_id)
-            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-            .all()
         )
+        if before_id:
+            cursor = session.execute(select(AuditLog.id, AuditLog.created_at).where(
+                AuditLog.id == before_id, AuditLog.action == "menu_upload", AuditLog.target == month_id,
+            )).first()
+            if cursor is None:
+                raise ValueError("menu_upload_cursor_invalid")
+            if cursor.created_at is None:
+                query = query.filter(AuditLog.created_at.is_(None), AuditLog.id < cursor.id)
+            else:
+                query = query.filter(or_(AuditLog.created_at < cursor.created_at, AuditLog.created_at.is_(None),
+                    (AuditLog.created_at == cursor.created_at) & (AuditLog.id < cursor.id)))
+        logs = query.order_by(AuditLog.created_at.desc().nullslast(), AuditLog.id.desc()).limit(26).all()
         items: list[dict] = []
-        for log in logs:
+        for log in logs[:25]:
             metadata = dict(log.metadata_json or {})
             file_uri = str(metadata.get("file_uri") or "").strip()
             entry = {
@@ -2762,7 +2804,7 @@ def list_menu_uploads(month_id: str) -> list[dict]:
             if archive_error:
                 entry["archive_error"] = archive_error
             items.append(entry)
-        return items
+        return {"items": items, "next_before_id": logs[24].id if len(logs) > 25 else None}
 
 
 def _format_menu_upload_display(created_at: datetime | None) -> str | None:
@@ -2781,17 +2823,29 @@ def _is_scoped_menu_upload_log(log: AuditLog) -> bool:
 
 
 def _get_latest_menu_upload_log(session, month_id: str, *, include_scoped: bool = False) -> AuditLog | None:
-    logs = (
+    query = (
         session.query(AuditLog)
         .filter(AuditLog.action == "menu_upload")
         .filter(AuditLog.target == month_id)
         .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-        .all()
     )
-    for log in logs:
-        if include_scoped or not _is_scoped_menu_upload_log(log):
-            return log
-    return None
+    if include_scoped:
+        return query.first()
+    log = query.filter(AuditLog.menu_scope_kind != "scoped").first()
+    if log is not None and log.menu_scope_kind != "unscoped":
+        raise ValueError("menu_upload_scope_invalid")
+    return log
+
+
+def _latest_unscoped_uploads(session, month_ids):
+    if not month_ids:
+        return {}
+    ranked = select(AuditLog.target, AuditLog.created_at, AuditLog.menu_scope_kind,
+        func.row_number().over(partition_by=AuditLog.target,
+            order_by=(AuditLog.created_at.desc(), AuditLog.id.desc())).label("rank")).where(
+                AuditLog.action == "menu_upload", AuditLog.target.in_(month_ids),
+                AuditLog.menu_scope_kind != "scoped").subquery()
+    return {row.target: row for row in session.execute(select(ranked).where(ranked.c.rank == 1))}
 
 
 def get_menu_upload_download(month_id: str, upload_id: str) -> dict | None:
@@ -3160,7 +3214,7 @@ def _count_monthly_entry_refs(
         query = query.where(MonthlyMenuEntry.category == normalized_category)
     if exclude_entry_id:
         query = query.where(MonthlyMenuEntry.id != exclude_entry_id)
-    return len(session.execute(query).scalars().all())
+    return int(session.execute(select(func.count()).select_from(query.subquery())).scalar_one())
 
 
 def upsert_entry_exceptions(month_id: str, entry_id: str, body: dict, *, _session=None) -> dict | None:
@@ -3399,8 +3453,8 @@ def serialize_menu_master(master: MenuMaster) -> dict:
     }
 
 
-def list_menu_masters(query: str | None = None, limit: int = 1000) -> list[dict]:
-    return list_menu_masters_page(query=query, limit=limit)["items"]
+def list_menu_masters(query: str | None = None, limit: int = 100) -> list[dict]:
+    return list_menu_masters_page(query=query, limit=limit, include_total=False)["items"]
 
 
 _MENU_MASTER_SORT_COLUMNS = {
@@ -3418,13 +3472,18 @@ _MENU_MASTER_SORT_COLUMNS = {
 
 
 def list_menu_masters_page(
-    query: str | None = None, limit: int = 1000, offset: int = 0,
-    sort: str = "name", order: str = "asc",
+    query: str | None = None, limit: int = 100, offset: int = 0,
+    sort: str = "name", order: str = "asc", after_id: str | None = None, before_id: str | None = None,
+    include_total: bool = True,
 ) -> dict:
     ensure_menu_schema()
-    normalized_limit = max(1, min(int(limit or 1000), 5000))
+    normalized_limit = max(1, min(int(limit or 100), 1000))
     if offset < 0 or sort not in _MENU_MASTER_SORT_COLUMNS or order not in {"asc", "desc"}:
         raise ValueError("invalid menu master pagination or sort")
+    if after_id is not None and before_id is not None:
+        raise ValueError("menu_master_cursor_invalid")
+    if offset and after_id is None and before_id is None:
+        raise ValueError("menu_master_cursor_required")
     with session_scope() as session:
         stmt = select(MenuMaster)
         count_stmt = select(func.count()).select_from(MenuMaster)
@@ -3433,14 +3492,43 @@ def list_menu_masters_page(
             stmt = stmt.where(MenuMaster.name.ilike(q))
             count_stmt = count_stmt.where(MenuMaster.name.ilike(q))
         column = _MENU_MASTER_SORT_COLUMNS[sort]
-        ordering = column.desc() if order == "desc" else column.asc()
-        stmt = stmt.order_by(ordering, MenuMaster.id.asc()).offset(offset).limit(normalized_limit)
+        backwards = before_id is not None
+        descending = (order == "desc") != backwards
+        ordering = column.desc() if descending else column.asc()
+        if after_id is not None or before_id is not None:
+            cursor_query = select(MenuMaster).where(MenuMaster.id == (before_id if backwards else after_id))
+            if query and query.strip():
+                cursor_query = cursor_query.where(MenuMaster.name.ilike(f"%{query.strip()}%"))
+            cursor = session.scalar(cursor_query)
+            if cursor is None:
+                raise ValueError("menu_master_cursor_invalid")
+            value = getattr(cursor, sort)
+            if value is None:
+                if backwards:
+                    stmt = stmt.where(or_(column.is_not(None), column.is_(None) & (MenuMaster.id < cursor.id)))
+                else:
+                    stmt = stmt.where(column.is_(None), MenuMaster.id > cursor.id)
+            else:
+                comparison = column < value if descending else column > value
+                tie = MenuMaster.id < cursor.id if backwards else MenuMaster.id > cursor.id
+                conditions = [comparison, (column == value) & tie]
+                if not backwards:
+                    conditions.append(column.is_(None))
+                stmt = stmt.where(or_(*conditions))
+        stmt = stmt.order_by(ordering.nullsfirst() if backwards else ordering.nullslast(),
+                             MenuMaster.id.desc() if backwards else MenuMaster.id.asc()).limit(normalized_limit + 1)
         rows = session.execute(stmt).scalars().all()
+        has_more = len(rows) > normalized_limit
+        rows = rows[:normalized_limit]
+        if backwards:
+            rows.reverse()
         return {
             "items": [serialize_menu_master(row) for row in rows],
-            "total": session.execute(count_stmt).scalar_one(),
+            "total": session.execute(count_stmt).scalar_one() if include_total else None,
             "offset": offset,
             "limit": normalized_limit,
+            "next_after_id": rows[-1].id if rows and (backwards or has_more) else None,
+            "previous_before_id": rows[0].id if rows and (has_more if backwards else offset > 0 or after_id is not None) else None,
         }
 
 
@@ -3901,6 +3989,11 @@ def _is_blank(value: str | None) -> bool:
     return value is None or value.strip() == ""
 
 
+def _facility_scope_filter(session, column, scope_ids):
+    from src.sql_text_v1 import PythonStrip
+    return PythonStrip(func.coalesce(column, "")).in_(["", *scope_ids])
+
+
 def get_menu_items_for_facility(month_id: str, facility_id: str | None, *, allow_unresolved: bool = False, session=None) -> list[dict]:
     if session is None:
         ensure_menu_schema()
@@ -3909,13 +4002,14 @@ def get_menu_items_for_facility(month_id: str, facility_id: str | None, *, allow
 
 
 def _read_items_for_facility(session, month_id: str, facility_id: str | None, *, allow_unresolved: bool = False) -> list[dict]:
+    scope_ids = _resolve_override_scope_ids(session, facility_id) if facility_id else []
     items = (
         session.query(MonthlyMenuItem)
         .filter(MonthlyMenuItem.monthly_menu_id == month_id)
+        .filter(_facility_scope_filter(session, MonthlyMenuItem.facility_override, scope_ids))
         .order_by(MonthlyMenuItem.id.asc())
         .all()
     )
-    scope_ids = _resolve_override_scope_ids(session, facility_id) if facility_id else []
     rank = {scope_id: idx for idx, scope_id in enumerate(scope_ids)}
     base_rank = len(scope_ids)
 
@@ -3969,9 +4063,11 @@ def get_menu_entries_for_facility(month_id: str, facility_id: str | None, *, ses
 
 
 def _read_entries_for_facility(session, month_id: str, facility_id: str | None) -> list[dict]:
+    scope_ids = _resolve_override_scope_ids(session, facility_id) if facility_id else []
     entries = (
         session.query(MonthlyMenuEntry)
         .filter(MonthlyMenuEntry.monthly_menu_id == month_id)
+        .filter(_facility_scope_filter(session, MonthlyMenuEntry.facility_override, scope_ids))
         .order_by(
             MonthlyMenuEntry.menu_date,
             MonthlyMenuEntry.daypart,
@@ -3987,7 +4083,6 @@ def _read_entries_for_facility(session, month_id: str, facility_id: str | None) 
         resolved.sort(key=_menu_entry_sort_key)
         return resolved
 
-    scope_ids = _resolve_override_scope_ids(session, facility_id)
     rank = {scope_id: idx for idx, scope_id in enumerate(scope_ids)}
     base_rank = len(scope_ids)
     base_entries_by_key: dict[tuple[object, object, int, str], list[MonthlyMenuEntry]] = {}
@@ -4047,7 +4142,6 @@ def get_menu(month_id: str, *, allow_unresolved: bool = False, session=None) -> 
 
 def get_menu_summaries(month_ids: list[str]) -> dict[str, dict]:
     """Read card metadata and exact identity counts, not recipes or output inputs."""
-    from types import SimpleNamespace
     identities = list(dict.fromkeys(month_ids))
     ensure_menu_schema()
     with _menu_read_session() as session:
@@ -4063,23 +4157,10 @@ def get_menu_summaries(month_ids: list[str]) -> dict[str, dict]:
                     or_(model.facility_override.is_(None), model.facility_override == ""))):
                 values[row.monthly_menu_id].append(row)
             grouped[model] = values
-        uploads = {}
-        invalid_uploads = set()
-        metadata_kind = (func.json_typeof(AuditLog.metadata_json)
-            if session.get_bind().dialect.name == "postgresql" else func.json_type(AuditLog.metadata_json))
-        for row in session.execute(select(AuditLog.target, AuditLog.created_at,
-                AuditLog.metadata_json["scope_override"].label("scope_override"), metadata_kind.label("metadata_kind")).where(
-                AuditLog.action == "menu_upload", AuditLog.target.in_(identities))
-                .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())):
-            log = SimpleNamespace(created_at=row.created_at, metadata_json={"scope_override": row.scope_override})
-            if row.target not in uploads and row.metadata_kind not in {None, "null", "object"}:
-                invalid_uploads.add(row.target)
-                continue
-            if row.target not in uploads and not _is_scoped_menu_upload_log(log):
-                uploads[row.target] = log
+        uploads = _latest_unscoped_uploads(session, identities)
         result = {}
         for month in identities:
-            if month in invalid_uploads:
+            if month in uploads and uploads[month].menu_scope_kind != "unscoped":
                 result[month] = {"month_id": month, "status": "unavailable", "menu": None, "item_count": None}
                 continue
             menu, upload = menus.get(month), uploads.get(month)
@@ -4118,13 +4199,9 @@ def list_recent_menus(limit: int = 12) -> list[dict]:
             MonthlyMenuEntry.monthly_menu_id.in_(month_ids),
             or_(MonthlyMenuEntry.facility_override.is_(None), MonthlyMenuEntry.facility_override == ""),
         ).distinct()).scalars()) if month_ids else set()
-        latest_uploads = {}
-        if month_ids:
-            for log in session.execute(select(AuditLog).where(
-                AuditLog.action == "menu_upload", AuditLog.target.in_(month_ids),
-            ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc())).scalars():
-                if log.target not in latest_uploads and not _is_scoped_menu_upload_log(log):
-                    latest_uploads[log.target] = log
+        latest_uploads = _latest_unscoped_uploads(session, month_ids)
+        if any(log.menu_scope_kind != "unscoped" for log in latest_uploads.values()):
+            raise ValueError("menu_upload_scope_invalid")
         for row in rows:
             latest_upload_log = latest_uploads.get(row.id)
             has_base_item = row.id in base_items

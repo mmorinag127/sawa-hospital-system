@@ -1,7 +1,7 @@
 from datetime import date, timedelta
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from .holiday_calendar import is_weekend_or_japanese_holiday
 from .models import (
@@ -18,7 +18,7 @@ from .models import (
     WorkdayRule,
 )
 from .periods import build_active_settings
-from .rotation_queue import resolve_rotation_queue, validate_rotation_snapshot
+from .rotation_queue import _queue_inputs, resolve_rotation_queue, validate_rotation_snapshot
 from .rule_config_utils import (
     PAID_LEAVE_HALF_DAY_WORK_KIND,
     fixed_weekday_off_value,
@@ -90,12 +90,18 @@ def validate_candidate(
     warnings: list[dict] = []
 
     covered: dict[tuple[date, int, int], int] = {}
-    for assignment in (
-        session.query(Assignment).filter(Assignment.candidate_id == candidate_id).all()
-    ):
+    coverage_staff: dict[tuple[date, int, int], set[int]] = {}
+    rotation_counts: dict[tuple[int, int], int] = {}
+    assignments = session.query(Assignment).options(joinedload(Assignment.shift_template)).filter(Assignment.candidate_id == candidate_id).all()
+    for assignment in assignments:
         key = (assignment.work_date, assignment.position_id, assignment.shift_template_id)
         covered[key] = covered.get(key, 0) + 1
-    demands = session.query(Demand).filter(Demand.work_date >= start, Demand.work_date < end).all()
+        coverage_staff.setdefault(key, set()).add(assignment.staff_id)
+        rotation_key = (assignment.position_id, assignment.staff_id)
+        rotation_counts[rotation_key] = rotation_counts.get(rotation_key, 0) + 1
+    demands = session.query(Demand).options(joinedload(Demand.position)).filter(
+        Demand.work_date >= start, Demand.work_date < end).order_by(
+        Demand.work_date, Demand.shift_template_id, Demand.position_id).all()
     for demand in demands:
         actual = covered.get((demand.work_date, demand.position_id, demand.shift_template_id), 0)
         minimum = demand.min_count if demand.min_count is not None else demand.required_count
@@ -120,7 +126,6 @@ def validate_candidate(
                 }
             )
 
-    config = session.query(RuleConfig).filter(RuleConfig.name == "active").one_or_none()
     if settings_override is not None:
         settings = build_active_settings(settings_override)
     else:
@@ -129,29 +134,40 @@ def validate_candidate(
             from .rule_profiles import effective_rule_config
             settings = effective_rule_config(session)
         else:
+            config = session.query(RuleConfig).filter(RuleConfig.name == "active").one_or_none()
             settings = build_active_settings(config.config_json if config else {})
     from .operational_constraints import input_calendar_dates, input_calendar_errors
     period_dates = input_calendar_dates(session, start, end)
+    candidate_statuses = session.query(CandidateStaffStatus).options(joinedload(CandidateStaffStatus.shift_template)).filter(
+        CandidateStaffStatus.candidate_id == candidate_id,
+    ).all()
+    workday_rule_by_date = {row.work_date: row for row in session.query(WorkdayRule).filter(
+        WorkdayRule.work_date >= start, WorkdayRule.work_date < end,
+    ).all()}
+    all_staff = session.query(Staff).all()
+    templates = {row.id: row for row in session.query(ShiftTemplate).all()}
+    hard_pair_rules = session.query(StaffPairRule).filter(StaffPairRule.strength == "hard").all()
+    policies = session.query(RotationPolicy).options(joinedload(RotationPolicy.position)).filter(
+        RotationPolicy.enabled.is_(True)).order_by(RotationPolicy.id).all()
+    from .solver import _load_availability
+    availability = _load_availability(session, start, end)
     from .assignment_validation import validate_assignments
-    warnings.extend(validate_assignments(session, candidate, start, end, settings))
-    assignments = session.query(Assignment).filter(Assignment.candidate_id == candidate_id).all()
+    warnings.extend(validate_assignments(session, candidate, start, end, settings, assignments=assignments,
+        candidate_statuses=candidate_statuses, workdays=workday_rule_by_date, period_dates=period_dates,
+        staffs={row.id: row for row in all_staff}, templates=templates, demands=demands,
+        hard_pair_rules=hard_pair_rules, policies=policies, availability=availability))
     for demand in demands:
         for group in settings.get("position_staffing_groups") or []:
             if group["position_id"] != demand.position_id:
                 continue
-            selected = {
-                row.staff_id for row in assignments
-                if row.work_date == demand.work_date
-                and row.position_id == demand.position_id
-                and row.shift_template_id == demand.shift_template_id
-            }
+            selected = coverage_staff.get((demand.work_date, demand.position_id, demand.shift_template_id), set())
             if selected and len(selected.intersection(group["staff_ids"])) < group["min_count"]:
                 warnings.append({
                     "severity": "error", "code": "position_staffing_group_shortage",
                     "position_id": demand.position_id, "work_date": demand.work_date.isoformat(),
                     "message": f"{demand.work_date} の担当グループの最低人数を満たしていません",
                 })
-    for assignment in session.query(Assignment).filter(Assignment.candidate_id == candidate_id).all():
+    for assignment in assignments:
         if is_position_prohibited(assignment.position_id, assignment.work_date, settings):
             warnings.append({
                 "severity": "error", "code": "position_day_category_prohibited",
@@ -162,19 +178,6 @@ def validate_candidate(
     counted = settings["holiday_counted_work_kinds"]
     holiday_by_staff: dict[int, float] = {}
     paid_leave_adjustment_by_staff: dict[int, float] = {}
-    candidate_statuses = (
-        session.query(CandidateStaffStatus)
-        .filter(CandidateStaffStatus.candidate_id == candidate_id)
-        .all()
-    )
-    workday_rule_by_date = {
-        row.work_date: row
-        for row in (
-            session.query(WorkdayRule)
-            .filter(WorkdayRule.work_date >= start, WorkdayRule.work_date < end)
-            .all()
-        )
-    }
     for status in candidate_statuses:
         counted_work_kind = status.work_kind
         if (
@@ -191,14 +194,8 @@ def validate_candidate(
             paid_leave_adjustment_by_staff[status.staff_id] = (
                 paid_leave_adjustment_by_staff.get(status.staff_id, 0.0) + 0.5
             )
-    active_staff = (
-        session.query(Staff)
-        .filter(
-            (Staff.active_from.is_(None) | (Staff.active_from < end)),
-            (Staff.active_to.is_(None) | (Staff.active_to >= start)),
-        )
-        .all()
-    )
+    active_staff = [staff for staff in all_staff if (staff.active_from is None or staff.active_from < end)
+                    and (staff.active_to is None or staff.active_to >= start)]
     exact = settings.get("monthly_holiday_exact_days")
     calendar_errors = input_calendar_errors(active_staff, period_dates, start, end, settings)
     if calendar_errors:
@@ -284,6 +281,8 @@ def validate_candidate(
     warnings.extend(validate_operational(
         session, candidate, active_staff, period_dates, settings,
         prior_status_by_key, workday_rule_by_date,
+        assignments=assignments, candidate_statuses=candidate_statuses, templates=templates,
+        availability=availability,
     ))
 
     for staff_id in {int(value) for value in settings.get("weekday_no_off_staff_ids") or []}:
@@ -341,7 +340,7 @@ def validate_candidate(
             or (staff.active_to and work_date > staff.active_to)
         )
 
-    for pair_rule in session.query(StaffPairRule).filter(StaffPairRule.strength == "hard").all():
+    for pair_rule in hard_pair_rules:
         if pair_rule.kind not in {"avoid_same_weekday_off", "avoid_same_day_off"}:
             continue
         for work_date in period_dates:
@@ -361,9 +360,8 @@ def validate_candidate(
                     "message": f"{work_date.isoformat()} に同時休み禁止の2名が休みです",
                 })
 
-    from .solver import _daily_work_limit_minutes, _load_availability
-    _, _, half_day_overrides, _, _ = _load_availability(session, start, end)
-    templates = {row.id: row for row in session.query(ShiftTemplate).all()}
+    from .solver import _daily_work_limit_minutes
+    _, _, half_day_overrides, _, _ = availability
     for staff in active_staff:
         for work_date in period_dates:
             workday_rule = workday_rule_by_date.get(work_date)
@@ -662,32 +660,26 @@ def validate_candidate(
                 "dates": additional_weekday_offs,
             })
     rotation_balances = []
-    policies = session.query(RotationPolicy).filter(RotationPolicy.enabled.is_(True)).all()
     confirmed = session.query(ScheduleConfirmation).filter_by(solve_run_id=run.id).first() is not None
     rotation_snapshot = config_json.get("rotation_queue_snapshot")
+    resolution_policies = [policy for policy in policies if not confirmed
+        or (rotation_snapshot or {}).get(str(policy.id)) is None]
+    rotation_inputs = _queue_inputs(session, resolution_policies, start)
     if not confirmed:
-        for message in validate_rotation_snapshot(session, policies, start, end, rotation_snapshot):
+        for message in validate_rotation_snapshot(session, policies, start, end, rotation_snapshot, _inputs=rotation_inputs):
             warnings.append({"severity": "error", "code": "rotation_queue_changed", "message": message})
-    assignments = (
-        session.query(Assignment)
-        .filter(Assignment.candidate_id == candidate_id)
-        .all()
-    )
     for policy in policies:
         recorded = (rotation_snapshot or {}).get(str(policy.id))
         if confirmed and recorded is not None:
             member_ids = recorded["queue_staff_ids"]
         else:
             try:
-                _, member_ids = resolve_rotation_queue(session, policy, start)
+                _, member_ids = resolve_rotation_queue(session, policy, start, _inputs=rotation_inputs)
             except ValueError as error:
                 warnings.append({"severity": "error", "code": "rotation_queue_invalid", "message": str(error)})
                 continue
         counts = {
-            staff_id: sum(
-                assignment.staff_id == staff_id and assignment.position_id == policy.position_id
-                for assignment in assignments
-            )
+            staff_id: rotation_counts.get((policy.position_id, staff_id), 0)
             for staff_id in member_ids
         }
         if not counts:

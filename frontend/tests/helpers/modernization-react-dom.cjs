@@ -18,7 +18,12 @@ function transport() {
     const call = { method, url, body: method === 'get' ? undefined : body, config: method === 'get' ? body : config };
     calls.push(call);
     const detailPrefix = url.includes('/workflow-v2/inspection-detail/') ? url.slice(0, url.lastIndexOf('/') + 1) : null;
-    const handler = handlers.get(`${method} ${url}`) || (detailPrefix && handlers.get(`${method} ${detailPrefix}`));
+    const display = new URL(url, 'https://component.invalid');
+    const selectedDocument = display.searchParams.get('selected_document_id');
+    const displayBase = selectedDocument && display.pathname.endsWith('/workflow-v2/display') &&
+      [...display.searchParams.keys()].every(key => ['scope', 'selected_document_id'].includes(key))
+      ? `${display.pathname}?scope=${display.searchParams.get('scope')}` : null;
+    const handler = handlers.get(`${method} ${url}`) || (displayBase && handlers.get(`${method} ${displayBase}`)) || (detailPrefix && handlers.get(`${method} ${detailPrefix}`));
     if (!handler) return Promise.reject(new Error(`Unhandled mocked transport ${method} ${url}`));
     try { return Promise.resolve(handler(call)); } catch (reason) { return Promise.reject(reason); }
   };

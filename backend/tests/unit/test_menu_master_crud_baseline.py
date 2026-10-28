@@ -123,3 +123,35 @@ def test_search_and_limit_preserve_existing_order():
     service.create_menu_master({"name": "Chicken"})
     assert service.list_menu_masters(query=" fish ", limit=1) == [first]
     assert service.list_menu_masters(query="not present") == []
+
+
+def test_cursor_pages_do_not_count_or_use_offset_unless_explicitly_requested():
+    from sqlalchemy import event
+
+    for name in ('Alpha', 'Bravo', 'Charlie', 'Delta'):
+        service.create_menu_master({'name': name})
+    statements = []
+    with service.session_scope() as session:
+        engine = session.get_bind()
+
+    def observe(_connection, _cursor, statement, *_args):
+        statements.append(statement.lower())
+
+    event.listen(engine, 'before_cursor_execute', observe)
+    try:
+        first = service.list_menu_masters_page(limit=2, include_total=False)
+        second = service.list_menu_masters_page(limit=2, after_id=first['next_after_id'], include_total=False)
+        previous = service.list_menu_masters_page(limit=2, before_id=second['previous_before_id'], include_total=False)
+        assert [item['name'] for item in first['items']] == ['Alpha', 'Bravo']
+        assert [item['name'] for item in second['items']] == ['Charlie', 'Delta']
+        assert previous['items'] == first['items']
+        assert first['total'] is second['total'] is previous['total'] is None
+        assert not any('count(' in statement for statement in statements)
+        # SQLite emits OFFSET 0 for LIMIT even without an ORM offset; no deep offset is requested.
+        with pytest.raises(ValueError, match='menu_master_cursor_required'):
+            service.list_menu_masters_page(limit=2, offset=2, include_total=False)
+        exact = service.list_menu_masters_page(limit=1, include_total=True)
+        assert exact['total'] == 4
+        assert any('count(' in statement for statement in statements)
+    finally:
+        event.remove(engine, 'before_cursor_execute', observe)

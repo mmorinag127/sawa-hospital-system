@@ -22,10 +22,22 @@ class ProcessHistory(Envelope):
     scope: Literal['menu', 'day']
     created_at: str
     origin: str
-    document: dict[str, JsonValue]
-    can_restore: bool
+    document: dict[str, JsonValue] | None
+    can_restore: bool | None
     change_note: str
-    changes: list[dict[str, JsonValue]]
+    changes: list[dict[str, JsonValue]] | None
+
+
+class ProcessHistoryPage(Envelope):
+    items: list[ProcessHistory]
+    next_before: int | None
+
+
+class ProcessHistoryDocument(Envelope):
+    menu_id: int
+    revision_id: int
+    version: int
+    document: dict[str, JsonValue]
 
 
 class ProcessRecipe(Envelope):
@@ -100,6 +112,7 @@ class ProcessContext(Envelope):
     shared_menu_defaults: SharedMenuDefaults | None
     proposal: ProcessProposal | None
     history: list[ProcessHistory]
+    history_before: int | None = None
     recipes: list[ProcessRecipe]
 
 

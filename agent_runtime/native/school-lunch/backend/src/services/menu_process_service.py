@@ -53,19 +53,27 @@ def state(session, menu_id):
     return menu, binding, recipe, revision
 
 
+def _revision_sources(session, model, ids):
+    keys = list(ids)
+    sources = {}
+    for offset in range(0, len(keys), 200):
+        sources.update((item.id, item) for item in session.scalars(select(model).where(
+            model.id.in_(keys[offset:offset + 200]),
+        )))
+    return sources
+
+
 def context(session, menu_id):
     menu, binding, recipe, revision = state(session, menu_id)
-    revisions = []
-    if recipe:
-        revisions = session.scalars(select(ProcessRevision).where(
-            ProcessRevision.recipe_id == recipe.id,
-            (ProcessRevision.scope == 'menu') | (ProcessRevision.menu_execution_id == menu_id)
-        ).order_by(ProcessRevision.number.desc())).all()
+    history = history_page(session, menu, recipe)
     # Reuse is only offered for an explicitly confirmed canonical revision.  A
     # newer draft may be the editing head, but is never a reusable recipe.
     recipes = session.scalars(select(ProcessRecipe).where(
         ProcessRecipe.facility_id == menu.facility_id,
         ProcessRecipe.confirmed_revision_id.is_not(None)).order_by(ProcessRecipe.name, ProcessRecipe.id)).all()
+    confirmed_numbers = dict(session.execute(select(ProcessRevision.id, ProcessRevision.number).where(
+        ProcessRevision.id.in_([item.confirmed_revision_id for item in recipes]),
+    )).all()) if recipes else {}
     document = deepcopy(revision.document) if revision else seed(menu)
     from src.services.shared_menu_service import daily_draft
     suggested_document = daily_draft(session, menu) if revision is None else None
@@ -103,18 +111,49 @@ def context(session, menu_id):
             'status': revision.status if revision else 'draft', 'scope': revision.scope if revision else 'menu',
             'document': document, 'suggested_document': suggested_document,
             'shared_menu_defaults': shared_menu_defaults, 'proposal': pending,
-            'history': [{'id': r.id, 'number': r.number, 'status': r.status, 'scope': r.scope,
-                         'created_at': r.created_at.isoformat(), 'origin': r.origin,
-                         'document': remap_materials(r.document, menu, clear_actuals=r.menu_execution_id != menu.id) or deepcopy(r.document),
-                         'can_restore': remap_materials(r.document, menu, clear_actuals=r.menu_execution_id != menu.id) is not None,
-                         'change_note': r.change_note,
-                         'changes': r.changes} for r in revisions],
+            'history': history['items'], 'history_before': history['next_before'],
             'recipes': [{'id': r.id, 'name': r.name,
-                         'revision': session.get(ProcessRevision, r.confirmed_revision_id).number}
+                         'revision': confirmed_numbers[r.confirmed_revision_id]}
                         for r in recipes]}
 
 
-def remap_materials(document, menu, *, clear_actuals=True):
+def history_page(session, menu, recipe, *, before=None):
+    if recipe is None:
+        return {'items': [], 'next_before': None}
+    columns = (ProcessRevision.id, ProcessRevision.number, ProcessRevision.status, ProcessRevision.scope,
+               ProcessRevision.created_at, ProcessRevision.origin, ProcessRevision.change_note)
+    statement = select(*columns).where(ProcessRevision.recipe_id == recipe.id,
+        (ProcessRevision.scope == 'menu') | (ProcessRevision.menu_execution_id == menu.id))
+    if before is not None:
+        if type(before) is not int or before <= 0:
+            raise HTTPException(422, '工程履歴のページ指定が不正です')
+        statement = statement.where(ProcessRevision.number < before)
+    rows = session.execute(statement.order_by(ProcessRevision.number.desc()).limit(26)).all()
+    return {'items': [{**{name: getattr(row, name) for name in ('id', 'number', 'status', 'scope', 'origin', 'change_note')},
+                       'created_at': row.created_at.isoformat(), 'document': None, 'can_restore': None,
+                       'changes': None} for row in rows[:25]],
+            'next_before': rows[24].number if len(rows) > 25 else None}
+
+
+def history_document(session, menu_id, revision_id, expected_version):
+    menu, binding, recipe, _ = state(session, menu_id)
+    if (binding.version if binding else 0) != expected_version:
+        conflict()
+    revision = session.get(ProcessRevision, revision_id)
+    if (recipe is None or revision is None or revision.recipe_id != recipe.id
+            or (revision.scope != 'menu' and revision.menu_execution_id != menu.id)):
+        raise HTTPException(404, '対象献立の工程履歴がありません')
+    pattern_ids = {item['pattern_revision_id'] for item in revision.document.get('pattern_applications', [])}
+    from src.models.process_pattern import ProcessPatternRevision
+    patterns = _revision_sources(session, ProcessPatternRevision, pattern_ids)
+    document = remap_materials(revision.document, menu, clear_actuals=revision.menu_execution_id != menu.id,
+                              pattern_sources=patterns)
+    if document is None:
+        raise HTTPException(422, '現在の献立と食材構成が異なるため、この履歴は復元できません')
+    return {'menu_id': menu.id, 'revision_id': revision.id, 'version': expected_version, 'document': document}
+
+
+def remap_materials(document, menu, *, clear_actuals=True, pattern_sources=None, shared_sources=None):
     """Explicit reuse only, by ordered material identities (including duplicate uses)."""
     document = deepcopy(document)
     expected = seed(menu)['ingredients']
@@ -133,7 +172,8 @@ def remap_materials(document, menu, *, clear_actuals=True):
         from src.models.process_pattern import ProcessPatternRevision
         from sqlalchemy.orm import object_session
         owner = object_session(menu)
-        source = owner.get(ProcessPatternRevision, application['pattern_revision_id']) if owner else None
+        source = (pattern_sources.get(application['pattern_revision_id']) if pattern_sources is not None
+                  else owner.get(ProcessPatternRevision, application['pattern_revision_id']) if owner else None)
         if source is None:
             raise HTTPException(422, '再利用するパターンの保存版が見つかりません')
         prefix = f"application-{application['application_id']}"
@@ -144,7 +184,8 @@ def remap_materials(document, menu, *, clear_actuals=True):
         from src.models.shared_menu import SharedMenuRevision
         from sqlalchemy.orm import object_session
         owner = object_session(menu)
-        source = owner.get(SharedMenuRevision, document['shared_menu_source']['revision_id']) if owner else None
+        source = (shared_sources.get(document['shared_menu_source']['revision_id']) if shared_sources is not None
+                  else owner.get(SharedMenuRevision, document['shared_menu_source']['revision_id']) if owner else None)
         if source is None:
             raise HTTPException(422, '再利用する共有献立の保存版が見つかりません')
         shared_default_equipment = {
@@ -352,6 +393,8 @@ def _save_locked(session, menu_id, request, actor_role='operator', *, selected_r
     menu, binding, recipe, previous = state(session, menu_id)
     check_versions(menu, binding, recipe, request)
     document = request.document.model_dump(exclude_none=False)
+    from src.services.shared_menu_review import school_direct_document
+    school_direct = school_direct_document(session,document)
     source = document.get('shared_menu_source')
     old_source = previous.document.get('shared_menu_source') if previous else None
     if not shared_adoption and not selected_recipe and source != old_source:
@@ -363,7 +406,7 @@ def _save_locked(session, menu_id, request, actor_role='operator', *, selected_r
         raise HTTPException(422, '共有献立を採用した工程は日次範囲でのみ保存できます。')
     if source:
         from src.services.shared_menu_service import _validate_equipment
-        _validate_equipment(document, confirmed=request.status == 'confirmed')
+        _validate_equipment(document, confirmed=request.status == 'confirmed' and not school_direct)
     if previous and previous.document.get('pattern_applications') and not document.get('pattern_applications'):
         # A daily graph sourced from patterns must not silently lose its source
         # while being edited. Explicit graph deletion remains valid, but retains
@@ -390,7 +433,8 @@ def _save_locked(session, menu_id, request, actor_role='operator', *, selected_r
             raise HTTPException(422, str(exc)) from exc
     if request.status == 'confirmed':
         try:
-            request.document.check_confirmable()
+            if not school_direct:
+                request.document.check_confirmable()
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
     if selected_recipe:

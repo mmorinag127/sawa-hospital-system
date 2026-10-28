@@ -1,10 +1,11 @@
 from datetime import datetime
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, LargeBinary, String
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Index
 from src.db import Base
 
 
 class SchoolLunchDocument(Base):
     __tablename__ = "school_lunch_documents"
+    __table_args__ = (Index("ix_school_documents_history", "facility_id", "target_month", "created_at", "id"),)
     id = Column(String(32), primary_key=True)
     facility_id = Column(Integer, ForeignKey("school_lunch_facilities.id", ondelete="RESTRICT"), nullable=False, index=True)
     target_month = Column(String(7), nullable=False)

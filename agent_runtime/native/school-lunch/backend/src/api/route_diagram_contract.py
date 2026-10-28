@@ -8,7 +8,7 @@ class RouteLayoutResponse(BaseModel):
     facility_id: int
     name: str
     version: int
-    image: str
+    image: str | None
     locations: dict[str, tuple[float, float]]
 
 
@@ -48,7 +48,7 @@ class RouteCandidateResponse(BaseModel):
     points: list[tuple[float, float]]
 
 
-class RouteSourceResponse(BaseModel):
+class RouteSourceSummaryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: int
     diagram_id: int
@@ -58,6 +58,15 @@ class RouteSourceResponse(BaseModel):
     source_sha256: str
     image_sha256: str
     page: int
+
+
+class RouteSourcePageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    items: list[RouteSourceSummaryResponse]
+    next_before_id: int | None
+
+
+class RouteSourceResponse(RouteSourceSummaryResponse):
     image: str
     settings: dict
     candidates: list[RouteCandidateResponse]

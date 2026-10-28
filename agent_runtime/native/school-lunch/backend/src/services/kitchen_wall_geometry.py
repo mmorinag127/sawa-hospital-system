@@ -158,6 +158,9 @@ def storage_obstacles(network, allowed, *, receipt=False):
     may clip a storage obstacle, and no wall/gate permission is altered here.
     """
     permissions={}
+    allowed=set(allowed)
+    allowed.update(network.get('storage_equipment_areas',{}).get(eid) for eid in tuple(allowed)
+                   if network.get('storage_equipment_areas',{}).get(eid))
     if receipt:
         regions={r['id']:tuple(r['bounds']) for r in network.get('regions',[]) if 'id' in r}
         for rule in network.get('receipt_transit_regions',[]):
@@ -225,4 +228,7 @@ def routing_network(root, network, manifest=None):
     if manifest is not None:
         result['compartments']=compartment_cells(root)
         result['protected_storage_cells']=protected_storage_cells(root,manifest,result['compartments'])
+        result['storage_equipment_areas']={el.get('id'):'area:'+el.get('data-storage-area')
+            for el in root.iter() if el.get('id') and el.get('data-storage-area')
+            and 'area:'+el.get('data-storage-area') in result['protected_storage_cells']}
     return result

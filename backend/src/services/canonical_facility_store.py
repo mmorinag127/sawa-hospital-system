@@ -1,6 +1,7 @@
 """Facility JSON bytes and their storage revision are one CAS snapshot."""
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from copy import deepcopy
 from datetime import date, datetime, timedelta
@@ -16,6 +17,8 @@ from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
 from src.services.storage_service import _get_thread_gcs_client, _get_thread_gcs_read_session
+
+_read_scope = ContextVar("canonical_facility_read_scope", default=None)
 
 
 class CanonicalStoreError(Exception):
@@ -491,6 +494,15 @@ def _read_gcs(source: str) -> MasterSnapshot:
 
 
 def read_snapshot() -> MasterSnapshot:
+    captured = _read_scope.get()
+    if captured is not None:
+        if source_location() != captured.source:
+            raise CanonicalStoreError("facility_master_read_source_changed", status_code=409)
+        return MasterSnapshot(deepcopy(captured.master), captured.revision, captured.source)
+    return _read_snapshot_from_source()
+
+
+def _read_snapshot_from_source() -> MasterSnapshot:
     source = source_location()
     try:
         if source.startswith("gs://"):
@@ -503,7 +515,26 @@ def read_snapshot() -> MasterSnapshot:
         raise CanonicalStoreError("facility_master_storage_unavailable") from exc
 
 
+@contextmanager
+def consistent_read_scope():
+    if _read_scope.get() is not None:
+        yield
+        return
+    original = _read_snapshot_from_source()
+    token = _read_scope.set(original)
+    try:
+        yield
+        observed = _read_snapshot_from_source()
+        if observed.source != original.source:
+            raise CanonicalStoreError("facility_master_read_source_changed", status_code=409)
+        check_revision(observed, original.revision)
+    finally:
+        _read_scope.reset(token)
+
+
 def update_snapshot(expected_revision: str, transform: Callable[[dict], dict]) -> MasterSnapshot:
+    if _read_scope.get() is not None:
+        raise CanonicalStoreError("facility_master_read_scope_is_readonly", status_code=409)
     if not isinstance(expected_revision, str) or not expected_revision:
         raise CanonicalStoreError("facility_master_expected_revision_required", status_code=428)
     source = source_location()

@@ -140,8 +140,9 @@ class ShiftQuestions:
         if action=='page':
             return await self.page(run, command, choice['question'], choice['items'], choice['page'])
         if action=='constraints':
-            source = await self.tools.flow.read(run, 'shift_get_constraints')
             period = await self.tools.flow.read(run, 'shift_get_period', {'query':{'month':inputs['month']}})
+            source = await self.tools.flow.read(run, 'shift_get_constraints', {'query': {
+                'date_from': period['start_date'], 'date_to': period['end_date_exclusive']}})
             staff = {item['id']:item['name'] for item in rows(await self.tools.flow.read(run, 'shift_get_staff'))}
             items = [item for item in rows(source) if period['start_date']<=item['work_date']<period['end_date_exclusive']]
             choices = [{'label':f'{staff[item["staff_id"]]}・{item["work_date"]}・{STATUSES.get(item["status"],item["status"])}（'+('必須' if item['strength']=='hard' else '希望')+'）', 'action':'constraint', 'item':item, 'source':source} for item in items]

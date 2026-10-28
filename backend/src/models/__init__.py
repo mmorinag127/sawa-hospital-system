@@ -41,3 +41,5 @@ from src.models.shipping_tracking import ShippingTrackingLog  # noqa: F401
 from src.models.ocr_training_sample import OcrTrainingSample  # noqa: F401
 from src.models.uploaded_pdf import UploadedPdf, UploadedPdfAttempt  # noqa: F401
 from src.models.workflow_ocr_delivery import WorkflowOcrDelivery  # noqa: F401
+from src.models.dashboard_counts_v1 import DashboardCount  # noqa: F401
+from src.models import document_reference_guard_v1  # noqa: F401

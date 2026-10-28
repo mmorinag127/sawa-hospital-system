@@ -2,12 +2,12 @@ from datetime import date
 from io import BytesIO
 import base64
 import re
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, TypeAdapter, ValidationError, field_validator
 from typing import Annotated, Literal
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 from starlette.responses import StreamingResponse
 from src.services.workbook_pdf_service import OutputFormat, workbook_response
 from src.api.auth import require_role
@@ -17,7 +17,7 @@ from src.models.route_diagram import KitchenLayout, RouteDiagram, RouteSourceSes
 from src.services import route_diagram_service as service
 from src.services.kitchen_layout_source import render_pdf_page
 from src.services.route_export_snapshot import begin_export_read, freeze_row
-from src.api.route_diagram_contract import RouteLayoutResponse, RouteDiagramResponse, RouteSourceResponse
+from src.api.route_diagram_contract import RouteLayoutResponse, RouteDiagramResponse, RouteSourceResponse, RouteSourcePageResponse
 
 from src.api.school_scope import require_school_scope
 
@@ -105,18 +105,32 @@ class DiagramWrite(BaseModel):
         return routes
 
 
-def layout_data(layout):
-    return {"id": layout.id, "facility_id": layout.facility_id, "name": layout.name, "version": layout.version, "locations": layout.locations, "image": "data:image/png;base64," + base64.b64encode(layout.image).decode()}
+def layout_data(layout, *, include_image=True):
+    return {"id": layout.id, "facility_id": layout.facility_id, "name": layout.name, "version": layout.version, "locations": layout.locations, "image": "data:image/png;base64," + base64.b64encode(layout.image).decode() if include_image else None}
 
 
-def diagram_data(session, diagram):
+def diagram_data(session, diagram, *, blockers=None, source_views=None):
     from src.services.route_source_service import modified
-    return {"id": diagram.id, "facility_id": diagram.facility_id, "service_date": str(diagram.service_date), "layout_id": diagram.layout_id, "layout_version": diagram.layout_version, "version": diagram.version, "source_versions": diagram.source_versions, "routes": [service.public_route(r) for r in diagram.routes], "source_modifications": {str(r["id"]): modified(session,r) for r in diagram.routes if r.get("source_provenance")}, "blockers": service.blockers(session, diagram)}
+    return {"id": diagram.id, "facility_id": diagram.facility_id, "service_date": str(diagram.service_date), "layout_id": diagram.layout_id, "layout_version": diagram.layout_version, "version": diagram.version, "source_versions": diagram.source_versions, "routes": [service.public_route(r) for r in diagram.routes], "source_modifications": {str(r["id"]): modified(session,r, sources=source_views) for r in diagram.routes if r.get("source_provenance")}, "blockers": service.blockers(session, diagram) if blockers is None else blockers}
 
 
 @router.get("/layouts", responses={200: {"model": list[RouteLayoutResponse]}})
-def layouts(facility_id: int, session: Session = Depends(get_school_lunch_session)):
-    return [layout_data(row) for row in session.query(KitchenLayout).filter_by(facility_id=facility_id).order_by(KitchenLayout.id)]
+def layouts(facility_id: int, session: Session = Depends(get_school_lunch_session), summary: bool = True):
+    query = session.query(KitchenLayout).filter_by(facility_id=facility_id).order_by(KitchenLayout.id)
+    if summary:
+        query = query.options(load_only(KitchenLayout.id, KitchenLayout.facility_id, KitchenLayout.name,
+                                       KitchenLayout.version, KitchenLayout.locations))
+    return [layout_data(row, include_image=not summary) for row in query]
+
+
+@router.get("/layouts/{layout_id}", responses={200: {"model": RouteLayoutResponse}})
+def read_layout(layout_id: int, facility_id: int, version: int, session: Session = Depends(get_school_lunch_session)):
+    row = session.query(KitchenLayout).filter_by(id=layout_id, facility_id=facility_id).one_or_none()
+    if row is None:
+        raise HTTPException(404, "選択された学校の図面が見つかりません。")
+    if row.version != version:
+        raise HTTPException(409, "図面が変更されています。一覧を再読み込みしてください。")
+    return layout_data(row)
 
 
 @router.post("/layouts")
@@ -163,7 +177,10 @@ def save_layout(layout_id: int, body: LocationsWrite, session: Session = Depends
 def list_diagrams(facility_id: int, month: str, session: Session = Depends(get_school_lunch_session)):
     start, end = month_range(month)
     rows = session.query(RouteDiagram).filter(RouteDiagram.facility_id == facility_id, RouteDiagram.service_date >= start, RouteDiagram.service_date < end).order_by(RouteDiagram.service_date).all()
-    return [diagram_data(session, row) for row in rows]
+    from src.services.route_source_service import source_views
+    sources = source_views(session, rows)
+    blockers = service.blockers_for_diagrams(session, rows, source_views=sources)
+    return [diagram_data(session, row, blockers=blockers[row.id], source_views=sources) for row in rows]
 
 
 def month_range(month):
@@ -320,9 +337,11 @@ class SourceConfirm(BaseModel):
 
 
 def source_data(row):
+    from src.services.route_source_service import source_content
+    _, image = source_content(row)
     return {"id": row.id, "diagram_id": row.diagram_id, "version": row.version, "status": row.status,
             "filename": row.filename, "source_sha256": row.source_sha256, "image_sha256": row.image_sha256,
-            "page": row.page, "image": "data:image/png;base64,"+base64.b64encode(row.image).decode(),
+            "page": row.page, "image": "data:image/png;base64,"+base64.b64encode(image).decode(),
             "settings": row.settings, "candidates": row.candidates, "confirmation": row.confirmation,
             "blockers": [] if row.status == "confirmed" else ["未確定です。枠線も含む候補から材料・順番・向き・位置合わせ・線種を確認してください" if row.candidates else "線候補がありません。読取範囲・色・設定を原本で確認してください"]}
 
@@ -335,8 +354,36 @@ def source_row(session, session_id):
 
 
 @router.get("/source-sessions/list", responses={200: {"model": list[RouteSourceResponse]}})
-def list_sources(diagram_id: int, session: Session = Depends(get_school_lunch_session)):
-    return [source_data(r) for r in session.query(RouteSourceSession).filter_by(diagram_id=diagram_id).order_by(RouteSourceSession.id.desc())]
+def list_sources(diagram_id: int, session: Session = Depends(get_school_lunch_session), *,
+                 before_id: Annotated[int | None, Query(ge=1)] = None,
+                 limit: Annotated[int, Query(ge=1, le=100)] = 25):
+    query = session.query(RouteSourceSession).filter_by(diagram_id=diagram_id)
+    if before_id is not None:
+        query = query.filter(RouteSourceSession.id < before_id)
+    return [source_data(row) for row in query.order_by(RouteSourceSession.id.desc()).limit(limit)]
+
+
+@router.get("/source-sessions/page", responses={200: {"model": RouteSourcePageResponse}})
+def source_page(diagram_id: int, before_id: int | None = None, session: Session = Depends(get_school_lunch_session)):
+    fields = ("id", "diagram_id", "version", "status", "filename", "source_sha256", "image_sha256", "page")
+    query = session.query(*(getattr(RouteSourceSession, name) for name in fields)).filter_by(diagram_id=diagram_id)
+    if before_id is not None:
+        if before_id <= 0:
+            raise HTTPException(422, "原本一覧のページ指定が不正です")
+        query = query.filter(RouteSourceSession.id < before_id)
+    rows = query.order_by(RouteSourceSession.id.desc()).limit(26).all()
+    return {"items": [{name: getattr(row, name) for name in fields} for row in rows[:25]],
+            "next_before_id": rows[24].id if len(rows) > 25 else None}
+
+
+@router.get("/source-sessions/{session_id}", responses={200: {"model": RouteSourceResponse}})
+def source_detail(session_id: int, version: int, session: Session = Depends(get_school_lunch_session)):
+    row = session.get(RouteSourceSession, session_id)
+    if row is None:
+        raise HTTPException(404, "原本読取がありません")
+    if row.version != version:
+        raise HTTPException(409, "原本読取の版が変更されています。再読み込みしてください")
+    return source_data(row)
 
 
 @router.post("/source-sessions")
@@ -379,7 +426,8 @@ def source_pdf(session_id: int, session: Session = Depends(get_school_lunch_sess
         check_export_sources(session, [diagram], expected_sources)
         if row.layout_id != diagram.layout_id or row.layout_version != diagram.layout_version:
             raise HTTPException(409, "原本の図面版が一致しません")
-    source_bytes = bytes(row.source_pdf)
+    from src.services.route_source_service import source_content
+    source_bytes, _ = source_content(row)
     return StreamingResponse(BytesIO(source_bytes), media_type="application/pdf", headers={"Content-Disposition": 'attachment; filename="route-source.pdf"'})
 
 
@@ -392,7 +440,9 @@ def extract_source(session_id: int, body: SourceExtract, session: Session = Depe
     if row.version != body.version or row.status == "confirmed":
         raise HTTPException(409, "確定済みまたは変更済みの読取です。新しく原本を登録してください")
     row.settings = {**body.model_dump(exclude={"version"}), "engine":"OpenCV HoughLinesP", "engine_version":cv2.__version__, "render_scale_to":2000}
-    row.candidates = detect(row.image, row.settings)
+    from src.services.route_source_service import source_content
+    _, image = source_content(row)
+    row.candidates = detect(image, row.settings)
     row.status = "extracted"
     row.version += 1
     session.flush()

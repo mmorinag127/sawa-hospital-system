@@ -44,6 +44,7 @@ class Connection:
         self.unsupported = []
         self.types = []
         self.routines = []
+        self.triggers = []
         self.native = [{'table_name': 'a', 'native_type': 'numeric(18,6)', 'attnotnull': False}]
     def exec_driver_sql(self, sql):
         self.sql.append(sql)
@@ -52,6 +53,7 @@ class Connection:
         if 'c.relkind IN' in sql: return Result(self.unsupported)
         if 'FROM pg_type' in sql: return Result(self.types)
         if 'FROM pg_proc' in sql: return Result(self.routines)
+        if 'FROM pg_trigger t JOIN pg_class' in sql: return Result(self.triggers)
         return Result(self.native if 'FROM pg_attribute' in sql else [])
 
 
@@ -91,7 +93,7 @@ def test_full_reflected_fixture_native_views_and_order_equal(monkeypatch):
     assert actual == expected
     assert list(actual['tables']) == ['a', 'z']
     assert [call[0] for call in inspector.calls] == list(METHODS)
-    assert len(connection.sql) == 6
+    assert len(connection.sql) == 8
 
 
 def test_empty_tables_do_not_trigger_unfiltered_multi_reflection(monkeypatch):
@@ -160,3 +162,24 @@ def test_sqlite_catalog_matches_single_table_inspector_and_is_read_only():
         finally: sa.event.remove(conn, 'before_cursor_execute', track)
         assert all(sql.lstrip().upper().startswith(('SELECT', 'PRAGMA')) for sql in statements)
     engine.dispose()
+
+
+@pytest.mark.parametrize('field,value', [('function_definition', 'changed body'), ('tgenabled', 'D')])
+def test_trigger_body_and_enabled_state_are_part_of_formal_catalog(monkeypatch, tmp_path, field, value):
+    tables = reflected_fixture()
+    tables['alembic_version'] = deepcopy(tables['a'])
+    inspector, connection = Inspector(tables), Connection()
+    connection.triggers = [{'table_name': 'a', 'trigger_name': 'owned',
+                            'function_definition': 'original body', 'tgenabled': 'O'}]
+    monkeypatch.setattr(catalog.sa, 'inspect', lambda _connection: inspector)
+    monkeypatch.setattr(catalog, 'formal_head_revision', lambda: '0001')
+    observed = catalog.read_catalog(connection)
+    shapes = catalog.table_shapes(observed, 'postgresql')
+    contract = tmp_path / 'contract.json'
+    contract.write_text(json.dumps({'revisions': {'postgresql': {'0001': {
+        'tables': {name: name for name in tables}, 'views': observed['views']}}}, 'shapes': shapes}))
+    monkeypatch.setattr(catalog, 'CONTRACT', contract)
+    catalog.require_formal_head(connection)
+    connection.triggers[0][field] = value
+    with pytest.raises(RuntimeError, match='mismatch: native'):
+        catalog.require_formal_head(connection)

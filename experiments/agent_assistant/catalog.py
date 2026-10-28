@@ -69,6 +69,7 @@ for name, path in [("labels", "/outputs/labels.xlsx"), ("delivery_notes", "/outp
     add("hospital", "export_"+name, "GET", path, "対象注文・版を照合した帳票を取得する。原本の確認完了を代用しない。")
 
 add("shift", "get_period", "GET", "/planning/period", "選択月に対する正規の勤務期間を設定から解決する。暦月の初日を推測しない。")
+add("shift", "get_constraint_dates", "GET", "/planning/constraint-date-counts", "登録済み予定の日別件数を200日ずつ取得する。予定本文は取得しない。")
 for name, path in [("staff", "/staff"), ("settings", "/optimization-settings"), ("constraints", "/constraints"), ("overview", "/planning/overview"),
                    ("demands", "/planning/demands"), ("workdays", "/planning/workdays"),
                    ("templates", "/planning/shift-templates"), ("positions", "/planning/positions"),

@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from io import BytesIO
 import os
+import shutil
 from pathlib import Path
 import sys
 import threading
@@ -24,7 +25,28 @@ from experiments.agent_assistant.tools import Tools
 from experiments.agent_assistant.tests.test_gemini import interaction
 
 ROOT=Path(__file__).resolve().parents[3]
+BASELINES=ROOT/'agent_runtime/baselines'
 pytestmark=pytest.mark.skipif(os.environ.get('SAWA_AGENT_NATIVE_TESTS')!='1',reason='Opt in to owned localhost native subprocesses')
+
+
+@pytest.fixture(scope='module', autouse=True)
+def prepared_image_baselines(tmp_path_factory):
+    from experiments.agent_assistant.prepare_packaged import prepare
+    global BASELINES
+    root=tmp_path_factory.mktemp('native-prepared-image')
+    shutil.copytree(BASELINES,root/'baselines')
+    shutil.copyfile(ROOT/'agent_runtime/release.json',root/'release.json')
+    interpreters={}
+    for domain in ('hospital','shift','school-lunch'):
+        backend=root/'native'/domain/'backend'
+        backend.parent.mkdir(parents=True)
+        backend.symlink_to(ROOT/'backend' if domain=='hospital' else ROOT/'agent_runtime/native'/domain/'backend',target_is_directory=True)
+        interpreters[domain]=os.environ.get('SAWA_AGENT_NATIVE_'+domain.upper().replace('-','_')+'_PYTHON',sys.executable)
+    prepare(root,interpreters)
+    original=BASELINES
+    BASELINES=root/'baselines'
+    try:yield
+    finally:BASELINES=original
 
 
 @contextmanager
@@ -46,7 +68,7 @@ def portal():
 def setup(root,domain,url):
     cfg={'worktree':str(ROOT/'agent_runtime/native'/domain),
          'source_manifest':str(ROOT/'agent_runtime/manifests'/(domain+'.json')),
-         'baseline':str(ROOT/'agent_runtime/baselines'/domain),
+         'baseline':str(BASELINES/domain),
          'python':os.environ.get('SAWA_AGENT_NATIVE_'+domain.upper().replace('-','_')+'_PYTHON',sys.executable),
          'env':{'AUTH_PROVIDER':'portal','PORTAL_AUTH_ME_URL':url}}
     store=Store(root);store.set_budget(1000)

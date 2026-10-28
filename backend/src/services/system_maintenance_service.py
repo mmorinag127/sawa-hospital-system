@@ -6,6 +6,9 @@ import json
 import os
 from src.staging_data import order_runtime_setting as _runtime_setting
 import zipfile
+import tempfile
+from contextlib import contextmanager
+from uuid import uuid4
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -33,7 +36,6 @@ from src.models.document import OrderDocument
 from src.models.uploaded_pdf import UploadedPdf, UploadedPdfAttempt
 
 _EXPORT_DIR = Path(os.getenv("SYSTEM_EXPORT_DIR", "/tmp/system-exports"))
-_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 _OPERATIONAL_MODELS: list[tuple[str, Any]] = [
     ("label_rows", LabelRow),
@@ -186,6 +188,18 @@ def _serialize_row(row: dict[str, Any]) -> dict[str, Any]:
     return {str(key): _sanitize_value(value) for key, value in row.items()}
 
 
+@contextmanager
+def _snapshot_archive(output_path):
+    with tempfile.NamedTemporaryFile(dir=output_path.parent, prefix=".db-snapshot-", suffix=".partial", delete=False) as stream:
+        temporary = Path(stream.name)
+    try:
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            yield archive
+        os.replace(temporary, output_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def export_database_snapshot(*, max_rows_per_table: int | None = None) -> tuple[Path, str, str, dict]:
     default_limit = _read_int_env("DB_EXPORT_MAX_ROWS_PER_TABLE", 1000000)
     if max_rows_per_table is None:
@@ -198,12 +212,18 @@ def export_database_snapshot(*, max_rows_per_table: int | None = None) -> tuple[
     table_names = sorted(metadata.tables.keys())
 
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    filename = f"db_snapshot_{stamp}.zip"
+    filename = f"db_snapshot_{stamp}_{uuid4().hex}.zip"
     output_path = local_directory(_EXPORT_DIR) / filename
 
     manifest_items: list[dict[str, Any]] = []
     with session_scope() as session:
-        with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        connection = session.connection()
+        if connection.dialect.name == "postgresql":
+            connection.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        elif connection.dialect.name == "sqlite":
+            if not connection.connection.driver_connection.in_transaction:
+                connection.exec_driver_sql("BEGIN")
+        with _snapshot_archive(output_path) as zf:
             for table_name in table_names:
                 table = metadata.tables[table_name]
                 count_value = session.execute(select(func.count()).select_from(table)).scalar_one_or_none()
@@ -211,19 +231,28 @@ def export_database_snapshot(*, max_rows_per_table: int | None = None) -> tuple[
                 query = select(table)
                 if total_rows > max_rows:
                     query = query.limit(max_rows)
-                rows = session.execute(query).mappings().all()
-                serialized_rows = [_serialize_row(dict(row)) for row in rows]
                 table_filename = f"tables/{table_name}.json"
-                zf.writestr(
-                    table_filename,
-                    json.dumps(serialized_rows, ensure_ascii=False, indent=2),
-                )
+                exported = 0
+                encoder = json.JSONEncoder(ensure_ascii=False)
+                result = session.execute(query.execution_options(yield_per=200)).mappings()
+                try:
+                    with zf.open(table_filename, "w", force_zip64=True) as stream:
+                        stream.write(b"[")
+                        for row in result:
+                            if exported:
+                                stream.write(b",\n")
+                            for chunk in encoder.iterencode(_serialize_row(dict(row))):
+                                stream.write(chunk.encode("utf-8"))
+                            exported += 1
+                        stream.write(b"]")
+                finally:
+                    result.close()
                 manifest_items.append(
                     {
                         "table": table_name,
                         "rows_total": total_rows,
-                        "rows_exported": len(serialized_rows),
-                        "truncated": total_rows > len(serialized_rows),
+                        "rows_exported": exported,
+                        "truncated": total_rows > exported,
                         "path": table_filename,
                     }
                 )

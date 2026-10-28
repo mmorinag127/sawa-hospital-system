@@ -17,7 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text, tuple_
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, load_only
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
@@ -557,14 +557,15 @@ def _staff_payload(
 
 
 def _staff_items_payload(session: Session, staff_ids: list[int]) -> list[dict]:
-    mapping = _staff_half_day_template_ids(session)
+    requested = set(staff_ids)
+    mapping = {key: value for key, value in _staff_half_day_template_ids(session).items() if key in requested}
     templates = {
         row.id: row
         for row in session.query(ShiftTemplate)
         .filter(ShiftTemplate.id.in_(set(mapping.values())))
         .all()
     } if mapping else {}
-    staff_by_id = {row.id: row for row in session.query(Staff).all()}
+    staff_by_id = {row.id: row for row in session.query(Staff).filter(Staff.id.in_(staff_ids)).all()}
     return [
         _staff_payload(staff_by_id[staff_id], mapping.get(staff_id), templates)
         for staff_id in staff_ids
@@ -795,35 +796,8 @@ def _validated_optimization_settings_payload(payload: OptimizationSettingsInput)
 
 
 def _solve_run_period_payload(solve_run: SolveRun) -> dict:
-    config = solve_run.config_json or {}
-    start_date = config.get("start_date")
-    end_date = config.get("end_date_exclusive") or config.get("end_date")
-    period_mode = config.get("period_mode", "calendar_month")
-    if start_date and end_date:
-        return {
-            "target_month": solve_run.target_month,
-            "start_date": start_date,
-            "end_date_exclusive": end_date,
-            "period_mode": period_mode,
-        }
-    if len(solve_run.target_month) == 7:
-        year, month = (int(part) for part in solve_run.target_month.split("-"))
-        if month == 12:
-            next_month = f"{year + 1:04d}-01-01"
-        else:
-            next_month = f"{year:04d}-{month + 1:02d}-01"
-        return {
-            "target_month": solve_run.target_month,
-            "start_date": f"{solve_run.target_month}-01",
-            "end_date_exclusive": next_month,
-            "period_mode": "calendar_month",
-        }
-    return {
-        "target_month": solve_run.target_month,
-        "start_date": None,
-        "end_date_exclusive": None,
-        "period_mode": period_mode,
-    }
+    from .period_metadata_v1 import display_period
+    return display_period(solve_run.target_month, solve_run.config_json)
 
 
 def _automatic_prior_statuses(
@@ -1276,8 +1250,17 @@ def delete_staff(staff_id: int, revision: int | None = None, collection_revision
 
 
 @app.get("/constraints", responses={200: {"model": ConstraintCollectionResponse}})
-def list_constraints(session: Session = Depends(get_session)) -> dict:
-    return read_collection(session, "constraints", lambda: [_constraint_payload(row) for row in session.query(Availability).order_by(Availability.work_date.desc(), Availability.id.desc()).all()])
+def list_constraints(session: Session = Depends(get_session), date_from: date | None = None, date_to: date | None = None) -> dict:
+    if not isinstance(date_from, date) or not isinstance(date_to, date) or date_from >= date_to:
+        raise HTTPException(422, "予定の期間を開始日・終了日（含まない）で指定してください")
+    def items():
+        query = session.query(Availability).options(joinedload(Availability.staff))
+        if date_from:
+            query = query.filter(Availability.work_date >= date_from)
+        if date_to:
+            query = query.filter(Availability.work_date < date_to)
+        return [_constraint_payload(row) for row in query.order_by(Availability.work_date.desc(), Availability.id.desc())]
+    return read_collection(session, "constraints", items)
 
 
 @app.post("/constraints", status_code=201, responses={201: {"model": ConstraintCommandResponse}})
@@ -2159,52 +2142,60 @@ def _get_solve_run_snapshot(solve_run_id, session, candidate_id, prior_for_start
 
 
 @app.get("/solve-run-periods")
-def list_solve_run_periods(session: Session = Depends(get_session)) -> list[dict]:
-    from sqlalchemy import func, select
-    config_type = (func.json_type(SolveRun.config_json) if session.get_bind().dialect.name == "sqlite"
-                   else func.json_typeof(SolveRun.config_json))
-    mode_present = (func.json_type(SolveRun.config_json, "$.period_mode").is_not(None)
-                    if session.get_bind().dialect.name == "sqlite" else SolveRun.config_json["period_mode"].is_not(None))
-    rows = session.execute(select(
-        SolveRun.id, SolveRun.target_month, SolveRun.status, SolveRun.started_at, SolveRun.finished_at,
-        config_type.label("config_type"),
-        mode_present.label("mode_present"),
-        SolveRun.config_json["start_date"].label("start_date"),
-        SolveRun.config_json["end_date_exclusive"].label("end_date_exclusive"),
-        SolveRun.config_json["end_date"].label("end_date"),
-        SolveRun.config_json["period_mode"].label("period_mode"),
-    ).order_by(SolveRun.id.desc())).mappings().all()
-    confirmed_ids = {ident for ident, in session.query(ScheduleConfirmation.solve_run_id)}
+def list_solve_run_periods(session: Session = Depends(get_session), initial_context: bool = False,
+                          end_date: date | None = None, limit: int = Query(default=100, ge=1, le=200),
+                          before_id: int | None = Query(default=None, ge=1)) -> list[dict]:
+    from sqlalchemy import select
+    if session.query(SolveRun.id).filter(SolveRun.period_display_error.is_(True)).first():
+        raise HTTPException(409, "保存済みのシフト期間を確認できません。")
+    confirmed = select(1).where(ScheduleConfirmation.solve_run_id == SolveRun.id).exists()
+    query = select(SolveRun.id, SolveRun.status, SolveRun.period_summary_json,
+                   SolveRun.started_at, SolveRun.finished_at, confirmed.label('confirmed'))
+    if initial_context:
+        unknown = session.query(SolveRun.id).filter(
+            SolveRun.status == 'succeeded', SolveRun.period_known.is_(False), confirmed,
+        ).order_by(SolveRun.id.desc()).first()
+        query = query.where(SolveRun.id == unknown[0]) if unknown else query.where(
+            SolveRun.status == 'succeeded', confirmed,
+        ).order_by(SolveRun.display_period_end_key.desc(), SolveRun.id.desc())
+        query = query.limit(1)
+    else:
+        if end_date:
+            query = query.where(SolveRun.display_period_end_key == end_date.isoformat())
+        if isinstance(before_id, int):
+            query = query.where(SolveRun.id < before_id)
+        query = query.order_by(SolveRun.id.desc()).limit(limit if isinstance(limit, int) else 100)
     result = []
-    for row in rows:
-        if row["config_type"] not in (None, "null", "object"):
+    for row in session.execute(query):
+        if not isinstance(row.period_summary_json, dict):
             raise HTTPException(409, "保存済みのシフト期間を確認できません。")
-        config = {key: row[key] for key in ("start_date", "end_date_exclusive", "end_date", "period_mode") if row[key] is not None}
-        if row["mode_present"]:
-            config["period_mode"] = row["period_mode"]
-        result.append({"id": row["id"], "status": row["status"],
-                       **_solve_run_period_payload(SimpleNamespace(target_month=row["target_month"], config_json=config)),
-                       "confirmed": row["id"] in confirmed_ids,
-                       "started_at": row["started_at"].isoformat() if row["started_at"] else None,
-                       "finished_at": row["finished_at"].isoformat() if row["finished_at"] else None})
+        result.append({'id': row.id, 'status': row.status, **row.period_summary_json,
+                       'confirmed': row.confirmed,
+                       'started_at': row.started_at.isoformat() if row.started_at else None,
+                       'finished_at': row.finished_at.isoformat() if row.finished_at else None})
     return result
 
 
 @app.get("/solve-runs", responses={200: {"model": list[SolveRunSummary]}})
-def list_solve_runs(session: Session = Depends(get_session), limit: int | None = Query(default=None, ge=1, le=200), before_id: int | None = Query(default=None, ge=1)) -> list[dict]:
+def list_solve_runs(session: Session = Depends(get_session), limit: int | None = Query(default=50, ge=1, le=200), before_id: int | None = Query(default=None, ge=1), include_job_status: bool = False) -> list[dict]:
     from sqlalchemy import func
     from .jobs import load_job_status_sources, serialize_job_status_from_sources
 
     query = session.query(SolveRun)
+    if not include_job_status:
+        query = query.options(load_only(SolveRun.id, SolveRun.target_month,
+            SolveRun.period_summary_json, SolveRun.period_display_error, SolveRun.status,
+            SolveRun.solver_status, SolveRun.started_at, SolveRun.finished_at))
     if isinstance(before_id, int):
         query = query.filter(SolveRun.id < before_id)
     query = query.order_by(SolveRun.id.desc())
-    if isinstance(limit, int):
-        query = query.limit(limit)
+    query = query.limit(limit if isinstance(limit, int) else 50)
     rows = query.all()
     if not rows:
         return []
-    job_status_sources = load_job_status_sources(session, rows)
+    if not include_job_status and any(row.period_display_error or not isinstance(row.period_summary_json, dict) for row in rows):
+        raise HTTPException(409, "保存済みのシフト期間を確認できません。")
+    job_status_sources = load_job_status_sources(session, rows) if include_job_status else None
     run_ids = [row.id for row in rows]
     assignment_counts = dict(
         session.query(CandidateSchedule.solve_run_id, func.count(Assignment.id))
@@ -2218,8 +2209,8 @@ def list_solve_runs(session: Session = Depends(get_session), limit: int | None =
     return [
         {
             "id": row.id,
-            **_solve_run_period_payload(row),
-            "job_status": serialize_job_status_from_sources(row, job_status_sources),
+            **(_solve_run_period_payload(row) if include_job_status else row.period_summary_json),
+            "job_status": serialize_job_status_from_sources(row, job_status_sources) if include_job_status else None,
             "status": row.status,
             "solver_status": row.solver_status,
             "started_at": row.started_at.isoformat() if row.started_at else None,

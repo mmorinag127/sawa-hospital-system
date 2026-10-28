@@ -2,6 +2,9 @@
 import hashlib
 from copy import deepcopy
 from io import BytesIO
+from types import SimpleNamespace
+from sqlalchemy import select
+from sqlalchemy.orm import object_session
 from fastapi import HTTPException
 from src.models.route_diagram import KitchenLayout, RouteDiagram, RouteSourceSession
 from src.services import route_diagram_service as routes
@@ -9,6 +12,27 @@ from src.services import route_diagram_service as routes
 
 def sha(content):
     return hashlib.sha256(content).hexdigest()
+
+
+def artifact_source(row):
+    if row.artifact_source_id is None:
+        return row
+    owner = object_session(row)
+    source = owner.get(RouteSourceSession, row.artifact_source_id) if owner else None
+    if (source is None or source.id == row.id or source.artifact_source_id is not None
+            or row.source_pdf is not None or row.image is not None
+            or (source.source_sha256, source.image_sha256, source.page)
+            != (row.source_sha256, row.image_sha256, row.page)):
+        raise HTTPException(409, "原本参照の整合性を確認できません")
+    return source
+
+
+def source_content(row):
+    source = artifact_source(row)
+    if (not isinstance(source.source_pdf, bytes) or not isinstance(source.image, bytes)
+            or sha(source.source_pdf) != row.source_sha256 or sha(source.image) != row.image_sha256):
+        raise HTTPException(409, "原本の整合性を確認できません")
+    return source.source_pdf, source.image
 
 
 def detect(image_bytes, settings):
@@ -43,8 +67,7 @@ def current(session, row):
     layout = session.get(KitchenLayout, row.layout_id)
     if not diagram or not layout or diagram.version != row.diagram_version or diagram.layout_id != row.layout_id or diagram.layout_version != row.layout_version or layout.version != row.layout_version or routes.versions(routes.menus(session, diagram.facility_id, diagram.service_date)) != row.source_versions:
         raise HTTPException(409, "対象の動線・献立・厨房図面が変更されています。原本から新しい確認を開始してください")
-    if sha(row.source_pdf) != row.source_sha256 or sha(row.image) != row.image_sha256:
-        raise HTTPException(409, "原本の整合性を確認できません。適用できません")
+    source_content(row)
     return diagram
 
 
@@ -102,19 +125,68 @@ def confirm(session, row, body):
     return diagram
 
 
-def provenance_issue(session, diagram, route):
+def source_views(session, diagrams):
+    ids = sorted({route['source_provenance'].get('session_id') for diagram in diagrams
+                  for route in diagram.routes if route.get('source_provenance')
+                  and isinstance(route['source_provenance'].get('session_id'), int)})
+    views = {}
+    fields = ('id', 'status', 'diagram_id', 'layout_id', 'layout_version', 'source_versions',
+              'confirmation', 'page', 'source_sha256', 'image_sha256')
+    source = RouteSourceSession
+    for offset in range(0, len(ids), 200):
+        result = session.execute(select(
+            *(getattr(source, name) for name in fields), source.artifact_source_id,
+            source.source_pdf.is_not(None).label('has_pdf'), source.image.is_not(None).label('has_image'),
+        ).where(source.id.in_(ids[offset:offset + 200])))
+        try:
+            for row in result:
+                values = {name: getattr(row, name) for name in fields}
+                values.update(artifact_source_id=row.artifact_source_id, has_pdf=row.has_pdf, has_image=row.has_image)
+                views[row.id] = SimpleNamespace(**values)
+        finally:
+            result.close()
+    root_ids = list({row.artifact_source_id if row.artifact_source_id is not None else row.id for row in views.values()})
+    roots = {}
+    for offset in range(0, len(root_ids), 200):
+        result = session.execute(select(source.id, source.artifact_source_id, source.source_sha256,
+            source.image_sha256, source.page, source.source_pdf, source.image).where(
+            source.id.in_(root_ids[offset:offset + 200])).execution_options(yield_per=1))
+        try:
+            for row in result:
+                valid = (row.artifact_source_id is None and isinstance(row.source_pdf, bytes) and isinstance(row.image, bytes)
+                    and sha(row.source_pdf) == row.source_sha256 and sha(row.image) == row.image_sha256)
+                roots[row.id] = (row.source_sha256, row.image_sha256, row.page) if valid else None
+        finally:
+            result.close()
+    for row in views.values():
+        direct = row.artifact_source_id is None
+        root_id = row.id if direct else row.artifact_source_id
+        row._bytes_valid = ((direct or (root_id != row.id and not row.has_pdf and not row.has_image))
+            and roots.get(root_id) == (row.source_sha256, row.image_sha256, row.page))
+    return views
+
+
+def provenance_issue(session, diagram, route, *, sources=None):
     proof = route.get("source_provenance")
     if not proof:
         return None
-    row = session.get(RouteSourceSession, proof.get("session_id"))
-    if not row or row.status != "confirmed" or row.diagram_id != diagram.id or row.layout_id != diagram.layout_id or row.layout_version != diagram.layout_version or any(diagram.source_versions.get(key) != value for key,value in row.source_versions.items()) or not row.confirmation or row.confirmation.get("material_id") != route["id"] or proof.get("candidate_ids") != [s["id"] for s in row.confirmation["selection"]] or proof.get("page") != row.page or proof.get("source_sha256") != row.source_sha256 or proof.get("image_sha256") != row.image_sha256 or sha(row.source_pdf) != row.source_sha256 or sha(row.image) != row.image_sha256:
+    row = session.get(RouteSourceSession, proof.get("session_id")) if sources is None else sources.get(proof.get("session_id"))
+    bytes_valid = getattr(row, '_bytes_valid', False) if sources is not None else False
+    if sources is None and row is not None:
+        try:
+            source_content(row)
+            bytes_valid = True
+        except HTTPException:
+            bytes_valid = False
+    if not row or row.status != "confirmed" or row.diagram_id != diagram.id or row.layout_id != diagram.layout_id or row.layout_version != diagram.layout_version or any(diagram.source_versions.get(key) != value for key,value in row.source_versions.items()) or not row.confirmation or row.confirmation.get("material_id") != route["id"] or proof.get("candidate_ids") != [s["id"] for s in row.confirmation["selection"]] or proof.get("page") != row.page or proof.get("source_sha256") != row.source_sha256 or proof.get("image_sha256") != row.image_sha256 or not bytes_valid:
         return "原本候補の確定・材料との対応が確認できません"
     return None
 
 
-def modified(session, route):
+def modified(session, route, *, sources=None):
     proof = route.get("source_provenance")
-    row = session.get(RouteSourceSession, proof.get("session_id")) if proof else None
+    row = ((session.get(RouteSourceSession, proof.get("session_id")) if sources is None
+            else sources.get(proof.get("session_id"))) if proof else None)
     if not row or not row.confirmation:
         return None
     return any(route.get(key) != row.confirmation.get(key) for key in ("points", "styles", "color")) or bool(route.get("segment_states"))
@@ -125,13 +197,14 @@ def derived_session(session, original, source_route, target_diagram, target_rout
     if issue:
         raise HTTPException(409, f"原本経路を再利用できません: {issue}")
     source = session.get(RouteSourceSession, source_route["source_provenance"]["session_id"])
+    original_artifact = artifact_source(source)
     confirmation = deepcopy(source.confirmation)
     confirmation.update(material_id=target_route["id"], derived_from={"session_id":source.id,
         "diagram_id":original.id,"material_id":source_route["id"],"service_date":str(original.service_date)})
     row = RouteSourceSession(diagram_id=target_diagram.id, diagram_version=target_diagram.version,
         layout_id=target_diagram.layout_id,layout_version=target_diagram.layout_version,source_versions=deepcopy(target_diagram.source_versions),
-        filename=source.filename,source_pdf=source.source_pdf,source_sha256=source.source_sha256,page=source.page,
-        image=source.image,image_sha256=source.image_sha256,version=1,status="confirmed",settings=deepcopy(source.settings),
+        filename=source.filename,artifact_source_id=original_artifact.id,source_sha256=source.source_sha256,page=source.page,
+        image_sha256=source.image_sha256,version=1,status="confirmed",settings=deepcopy(source.settings),
         candidates=deepcopy(source.candidates),confirmation=confirmation)
     session.add(row);session.flush()
     return {**deepcopy(source_route["source_provenance"]),"session_id":row.id}

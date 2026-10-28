@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, Computed, DateTime, ForeignKey, JSON, String
+from sqlalchemy import Column, Computed, DateTime, ForeignKey, JSON, String, Index
 from sqlalchemy.orm import deferred
 
 from src.db import Base
@@ -9,6 +9,10 @@ from src.models.generated_json import GeneratedJSON
 
 class OrderOcrEvidenceRun(Base):
     __tablename__ = "order_ocr_evidence_runs"
+    __table_args__ = (
+        Index("ix_order_ocr_evidence_runs_order_created_id", "order_id", "created_at", "id"),
+        Index("ix_order_ocr_evidence_runs_template_history", "order_id", "template_version_id", "created_at", "id"),
+    )
 
     id = Column(String, primary_key=True)
     order_id = Column(String, ForeignKey("orders.id"), nullable=False, index=True)

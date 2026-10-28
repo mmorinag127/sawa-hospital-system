@@ -6,11 +6,17 @@ import {
   Divider,
   MenuItem,
   Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TablePagination,
+  TableRow,
   Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  DataTable,
   EditForm,
   FormTextField,
   RequestState,
@@ -40,7 +46,7 @@ import {
   updateMenuMasterPayload,
 } from "../services/menuMasters";
 
-type ListResponse = { items: MenuMaster[]; total: number };
+type ListResponse = { items: MenuMaster[]; total: number | null; next_after_id?:string|null; previous_before_id?:string|null };
 type ItemResponse = { item: MenuMaster };
 const blank: MenuMasterDraft = {
   name: "",
@@ -141,6 +147,7 @@ function Screen({ authenticated }: { authenticated: boolean }) {
   const [editDirty, setEditDirty] = useState(false);
   const [newDirty, setNewDirty] = useState(false);
   const editor = useRef({ generation: 0, id: null as string | null, dirty: false, active: true });
+  const cursors = useRef({scope:"",offsets:new Map<number,string>()});
   useEffect(() => {
     editor.current.active = true;
     return () => { editor.current.active = false; };
@@ -187,17 +194,22 @@ function Screen({ authenticated }: { authenticated: boolean }) {
     [urlState],
   );
   const list = useQuery({
-    queryKey: ["menu-masters", params],
+    queryKey: ["menu-masters", params, urlState.ok ? [urlState.value.afterId, urlState.value.beforeId] : undefined],
     enabled: !!params && authenticated,
-    queryFn: async ({ signal }) =>
-      parseMenuMasterList(
-        (
-          await apiClient.get<ListResponse>("/menu-masters", {
-            params: params!,
-            signal,
-          })
-        ).data,
-      ),
+    queryFn: async ({ signal }) => {
+      const scope=JSON.stringify([params!.q,params!.limit,params!.sort,params!.order,browserSessionKey()]);
+      if(cursors.current.scope!==scope)cursors.current={scope,offsets:new Map()};
+      const response=await apiClient.get<ListResponse>("/menu-masters",{
+        params:{...params!,include_total:false,before_id:urlState.ok ? urlState.value.beforeId : undefined,
+          after_id:(urlState.ok && urlState.value.beforeId) ? undefined :
+            (urlState.ok ? urlState.value.afterId : undefined) || cursors.current.offsets.get(params!.offset)},signal,
+      });
+      const page=parseMenuMasterList(response.data);
+      if(!signal.aborted&&cursors.current.scope===scope&&page.next_after_id) {
+        cursors.current.offsets.set(params!.offset+params!.limit,page.next_after_id);
+      }
+      return page;
+    },
   });
   const create = useMutation({
     mutationFn: async (values: MenuMasterDraft) =>
@@ -211,12 +223,16 @@ function Screen({ authenticated }: { authenticated: boolean }) {
         ).data.item,
       ) : Promise.reject(new Error("ログインを確認してください。")),
   });
-  const refresh = () =>
-    client.invalidateQueries({ queryKey: ["menu-masters"] });
+  const refresh = () => {
+    cursors.current.offsets.clear();
+    return client.invalidateQueries({ queryKey: ["menu-masters"] });
+  };
   const replaceListUrl = (next: {
     q: string;
     page: number;
     pageSize: number;
+    afterId?: string;
+    beforeId?: string;
   }) =>
     void router.push(menuMasterListUrl(router.asPath, next), undefined, {
       shallow: true,
@@ -224,10 +240,25 @@ function Screen({ authenticated }: { authenticated: boolean }) {
   const page = urlState.ok ? urlState.value.page : 0;
   const size = urlState.ok ? urlState.value.pageSize : MENU_MASTER_PAGE_SIZE;
   const applied = urlState.ok ? urlState.value.q : "";
-  const pageOutOfRange = !!list.data && page > 0 && page * size >= list.data.total;
+  const totalCount = useQuery({
+    queryKey: ["menu-masters", "count", applied, browserSessionKey()], enabled: false, staleTime: Infinity,
+    queryFn: async ({signal}) => {
+      const response = await apiClient.get<ListResponse>("/menu-masters", {
+        params: {q: applied || undefined, limit: 1, include_total: true}, signal,
+      });
+      return parseMenuMasterList(response.data).total;
+    },
+  });
+  const pageOutOfRange = !!list.data && page > 0 && list.data.items.length === 0;
   const listError = !urlState.ok ? urlState.error : list.isError ? menuMasterErrorMessage(list.error) :
     pageOutOfRange ? "一覧のページが範囲外です。検索条件を確認してください。" : undefined;
-  const retryList = () => { if (urlState.ok) void list.refetch(); };
+  const retryList = () => {
+    if (!urlState.ok) return;
+    const detail = (list.error as {response?:{data?:{detail?:unknown}}})?.response?.data?.detail;
+    if (detail === "menu_master_cursor_invalid" || detail === "menu_master_cursor_required") {
+      replaceListUrl({q: applied, page: 0, pageSize: size});
+    } else void list.refetch();
+  };
   const searchNow = () =>
     replaceListUrl({ q: search, page: 0, pageSize: size });
   const select = (next: MenuMaster) => {
@@ -292,24 +323,40 @@ function Screen({ authenticated }: { authenticated: boolean }) {
           pending={list.isFetching}
           label="メニュー名で検索"
         />
-        {list.data && !pageOutOfRange && urlState.ok ? <DataTable
-          label="メニューマスター一覧"
-          rows={list.data.items}
-          columns={columns}
-          rowKey={(r) => r.id}
-          total={list.data.total}
-          page={page}
-          rowsPerPage={size}
-          onPageChange={(next) =>
-            replaceListUrl({ q: applied, page: next, pageSize: size })
+        {list.data && !pageOutOfRange && urlState.ok ? <Box aria-busy={list.isFetching}>
+          <RequestState pending={list.isFetching} error={listError} onRetry={retryList} />
+          <TableContainer tabIndex={0} role="region" aria-label="メニューマスター一覧">
+            <Table size="small" aria-label="メニューマスター一覧">
+              <TableHead><TableRow>{columns.map(column => <TableCell key={column.id}
+                scope="col" align={column.align}>{column.label}</TableCell>)}</TableRow></TableHead>
+              <TableBody>{list.data.items.map(item => <TableRow key={item.id}>
+                {columns.map(column => <TableCell key={column.id} align={column.align}
+                  sx={{minWidth: "4rem", maxWidth: "16rem", overflowWrap: "break-word"}}>{column.render(item)}</TableCell>)}
+              </TableRow>)}{!list.data.items.length && !list.isFetching ? <TableRow>
+                <TableCell colSpan={columns.length}>該当データがありません。</TableCell></TableRow> : null}</TableBody>
+            </Table>
+          </TableContainer>
+          <TablePagination component="div" count={-1} page={page} rowsPerPage={size}
+            rowsPerPageOptions={[25, 50, 100]} labelRowsPerPage="表示件数"
+            labelDisplayedRows={({from, to}) => `${from}–${to} 件`}
+            slotProps={{actions: {
+              previousButton: {disabled: list.isFetching || !list.data.previous_before_id},
+              nextButton: {disabled: list.isFetching || !list.data.next_after_id},
+            }}}
+            getItemAriaLabel={type => type === "next" ? "次のページ" : "前のページ"}
+            onPageChange={(_, next) =>
+            replaceListUrl({ q: applied, page: next, pageSize: size,
+              afterId: next > page ? list.data.next_after_id || undefined : undefined,
+              beforeId: next < page ? list.data.previous_before_id || undefined : undefined })
           }
-          onRowsPerPageChange={(next) =>
-            replaceListUrl({ q: applied, page: 0, pageSize: next })
+          onRowsPerPageChange={event =>
+            replaceListUrl({ q: applied, page: 0, pageSize: Number(event.target.value) })
           }
-          pending={list.isFetching}
-          error={listError}
-          onRetry={retryList}
-        /> : <RequestState pending={list.isFetching} error={listError} onRetry={retryList} />}
+          />
+          <Button disabled={totalCount.isFetching} onClick={() => void totalCount.refetch()}>総件数を取得</Button>
+          {typeof totalCount.data === "number" && !totalCount.isStale ? <Typography component="span">{totalCount.data} 件</Typography> : null}
+          {totalCount.isError ? <RequestState error={menuMasterErrorMessage(totalCount.error)} onRetry={() => void totalCount.refetch()} /> : null}
+        </Box> : <RequestState pending={list.isFetching} error={listError} onRetry={retryList} />}
         <Divider />
         <Box component="section">
           <Typography component="h2" variant="h6" sx={{ mb: 2 }}>

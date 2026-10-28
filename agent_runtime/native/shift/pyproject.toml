@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Generic web-based shift scheduling optimizer for Cloud Run, Cloud SQL, GCS, and OR-Tools."
 requires-python = ">=3.11"
 dependencies = [
+    "ijson==3.6.0",
     "certifi>=2026.10.19",
     "anyio>=4.14.2,<5",
     "cryptography>=50.0.2,<51",

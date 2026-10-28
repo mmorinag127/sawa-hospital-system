@@ -40,21 +40,21 @@ DATABASES = {
 
 
 def owned_root(run_id, attempt, suite='readonly'):
-    if suite not in MODULES:
+    if suite not in (*MODULES, 'batch'):
         raise ValueError('unknown suite')
     if any(not re.fullmatch(r'[1-9][0-9]{0,19}', value) for value in (run_id, attempt)):
         raise ValueError('explicit numeric local run identity required')
     prefix = {'readonly': 'sawa-ro', 'c1': 'sawa-c1',
               'c1-guards': 'sawa-c1-guards', 'menu-identity': 'sawa-menu-identity',
-              'output': 'sawa-output', 'formal': 'sawa-formal'}[suite]
+              'output': 'sawa-output', 'formal': 'sawa-formal', 'batch': 'sawa-pg-batch'}[suite]
     return Path('/tmp').resolve() / f'{prefix}-{run_id}-{attempt}'
 
 
 def pytest_command(root, suite='readonly'):
     if suite not in MODULES:
         raise ValueError('unknown suite')
-    return [sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', *MODULES[suite],
-            '--basetemp', str(root / 'tests'), '--junitxml', str(root / 'evidence/results.xml'), '-v']
+    return [sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', '-p', 'local_pg_input_guard', *MODULES[suite],
+            '--basetemp', str(root / 'tests'), '--junitxml', str(root / 'evidence' / ('results-' + suite + '.xml')), '-v']
 
 
 def require_postmaster(data, socket, port):
@@ -65,10 +65,14 @@ def require_postmaster(data, socket, port):
     return int(pid[0])
 
 
-def run(source, run_id, attempt, suite='readonly'):
+def run(source, run_id, attempt, suite='readonly', *, suites=None):
     source = source.resolve(strict=True)
     if os.environ.get('GITHUB_ACTIONS') or os.environ.get('CI'):
         raise ValueError('readonly PG suites run only from the local hospital test entry')
+    selected = list(suites) if suites is not None else [suite]
+    if (not selected or len(set(selected)) != len(selected) or any(item not in MODULES for item in selected)
+            or (suite != 'batch' and selected != [suite])):
+        raise ValueError('explicit distinct PostgreSQL suites required')
     root = owned_root(run_id, attempt, suite)
     root.mkdir(mode=0o700, exist_ok=False)
     evidence = root / 'evidence'
@@ -77,7 +81,8 @@ def run(source, run_id, attempt, suite='readonly'):
     home.mkdir(mode=0o700)
     pg = root / 'pg'
     pg.mkdir(mode=0o700)
-    port, databases = '55471', DATABASES[suite]
+    port = '55471'
+    databases = {key: value for selected_suite in selected for key, value in DATABASES[selected_suite].items()}
     data, socket = pg / 'pgdata', pg / 'socket'
     socket.mkdir(mode=0o700)
     for owner in (root / 'OWNER', pg / 'OWNER'):
@@ -92,7 +97,8 @@ def run(source, run_id, attempt, suite='readonly'):
         'SAWA_OWNED_PG_ROOT': str(pg), 'SAWA_OWNED_PG_PORT': port,
         'SAWA_OWNED_PG_SOURCE': str(source),
         'SAWA_LOCAL_PG_EVIDENCE_DIR': str(evidence),
-        'PYTHONPATH': str(source / 'backend'), 'PYTHONDONTWRITEBYTECODE': '1',
+        'PYTHONPATH': os.pathsep.join([str(source / 'scripts'), str(source / 'backend')]), 'PYTHONDONTWRITEBYTECODE': '1',
+        'SAWA_PG_COMMAND_OWNED_ROOT': str(root), 'GIT_NO_REPLACE_OBJECTS': '1',
         'AUTH_DISABLED': 'true', 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
         'HF_DATASETS_OFFLINE': '1', 'ORDERS_OUTPUT_DIR': str(root / 'output'),
         'XDG_CACHE_HOME': str(root / 'cache'), 'HF_HOME': str(root / 'models'), 'TMPDIR': str(root),
@@ -100,9 +106,6 @@ def run(source, run_id, attempt, suite='readonly'):
     })
     env.update({key: f'postgresql+psycopg2://mmorinag@/{database}?' + urlencode(
         {'host': str(socket), 'port': port}) for key, database in databases.items()})
-    if suite == 'output':
-        env.update({key: env['MODERNIZATION_PG_TEST_URI']
-                    for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI', 'OCR_HISTORY_PROJECTION_POSTGRES_URL')})
     lifecycle = []
     initialized = False
     owned_pid = None
@@ -124,7 +127,8 @@ def run(source, run_id, attempt, suite='readonly'):
         (evidence / 'git-sha.txt').write_text(sha)
         (evidence / 'run.json').write_text(json.dumps({
             'source_sha': sha.strip(), 'source': str(source), 'suite': suite,
-            'modules': MODULES[suite], 'argv': pytest_command(root, suite),
+            'modules': [module for selected_suite in selected for module in MODULES[selected_suite]],
+            'argv': [pytest_command(root, selected_suite) for selected_suite in selected], 'suites': selected,
             'root': str(root), 'pg_root': str(pg), 'data': str(data), 'socket': str(socket),
             'port': port, 'pg_bin': str(PG_BIN), 'uris': {key: env[key] for key in databases},
         }, indent=2) + '\n')
@@ -148,10 +152,10 @@ def run(source, run_id, attempt, suite='readonly'):
         lifecycle.append({'owned_postmaster_pid': owned_pid})
         if databases:
             connection = ['-h', socket, '-p', port, '-U', 'mmorinag']
-            for database in databases.values():
+            for database in sorted(set(databases.values())):
                 if database != 'postgres':
                     command([PG_BIN / 'createdb', *connection, database], 'createdb.log')
-            for database in databases.values():
+            for database in sorted(set(databases.values())):
                 server_log = f'server-{database}.json'
                 command([PG_BIN / 'psql', '-X', '-w', *connection, '-d', database,
                          '-v', 'ON_ERROR_STOP=1', '-At', '-c',
@@ -164,12 +168,37 @@ def run(source, run_id, attempt, suite='readonly'):
                 if actual != {'data_directory': str(data), 'port': port, 'socket': str(socket),
                               'listen_addresses': '', 'major': 16, 'role': 'mmorinag', 'database': database}:
                     raise ValueError('C1 physical server identity mismatch')
-        if suite == 'output':
-            command([sys.executable, 'backend/tests/integration/pg_output_migration_probe.py',
-                     '--evidence=' + str(evidence / 'migration-probe.json')], 'migration.log')
-        # Every fixture validates the owned server before exercising its cases.
-        result = command(pytest_command(root, suite), 'pytest.log', check=False)
-        lifecycle.append({'pytest_exit': result})
+        result = 0
+        suite_uris = {key: env[key] for key in databases}
+        input_reports = {}
+        for selected_suite in selected:
+            env['SAWA_PG_COMMAND_INPUT_REPORT'] = str(evidence / ('inputs-' + selected_suite + '.json'))
+            for key in databases:
+                env.pop(key, None)
+            env.update({key: suite_uris[key] for key in DATABASES[selected_suite]})
+            env.update({key: uri for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')})
+            env.pop('OCR_HISTORY_PROJECTION_POSTGRES_URL', None)
+            if selected_suite == 'output':
+                env.update({key: env['MODERNIZATION_PG_TEST_URI'] for key in (
+                    'DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI', 'OCR_HISTORY_PROJECTION_POSTGRES_URL')})
+                migration_exit = command([sys.executable, 'backend/tests/integration/pg_output_migration_probe.py',
+                    '--evidence=' + str(evidence / 'migration-probe.json')], 'migration.log', check=False)
+                if migration_exit:
+                    result = 1
+                    lifecycle.append({'suite': selected_suite, 'not_started': 'migration_failed', 'migration_exit': migration_exit})
+                    continue
+            # Each fixture still verifies the physical server and its isolated DB/schema.
+            code = command(pytest_command(root, selected_suite), 'pytest-' + selected_suite + '.log', check=False)
+            lifecycle.append({'suite': selected_suite, 'pytest_exit': code})
+            result = int(bool(code or result))
+            input_reports[selected_suite] = json.loads(Path(env['SAWA_PG_COMMAND_INPUT_REPORT']).read_text())
+        destination = os.environ.get('SAWA_LOCAL_EVIDENCE_DIR')
+        if suite == 'batch' and destination:
+            (Path(destination) / 'pg-command-inputs.json').write_text(json.dumps({
+                'schema': 1, 'source_sha': sha.strip(), 'suites': selected, 'reports': input_reports}, indent=2) + '\n')
+        print(json.dumps({'source_sha': sha.strip(), 'suites': {name: {
+            key: report[key] for key in ('collected', 'passed', 'skipped', 'failed', 'exitstatus')}
+            for name, report in input_reports.items()}, 'evidence': str(evidence), 'exit_code': result}), flush=True)
     except BaseException:
         (evidence / 'runner-error.log').write_text(traceback.format_exc())
         raise

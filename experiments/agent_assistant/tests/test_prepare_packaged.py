@@ -18,26 +18,28 @@ def bundle(tmp_path):
     root = tmp_path / "image"
     shutil.copytree(ROOT / "agent_runtime/baselines", root / "baselines")
     shutil.copyfile(ROOT / "agent_runtime/release.json", root / "release.json")
-    backend = root / "native/hospital/backend"
-    backend.parent.mkdir(parents=True)
-    backend.symlink_to(ROOT / "backend", target_is_directory=True)
+    for domain in ('hospital', 'shift', 'school-lunch'):
+        backend = root / 'native' / domain / 'backend'
+        backend.parent.mkdir(parents=True)
+        backend.symlink_to(ROOT / 'backend' if domain == 'hospital' else ROOT / 'agent_runtime/native' / domain / 'backend', target_is_directory=True)
     return root
 
 
 def rows(path):
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as db:
         tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-        return {name: sorted(db.execute('SELECT * FROM "' + name.replace('"', '""') + '"').fetchall(), key=repr)
+        db.row_factory = sqlite3.Row
+        return {name: sorted((dict(row) for row in db.execute('SELECT * FROM "' + name.replace('"', '""') + '"')), key=repr)
                 for name in tables if name != "alembic_version"}
 
 
-def test_formal_migration_preserves_all_data_and_seals_only_hospital(bundle, monkeypatch):
+def test_formal_migration_preserves_all_data_and_seals_each_domain(bundle, monkeypatch):
     from sqlalchemy import create_engine
     from src.maintenance.formal_migration_schema import require_formal_head
 
     baseline = bundle / "baselines/hospital"
     database = baseline / "database.sqlite3"
-    before = rows(database)
+    before = {domain: rows(bundle / 'baselines' / domain / 'database.sqlite3') for domain in ('hospital', 'shift', 'school-lunch')}
     release_before = json.loads((bundle / "release.json").read_text())
     source_before = (ROOT / "agent_runtime/baselines/hospital/database.sqlite3").read_bytes()
     outsider = bundle.parent / "must-not-be-opened.sqlite3"
@@ -50,14 +52,19 @@ def test_formal_migration_preserves_all_data_and_seals_only_hospital(bundle, mon
         require_formal_head(connection)
     engine.dispose()
     after = rows(database)
-    assert all(after[name] == values for name, values in before.items())
-    assert set(after) - set(before) == {"portal_sessions", "portal_login_attempts"}
+    for domain, tables in before.items():
+        migrated = rows(bundle / 'baselines' / domain / 'database.sqlite3')
+        for name, values in tables.items():
+            columns = set(values[0]) if values else set()
+            normalize = lambda records: sorted(repr(sorted(record.items())) for record in records)
+            assert normalize({key: row[key] for key in columns} for row in migrated[name]) == normalize(values), (domain, name)
+    assert set(after) - set(before['hospital']) == {"portal_sessions", "portal_login_attempts", "order_dashboard_counts"}
     assert after["portal_sessions"] == after["portal_login_attempts"] == []
     release = json.loads((bundle / "release.json").read_text())
     assert release["domains"]["hospital"]["baseline_files"] == source_manifest(baseline)
     for domain in ("shift", "school-lunch"):
-        assert release["domains"][domain] == release_before["domains"][domain]
         assert source_manifest(bundle / "baselines" / domain) == release["domains"][domain]["baseline_files"]
+        assert {k: v for k, v in release['domains'][domain].items() if k != 'baseline_files'} == {k: v for k, v in release_before['domains'][domain].items() if k != 'baseline_files'}
     assert not outsider.exists()
     assert (ROOT / "agent_runtime/baselines/hospital/database.sqlite3").read_bytes() == source_before
     prepare(bundle, sys.executable)

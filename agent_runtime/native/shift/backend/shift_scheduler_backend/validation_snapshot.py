@@ -3,7 +3,7 @@
 from copy import deepcopy
 from datetime import date, datetime, time
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, select, func, or_, and_
 from sqlalchemy.exc import SQLAlchemyError
 from fastapi import HTTPException
 
@@ -100,7 +100,7 @@ def _capture_rule_source(session, start, end, *, populate_existing, solver=False
         models.RotationPolicy, models.RotationQueueState, models.ScheduleException,
         models.PositionAssignmentRule,
     ):
-        if solver and model in (models.RotationPolicy, models.RotationQueueState):
+        if model in (models.RotationPolicy, models.RotationQueueState):
             continue
         query = session.query(model)
         if model is models.PositionAssignmentRule:
@@ -111,14 +111,35 @@ def _capture_rule_source(session, start, end, *, populate_existing, solver=False
         if populate_existing:
             query = query.populate_existing()
         result["tables"][model.__tablename__] = [_row_values(row) for row in query.all()]
+    if not solver:
+        rotations = capture_delivery_read_set(session, start=start, end=end, populate_existing=populate_existing)
+        result['rotation_read_set_version'] = rotations['version']
+        result['tables'].update(rotations['tables'])
     return result
 
 
-def capture_delivery_read_set(session):
-    """Full rotation relations: validators read beyond the selected policy slice."""
-    return {model.__tablename__: [_row_values(row) for row in
-        session.query(model).order_by(*inspect(model).primary_key).all()]
-        for model in (models.RotationPolicy, models.RotationQueueState)}
+def capture_delivery_read_set(session, *, start=None, end=None, version=2, populate_existing=False):
+    if version == 1:
+        return {model.__tablename__: [_row_values(row) for row in
+            session.query(model).order_by(*inspect(model).primary_key).all()]
+            for model in (models.RotationPolicy, models.RotationQueueState)}
+    if version != 2 or not isinstance(start, date) or not isinstance(end, date) or start >= end:
+        raise ValueError("shift_delivery_read_set_period_required")
+    policy_query = session.query(models.RotationPolicy).order_by(models.RotationPolicy.id)
+    policies = (policy_query.populate_existing() if populate_existing else policy_query).all()
+    enabled_ids = [row.id for row in policies if row.enabled]
+    queue = models.RotationQueueState
+    latest = select(queue.rotation_policy_id.label('policy_id'), func.max(queue.effective_from).label('day')).where(
+        queue.rotation_policy_id.in_(enabled_ids), queue.effective_from <= start,
+    ).group_by(queue.rotation_policy_id).subquery()
+    state_query = session.query(queue).outerjoin(latest, latest.c.policy_id == queue.rotation_policy_id).filter(
+        queue.rotation_policy_id.in_(enabled_ids),
+        or_(queue.effective_from == latest.c.day, and_(queue.effective_from > start, queue.effective_from <= end)),
+    ).order_by(queue.id)
+    states = (state_query.populate_existing() if populate_existing else state_query).all() if enabled_ids else []
+    return {"version": 2, "start_date": start.isoformat(), "end_date": end.isoformat(),
+            "tables": {models.RotationPolicy.__tablename__: [_row_values(row) for row in policies],
+                       queue.__tablename__: [_row_values(row) for row in states]}}
 
 
 def capture_rule_source(session, start, end):

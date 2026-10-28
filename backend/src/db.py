@@ -1,5 +1,6 @@
 import os
-from functools import lru_cache
+from collections import OrderedDict
+from threading import RLock
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event
@@ -50,8 +51,11 @@ ControlSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=Fals
 Base = declarative_base()
 
 
-@lru_cache(maxsize=4)
-def _replay_engine(uri):
+_replay_engines = OrderedDict()
+_replay_engine_lock = RLock()
+
+
+def _create_replay_engine(uri):
     selected = create_engine(uri, **engine_kwargs)
     from src.maintenance.formal_migration_schema import require_formal_head
     try:
@@ -61,6 +65,19 @@ def _replay_engine(uri):
         selected.dispose()
         raise staging_data.DatasetUnavailable("staging_dataset_schema_not_ready") from None
     return selected
+
+
+def _replay_engine(uri):
+    with _replay_engine_lock:
+        if uri in _replay_engines:
+            _replay_engines.move_to_end(uri)
+            return _replay_engines[uri]
+        selected = _create_replay_engine(uri)
+        _replay_engines[uri] = selected
+        while len(_replay_engines) > 4:
+            _, retired = _replay_engines.popitem(last=False)
+            retired.dispose()
+        return selected
 
 
 def get_engine():

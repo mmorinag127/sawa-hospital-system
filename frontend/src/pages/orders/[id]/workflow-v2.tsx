@@ -90,6 +90,7 @@ type WorkflowV2 = {
 };
 
 type OrderVersion = {
+  id?: string;
   version_no?: number | null;
   document_id?: string | null;
   message_id?: string | null;
@@ -117,6 +118,7 @@ type OrderDetail = {
   version_count?: number | null;
   current_version?: OrderVersion | null;
   versions?: OrderVersion[] | null;
+  versions_next_before_id?: string | null;
 };
 
 type PreSaveCheckEntry = {
@@ -294,6 +296,8 @@ type InspectionPayload = {
     blockers: string[];
     candidate_template_version_id: string | null;
     hidden_template_mismatch_result_count: number;
+    next_before_id?: string | null;
+    total_count?: number;
     results: OcrResult[];
   };
   workflow?: WorkflowV2;
@@ -1353,7 +1357,14 @@ export default function OrderWorkflowV2Page() {
     jobId:workflow?.ocr_job?.ocr_job_id ?? null,attemptId:workflow?.ocr_job?.workflow_attempt_id ?? null,state:workflow?.state,
     ...(workflow?.ocr_job && "native_ingest" in workflow.ocr_job ? {native_ingest:workflow.ocr_job.native_ingest} : {})};
   const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null);
+  const [faxHistoryLoading, setFaxHistoryLoading] = useState(false);
+  const faxHistoryRequestRef = useRef(0);
+  const faxHistoryAbortRef = useRef<AbortController | null>(null);
   const [ocrResults, setOcrResults] = useState<OcrResult[]>([]);
+  const [ocrHistoryBeforeId, setOcrHistoryBeforeId] = useState<string | null>(null);
+  const [ocrHistoryLoading, setOcrHistoryLoading] = useState(false);
+  const ocrHistoryRequestRef = useRef(0);
+  const ocrHistoryAbortRef = useRef<AbortController | null>(null);
   const [inspection, setInspection] = useState<InspectionPayload | null>(null);
   const [rawInspection, setRawInspection] = useState<InspectionPayload | null>(null);
   const ocrCompletionRefreshRef = useRef<string | null>(null);
@@ -2420,12 +2431,20 @@ export default function OrderWorkflowV2Page() {
     if (displayScope === "initial") initialDisplayReadRef.current = null;
     const refreshGeneration = refreshGenerationRef.current + 1;
     refreshGenerationRef.current = refreshGeneration;
+    faxHistoryRequestRef.current += 1;
+    faxHistoryAbortRef.current?.abort();
+    setFaxHistoryLoading(false);
+    ocrHistoryRequestRef.current += 1;
+    ocrHistoryAbortRef.current?.abort();
+    setOcrHistoryLoading(false);
     ocrDetailRequestRef.current += 1;
     ocrDetailAbortRef.current?.abort();
     rawInspectionRequestRef.current += 1;
     rawInspectionAbortRef.current?.abort();
     const requestedRevision = workflowRevisionRef.current?.revision;
-    const inspectionRes = await apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/display?scope=${displayScope}`, {signal, timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}).catch(err=>{
+    const displayParams = new URLSearchParams({scope: displayScope});
+    if (selectedDocumentId && orderDetail?.id === orderId) displayParams.set("selected_document_id", selectedDocumentId);
+    const inspectionRes = await apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/display?${displayParams}`, {signal, timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}).catch(err=>{
       if (signal?.aborted) return null;
       if (refreshGeneration===refreshGenerationRef.current && requestedOrderId===activeOrderIdRef.current
         && ownsPageInput(own) && callerCurrent()) throw err;
@@ -2486,7 +2505,10 @@ export default function OrderWorkflowV2Page() {
       if (canAdoptReadEditorInput("expandedCellCopy")) {
         setExpandedCellCopyMode(normalizeExpandedCellCopyMode(workflowRes.data.expanded_cell_copy_mode));
       }
-      if (candidates) setOcrResults(candidates.results);
+      if (candidates) {
+        setOcrResults(candidates.results);
+        setOcrHistoryBeforeId(candidates.next_before_id || null);
+      }
       setInspection((previous) => initial || displayScope === "summary" ? inspectionData : {...previous, ...inspectionData});
       if (initial || displayScope === "summary") {
         displayReadyRef.current = "";
@@ -2494,7 +2516,10 @@ export default function OrderWorkflowV2Page() {
           order: own.context.orderId, document: own.context.documentId || String(orderHeader.current_version?.document_id
             || orderHeader.versions?.find((version) => version.is_current)?.document_id || "").trim(),
           route: own.context.route, auth: own.auth, inputGeneration: own.inputGeneration} : null;
-        if (!candidates) setOcrResults([]);
+        if (!candidates) {
+          setOcrResults([]);
+          setOcrHistoryBeforeId(null);
+        }
         setDisplayEpoch((epoch) => epoch + 1);
       }
       rawInspectionRequestRef.current += 1;
@@ -2533,6 +2558,86 @@ export default function OrderWorkflowV2Page() {
     });
     if (adopted && rawInspectionOpenRef.current) void loadRawInspection(true);
     return adopted;
+  };
+
+  const loadFaxHistoryPage = async () => {
+    const cursor = orderDetail?.versions_next_before_id;
+    if (!cursor || faxHistoryLoading) return;
+    const own = capturePageOwner();
+    const generation = refreshGenerationRef.current;
+    const revision = workflowRevisionRef.current?.revision ?? 0;
+    const currentDocument = currentDocumentId;
+    const request = ++faxHistoryRequestRef.current;
+    faxHistoryAbortRef.current?.abort();
+    const controller = new AbortController();
+    faxHistoryAbortRef.current = controller;
+    const isCurrent = () => !controller.signal.aborted && request === faxHistoryRequestRef.current
+      && ownsPageInput(own) && generation === refreshGenerationRef.current
+      && revision === (workflowRevisionRef.current?.revision ?? 0);
+    if (!isCurrent()) return;
+    setFaxHistoryLoading(true);
+    try {
+      const response = await apiClient.get<{order_id: string; workflow_revision: number;
+        items: OrderVersion[]; total: number; next_before_id: string | null; current_version: OrderVersion | null}>(
+        `/orders/${orderId}/versions?before_id=${encodeURIComponent(cursor)}&expected_workflow_revision=${revision}`,
+        {signal: controller.signal, timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS});
+      if (!isCurrent()) return;
+      const page = response.data;
+      if (page.order_id !== own.context.orderId || page.workflow_revision !== revision
+        || !Array.isArray(page.items) || page.items.some(item => typeof item?.id !== "string"
+          || typeof item.document_id !== "string") || page.next_before_id === cursor
+        || String(page.current_version?.document_id || "") !== currentDocument) {
+        throw new Error("FAX履歴が更新されました。再読込してください。");
+      }
+      setOrderDetail(current => {
+        if (!current || !isCurrent()) return current;
+        const existing = new Set((current.versions || []).map(item => item.id));
+        return {...current, versions: [...(current.versions || []), ...page.items.filter(item => !existing.has(item.id))],
+          version_count: page.total, versions_next_before_id: page.next_before_id};
+      });
+    } catch (error) {
+      if (isCurrent()) setError(formatApiError(error, "FAX履歴の取得に失敗しました"));
+    } finally {
+      if (request === faxHistoryRequestRef.current) setFaxHistoryLoading(false);
+    }
+  };
+
+  const loadOcrHistoryPage = async () => {
+    if (!ocrHistoryBeforeId || ocrHistoryLoading) return;
+    const own = capturePageOwner();
+    const generation = refreshGenerationRef.current;
+    const revision = workflowRevisionRef.current?.revision;
+    const cursor = ocrHistoryBeforeId;
+    const request = ++ocrHistoryRequestRef.current;
+    ocrHistoryAbortRef.current?.abort();
+    const controller = new AbortController();
+    ocrHistoryAbortRef.current = controller;
+    const isCurrent = () => !controller.signal.aborted && request === ocrHistoryRequestRef.current
+      && ownsPageInput(own) && generation === refreshGenerationRef.current
+      && revision === workflowRevisionRef.current?.revision;
+    if (!isCurrent()) return;
+    setOcrHistoryLoading(true);
+    try {
+      const response = await apiClient.get<InspectionPayload>(
+        `/orders/${orderId}/workflow-v2/display?scope=ocr&history_before_id=${encodeURIComponent(cursor)}`,
+        {signal: controller.signal, timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS},
+      );
+      if (!isCurrent()) return;
+      const candidates = response.data.ocr_candidates;
+      if (response.data.workflow?.revision !== revision || response.data.workflow?.order_id !== own.context.orderId
+          || candidates?.order_id !== own.context.orderId || !Array.isArray(candidates.results)
+          || candidates.results.some(item => typeof item?.ocr_result_id !== "string")
+          || candidates.next_before_id === cursor) throw new Error("OCR履歴が更新されました。再読込してください。");
+      setOcrResults(current => {
+        const existing = new Set(current.map(item => item.ocr_result_id));
+        return [...current, ...candidates.results.filter(item => !existing.has(item.ocr_result_id))];
+      });
+      setOcrHistoryBeforeId(candidates.next_before_id || null);
+    } catch (error) {
+      if (isCurrent()) setError(formatApiError(error, "OCR履歴の取得に失敗しました"));
+    } finally {
+      if (request === ocrHistoryRequestRef.current) setOcrHistoryLoading(false);
+    }
   };
 
   const loadOcrResultDetail = async (ocrResultId: string, callerCurrent: () => boolean = () => true) => {
@@ -2604,6 +2709,13 @@ export default function OrderWorkflowV2Page() {
     initialDisplayReadRef.current = null;
     displayRequestRef.current += 1;
     setOcrResults([]);
+    faxHistoryRequestRef.current += 1;
+    faxHistoryAbortRef.current?.abort();
+    setFaxHistoryLoading(false);
+    setOcrHistoryBeforeId(null);
+    setOcrHistoryLoading(false);
+    ocrHistoryRequestRef.current += 1;
+    ocrHistoryAbortRef.current?.abort();
     sheetEditGenerationRef.current += 1;
     sheetDirtyRef.current = false;
     workflowEditorVersionsRef.current = {};
@@ -2627,6 +2739,10 @@ export default function OrderWorkflowV2Page() {
   }, [orderId]);
 
   useEffect(() => () => {
+    faxHistoryRequestRef.current += 1;
+    faxHistoryAbortRef.current?.abort();
+    ocrHistoryRequestRef.current += 1;
+    ocrHistoryAbortRef.current?.abort();
     ocrDetailRequestRef.current += 1;
     ocrDetailAbortRef.current?.abort();
     rawInspectionRequestRef.current += 1;
@@ -4992,6 +5108,10 @@ export default function OrderWorkflowV2Page() {
                 <span className="subtle">選択中: {selectedFaxVersionLabel}。このPDFを表示し、OCR再実行の入力にも使います。</span>
               </label>
             ) : null}
+            {orderDetail?.versions_next_before_id ? (
+              <Button type="button" disabled={faxHistoryLoading || Boolean(busy)}
+                onClick={() => void loadFaxHistoryPage()}>{faxHistoryLoading ? "取得中..." : "過去のFAXを表示"}</Button>
+            ) : null}
             <div className="step1-current-strip">
               <div className="step1-current-pills">
                 <span>現在: {workflowFacilityLabel}</span>
@@ -5843,6 +5963,8 @@ export default function OrderWorkflowV2Page() {
             </div>
           </header>
           {displayLoading ? <p role="status">OCR候補を取得中...</p> : null}
+          {ocrHistoryBeforeId ? <Button type="button" disabled={Boolean(busy) || displayLoading || ocrHistoryLoading}
+            onClick={() => void loadOcrHistoryPage()}>{ocrHistoryLoading ? "取得中..." : "過去のOCR候補を表示"}</Button> : null}
           <div className="ocr-result-list">
             {ocrResults.length ? (
               ocrResults.map((item) => (

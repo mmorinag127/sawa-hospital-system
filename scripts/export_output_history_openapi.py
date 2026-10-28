@@ -27,12 +27,17 @@ def response_contract():
         schema_builder=models_json_schema,
     )
     handlers = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "get_output_history"]
-    if len(handlers) != 1 or handlers[0].args.defaults:
+    if len(handlers) != 1:
         raise ValueError("unresolved required history query")
     handler = handlers[0]
     expected = {"order_id": "OrderIdQuery", "expected_workflow_revision": "WorkflowRevisionQuery",
                 "page": "PageQuery", "limit": "LimitQuery"}
-    if len(handler.args.args) != len(expected):
+    optional = {"before_id": ("str | None", str | None, None),
+                "validate_records": ("bool", bool, True), "record_id": ("str | None", str | None, None)}
+    if (len(handler.args.args) != len(expected) + len(optional)
+            or len(handler.args.defaults) != len(optional)
+            or [argument.arg for argument in handler.args.args] != [*expected, *optional]
+            or [ast.literal_eval(value) for value in handler.args.defaults] != [item[2] for item in optional.values()]):
         raise ValueError("changed history query signature")
     imports = [node for node in tree.body if isinstance(node, ast.ImportFrom)
                and node.module == "src.api.output_history_contract"]
@@ -46,10 +51,15 @@ def response_contract():
         raise ValueError("history operator authorization required")
     parameters = []
     for argument in handler.args.args:
-        if argument.arg not in expected or ast.unparse(argument.annotation) != expected[argument.arg]:
+        annotation = expected.get(argument.arg, optional.get(argument.arg, (None,))[0])
+        if ast.unparse(argument.annotation) != annotation:
             raise ValueError("unresolved history query contract")
-        parameters.append({"name": argument.arg, "in": "query", "required": True,
-                           "schema": TypeAdapter(getattr(contracts, expected[argument.arg])).json_schema()})
+        required = argument.arg in expected
+        value_type = getattr(contracts, annotation) if required else optional[argument.arg][1]
+        schema = TypeAdapter(value_type).json_schema()
+        if not required:
+            schema['default'] = optional[argument.arg][2]
+        parameters.append({"name": argument.arg, "in": "query", "required": required, "schema": schema})
     result["paths"]["/outputs/history"]["get"]["parameters"] = parameters
     return result
 

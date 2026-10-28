@@ -892,18 +892,25 @@ def evidence_run_is_selectable(row: OrderOcrEvidenceRun, *, _analysis=None, _rea
     return evidence_run_selectability_error(row, _analysis=_analysis, _read_operation=_read_operation) is None
 
 
-def list_evidence_runs(order_id: str) -> list[dict[str, Any]]:
+def list_evidence_runs(order_id: str, *, before_id: str | None = None, limit: int = 25) -> list[dict[str, Any]]:
     normalized_order_id = str(order_id or "").strip()
     if not normalized_order_id:
         return []
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("ocr_history_limit_invalid")
+    from src.services.ocr_history_read import read_history_summary
     with session_scope() as session:
-        rows = (
-            session.query(OrderOcrEvidenceRun)
-            .filter(OrderOcrEvidenceRun.order_id == normalized_order_id)
-            .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
-            .all()
-        )
-        return [_serialize_evidence_run(row, include_payload=False) for row in rows]
+        before = None
+        if before_id:
+            previous = read_history_summary(session, normalized_order_id, evidence_id=before_id)
+            if not previous:
+                raise ValueError("ocr_history_cursor_invalid")
+            before = previous[0]
+        rows = read_history_summary(session, normalized_order_id, before=before, limit=limit)
+        return [{**vars(row), "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else None,
+                 "detail_state": "not_loaded", "execution_lineage": None, "selectable": None,
+                 "artifact_manifest_json": None, "capabilities_json": None, "degraded_reasons_json": None}
+                for row in rows]
 
 
 def _serialize_evidence_run(

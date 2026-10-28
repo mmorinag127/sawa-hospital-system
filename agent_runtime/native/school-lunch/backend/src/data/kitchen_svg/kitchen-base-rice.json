@@ -2,7 +2,7 @@
   "schema_version": 1,
   "supply_area_ids": ["inspection", "rice-store", "fridge-b2", "freezer-b1", "freezer-a", "fridge-c1", "fridge-c2", "fridge-d1", "fridge-d2", "ingredient-store"],
   "template_id": "kitchen-rice",
-  "version": 8,
+  "version": 9,
   "view_box": [
     0,
     0,
@@ -16,6 +16,10 @@
     1260
   ],
   "points": [
+    {"id":"storage-fridge-d2-west","name":"冷蔵庫D-2・西接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-storage-fridge-d2-west","x":652,"y":1047.5,"equipment_id":"storage-fridge-d2","side":"西接続"},
+    {"id":"storage-fridge-d2-east","name":"冷蔵庫D-2・東接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-storage-fridge-d2-east","x":695,"y":1047.5,"equipment_id":"storage-fridge-d2","side":"東接続"},
+    {"id":"storage-fridge-d2-north","name":"冷蔵庫D-2・北接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-storage-fridge-d2-north","x":673.5,"y":1010,"equipment_id":"storage-fridge-d2","side":"北接続"},
+    {"id":"storage-fridge-d2-south","name":"冷蔵庫D-2・南接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-storage-fridge-d2-south","x":673.5,"y":1085,"equipment_id":"storage-fridge-d2","side":"南接続"},
     {
       "id": "rice-cooker-west",
       "name": "炊飯器・西接続",
@@ -6798,5 +6802,5 @@
     "max_lines": 9
   },
   "svg_file": "kitchen-base-rice.svg",
-  "svg_sha256": "cd59109536d996c611bf848a04fc51696190304e25833bb5e4d2afaf894db6f6"
+  "svg_sha256": "d0cc8da1cdffc79bf7a9bcad037313bdfce4fa203ffcb6b11894f07fbf285a80"
 }

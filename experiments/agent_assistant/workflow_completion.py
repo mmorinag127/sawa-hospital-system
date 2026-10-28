@@ -63,7 +63,9 @@ class WorkflowCompletion:
         evidence.append(period['command_id'])
         query = {'start': period['data']['start_date'], 'end': period['data']['end_date_exclusive']}
         for name in ('shift_get_staff', 'shift_get_constraints', 'shift_get_settings', 'shift_get_demands', 'shift_get_workdays'):
-            result = await self.call(run, command, name, name, {'query': query} if name in ('shift_get_demands','shift_get_workdays') else {})
+            parameters = {'query': query} if name in ('shift_get_demands','shift_get_workdays') else (
+                {'query': {'date_from': query['start'], 'date_to': query['end']}} if name == 'shift_get_constraints' else {})
+            result = await self.call(run, command, name, name, parameters)
             evidence.append(result['command_id'])
         detail = await self.call(run, command, 'candidate', 'shift_get_run', {'ids': {'run_id': sid}, 'query': {'candidate_id': cid}})
         evidence.append(detail['command_id'])
@@ -82,7 +84,9 @@ class WorkflowCompletion:
         month = run['task_inputs']['inputs']['month']
         if run['task_id'] == 'shift_absence':
             await self.tools.flow.capture_shift_reference(run)
-            source = (await self.call(run, command, 'constraints-before', 'shift_get_constraints'))['data']
+            period = await self.call(run, command, 'constraint-period', 'shift_get_period', {'query': {'month': month}})
+            source = (await self.call(run, command, 'constraints-before', 'shift_get_constraints', {
+                'query': {'date_from': period['data']['start_date'], 'date_to': period['data']['end_date_exclusive']}}))['data']
             target = run['task_inputs']['targets'][0]
             staff_id = int(target['key'])
             day = run['task_inputs']['inputs']['absence_date']

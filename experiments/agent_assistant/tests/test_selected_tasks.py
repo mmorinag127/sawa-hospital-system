@@ -33,6 +33,24 @@ class Native:
             return httpx.Response(200,json={'valid':True,**body,'sha256':hashlib.sha256(kwargs['files']['artifact_file'][1]).hexdigest(),'revision':wf['revision'],'confirmed_snapshot_id':wf['confirmed_snapshot_id']})
         if method=='GET':
             self.reads.append(path)
+            if path == '/planning/constraint-date-counts':
+                source = self.data.get('/constraints', {'items': [], 'collection_revision': 0})
+                counts = {}
+                for item in source.get('items', []):
+                    counts[item['work_date']] = counts.get(item['work_date'], 0) + 1
+                after = kwargs.get('params', {}).get('after')
+                dates = sorted(day for day in counts if after is None or day > after)
+                return httpx.Response(200, json={'collection_revision': source.get('collection_revision', 0),
+                    'items': [{'work_date': day, 'count': counts[day]} for day in dates[:200]],
+                    'next_after': dates[199] if len(dates) > 200 else None})
+            if path == '/solve-runs':
+                source = self.data[path]
+                values = source['items'] if isinstance(source, dict) else source
+                query = kwargs.get('params', {})
+                values = sorted(values, key=lambda item: item['id'], reverse=True)
+                if query.get('before_id') is not None:
+                    values = [item for item in values if item['id'] < query['before_id']]
+                return httpx.Response(200, json=deepcopy(values[:query.get('limit', 50)]))
             if path.endswith('/export') or path.endswith('/export/month') or path.startswith('/outputs/'):
                 if self.after_export: self.after_export()
                 return httpx.Response(200,content=b'synthetic workbook bytes',headers={'content-type':'application/octet-stream'})
@@ -66,6 +84,9 @@ def record(tools,run,name,data,parameters=None):
 
 
 async def get(tools,run,name,ids=None,query=None):
+    if name == 'shift_get_constraints' and not query:
+        period = await tools.flow.read(run, 'shift_get_period', {'query': {'month': run['task_inputs']['inputs']['month']}})
+        query = {'date_from': period['start_date'], 'date_to': period['end_date_exclusive']}
     ident='get-'+str(len(tools.flow.commands(run['id'])))
     result=await tools.execute(run['id'],0,name,{'parameters':{'ids':ids or {},'query':query or {}}},ident)
     assert result.get('ok'),result

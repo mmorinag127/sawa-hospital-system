@@ -57,14 +57,26 @@
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/SavedImportResponse"
+              "$ref": "#/components/schemas/ImportSummaryResponse"
             },
             "title": "Items",
             "type": "array"
+          },
+          "next_before_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before Id"
           }
         },
         "required": [
-          "items"
+          "items",
+          "next_before_id"
         ],
         "title": "ImportListResponse",
         "type": "object"
@@ -212,6 +224,43 @@
           "media_type"
         ],
         "title": "ImportSource",
+        "type": "object"
+      },
+      "ImportSummaryResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "month_id": {
+            "title": "Month Id",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ImportSource"
+          },
+          "state": {
+            "enum": [
+              "review",
+              "applied"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "month_id",
+          "state",
+          "source",
+          "created_at"
+        ],
+        "title": "ImportSummaryResponse",
         "type": "object"
       },
       "MonthlyCommandResponse": {
@@ -572,6 +621,21 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           }
         ],

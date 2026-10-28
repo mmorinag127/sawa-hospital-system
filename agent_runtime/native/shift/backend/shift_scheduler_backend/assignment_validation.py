@@ -20,7 +20,9 @@ class AssignmentChecks:
         self.valid = self.valid and bool(condition)
 
 
-def validate_assignments(session, candidate, start, end, settings):
+def validate_assignments(session, candidate, start, end, settings, *, assignments=None, candidate_statuses=None,
+                         workdays=None, period_dates=None, staffs=None, templates=None, demands=None,
+                         hard_pair_rules=None, policies=None, availability=None):
     from .operational_constraints import active_on
     from .solver import (
         _assignment_eligibility_error, _daily_work_limit_minutes, _is_hard_unavailable,
@@ -29,18 +31,26 @@ def validate_assignments(session, candidate, start, end, settings):
     )
 
     errors = []
-    staffs = {row.id: row for row in session.query(Staff).all()}
+    if staffs is None:
+        staffs = {row.id: row for row in session.query(Staff).all()}
     positions = {row.id: row for row in session.query(Position).all()}
-    templates = {row.id: row for row in session.query(ShiftTemplate).all()}
-    demands = session.query(Demand).filter(Demand.work_date >= start, Demand.work_date < end).order_by(
-        Demand.work_date, Demand.shift_template_id, Demand.position_id,
-    ).all()
-    workdays = {row.work_date: row for row in session.query(WorkdayRule).filter(
-        WorkdayRule.work_date >= start, WorkdayRule.work_date < end,
-    ).all()}
-    assignments = session.query(Assignment).filter_by(candidate_id=candidate.id).all()
-    statuses = {(row.staff_id, row.work_date): row for row in session.query(CandidateStaffStatus).filter_by(candidate_id=candidate.id).all()}
-    hard_unavailable, _, half_day_overrides, _, hard_working = _load_availability(session, start, end)
+    if templates is None:
+        templates = {row.id: row for row in session.query(ShiftTemplate).all()}
+    if demands is None:
+        demands = session.query(Demand).filter(Demand.work_date >= start, Demand.work_date < end).order_by(
+            Demand.work_date, Demand.shift_template_id, Demand.position_id,
+        ).all()
+    if workdays is None:
+        workdays = {row.work_date: row for row in session.query(WorkdayRule).filter(
+            WorkdayRule.work_date >= start, WorkdayRule.work_date < end,
+        ).all()}
+    if assignments is None:
+        assignments = session.query(Assignment).filter_by(candidate_id=candidate.id).all()
+    if candidate_statuses is None:
+        candidate_statuses = session.query(CandidateStaffStatus).filter_by(candidate_id=candidate.id).all()
+    statuses = {(row.staff_id, row.work_date): row for row in candidate_statuses}
+    hard_unavailable, _, half_day_overrides, _, hard_working = (
+        _load_availability(session, start, end) if availability is None else availability)
     staff_skills = _load_staff_skill_ids(session)
     position_rules = _load_staff_position_rules(session)
 
@@ -120,13 +130,15 @@ def validate_assignments(session, candidate, start, end, settings):
             report("hard_shift_request_missing", "必須の勤務枠指定に対応する担当が配置されていません", staff_id, day)
 
     from .operational_constraints import daily_staffing_rules, hard_pair_constraint, input_calendar_dates
-    dates = input_calendar_dates(session, start, end)
+    dates = input_calendar_dates(session, start, end) if period_dates is None else period_dates
     working = {(staff_id, day): int((status := statuses.get((staff_id, day))) is not None and status.status == "working")
                for staff_id in staffs for day in dates}
     for day, label, value, relation, bound in daily_staffing_rules(list(staffs.values()), dates, working, workdays, settings):
         if not (value >= bound if relation == "ge" else value <= bound):
             report("daily_staffing_mismatch", f"{label}が基準を満たしていません（実績 {value}人、{'下限' if relation == 'ge' else '上限'} {bound}人）", day=day)
-    for rule in session.query(StaffPairRule).filter_by(strength="hard").all():
+    if hard_pair_rules is None:
+        hard_pair_rules = session.query(StaffPairRule).filter_by(strength="hard").all()
+    for rule in hard_pair_rules:
         if rule.first_staff_id not in staffs or rule.second_staff_id not in staffs:
             continue
         if rule.kind not in {"avoid_same_day_assignment", "require_same_day_assignment", "require_same_day_work"}:
@@ -152,7 +164,8 @@ def validate_assignments(session, candidate, start, end, settings):
     except (ValueError, TypeError, KeyError):
         report("locked_assignment_unresolved", "固定担当の作成時記録を特定できません。固定条件を確認して再作成してください")
         return errors
-    policies = session.query(RotationPolicy).filter_by(enabled=True).order_by(RotationPolicy.id).all()
+    if policies is None:
+        policies = session.query(RotationPolicy).filter_by(enabled=True).order_by(RotationPolicy.id).all()
     queues = {}
     for policy in policies:
         if not any(demand.position_id == policy.position_id for demand in demands):

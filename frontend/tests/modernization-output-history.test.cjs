@@ -9,7 +9,7 @@ const entry = (id, current = false) => ({ output_bundle_id: id, order_id: 'synth
   source_saved_sheet_id: 'synthetic-sheet', source_bagging_result_id: 'synthetic-bag', template_version_id: null,
   created_at: '2026-02-15T09:00:00.123456+00:00', current, validation: 'validated', blocked_reasons: [] });
 const page = (number = 1) => ({ order_id: 'synthetic-order', workflow_revision: 7, current_output_bundle_id: 'recorded-current',
-  page: number, limit: 25, total: 26, entries: number === 1
+  page: number, limit: 25, total: 26, next_before_id: number === 1 ? 'recorded-current' : null, entries: number === 1
     ? [entry('newest-not-current'), entry('recorded-current', true)] : [entry('old-history')] });
 
 test('actual common history table distinguishes generation/history, exact lineage, UTC and no hidden actions', async () => {
@@ -39,6 +39,7 @@ test('real DataTable page change displays RequestState until the owned new page,
     await h.waitFor(() => h.document.querySelector('table'), 'initial history page');
     await h.click(h.document.querySelector('button[aria-label="次のページ"]'));
     assert.equal(t.calls.at(-1).config.params.page, 2);
+    assert.equal(t.calls.at(-1).config.params.before_id, 'recorded-current');
     assert.equal(h.document.querySelector('table'), null);
     assert.ok(h.document.querySelector('[role="status"]'));
     await h.settle(() => pending.resolve({ data: page(2) }));

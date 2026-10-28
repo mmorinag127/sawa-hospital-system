@@ -207,7 +207,7 @@ def list_process_logs(limit: int = DEFAULT_PROCESS_LOG_LIMIT, *, include_details
         items.extend(
             _ocr_job_row(row, include_details=include_details)
             for row in session.execute(
-                select(OcrJob).options(*([] if include_details else [defer(OcrJob.metrics)]))
+                select(OcrJob).options(*([] if include_details else [defer(OcrJob.evidence_metrics), defer(OcrJob.progress_metrics)]))
                 .order_by(desc(OcrJob.updated_at), desc(OcrJob.created_at)).limit(per_source_limit)
             )
             .scalars()

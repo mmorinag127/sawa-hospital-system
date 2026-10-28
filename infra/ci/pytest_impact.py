@@ -129,6 +129,10 @@ def input_digest(name):
         except (OSError, subprocess.SubprocessError):
             return None
     for method in ('stat', 'lstat'):
+        external_prefix = 'external-' + method + ':'
+        if name.startswith(external_prefix):
+            path = Path(name.removeprefix(external_prefix))
+            return metadata_digest(path, method) if path.is_absolute() else None
         prefix = method + ':'
         if name.startswith(prefix):
             path = Path(os.path.abspath(ROOT / name.removeprefix(prefix)))
@@ -914,7 +918,8 @@ def install_input_observers():
                                 method = 'lstat' if _method == 'lstat' or not follow else 'stat'
                                 record_input(method + ':' + relative, metadata_digest(path, method))
                         elif not any(path.is_relative_to(prefix) for prefix in RUNTIME_PATHS):
-                            record_unsafe('file-metadata')
+                            method = 'lstat' if _method == 'lstat' or not follow else 'stat'
+                            record_input('external-' + method + ':' + str(path), metadata_digest(path, method))
                     else:
                         record_unsafe('file-metadata')
                 finally:

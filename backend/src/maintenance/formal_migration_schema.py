@@ -162,14 +162,13 @@ def read_catalog(connection):
             JOIN pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname=current_schema() AND (
                 c.relkind IN ('p','f','S') OR c.relispartition OR c.relrowsecurity OR c.relforcerowsecurity
-                OR EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid=c.oid AND NOT t.tgisinternal)
                 OR EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid)
                 OR EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid=c.oid OR i.inhparent=c.oid)
                 OR EXISTS (SELECT 1 FROM pg_rewrite r WHERE r.ev_class=c.oid AND r.rulename != '_RETURN')
             ) ORDER BY c.relname
         """).scalars().all()
         if unsupported:
-            raise RuntimeError("catalog blocked: unsupported trigger/RLS/partition/inheritance: " + ", ".join(unsupported))
+            raise RuntimeError("catalog blocked: unsupported RLS/partition/inheritance: " + ", ".join(unsupported))
         types = connection.exec_driver_sql("""
             SELECT t.typname, CASE
                 WHEN NOT t.typisdefined THEN 'shell'
@@ -181,7 +180,9 @@ def read_catalog(connection):
                 ELSE 'composite' END AS kind
             FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
             LEFT JOIN pg_class c ON c.oid=t.typrelid
-            WHERE n.nspname=current_schema() AND (
+            WHERE n.nspname=current_schema()
+              AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid=d.refobjid
+                WHERE d.classid='pg_type'::regclass AND d.objid=t.oid AND d.deptype='e' AND e.extname='pg_trgm') AND (
                 NOT t.typisdefined OR t.typtype IN ('d','e','r','m')
                 OR (t.typtype='b' AND t.typelem=0)
                 OR (t.typtype='c' AND c.relkind='c'))
@@ -192,7 +193,13 @@ def read_catalog(connection):
                                ", ".join(f"{name} ({kind})" for name, kind in types))
         routines = connection.exec_driver_sql("""
             SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-            WHERE n.nspname=current_schema() ORDER BY p.proname
+            WHERE n.nspname=current_schema()
+              AND NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+                JOIN pg_namespace tn ON tn.oid=c.relnamespace
+                WHERE t.tgfoid=p.oid AND NOT t.tgisinternal AND tn.nspname=current_schema())
+              AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid=d.refobjid
+                WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e' AND e.extname='pg_trgm')
+            ORDER BY p.proname
         """).scalars().all()
         if routines:
             raise RuntimeError("catalog blocked: unsupported routine or standalone type")
@@ -266,10 +273,95 @@ def read_catalog(connection):
             WHERE n.nspname=current_schema()
             ORDER BY t.relname,c.conname
         """).mappings())
+        native += _postgres_scaling_features(connection)
     else:
         raise RuntimeError("catalog blocked: unsupported migration dialect")
     return {"tables": tables, "native": _clean([dict(item) for item in native]),
             "views": {name: inspector.get_view_definition(name) for name in inspector.get_view_names()}}
+
+
+def _postgres_scaling_features(connection):
+    triggers = list(connection.exec_driver_sql("""
+        SELECT c.relname AS table_name, t.tgname AS trigger_name,
+               pg_get_triggerdef(t.oid, false) AS trigger_definition,
+               t.tgenabled, t.tgdeferrable, t.tginitdeferred,
+               pg_get_functiondef(p.oid) AS function_definition,
+               p.provolatile, p.proisstrict, p.prosecdef, p.proleakproof, p.proparallel,
+               p.proconfig, p.procost, p.prorows
+        FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+        JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid
+        WHERE n.nspname=current_schema() AND NOT t.tgisinternal
+        ORDER BY c.relname,t.tgname
+    """).mappings())
+    extensions = list(connection.exec_driver_sql("""
+        SELECT e.extname, e.extversion, n.nspname AS schema_name, e.extrelocatable
+        FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace
+        WHERE e.extname='pg_trgm' ORDER BY e.extname
+    """).mappings())
+    if not extensions:
+        return triggers
+    # Bind extension implementation and operator/support dispatch, not its name alone.
+    types = list(connection.exec_driver_sql("""
+        SELECT n.nspname AS schema_name, t.typname,t.typtype,t.typisdefined,t.typlen,t.typbyval,
+               t.typcategory,t.typispreferred,t.typdelim,t.typalign,t.typstorage,
+               t.typinput::regprocedure::text AS input_function,t.typoutput::regprocedure::text AS output_function,
+               t.typreceive::regprocedure::text AS receive_function,t.typsend::regprocedure::text AS send_function,
+               t.typmodin::regprocedure::text AS modifier_input,t.typmodout::regprocedure::text AS modifier_output,
+               t.typanalyze::regprocedure::text AS analyze_function,
+               format_type(t.typelem,NULL) AS element_type, format_type(t.typbasetype,NULL) AS base_type
+        FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+        JOIN pg_depend d ON d.classid='pg_type'::regclass AND d.objid=t.oid AND d.deptype='e'
+        JOIN pg_extension e ON e.oid=d.refobjid WHERE e.extname='pg_trgm' ORDER BY n.nspname,t.typname
+    """).mappings())
+    functions = list(connection.exec_driver_sql("""
+        SELECT pg_get_functiondef(p.oid) AS definition, p.provolatile, p.proisstrict,
+               p.prosecdef, p.proleakproof, p.proparallel, p.proconfig, p.procost, p.prorows
+        FROM pg_proc p JOIN pg_depend d ON d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e'
+        JOIN pg_extension e ON e.oid=d.refobjid WHERE e.extname='pg_trgm'
+        ORDER BY p.proname,pg_get_function_identity_arguments(p.oid)
+    """).mappings())
+    operators = list(connection.exec_driver_sql("""
+        SELECT n.nspname AS schema_name, o.oprname, format_type(o.oprleft,NULL) AS left_type,
+               format_type(o.oprright,NULL) AS right_type, format_type(o.oprresult,NULL) AS result_type,
+               o.oprcode::regprocedure::text AS function_name,
+               o.oprrest::regprocedure::text AS restriction_function,
+               o.oprjoin::regprocedure::text AS join_function, o.oprcanmerge, o.oprcanhash
+        FROM pg_operator o JOIN pg_namespace n ON n.oid=o.oprnamespace
+        JOIN pg_depend d ON d.classid='pg_operator'::regclass AND d.objid=o.oid AND d.deptype='e'
+        JOIN pg_extension e ON e.oid=d.refobjid WHERE e.extname='pg_trgm'
+        ORDER BY n.nspname,o.oprname,left_type,right_type
+    """).mappings())
+    dispatch = list(connection.exec_driver_sql("""
+        SELECT n.nspname AS schema_name, f.opfname AS family, a.amname AS method,
+               m.amopstrategy AS strategy, m.amoppurpose::text AS purpose,
+               format_type(m.amoplefttype,NULL) AS left_type, format_type(m.amoprighttype,NULL) AS right_type,
+               m.amopopr::regoperator::text AS operator_name, NULL::text AS function_name
+        FROM pg_opfamily f JOIN pg_namespace n ON n.oid=f.opfnamespace JOIN pg_am a ON a.oid=f.opfmethod
+        JOIN pg_depend d ON d.classid='pg_opfamily'::regclass AND d.objid=f.oid AND d.deptype='e'
+        JOIN pg_extension e ON e.oid=d.refobjid JOIN pg_amop m ON m.amopfamily=f.oid WHERE e.extname='pg_trgm'
+        UNION ALL
+        SELECT n.nspname,f.opfname,a.amname,m.amprocnum,'support',format_type(m.amproclefttype,NULL),
+               format_type(m.amprocrighttype,NULL),NULL::text,m.amproc::regprocedure::text
+        FROM pg_opfamily f JOIN pg_namespace n ON n.oid=f.opfnamespace JOIN pg_am a ON a.oid=f.opfmethod
+        JOIN pg_depend d ON d.classid='pg_opfamily'::regclass AND d.objid=f.oid AND d.deptype='e'
+        JOIN pg_extension e ON e.oid=d.refobjid JOIN pg_amproc m ON m.amprocfamily=f.oid WHERE e.extname='pg_trgm'
+        ORDER BY 1,2,3,4,5,6,7
+    """).mappings())
+    classes = list(connection.exec_driver_sql("""
+        SELECT n.nspname AS schema_name,c.opcname,a.amname AS method,c.opcdefault,
+               format_type(c.opcintype,NULL) AS input_type,format_type(c.opckeytype,NULL) AS key_type,
+               fn.nspname AS family_schema,f.opfname AS family
+        FROM pg_opclass c JOIN pg_namespace n ON n.oid=c.opcnamespace JOIN pg_am a ON a.oid=c.opcmethod
+        JOIN pg_opfamily f ON f.oid=c.opcfamily JOIN pg_namespace fn ON fn.oid=f.opfnamespace
+        JOIN pg_depend d ON d.classid='pg_opclass'::regclass AND d.objid=c.oid AND d.deptype='e'
+        JOIN pg_extension e ON e.oid=d.refobjid WHERE e.extname='pg_trgm' ORDER BY n.nspname,c.opcname
+    """).mappings())
+    triggers.append({'table_name': 'alembic_version', 'extension_definitions': [dict(row) for row in extensions],
+                     'extension_types': [dict(row) for row in types], 'extension_classes': [dict(row) for row in classes],
+                     'extension_functions': [dict(row) for row in functions],
+                     'extension_operators': [dict(row) for row in operators],
+                     'extension_dispatch': [dict(row) for row in dispatch]})
+    return triggers
 
 
 def _without_identity(shape, dialect):

@@ -14,13 +14,19 @@ import "../../public/assistant-workflow.css";
 const PUBLIC_ROUTES = new Set(["/login", "/logout", "/auth/session", "/auth/automation", "/auth/handoff", "/about", "/privacy", "/terms"]);
 const portalUrl = (process.env.NEXT_PUBLIC_PORTAL_URL || "").replace(/\/$/, "");
 
-export default function App({ Component, pageProps, initialDataset }: AppProps & { initialDataset?: DocumentDataset }) {
+type DeploymentInfo = { gitSha: string; deployedAt: string };
+
+export default function App({ Component, pageProps, initialDataset, initialDeployment }: AppProps & {
+  initialDataset?: DocumentDataset;
+  initialDeployment?: DeploymentInfo;
+}) {
   initializeDocumentDataset(initialDataset);
   const router = useRouter();
   const destination = useRef(router.asPath);
   destination.current = router.asPath;
-  const gitSha = process.env.NEXT_PUBLIC_GIT_SHA || "unknown";
-  const deployedAt = process.env.NEXT_PUBLIC_DEPLOYED_AT || "unknown";
+  const deployment = useRef(initialDeployment || {gitSha: "unknown", deployedAt: "unknown"});
+  if (initialDeployment) deployment.current = initialDeployment;
+  const {gitSha, deployedAt} = deployment.current;
   const publicPage = PUBLIC_ROUTES.has(router.pathname);
   const [verifiedPath, setVerifiedPath] = useState<string | null>(null);
   const [authError, setAuthError] = useState("");
@@ -67,5 +73,10 @@ App.getInitialProps = async (context: AppContext) => {
   const props = await NextApp.getInitialProps(context);
   if (!context.ctx.req) return props;
   context.ctx.res?.setHeader("Cache-Control", "private, no-store");
-  return { ...props, initialDataset: datasetFromCookie(context.ctx.req.headers.cookie) };
+  return { ...props, initialDataset: datasetFromCookie(context.ctx.req.headers.cookie),
+    initialDeployment: {
+      gitSha: process.env.SAWA_GIT_SHA || process.env.NEXT_PUBLIC_GIT_SHA || "unknown",
+      deployedAt: process.env.SAWA_DEPLOYED_AT || process.env.NEXT_PUBLIC_DEPLOYED_AT || "unknown",
+    },
+  };
 };

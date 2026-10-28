@@ -5,12 +5,18 @@ from datetime import date
 from typing import Any, Iterable
 
 from sqlalchemy import or_, select
-from sqlalchemy.orm import object_session
+from sqlalchemy.orm import object_session, selectinload
 
 from src.db import session_scope
 from src.models.order import Order, OrderLine
+from src.models.order_workflow_state import OrderWorkflowState
+from src.models.order_sheet_draft import OrderSheetDraft
+from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.services import config_service
 from src.services import order_service
+from src.services.canonical_facility_store import consistent_read_scope
+from src.services.order_output_artifact_service import consistent_artifact_reads, clear_artifact_read_batch
 from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
 
 _MEAL_PERIOD_LABELS = {
@@ -56,11 +62,27 @@ def _confirmed_orders_query(date_from: date | None = None, date_to: date | None 
 
 
 def _iter_confirmed_orders(date_from: date | None = None, date_to: date | None = None) -> Iterable[Order]:
-    with session_scope() as session:
-        query = _confirmed_orders_query(date_from, date_to)
-        orders = session.execute(query).scalars().all()
-        for order in orders:
-            yield order
+    with consistent_read_scope(), session_scope() as session, consistent_artifact_reads(session):
+        query = _confirmed_orders_query(date_from, date_to).options(selectinload(Order.lines))
+        orders = session.execute(query.execution_options(yield_per=25)).scalars()
+        try:
+            for batch in orders.partitions(25):
+                ids = [order.id for order in batch]
+                workflows = session.execute(select(OrderWorkflowState).where(OrderWorkflowState.order_id.in_(ids))).scalars().all()
+                # Keep these ORM values alive for this batch only; receipt checks still run per order.
+                references = []
+                for model, identities in (
+                    (OrderSheetDraft, [row.draft_id for row in workflows if row.draft_id]),
+                    (OrderOcrEvidenceRun, [row.evidence_run_id for row in workflows if row.evidence_run_id]),
+                    (OrderConfirmedSnapshot, [row.confirmed_snapshot_id for row in workflows if row.confirmed_snapshot_id]),
+                ):
+                    if identities:
+                        references.extend(session.execute(select(model).where(model.id.in_(identities))).scalars())
+                yield from batch
+                references.clear()
+                clear_artifact_read_batch(session)
+        finally:
+            orders.close()
 
 
 def _serialize_order_refs(order_refs: dict[tuple[str, str, str, str], dict[str, Any]]) -> list[dict[str, Any]]:
@@ -105,8 +127,9 @@ def build_totals(date_from: date | None, date_to: date | None, include_order_ref
 
     grouped: dict[tuple, dict] = {}
     for order in _iter_confirmed_orders(date_from, date_to):
-        order_payload = order_service.get_order_for_output_read(order.id, read_session=object_session(order))
-        accepted = output_builder._accepted_output_candidate(order_payload)
+        read_session = object_session(order)
+        order_payload = order_service.get_order_for_output_read(order.id, read_session=read_session, include_navigation=False)
+        accepted = output_builder._accepted_output_candidate(order_payload, write_session=read_session)
         quantity_rules = accepted["configured_input"]["policy"].get("quantity_rules", {})
         zero_as_empty = quantity_rules.get("zero_as_empty", True)
         order_lines = output_builder.build_order_lines_for_outputs(

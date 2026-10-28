@@ -235,10 +235,12 @@ def test_inspection_reads_each_reference_once_and_joins_job_sources(history_case
     job_reads = [sql for sql in statements if "FROM ocr_jobs" in sql]
     assert len(job_reads) == 1
     assert all(name in job_reads[0] for name in ("order_documents", "uploaded_pdfs", "order_versions"))
-    assert not any("count(*)" in sql.lower() and "order_ocr_evidence_runs" in sql for sql in statements)
+    counts = [sql for sql in statements if 'count(*)' in sql.lower() and 'order_ocr_evidence_runs' in sql]
+    assert len(counts) == 2
+    assert all('order_ocr_evidence_runs.order_id =' in sql for sql in counts)
     assert sum("FROM orders LEFT OUTER JOIN order_workflow_states" in sql for sql in statements) == 1
     assert sum("FROM order_sheet_drafts" in sql for sql in statements) == 2
-    assert sum("FROM order_ocr_evidence_runs" in sql for sql in statements) == (2 if saved_map else 3)
+    assert sum("FROM order_ocr_evidence_runs" in sql for sql in statements if sql not in counts) == (2 if saved_map else 3)
     assert len(full_evidence_reads) == (0 if saved_map else 1)
     assert result["saved_sheet"]["sheet"]["rows"] == produced["sheet"]["rows"]
     assert result["ocr_result_count"] == len(result["ocr_candidates"]["results"])

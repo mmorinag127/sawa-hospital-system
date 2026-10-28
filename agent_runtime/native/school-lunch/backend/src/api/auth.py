@@ -1,7 +1,5 @@
 import hmac
 import os
-import threading
-import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -38,10 +36,6 @@ def _parse_emails(env_key: str) -> set[str]:
 ALLOWED_EMAILS = _parse_emails("ALLOWED_EMAILS")
 ADMIN_EMAILS = _parse_emails("ADMIN_EMAILS")
 ADMIN_SERVICE_ACCOUNTS = _parse_emails("ADMIN_SERVICE_ACCOUNTS")
-_USER_ROLE_CACHE_TTL_SECONDS = max(float(os.getenv("AUTH_USER_CACHE_TTL_SECONDS", "15")), 0.0)
-_USER_ROLE_CACHE_LOCK = threading.Lock()
-_USER_ROLE_CACHE_EXPIRES_AT = 0.0
-_USER_ROLE_CACHE: dict[str, str] = {}
 
 
 class UserRoleLookupError(RuntimeError):
@@ -52,25 +46,16 @@ def is_auth_disabled() -> bool:
     return os.getenv("AUTH_DISABLED", "false").lower() == "true"
 
 
-def invalidate_user_cache() -> None:
-    global _USER_ROLE_CACHE_EXPIRES_AT, _USER_ROLE_CACHE
-    with _USER_ROLE_CACHE_LOCK:
-        _USER_ROLE_CACHE_EXPIRES_AT = 0.0
-        _USER_ROLE_CACHE = {}
-
-
-def _load_active_user_roles() -> dict[str, str]:
-    global _USER_ROLE_CACHE_EXPIRES_AT, _USER_ROLE_CACHE
-
-    now = time.monotonic()
-    with _USER_ROLE_CACHE_LOCK:
-        if now < _USER_ROLE_CACHE_EXPIRES_AT:
-            return dict(_USER_ROLE_CACHE)
-
+def _load_active_user_roles(account: str) -> dict[str, str]:
+    identity = str(account or "").strip().lower()
+    if not identity:
+        return {}
     try:
         roles: dict[str, str] = {}
         with session_scope() as session:
-            users = session.execute(select(User)).scalars().all()
+            users = session.execute(select(User.account, User.role, User.status).where(
+                User.account_lookup == identity,
+            ))
             for user in users:
                 account = str(user.account or "").strip().lower()
                 role = str(user.role or "").strip().lower()
@@ -85,10 +70,7 @@ def _load_active_user_roles() -> dict[str, str]:
     except Exception as exc:  # noqa: BLE001
         raise UserRoleLookupError("Failed to load active user roles") from exc
 
-    with _USER_ROLE_CACHE_LOCK:
-        _USER_ROLE_CACHE = roles
-        _USER_ROLE_CACHE_EXPIRES_AT = now + _USER_ROLE_CACHE_TTL_SECONDS
-    return dict(roles)
+    return roles
 
 
 def _raise_role_lookup_unavailable():
@@ -227,7 +209,7 @@ def get_current_admin(request: Request) -> UserContext:
         if google_email in ADMIN_SERVICE_ACCOUNTS:
             return UserContext(role="admin")
         try:
-            active_roles = _load_active_user_roles()
+            active_roles = _load_active_user_roles(google_email)
         except UserRoleLookupError:
             _raise_role_lookup_unavailable()
         registered_role = active_roles.get(str(google_email).lower())
@@ -256,7 +238,7 @@ def get_current_operator(request: Request) -> UserContext:
         if google_email in ADMIN_SERVICE_ACCOUNTS:
             return UserContext(role="operator")
         try:
-            active_roles = _load_active_user_roles()
+            active_roles = _load_active_user_roles(google_email)
         except UserRoleLookupError:
             _raise_role_lookup_unavailable()
         registered_role = active_roles.get(str(google_email).lower())

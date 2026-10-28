@@ -84,30 +84,36 @@ cloud credentials are excluded; Next-generated source stays in that workspace.
 
 ## Backend impact selection
 
-The local batch defaults to explicitly scoped staging core/backend repair tests,
-with dependency tracking within that scope. Modules outside the scope are not
-passed or reused. `infra/ci/staging_backend_scope.json` records the exact scope;
-known failed or interrupted modules are additionally retained. `--full` and
+The local batch collects every general backend module, then uses recorded per-case
+dependencies to select execution. The historical
+`infra/ci/staging_backend_scope.json` is no longer an execution allowlist; new or
+changed tests cannot disappear outside it. Known failed or interrupted cases
+are retained. Dedicated PostgreSQL modules are excluded only because the same
+receipt maps them to their owned PostgreSQL command. `--full` and
 `release/prod-*` execute every case. Unknown inputs, missing or corrupt tracking,
 and failed tracking runs do not authorize reuse. Only the runner's built-in
 testmon/input tracker may select cases; inherited pytest selectors are removed.
 
 Each backend run retains `backend-tests/selection.json`, including executed and
 reused node IDs, reasons, context, baseline identity and tracking hashes. Its hash,
-source SHA and counts are included in the version 2 signed receipt accepted by
-the staging source gate. Version 1 full-run receipts remain readable.
+source SHA and counts are included in the signed receipt accepted by the staging
+source gate. Version 3 additionally records command reuse and its original signed
+execution proof. Version 1 full-run receipts remain readable.
 
-The first tracking run executes every case in the selected scope. Explicit full
+The first tracking run executes every collected general case. Explicit full
 mode still executes the whole backend suite. A reported all-test run is not evidence of a
 speed improvement: real backend reuse and timing must be measured separately.
 
-Focused staging also declares its frontend contract files and real browser specs
-in `infra/ci/staging_frontend_scope.json`. Other frontend cases are not run or
-claimed as passed/reused. Full and production runs retain the complete suites.
-The output PG group always performs its fresh-head migration probe and all
-transaction/output cases; historical per-revision resume matrices are full-mode
-coverage. Adoption, readonly, C1, menu identity and all native/runtime checks are
-unchanged. Scope reports and command logs preserve these distinctions.
+Focused frontend discovery includes all standard config and browser test names,
+in addition to the explicit boundary modules in
+`infra/ci/staging_frontend_scope.json`. Fixed lists cannot hide new tests. The
+five PostgreSQL groups share one owned server startup and run serially in separate
+pytest processes. The output group performs its fresh-head migration probe;
+historical per-revision resume matrices remain full-mode coverage. A focused PG
+batch can reuse an earlier real success only with its signature, ancestor source,
+unchanged source/runtime/environment and intact input-observation proof. Unknown
+inputs, subprocesses, skips or failures prohibit reuse. Full/production runs
+never reuse that command. No hosted CI execution is introduced.
 
 ## Cold-run preparation reduction
 

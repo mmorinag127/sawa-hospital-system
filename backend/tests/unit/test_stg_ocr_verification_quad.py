@@ -165,7 +165,8 @@ def test_actual_serializer_contracts(monkeypatch):
     })
     serializer, order_ast = source_function('order_serialization_service', 'serialize_order', {
         'sheet_week_service': sheet_week_service, '_build_menu_amount_meta': lambda row: {},
-        '_list_order_versions_for_serialization': lambda row: [version],
+        '_list_order_versions_for_serialization': lambda row: {
+            'items': [version], 'total': 1, 'current_version': version, 'next_before_id': None},
         '_recorded_job_fields': recorded_fields,
     })
     order = serializer(row_for(order_ast, 'order', id='ord', current_document_id='doc', facility_code=value['facility_id'], week_code=value['week_id']))

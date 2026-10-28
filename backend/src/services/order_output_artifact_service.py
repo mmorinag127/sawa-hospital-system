@@ -3,11 +3,65 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from contextlib import contextmanager
 from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from src.models.order_output_artifact import OrderBaggingResult, OrderOutputBundle
+
+_READ_SET = 'verified_output_artifact_read_set_v1'
+
+
+@contextmanager
+def consistent_artifact_reads(session: Session):
+    if session.in_transaction():
+        raise ValueError('output_read_snapshot_requires_new_transaction')
+    connection = session.connection()
+    sqlite_query_only = None
+    restore_query_only = None
+    listeners = []
+    try:
+        if connection.dialect.name == 'postgresql':
+            connection.exec_driver_sql('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+        elif connection.dialect.name == 'sqlite':
+            sqlite_query_only = connection.exec_driver_sql('PRAGMA query_only').scalar_one()
+            driver = connection.connection.driver_connection
+            restored = False
+
+            def restore_query_only(_connection):
+                nonlocal restored
+                if not restored:
+                    driver.execute('PRAGMA query_only=' + str(int(sqlite_query_only)))
+                    restored = True
+
+            connection.exec_driver_sql('PRAGMA query_only=ON')
+            for name in ('commit', 'rollback'):
+                event.listen(connection, name, restore_query_only)
+                listeners.append(name)
+            if not driver.in_transaction:
+                connection.exec_driver_sql('BEGIN')
+        else:
+            raise ValueError('output_read_snapshot_dialect_unsupported')
+        session.info[_READ_SET] = {'transaction': session.get_transaction(), 'entries': {}}
+        yield
+        if session.info[_READ_SET]['transaction'] is not session.get_transaction():
+            raise ValueError('output_read_snapshot_changed')
+    finally:
+        session.info.pop(_READ_SET, None)
+        if restore_query_only is not None:
+            try:
+                restore_query_only(connection)
+            finally:
+                for name in listeners:
+                    event.remove(connection, name, restore_query_only)
+
+
+def clear_artifact_read_batch(session: Session):
+    read_set = session.info.get(_READ_SET)
+    if read_set is not None:
+        read_set['entries'].clear()
 
 
 def payload_digest(payload: object) -> str:
@@ -101,22 +155,30 @@ def save_output_bundle_artifact(
 
 
 def load_bagging_result_payload(session: Session, artifact_id: str | None, *, expected_order_id: str) -> dict[str, Any] | None:
-    normalized_id = _optional_id(artifact_id)
-    if not normalized_id:
-        return None
-    artifact = session.get(OrderBaggingResult, normalized_id, populate_existing=True)
-    if artifact is None or not _valid_payload(artifact, artifact.payload_json, expected_order_id=expected_order_id):
-        return None
-    return deepcopy(artifact.payload_json)
+    return _load_payload(session, OrderBaggingResult, artifact_id, expected_order_id)
 
 
 def load_output_bundle_payload(session: Session, artifact_id: str | None, *, expected_order_id: str) -> dict[str, Any] | None:
+    return _load_payload(session, OrderOutputBundle, artifact_id, expected_order_id)
+
+
+def _load_payload(session, model, artifact_id, expected_order_id):
     normalized_id = _optional_id(artifact_id)
     if not normalized_id:
         return None
-    artifact = session.get(OrderOutputBundle, normalized_id, populate_existing=True)
+    read_set = session.info.get(_READ_SET)
+    key = (model, normalized_id, expected_order_id)
+    if read_set is not None:
+        if (read_set['transaction'] is not session.get_transaction()
+                or session.new or session.dirty or session.deleted):
+            raise ValueError('output_read_snapshot_changed')
+        if key in read_set['entries']:
+            return deepcopy(read_set['entries'][key][1])
+    artifact = session.get(model, normalized_id, populate_existing=True)
     if artifact is None or not _valid_payload(artifact, artifact.payload_json, expected_order_id=expected_order_id):
         return None
+    if read_set is not None:
+        read_set['entries'][key] = (artifact, deepcopy(artifact.payload_json))
     return deepcopy(artifact.payload_json)
 
 

@@ -34,7 +34,7 @@ from src.services.provider_row_presentation import (
 from src.services.template_field_schema_service import (
     build_header_by_field,
     classify_aux_header_semantic,
-    derive_row_fields_from_columns,
+    provider_row_fields,
 )
 
 _DEFAULT_ROW_FIELDS = ["date_mmdd", "daypart", "menu", "remarks"]
@@ -59,21 +59,7 @@ def _safe_int(value: object, fallback: int) -> int:
 
 
 def _row_fields(template: dict) -> list[str]:
-    derived = derive_row_fields_from_columns(template.get("columns"))
-    if bool(template.get("columns_authoritative")) and derived:
-        return derived
-    fields = template.get("main_ocr_row_fields")
-    if isinstance(fields, list):
-        normalized: list[str] = []
-        for field in fields:
-            text = str(field or "").strip()
-            if text:
-                normalized.append(text)
-        if normalized:
-            return normalized
-    if derived:
-        return derived
-    return list(_DEFAULT_ROW_FIELDS)
+    return provider_row_fields(template, default_fields=_DEFAULT_ROW_FIELDS)
 
 
 def _quantity_only_mode(template: dict[str, Any]) -> bool:

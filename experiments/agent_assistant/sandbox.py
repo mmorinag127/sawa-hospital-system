@@ -63,6 +63,12 @@ def require_process_group_owner(pid, run_id, created=None):
                 or os.getpgid(pid) != pid):
             raise Conflict("試用APIのプロセス所有権を確認できません")
     except (psutil.AccessDenied, PermissionError) as exc:
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
         raise Conflict("試用APIのプロセス所有権確認がOSに拒否されました。終了未確認です") from exc
     except psutil.NoSuchProcess:
         try:

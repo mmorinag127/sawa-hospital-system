@@ -1,12 +1,13 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, Date, DateTime, Integer, String
+from sqlalchemy import Boolean, Column, Date, DateTime, Integer, String, Index
 
 from src.db import Base
 
 
 class ShippingTrackingLog(Base):
     __tablename__ = "shipping_tracking_logs"
+    __table_args__ = (Index("ix_shipping_tracking_logs_key_latest", "tracking_key", "looked_up_at", "created_at", "id"),)
 
     id = Column(String, primary_key=True)
     tracking_key = Column(String, nullable=False, index=True)

@@ -4,11 +4,13 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
 import time
 from local_receipt_signing import sign, verify_signed
+from local_command_evidence import CommandEvidence, validate_proof
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +47,19 @@ def frontend_scope(group):
                     or (kind == 'e2e' and not name.endswith('.spec.ts'))
                     or (kind == 'config' and not name.endswith(('.test.cjs', '.test.mjs', '.test.js')))):
                 raise ValueError('Invalid staging frontend module')
-    return value[group]
+    if group == 'config':
+        discovered = {
+            str(path.relative_to(ROOT / 'frontend'))
+            for pattern in ('tests/config/**/*.test.js', 'tests/config/**/*.test.mjs', 'tests/config/**/*.test.cjs',
+                            'tests/*.test.js', 'tests/*.test.mjs', 'tests/*.test.cjs')
+            for path in (ROOT / 'frontend').glob(pattern)
+            if path.is_file()
+        }
+        return sorted(discovered | set(value[group]))
+    discovered = {str(path.relative_to(ROOT / 'frontend'))
+                  for pattern in ('*.spec.ts', '*.spec.tsx', '*.spec.js', '*.spec.mjs', '*.spec.cjs')
+                  for path in (ROOT / 'frontend/tests/e2e').rglob(pattern) if path.is_file()}
+    return sorted(discovered | set(value[group]))
 
 
 def digest(path: Path) -> str:
@@ -79,13 +93,15 @@ def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash:
     if type(receipt) is not dict:
         raise ValueError("receipt fields do not match the local receipt contract")
     required = {"receipt_version", "owner_attestation", "source_sha_start", "source_sha_end", "clean_before", "clean_after", "definition_sha256", "commands"}
-    if receipt.get("receipt_version") == 2:
+    if receipt.get("receipt_version") in (2, 3):
         required.add("backend_selection")
+    if receipt.get("receipt_version") == 3:
+        required.add("command_reuse")
     if type(receipt) is not dict or set(receipt) != required:
         raise ValueError("receipt fields do not match the local receipt contract")
-    if type(receipt["receipt_version"]) is not int or receipt["receipt_version"] not in (1, 2) or receipt["owner_attestation"] != "manual":
+    if type(receipt["receipt_version"]) is not int or receipt["receipt_version"] not in (1, 2, 3) or receipt["owner_attestation"] != "manual":
         raise ValueError("receipt must be a supported manual owner attestation")
-    if receipt["receipt_version"] == 2:
+    if receipt["receipt_version"] in (2, 3):
         selection = receipt["backend_selection"]
         if require_full and (not isinstance(selection, dict) or selection.get("mode") != "full"):
             raise ValueError("production requires full backend execution")
@@ -126,6 +142,20 @@ def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash:
             raise ValueError("receipt contains an unsuccessful local command")
         if command["name"] != expected["name"] or command["command_sha256"] != hashlib.sha256(expected["command"].encode()).hexdigest():
             raise ValueError("receipt command does not match the local test manifest")
+    if receipt['receipt_version'] == 3:
+        reuse = receipt['command_reuse']
+        if require_full or not isinstance(reuse, list) or not reuse:
+            raise ValueError('full verification cannot reuse outer command results')
+        by_name = {command['name']: command for command in commands}
+        seen = set()
+        for entry in reuse:
+            if (not isinstance(entry, dict) or set(entry) != {'name', 'dependency_sha256', 'proof'}
+                    or entry['name'] not in by_name or entry['name'] in seen):
+                raise ValueError('invalid command reuse record')
+            seen.add(entry['name'])
+            command = by_name[entry['name']]
+            validate_proof(entry['proof'], command_hash=command['command_sha256'],
+                           dependency_hash=entry['dependency_sha256'], log_hash=command['log_sha256'])
 
 
 def run(output: Path, *, full: bool = False) -> int:
@@ -150,15 +180,40 @@ def run(output: Path, *, full: bool = False) -> int:
     environment["SAWA_LOCAL_TEST_MODE"] = "full" if full or not branch or branch.startswith("release/prod-") else "focused"
     environment["SAWA_IMPACT_FULL"] = "1" if environment["SAWA_LOCAL_TEST_MODE"] == "full" else "0"
     records = []
+    executed_commands = {}
+    evidence = CommandEvidence(ROOT, environment)
+    reused_commands = []
+    new_baselines = []
     source_stable = True
     for index, item in enumerate(commands):
         name, command = item.get("name"), item.get("command")
         if not isinstance(name, str) or not isinstance(command, str):
             raise SystemExit("invalid local hospital test command")
         log = output / f"{index:02d}-{name}.log"
-        with log.open("wb") as stream:
-            result = subprocess.run(["bash", "-euo", "pipefail", "-c", command], cwd=ROOT,
-                                    env=environment, stdout=stream, stderr=subprocess.STDOUT)
+        started = time.monotonic()
+        if command in executed_commands:
+            previous_log, result, reuse = executed_commands[command]
+            shutil.copyfile(previous_log, log)
+            reused_in_batch = True
+        else:
+            reuse = evidence.reuse(command, log) if environment['SAWA_LOCAL_TEST_MODE'] == 'focused' else None
+            if reuse is not None:
+                result = subprocess.CompletedProcess(command, 0)
+            else:
+                with log.open("wb") as stream:
+                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", command], cwd=ROOT,
+                                            env=environment, stdout=stream, stderr=subprocess.STDOUT)
+                if result.returncode == 0:
+                    new_baselines.append((command, log))
+            executed_commands[command] = (log, result, reuse)
+            reused_in_batch = False
+        if reuse is not None:
+            reused_commands.append({'name': name, **reuse})
+        with (output / "command-timings.jsonl").open("a") as stream:
+            stream.write(json.dumps({"name": name, "seconds": round(time.monotonic() - started, 3),
+                                     "shared_batch_result": reused_in_batch,
+                                     "dependency_reused": reuse is not None,
+                                     "exit_code": result.returncode}) + "\n")
         records.append({"name": name, "command_sha256": hashlib.sha256(command.encode()).hexdigest(),
                         "log_sha256": digest(log), "exit_code": result.returncode})
         if (git("rev-parse", "HEAD") != source_sha_start
@@ -192,7 +247,17 @@ def run(output: Path, *, full: bool = False) -> int:
             "mode": environment["SAWA_LOCAL_TEST_MODE"], "executed": len(executed),
             "reused": len(report["reused"]), "report_sha256": digest(report_path)}
         validate_receipt(receipt, source_sha_start, receipt["definition_sha256"])
+    if reused_commands:
+        receipt['receipt_version'] = 3
+        receipt['command_reuse'] = reused_commands
+        validate_receipt(receipt, source_sha_start, receipt['definition_sha256'])
     (output / "receipt.json").write_text(json.dumps(sign(receipt), indent=2) + "\n")
+    try:
+        for command, log in new_baselines:
+            evidence.save(command, source_sha_start, log)
+        evidence.persist()
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        (output / 'command-cache-unavailable.json').write_text(json.dumps({'type': type(error).__name__}) + '\n')
     return 0 if receipt["clean_after"] and len(records) == len(commands) and all(x["exit_code"] == 0 for x in records) else 1
 
 

@@ -114,7 +114,7 @@ class SolveResponse(SolvePeriod):
 
 
 class SolveRunSummary(SolvePeriod):
-    job_status: SolveJobStatus
+    job_status: SolveJobStatus | None
     id: int
     status: str
     solver_status: str | None

@@ -152,14 +152,22 @@ def template_slot(template):
             "shift_template_id": template.id}
 
 
-def candidate_time_rows(session, candidate_id):
+def candidate_time_rows(session, candidate_id, *, assignment_rows=None, status_rows=None):
     from .models import Assignment, CandidateStaffStatus
 
     assignments = defaultdict(list)
-    for row in session.query(Assignment).filter(Assignment.candidate_id == candidate_id).all():
+    if assignment_rows is None:
+        from sqlalchemy.orm import joinedload
+        assignment_rows = session.query(Assignment).options(joinedload(Assignment.shift_template)).filter(
+            Assignment.candidate_id == candidate_id).all()
+    for row in assignment_rows:
         assignments[(row.staff_id, row.work_date)].append(row)
     statuses = defaultdict(list)
-    for row in session.query(CandidateStaffStatus).filter(CandidateStaffStatus.candidate_id == candidate_id).all():
+    if status_rows is None:
+        from sqlalchemy.orm import joinedload
+        status_rows = session.query(CandidateStaffStatus).options(joinedload(CandidateStaffStatus.shift_template)).filter(
+            CandidateStaffStatus.candidate_id == candidate_id).all()
+    for row in status_rows:
         statuses[(row.staff_id, row.work_date)].append(row)
     result = []
     for staff_id, day in sorted(assignments.keys() | statuses.keys()):
@@ -368,7 +376,8 @@ def slots_conflict(first_day, first, second_day, second, rest):
     return second_start - first_end < rest
 
 
-def validate_operational(session, candidate, staffs, dates, settings, prior_status, workday_rules):
+def validate_operational(session, candidate, staffs, dates, settings, prior_status, workday_rules, *,
+                         assignments=None, candidate_statuses=None, templates=None, availability=None):
     from itertools import combinations
     from .models import ShiftTemplate
     from .solver import _daily_work_limit_minutes, _load_availability
@@ -384,7 +393,8 @@ def validate_operational(session, candidate, staffs, dates, settings, prior_stat
 
     if not dates:
         return errors
-    _, _, half_day_overrides, _, _ = _load_availability(session, dates[0], dates[-1] + timedelta(days=1))
+    _, _, half_day_overrides, _, _ = (_load_availability(session, dates[0], dates[-1] + timedelta(days=1))
+                                      if availability is None else availability)
     try:
         prior_time = load_time_history(
             (candidate.solve_run.config_json or {}).get("prior_time_history"),
@@ -393,11 +403,12 @@ def validate_operational(session, candidate, staffs, dates, settings, prior_stat
     except (ValueError, TypeError, KeyError):
         report("prior_time_history_invalid", None, dates[0])
         prior_time = {}
-    templates = {row.id: row for row in session.query(ShiftTemplate).all()}
+    if templates is None:
+        templates = {row.id: row for row in session.query(ShiftTemplate).all()}
     for code, staff_id, day in required_history_errors(staffs, dates[0], settings, prior_status, prior_time):
         report(code, staff_id, day)
     rows = {(row["staff_id"], date.fromisoformat(row["work_date"])): row
-            for row in candidate_time_rows(session, candidate.id)}
+            for row in candidate_time_rows(session, candidate.id, assignment_rows=assignments, status_rows=candidate_statuses)}
     minutes, off = {}, {}
     time_valid_staff, status_valid_staff = [], []
     for staff in staffs:

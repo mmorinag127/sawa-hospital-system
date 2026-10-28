@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, ForeignKey, JSON, LargeBinary, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Date, ForeignKey, JSON, LargeBinary, UniqueConstraint, CheckConstraint, Index
 from src.db import Base
 
 
@@ -27,6 +27,11 @@ class RouteDiagram(Base):
 
 class RouteSourceSession(Base):
     __tablename__ = "school_lunch_route_source_sessions"
+    __table_args__ = (CheckConstraint(
+        "(artifact_source_id IS NULL AND source_pdf IS NOT NULL AND image IS NOT NULL) OR "
+        "(artifact_source_id IS NOT NULL AND artifact_source_id <> id AND source_pdf IS NULL AND image IS NULL)",
+        name="ck_route_source_artifact_storage",
+    ), Index("ix_route_sources_diagram_id", "diagram_id", "id"))
     id = Column(Integer, primary_key=True)
     diagram_id = Column(Integer, ForeignKey("school_lunch_route_diagrams.id"), nullable=False)
     diagram_version = Column(Integer, nullable=False)
@@ -34,10 +39,11 @@ class RouteSourceSession(Base):
     layout_version = Column(Integer, nullable=False)
     source_versions = Column(JSON, nullable=False)
     filename = Column(String(300), nullable=False)
-    source_pdf = Column(LargeBinary, nullable=False)
+    artifact_source_id = Column(Integer, ForeignKey("school_lunch_route_source_sessions.id"), nullable=True, index=True)
+    source_pdf = Column(LargeBinary, nullable=True)
     source_sha256 = Column(String(64), nullable=False)
     page = Column(Integer, nullable=False)
-    image = Column(LargeBinary, nullable=False)
+    image = Column(LargeBinary, nullable=True)
     image_sha256 = Column(String(64), nullable=False)
     version = Column(Integer, nullable=False, default=1)
     status = Column(String(30), nullable=False, default="source")

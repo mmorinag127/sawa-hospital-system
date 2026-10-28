@@ -106,7 +106,7 @@ def _enqueue_solve(session, request, *, transport_contract=None, transport_facto
             solve_run_id=run.id, generation=1, state="pending", owner_attempt=None,
             lease_until=None, transport_contract=transport,
             captured_config=deepcopy(run.config_json), input_version=version,
-            read_set=capture_delivery_read_set(session), receipt=None,
+            read_set=capture_delivery_read_set(session, start=period.start_date, end=period.end_date_exclusive), receipt=None,
         )
         session.add(delivery)
         session.commit()
@@ -252,7 +252,16 @@ def execute_claimed_solve(session, claim: SolveClaim, *, clock):
         request = captured["execution_contract"]["request"]["solve_period"]
         failure = None
         try:
-            if not execution_json_equal(delivery.read_set, capture_delivery_read_set(session)):
+            recorded_read_set = delivery.read_set
+            legacy_keys = {models.RotationPolicy.__tablename__, models.RotationQueueState.__tablename__}
+            if type(recorded_read_set) is dict and set(recorded_read_set) == legacy_keys:
+                current_read_set = capture_delivery_read_set(session, version=1)
+            elif type(recorded_read_set) is dict and recorded_read_set.get("version") == 2:
+                current_read_set = capture_delivery_read_set(session, start=date.fromisoformat(request["start_date"]),
+                    end=date.fromisoformat(request["end_date_exclusive"]))
+            else:
+                raise PreparedInputStopped("shift_delivery_input_changed", "Rotation read set version is unresolved")
+            if not execution_json_equal(recorded_read_set, current_read_set):
                 raise PreparedInputStopped("shift_delivery_input_changed", "Rotation read set differs")
             prepared = prepare_period_solve(
                 session, request["label"], request["start_date"], request["end_date_exclusive"],

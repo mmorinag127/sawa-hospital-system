@@ -12,6 +12,21 @@ import tempfile
 from local_hospital_test_runner import ROOT, clean_tree, frontend_scope, git, reject_hosted_runner
 
 
+def copy_dependencies(source, target):
+    command = (['cp', '-cR', str(source), str(target)] if sys.platform == 'darwin' else
+               ['cp', '--reflink=auto', '-a', str(source), str(target)] if sys.platform.startswith('linux') else None)
+    if command is not None:
+        try:
+            result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if result.returncode == 0:
+                return
+        except OSError:
+            pass
+        if target.exists():
+            shutil.rmtree(target)
+    shutil.copytree(source, target, symlinks=True)
+
+
 def main():
     reject_hosted_runner()
     if not clean_tree():
@@ -39,7 +54,7 @@ def main():
             raise ValueError("E2E source copy differs: " + name)
         hashes[name] = digest
     # Independent installed files keep Next's generated changes out of the source.
-    shutil.copytree(ROOT / "frontend/node_modules", workspace / "node_modules", symlinks=True)
+    copy_dependencies(ROOT / "frontend/node_modules", workspace / "node_modules")
     for installed in (workspace / "node_modules").rglob("*"):
         if installed.is_symlink() and workspace not in installed.resolve(strict=True).parents:
             raise ValueError("E2E dependency link escapes its isolated copy")

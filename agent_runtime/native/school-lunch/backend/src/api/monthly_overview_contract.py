@@ -31,3 +31,4 @@ class MonthlyOverviewResponse(BaseModel):
     start_date: date
     end_date: date
     facilities: list[OverviewFacility]
+    next_after_id: int | None = None

@@ -9,6 +9,14 @@ from .process_route_rules_service import prepare_process_route_rules
 from .process_route_center_geometry import canvas, segment_box, free_path, intersection, overlap
 
 
+def _equipment_permissions(points, storage_equipment):
+    allowed = {point['equipment_id'] for point in points if point.get('equipment_id')}
+    for point in points:
+        if point.get('kind') == 'area_anchor':
+            allowed.update(storage_equipment.get(point.get('area_id'), ()))
+    return allowed
+
+
 def _centres(svg, manifest):
     root=E.fromstring(svg); parents={c:p for p in root.iter() for c in p}
     elements={el.get('id'):el for el in root.iter() if el.get('id')}
@@ -85,6 +93,10 @@ def plan_center_flow(svg, manifest, request):
     from .process_route_layout_service import text_boxes
     centres,all_boxes=_centres(svg,manifest)
     boxes={eid:b for eid,b in all_boxes.items() if eid not in inactive}
+    storage_equipment = defaultdict(set)
+    for element in root.iter():
+        if element.get('id') in boxes and element.get('data-storage-area'):
+            storage_equipment[element.get('data-storage-area')].add(element.get('id'))
     visits=visits_for(prepared,centres,boxes)
     positions={(rid,i):visits['stage',rid,i] for rid,ps in prepared.stages.items() for i in range(len(ps))}
     departures=dict(positions)
@@ -190,7 +202,7 @@ def plan_center_flow(svg, manifest, request):
         middle=free_path(tips[0],tips[1],obstacles,region,blocked_edges)
         return compact([tuple(a),*middle,tuple(b)])
     for sid,(a,b) in sections.items():
-        allowed={p.get('equipment_id') for p in prepared.shared[sid]['points'] if p.get('equipment_id')}
+        allowed=_equipment_permissions(prepared.shared[sid]['points'], storage_equipment)
         limits=[prepared.region_by_id[value]['bounds'] for rid,leg in prepared.shared[sid]['members'] if (value:=prepared.layout.get('leg_regions',{}).get(rid,{}).get(str(leg)))]
         region=[max(v[0] for v in [domain,*limits]),max(v[1] for v in [domain,*limits]),min(v[2] for v in [domain,*limits]),min(v[3] for v in [domain,*limits])]
         anchors=[(p['x'],p['y']) for p in prepared.shared[sid]['points']]
@@ -209,7 +221,7 @@ def plan_center_flow(svg, manifest, request):
             else:
                 region_id=prepared.layout.get('leg_regions',{}).get(rid,{}).get(str(leg))
                 region=prepared.region_by_id[region_id]['bounds'] if region_id else domain
-                allowed={p['equipment_id'] for p in (stages[leg],stages[leg+1]) if p.get('equipment_id')}
+                allowed=_equipment_permissions((stages[leg],stages[leg+1]), storage_equipment)
                 pairs=prepared.transits.get((rid,leg),[])
                 allowed|={p['equipment_id'] for pair in pairs for p in pair}
                 selected=prepared.leg_sections.get((rid,leg),[])

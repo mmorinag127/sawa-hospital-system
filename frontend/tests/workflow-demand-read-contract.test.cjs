@@ -256,7 +256,7 @@ test('same revision detail refresh generation rejects old bytes after newer deta
 const source = fs.readFileSync(path.join(__dirname, "../src/pages/orders/[id]/workflow-v2.tsx"), "utf8");
 
 test("workflow demand reads retain filtered summaries and defer candidate details", () => {
-  assert.match(source, /display\?scope=\$\{displayScope\}/);
+  assert.match(source, /new URLSearchParams\(\{scope: displayScope\}\)/);
   assert.match(source, /displayScope !== "summary"/);
   assert.match(source, /loaded_sections\?\.includes\("sheet"\)/);
   assert.match(source, /inspection-detail\/\$\{ocrResultId\}/);
@@ -279,10 +279,10 @@ for (const state of ['sheet_saved', 'confirmed']) test(`${state} initial view do
     assert.equal(f.t.calls.some(call => call.url === DETAIL || call.url.endsWith('/document')
       || call.url === `${BASE}/display?scope=sheet` || call.url === `${BASE}/display?scope=ocr`), false);
     await f.h.settle(() => f.probe.current.setVisibleStep(2));
-    assert.ok(f.t.calls.some(call => call.url === `${BASE}/display?scope=ocr`));
+    assert.ok(f.t.calls.some(call => call.url === `${BASE}/display?scope=ocr&selected_document_id=pdf`));
     assert.equal(f.t.calls.some(call => call.url === DETAIL), false);
     await f.h.settle(() => f.probe.current.setVisibleStep(3));
-    assert.ok(f.t.calls.some(call => call.url === `${BASE}/display?scope=sheet`));
+    assert.ok(f.t.calls.some(call => call.url === `${BASE}/display?scope=sheet&selected_document_id=pdf`));
     assert.ok(f.t.calls.some(call => call.url === DETAIL));
     assert.equal(f.h.document.querySelector('input[data-sheet-row="0"][data-sheet-col="0"]').value, '001');
   } finally { await f.h.close(); }

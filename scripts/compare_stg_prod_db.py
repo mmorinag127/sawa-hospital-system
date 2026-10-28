@@ -166,13 +166,19 @@ def _stable_json(value: Any) -> str:
 def _table_content_hash(cursor, table_name: str, columns: list[str]) -> dict[str, Any]:
     quoted = ", ".join(f'"{column}"' for column in columns)
     order_by = "id" if "id" in columns else columns[0]
-    cursor.execute(f'SELECT {quoted} FROM "{table_name}" ORDER BY "{order_by}"')
+    cursor.execute(f'DECLARE sawa_content_hash NO SCROLL CURSOR FOR SELECT {quoted} FROM "{table_name}" ORDER BY "{order_by}"')
     h = hashlib.sha256()
     rows = 0
-    for row in cursor.fetchall():
-        rows += 1
-        h.update(_stable_json(dict(zip(columns, row))).encode("utf-8"))
-        h.update(b"\n")
+    while True:
+        cursor.execute('FETCH FORWARD 256 FROM sawa_content_hash')
+        batch = cursor.fetchall()
+        if not batch:
+            break
+        for row in batch:
+            rows += 1
+            h.update(_stable_json(dict(zip(columns, row))).encode("utf-8"))
+            h.update(b"\n")
+    cursor.execute('CLOSE sawa_content_hash')
     return {"rows": rows, "sha256": h.hexdigest()}
 
 
@@ -180,6 +186,7 @@ def _snapshot(connector: Connector, env: str, conn_name: str, secret_name: str) 
     password = _load_secret(secret_name)
     with closing(_connect(connector, conn_name, password)) as conn:
         with closing(conn.cursor()) as cursor:
+            cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
             columns = _fetch_columns(cursor)
             indexes = _fetch_indexes(cursor)
             constraints = _fetch_constraints(cursor)

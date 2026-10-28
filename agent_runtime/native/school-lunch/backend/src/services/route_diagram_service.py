@@ -123,10 +123,13 @@ def assign_map_labels(routes, layout, *, positions_only=False, preserve_position
         # the operator explicitly supplies a position for this numbered route.
 
 
-def blockers_for_diagrams(session, diagrams):
+def blockers_for_diagrams(session, diagrams, *, source_views=None):
     diagrams = list(diagrams)
     if not diagrams:
         return {}
+    if source_views is None:
+        from src.services.route_source_service import source_views as read_source_views
+        source_views = read_source_views(session, diagrams)
     layout_ids = list(dict.fromkeys(row.layout_id for row in diagrams))
     layouts = {}
     for start in range(0, len(layout_ids), 500):
@@ -148,10 +151,11 @@ def blockers_for_diagrams(session, diagrams):
         session, row, layouts.get(row.layout_id),
         menu_source_versions=menu_versions[(row.facility_id, row.service_date)],
         answer_revisions=answer_revisions[(row.facility_id, row.service_date)],
+        source_views=source_views,
     ) for row in diagrams}
 
 
-def blockers(session, diagram, layout=None, *, menu_source_versions=None, answer_revisions=None):
+def blockers(session, diagram, layout=None, *, menu_source_versions=None, source_views=None, answer_revisions=None):
     if layout is None:
         layout = session.get(KitchenLayout, diagram.layout_id)
     from src.services.agent_daily_process import route_revision_issues
@@ -166,7 +170,7 @@ def blockers(session, diagram, layout=None, *, menu_source_versions=None, answer
         issues.append("厨房図面が変更されています。下書きを再生成してください")
     for route in diagram.routes:
         from src.services.route_source_service import provenance_issue
-        issue = provenance_issue(session, diagram, route)
+        issue = provenance_issue(session, diagram, route, sources=source_views)
         if issue:
             issues.append(f'{route["label"]}: {issue}')
         if not route["locations"] and not route.get("points"):

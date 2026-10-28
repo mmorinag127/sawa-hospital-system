@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime, Float, ForeignKey, Integer, JSON, String, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime, Float, ForeignKey, Integer, JSON, String, UniqueConstraint, Index
 from sqlalchemy.orm import relationship
 
 from src.db import Base
@@ -34,6 +34,9 @@ class MenuItem(Base):
 
 class MenuMaster(Base):
     __tablename__ = "menu_masters"
+    __table_args__ = (
+        Index("ix_menu_masters_name_id", "name", "id"),
+    )
 
     id = Column(String, primary_key=True)
     revision = Column(Integer, nullable=False, default=1, server_default="1")

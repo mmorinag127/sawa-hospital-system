@@ -1,17 +1,18 @@
 from copy import deepcopy
-import unicodedata
 
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import func, select, tuple_, update
 
 from src.models.school_lunch import Ingredient
-from src.models.shared_menu import SharedMenu, SharedMenuAdoption, SharedMenuRevision
+from src.models.shared_menu import SharedMenu, SharedMenuAdoption, SharedMenuRevision, SharedMenuVocabulary
+from src.shared_menu_catalog_keys import catalog_search_text, menu_identity, menu_identity_key
 from src.schemas.menu_process import ProcessDocument
 from src.services import menu_process_service as process
 from src.services.menu_process_route_service import options as route_options
 
 
 def revision_data(revision):
+    from src.services.shared_menu_review import review_summary
     return {
         'id': revision.id, 'number': revision.number,
         'parent_revision_id': revision.parent_revision_id, 'status': revision.status,
@@ -21,6 +22,7 @@ def revision_data(revision):
         'ingredient_count': len(revision.document['ingredients']),
         'step_count': len(revision.document['steps']),
         'created_at': revision.created_at.isoformat(),
+        **review_summary(revision.provenance),
     }
 
 
@@ -29,34 +31,86 @@ def data(menu, revision):
             'latest_revision': revision_data(revision)}
 
 
-def list_(session, query, month, summary=False):
-    statement = select(SharedMenu, SharedMenuRevision).join(
+def list_(session, query, month, summary=False, *, limit=100, after_name=None, after_id=None, status=None):
+    limit = max(1, min(limit, 100))
+    if summary:
+        statement = select(
+            SharedMenu.id, SharedMenu.name, SharedMenu.version,
+            SharedMenuRevision.id.label('revision_id'), SharedMenuRevision.number,
+            SharedMenuRevision.status, SharedMenuRevision.source_month,
+            SharedMenuRevision.ingredient_count, SharedMenuRevision.step_count,
+            SharedMenuRevision.question_count, SharedMenuRevision.unanswered_count,
+        )
+    else:
+        statement = select(SharedMenu, SharedMenuRevision)
+    statement = statement.join(
         SharedMenuRevision, SharedMenu.head_revision_id == SharedMenuRevision.id
     ).order_by(SharedMenu.name, SharedMenu.id)
     if query:
-        statement = statement.where(SharedMenu.name.ilike('%' + query + '%'))
+        statement = statement.where(SharedMenu.search_name.contains(catalog_search_text(query), autoescape=True))
     if month:
         statement = statement.where(SharedMenuRevision.source_month == month)
+    if status:
+        statement = statement.where(SharedMenuRevision.status == status)
+    total = session.scalar(select(func.count()).select_from(statement.order_by(None).subquery()))
+    if (after_name is None) != (after_id is None):
+        raise HTTPException(422, '共有献立のカーソルが不完全です')
+    if after_name is not None:
+        statement = statement.where(tuple_(SharedMenu.name, SharedMenu.id) > tuple_(after_name, after_id))
+    statement = statement.limit(limit + 1)
+    if summary:
+        rows = session.execute(statement).all()
+        cursor = {'name': rows[limit - 1].name, 'id': rows[limit - 1].id} if len(rows) > limit else None
+        return {'items': [
+            {'id': row.id, 'name': row.name, 'version': row.version, 'latest_revision': {
+                'id': row.revision_id, 'number': row.number, 'status': row.status,
+                'source_month': row.source_month, 'ingredient_count': row.ingredient_count,
+                'step_count': row.step_count, 'question_count': row.question_count,
+                'unanswered_count': row.unanswered_count,
+            }} for row in rows[:limit]
+        ], 'total': total, 'next_cursor': cursor}
     items = []
-    for menu, revision in session.execute(statement).all():
+    rows = session.execute(statement).all()
+    for menu, revision in rows[:limit]:
         item = data(menu, revision)
-        if summary:
-            item['latest_revision'] = {key: item['latest_revision'][key] for key in (
-                'id', 'number', 'status', 'source_month', 'ingredient_count', 'step_count'
-            )}
         items.append(item)
-    return {'items': items}
+    last = rows[limit - 1][0] if len(rows) > limit else None
+    return {'items': items, 'total': total, 'next_cursor': {'name': last.name, 'id': last.id} if last else None}
 
 
 def get(session, shared_menu_id):
     menu = session.get(SharedMenu, shared_menu_id)
     if not menu:
         raise HTTPException(404, '共有献立が見つかりません')
-    revisions = session.scalars(select(SharedMenuRevision).where(
-        SharedMenuRevision.shared_menu_id == shared_menu_id
-    ).order_by(SharedMenuRevision.number.desc())).all()
+    page = revision_page(session, shared_menu_id)
     return {**data(menu, session.get(SharedMenuRevision, menu.head_revision_id)),
-            'revisions': [revision_data(revision) for revision in revisions]}
+            'revisions': page['items'], 'revision_count': page['total'],
+            'revisions_before': page['next_before']}
+
+
+def revision_page(session, shared_menu_id, *, before_number=None, limit=25):
+    limit = max(1, min(limit, 100))
+    predicate = SharedMenuRevision.shared_menu_id == shared_menu_id
+    statement = select(SharedMenuRevision.id, SharedMenuRevision.number, SharedMenuRevision.status,
+        SharedMenuRevision.source_month, SharedMenuRevision.ingredient_count, SharedMenuRevision.step_count,
+        SharedMenuRevision.question_count, SharedMenuRevision.unanswered_count,
+        SharedMenuRevision.change_note, SharedMenuRevision.created_at).where(predicate)
+    if before_number is not None:
+        statement = statement.where(SharedMenuRevision.number < before_number)
+    rows = session.execute(statement.order_by(SharedMenuRevision.number.desc()).limit(limit + 1)).mappings().all()
+    items = [{**row, 'created_at': row['created_at'].isoformat()} for row in rows[:limit]]
+    total = session.scalar(select(func.count()).select_from(SharedMenuRevision).where(predicate))
+    return {'items': items, 'total': total,
+            'next_before': items[-1]['number'] if len(rows) > limit else None}
+
+
+def get_revision(session, shared_menu_id, revision_id):
+    row = session.scalar(select(SharedMenuRevision).where(
+        SharedMenuRevision.shared_menu_id == shared_menu_id, SharedMenuRevision.id == revision_id,
+    ))
+    if row is None:
+        raise HTTPException(404, '共有献立の指定版が見つかりません')
+    return revision_data(row)
 
 
 def daily_draft(session, menu):
@@ -65,16 +119,14 @@ def daily_draft(session, menu):
     Names and the complete ordered material list must agree. Multiple matching
     recipes remain an operator choice; no first-candidate selection is allowed.
     """
-    def identity(value):
-        return ''.join(unicodedata.normalize('NFKC', value).split()).lstrip('★')
-
     expected = process.seed(menu)['ingredients']
-    names = [identity(item['name']) for item in expected]
+    names = [menu_identity(item['name']) for item in expected]
     matches = []
     for catalog, revision in session.execute(select(SharedMenu, SharedMenuRevision).join(
-            SharedMenuRevision, SharedMenu.head_revision_id == SharedMenuRevision.id)).all():
-        if (identity(catalog.name) == identity(menu.name)
-                and [identity(item['name']) for item in revision.document['ingredients']] == names
+            SharedMenuRevision, SharedMenu.head_revision_id == SharedMenuRevision.id)
+            .where(SharedMenu.name_identity == menu_identity_key(menu.name))).all():
+        if (menu_identity(catalog.name) == menu_identity(menu.name)
+                and [menu_identity(item['name']) for item in revision.document['ingredients']] == names
                 and revision.document['steps']):
             matches.append(revision)
     if len(matches) != 1:
@@ -112,11 +164,8 @@ def adoption_document(menu, source, mapping):
 def editor_options(session):
     templates = route_options()['templates']
     operations, documented_names = set(), set()
-    for document in session.scalars(select(SharedMenuRevision.document)).all():
-        operations.update(step['operation'] for step in document.get('steps', [])
-                          if step.get('operation'))
-        documented_names.update(ingredient['name'] for ingredient in document.get('ingredients', [])
-                                if ingredient.get('name'))
+    for kind, value in session.execute(select(SharedMenuVocabulary.kind, SharedMenuVocabulary.value)):
+        (operations if kind == 'operation' else documented_names).add(value)
     ingredients = [{'id': ingredient.id, 'name': ingredient.name,
                     'category': ingredient.category, 'stock_unit': ingredient.stock_unit,
                     'order_unit': ingredient.order_unit}
@@ -134,7 +183,7 @@ def _equipment_by_template():
             for template in route_options()['templates']}
 
 
-def _validate_equipment(document, *, confirmed):
+def _validate_equipment(document, *, confirmed, require_ids=True):
     config = document.get('route_config') or {}
     template_id = config.get('template_id')
     actual_equipment = [equipment for step in document['steps'] for equipment in ([p['equipment'] for p in step['daily_work']['placements']] if step.get('daily_work') else [step['equipment']])]
@@ -150,11 +199,11 @@ def _validate_equipment(document, *, confirmed):
         raise HTTPException(422, '厨房図面が登録されていません')
     for equipment in actual_equipment:
         kind, equipment_id = equipment.get('type'), equipment.get('id')
-        if confirmed and bool(kind) != bool(equipment_id):
+        if confirmed and require_ids and bool(kind) != bool(equipment_id):
             raise HTTPException(422, '設備種類と具体的な設備IDを対で指定してください')
         if equipment_id and not kind:
             raise HTTPException(422, '設備IDには設備種類が必要です')
-        if confirmed and not equipment_id:
+        if confirmed and require_ids and not equipment_id:
             raise HTTPException(422, '確認済みにするには各工程の具体的な設備IDが必要です')
         if equipment_id:
             selected = inventory.get(equipment_id)
@@ -163,21 +212,34 @@ def _validate_equipment(document, *, confirmed):
 
 
 def validate(body):
+    from src.services.shared_menu_review import validate_review
+    validate_review(body.provenance, confirmed=body.status == 'confirmed')
     document = body.document.model_dump(exclude_none=False)
     if document.get('daily_work_source') or any(s.get('daily_work') for s in document['steps']):
         raise HTTPException(422, '当日の一緒・別々の回答や使用設備は共有献立に保存できません')
+    review = body.provenance.get('pattern_review') or {}
+    exempt = (review.get('handling') == 'school_direct' and not document['steps']
+              and all((m.get('drawing') or {}).get('mode') == 'annotation'
+                      for m in document['ingredients']))
     if document.get('pattern_applications'):
         raise HTTPException(422, '日次パターン採用記録は共有献立に保存できません')
     if document.get('shared_menu_source') is not None:
         raise HTTPException(422, '日次共有献立出典は共有献立に保存できません')
     if any(step.get('execution') is not None for step in document['steps']):
         raise HTTPException(422, '日次実績executionは共有献立に保存できません')
-    _validate_equipment(document, confirmed=body.status == 'confirmed')
-    if body.status == 'confirmed':
+    # A reviewed standard may leave an individual kettle as a daily choice.
+    # Explicit defaults still have to match the selected SVG inventory. Actual
+    # daily output retains the existing strict equipment-ID gate.
+    require_ids = not bool(review)
+    _validate_equipment(document, confirmed=body.status == 'confirmed' and not exempt, require_ids=require_ids)
+    if body.status == 'confirmed' and not exempt:
         try:
-            body.document.check_confirmable(require_equipment_ids=True)
+            body.document.check_confirmable(require_equipment_ids=require_ids)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+    if body.status == 'confirmed' and exempt and any(
+            m['drawing'].get('status') != 'user-confirmed' for m in document['ingredients']):
+        raise HTTPException(422, '学校直納の対象外設定を確認してください')
     return document
 
 
@@ -205,6 +267,8 @@ def revise(session, shared_menu_id, body):
     if menu.version != body.expected_version:
         raise HTTPException(409, '共有献立が更新されています')
     previous = session.get(SharedMenuRevision, menu.head_revision_id)
+    from src.services.shared_menu_review import preserve_questions
+    preserve_questions(previous.provenance, body.provenance)
     document = validate(body)
     changed = session.execute(update(SharedMenu).where(
         SharedMenu.id == shared_menu_id, SharedMenu.version == body.expected_version
@@ -220,7 +284,7 @@ def revise(session, shared_menu_id, body):
     session.add(revision)
     session.flush()
     session.execute(update(SharedMenu).where(SharedMenu.id == shared_menu_id).values(
-        name=body.name, head_revision_id=revision.id))
+        name=body.name, name_identity=menu_identity_key(body.name), search_name=catalog_search_text(body.name), head_revision_id=revision.id))
     session.flush()
     session.expire(menu)
     return data(session.get(SharedMenu, shared_menu_id), revision)

@@ -19,7 +19,7 @@ from src.schemas.menu_process import material_flow
 
 from src.services.named_svg_route_service import validate_pair, _equipment_bounds, resolve_line_styles, hide_standard_routes
 from src.services.route_diagram_service import COLORS
-from src.services.menu_process_preview_geometry import preview_manifest, usable_port
+from src.services.menu_process_preview_geometry import preview_manifest, usable_port, on_wall
 from src.services.process_graph_route_layout import layout_events, render as render_graph, transport_groups
 from src.services.process_material_journey import expand_supplies, supply_options, supply_area_bounds
 from src.services.process_dispatch_projection import expand_dispatch
@@ -424,6 +424,12 @@ def bind_preview_ports(document, manifest):
             dx,dy = ((sum(p[0] for p in targets)/len(targets)-center[0],sum(p[1] for p in targets)/len(targets)-center[1])
                      if targets else ((-1,0) if direction=="ingress" else (1,0)))
             candidates = [p for p in groups[eid] if p.get("side") in normals and usable_port(p, network, manifest.get('_preview_obstacles',()))]
+            if not candidates:
+                # A canonical port may be inside the terminal room rather than
+                # a corridor rectangle (e.g. the oven). Selection is not route
+                # permission: the full wall/obstacle solver must still connect
+                # its endpoint compartment, or fail without drawing a shortcut.
+                candidates = [p for p in groups[eid] if p.get('side') in normals and not on_wall((p['x'],p['y']),network)]
             if candidates:
                 binding[direction] = max(candidates,key=lambda p:(normals[p["side"]][0]*dx+normals[p["side"]][1]*dy,p["id"]))["id"]
                 automatic.setdefault(sid, []).append(direction)
@@ -515,7 +521,11 @@ def generate_events(revision, menu, profile_document, *, is_preview=False):
         # The operator chooses the equipment, not drawing angles. Compute only
         # unspecified geometry from the pinned facility snapshot; preserve all
         # explicit ports and never assign a missing equipment here.
-        port_manifest = {**manifest, 'flow_network': network}
+        # Saved generation needs the same equipment-to-corridor approaches as
+        # current-graph previews. These add drawing space only, never a gate or
+        # an equipment assignment; walls and obstacles remain hard constraints.
+        port_manifest = preview_manifest(svg, {**manifest, 'flow_network': network})
+        network = port_manifest['flow_network']
         document = bind_preview_ports(document, port_manifest)
         config = document['route_config']
         ports = config['step_ports']

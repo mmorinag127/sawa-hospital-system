@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, select
 
 from src.db import session_scope
 from src.models.document import OrderDocument
@@ -17,38 +17,13 @@ from src.models.facility import Facility, FacilityArea, FacilityConfig
 from src.models.ingest_job import IngestJob
 from src.models.menu import MenuItem, MenuMaster, MonthlyMenu, WeeklyMenu
 from src.models.ocr_job import OcrJob
-from src.models.order import Order, OrderLine, OrderMenuSnapshot
-from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
-from src.models.order_critical_decision import OrderCriticalDecision
-from src.models.order_current_state import OrderCurrentState
-from src.models.order_ocr_cache import OrderOcrCache
-from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
-from src.models.order_ocr_revision import OrderOcrRevision
-from src.models.order_sheet_draft import OrderSheetDraft
-from src.models.order_sheet_patch_candidate import OrderSheetPatchCandidate
-from src.models.order_workflow_state import OrderWorkflowState
-from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
+from src.models.order import Order
+from src.models.output import ManufacturingAggregateRow
 from src.models.uploaded_pdf import UploadedPdf, UploadedPdfAttempt
 from src.services.storage_service import load_bytes_from_uri
+from src.services import order_cleanup_manifest_v1 as frozen_plan
+from src.services.order_retention_policy import LEAF_ORDER_MODELS, unreferenced_order_predicates
 
-
-_ORDER_SCOPED_MODELS: list[tuple[str, Any, Any]] = [
-    ("label_rows", LabelRow, LabelRow.order_id),
-    ("bags", Bag, Bag.order_id),
-    ("delivery_notes", DeliveryNote, DeliveryNote.order_id),
-    ("order_menu_snapshots", OrderMenuSnapshot, OrderMenuSnapshot.order_id),
-    ("order_lines", OrderLine, OrderLine.order_id),
-    ("order_current_states", OrderCurrentState, OrderCurrentState.order_id),
-    ("order_critical_decisions", OrderCriticalDecision, OrderCriticalDecision.order_id),
-    ("order_workflow_states", OrderWorkflowState, OrderWorkflowState.order_id),
-    ("order_confirmed_snapshots", OrderConfirmedSnapshot, OrderConfirmedSnapshot.order_id),
-    ("order_sheet_drafts", OrderSheetDraft, OrderSheetDraft.order_id),
-    ("order_sheet_patch_candidates", OrderSheetPatchCandidate, OrderSheetPatchCandidate.order_id),
-    ("order_ocr_evidence_runs", OrderOcrEvidenceRun, OrderOcrEvidenceRun.order_id),
-    ("order_ocr_revisions", OrderOcrRevision, OrderOcrRevision.order_id),
-    ("order_ocr_cache", OrderOcrCache, OrderOcrCache.order_id),
-    ("order_documents", OrderDocument, OrderDocument.source_email_id),
-]
 
 _CANONICAL_TABLES_TO_PRESERVE: list[tuple[str, Any]] = [
     ("facilities", Facility),
@@ -59,6 +34,8 @@ _CANONICAL_TABLES_TO_PRESERVE: list[tuple[str, Any]] = [
     ("menu_items", MenuItem),
     ("menu_masters", MenuMaster),
 ]
+
+_LEAF_MODELS = [(model.__tablename__, model, model.order_id) for model in LEAF_ORDER_MODELS]
 
 
 @dataclass(frozen=True)
@@ -84,15 +61,6 @@ def _order_scope_filter(scope: CleanupScope) -> list[Any]:
     return filters
 
 
-def _uploaded_pdf_scope_filter(order_ids: list[str], message_ids: list[str]) -> list[Any]:
-    filters: list[Any] = []
-    if order_ids:
-        filters.append(UploadedPdf.current_order_id.in_(order_ids))
-    if message_ids:
-        filters.append(UploadedPdf.message_id.in_(message_ids))
-    return filters
-
-
 def _count_model(session: Any, model: Any, predicate: Any | None = None) -> int:
     query = select(func.count()).select_from(model)
     if predicate is not None:
@@ -100,198 +68,192 @@ def _count_model(session: Any, model: Any, predicate: Any | None = None) -> int:
     return int(session.execute(query).scalar_one_or_none() or 0)
 
 
+def _begin_cleanup_snapshot(session, *, readonly):
+    connection = session.connection()
+    if connection.dialect.name == 'postgresql':
+        connection.exec_driver_sql('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY' if readonly
+                                  else 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+    elif connection.dialect.name == 'sqlite' and not connection.connection.driver_connection.in_transaction:
+        connection.exec_driver_sql('BEGIN' if readonly else 'BEGIN IMMEDIATE')
+
+
+def _database_identity(session):
+    connection = session.connection()
+    binding = session.get_bind()
+    engine = getattr(binding, 'engine', binding)
+    identity = {'url': engine.url.render_as_string(hide_password=False)}
+    if connection.dialect.name == 'postgresql':
+        explicit = connection.get_execution_options().get('sawa_cleanup_source_identity')
+        if not engine.url.host and not engine.url.query.get('host') and not explicit:
+            raise ValueError('cleanup_source_database_identity_required')
+        identity['configured_source'] = explicit
+        identity['server'] = list(connection.exec_driver_sql(
+            "SELECT current_database(), inet_server_addr()::text, inet_server_port(), "
+            "(SELECT oid FROM pg_database WHERE datname=current_database())").one())
+        if explicit is not None and (not isinstance(explicit, dict) or set(explicit) != {'instance', 'database', 'user'}
+                or explicit['database'] != identity['server'][0]):
+            raise ValueError('cleanup_source_database_identity_mismatch')
+    elif connection.dialect.name == 'sqlite':
+        location = connection.exec_driver_sql('PRAGMA database_list').all()
+        identity['files'] = []
+        for _number, name, path in location:
+            if name == 'temp':
+                continue
+            if path:
+                info = Path(path).stat()
+                identity['files'].append([name, str(Path(path).resolve()), info.st_dev, info.st_ino])
+            else:
+                identity['files'].append([name, id(engine), id(connection.connection.driver_connection)])
+    else:
+        raise ValueError('cleanup_database_dialect_unsupported')
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
 def build_order_cleanup_plan(scope: CleanupScope) -> dict[str, Any]:
     if not scope.all_orders and scope.received_from is None and scope.received_to is None:
         raise ValueError("cleanup scope must specify all_orders or a received date range")
 
     with session_scope() as session:
-        query = select(Order)
-        if not scope.all_orders:
-            for filter_item in _order_scope_filter(scope):
-                query = query.where(filter_item)
-        orders = list(session.execute(query.order_by(Order.received_at.asc(), Order.id.asc())).scalars().all())
-        order_ids = [str(order.id) for order in orders]
-        message_ids = [str(order.message_id) for order in orders if str(order.message_id or "").strip()]
-        document_uris = [str(order.document_uri) for order in orders if str(order.document_uri or "").strip()]
-
-        counts: dict[str, int] = {"orders": len(order_ids)}
-        for table_name, model, column in _ORDER_SCOPED_MODELS:
-            if table_name == "order_documents":
-                predicate = column.in_(message_ids) if message_ids else None
-                counts[table_name] = _count_model(session, model, predicate) if predicate is not None else 0
-            else:
-                counts[table_name] = _count_model(session, model, column.in_(order_ids)) if order_ids else 0
-
-        uploaded_filters = _uploaded_pdf_scope_filter(order_ids, message_ids)
-        uploaded_predicate = or_(*uploaded_filters) if uploaded_filters else None
-        uploaded_ids = []
-        if uploaded_predicate is not None:
-            uploaded_ids = [
-                str(row.id)
-                for row in session.execute(
-                    select(UploadedPdf.id).where(uploaded_predicate)
-                ).all()
-            ]
-        counts["uploaded_pdfs"] = len(uploaded_ids)
-        counts["uploaded_pdf_attempts"] = (
-            _count_model(session, UploadedPdfAttempt, UploadedPdfAttempt.uploaded_pdf_id.in_(uploaded_ids))
-            if uploaded_ids
-            else 0
-        )
-
-        counts["ocr_jobs"] = _count_model(
-            session,
-            OcrJob,
-            or_(
-                *(filter_item for filter_item in [
-                    OcrJob.id.in_([f"OCR-{order_id}" for order_id in order_ids]) if order_ids else None,
-                    OcrJob.input_reference.in_(document_uris) if document_uris else None,
-                ] if filter_item is not None)
-            ) if order_ids or document_uris else None,
-        ) if order_ids or document_uris else 0
-        counts["ingest_jobs"] = _count_model(
-            session,
-            IngestJob,
-            IngestJob.id.in_(message_ids),
-        ) if message_ids else 0
-        counts["manufacturing_aggregate_rows"] = _count_model(session, ManufacturingAggregateRow)
-
+        _begin_cleanup_snapshot(session, readonly=True)
+        conditions = [] if scope.all_orders else _order_scope_filter(scope)
+        target_ids = select(Order.id).where(*conditions)
+        protected = _count_model(session, Order, and_(Order.id.in_(target_ids), ~and_(*unreferenced_order_predicates())))
+        counts = {'orders': _count_model(session, Order, Order.id.in_(target_ids))}
+        for name, model, owner in _LEAF_MODELS:
+            counts[name] = _count_model(session, model, owner.in_(target_ids))
         preserve_counts = {
             table_name: _count_model(session, model)
-            for table_name, model in _CANONICAL_TABLES_TO_PRESERVE
+            for table_name, model in [*_CANONICAL_TABLES_TO_PRESERVE,
+                ('order_documents', OrderDocument), ('uploaded_pdfs', UploadedPdf),
+                ('uploaded_pdf_attempts', UploadedPdfAttempt), ('ocr_jobs', OcrJob),
+                ('ingest_jobs', IngestJob), ('manufacturing_aggregate_rows', ManufacturingAggregateRow)]
         }
-
-    return {
-        "scope": {
+        header = {'schema': 1, 'database_sha256': _database_identity(session), 'created_at': datetime.utcnow().isoformat(),
+            'protected_orders': protected, 'scope': {
             "all_orders": scope.all_orders,
             "received_from": scope.received_from.isoformat() if scope.received_from else None,
             "received_to": scope.received_to.isoformat() if scope.received_to else None,
-        },
-        "order_ids": order_ids,
-        "message_ids": message_ids,
-        "document_uris": document_uris,
-        "counts": counts,
-        "preserved_canonical_counts": preserve_counts,
-        "total_rows_targeted": int(sum(counts.values())),
-    }
+            }, 'counts': counts, 'preserved_canonical_counts': preserve_counts}
+        queries = [(Order, select(*frozen_plan.columns(Order)).where(*conditions))]
+        if not protected:
+            queries.extend((model, select(*frozen_plan.columns(model)).where(owner.in_(target_ids)))
+                           for _name, model, owner in _LEAF_MODELS)
+        manifest = frozen_plan.create(session, header, queries)
+        preview = [{'id': row.id, 'received_at': row.received_at.isoformat() if row.received_at else None}
+            for row in session.execute(select(Order.id, Order.received_at).where(*conditions)
+                .order_by(Order.received_at.asc(), Order.id.asc()).limit(25))]
+    return {**header, 'manifest': manifest, 'preview_orders': preview, 'blocked': bool(protected),
+            'total_rows_targeted': int(sum(counts.values()))}
 
 
 def _safe_filename(order_id: str, uri: str, index: int) -> str:
     suffix = Path(urlparse(uri).path).suffix or ".pdf"
     digest = hashlib.sha256(uri.encode("utf-8")).hexdigest()[:10]
-    return f"{index:03d}_{order_id}_{digest}{suffix}"
+    identity = hashlib.sha256(order_id.encode('utf-8')).hexdigest()[:16]
+    return f"{index:03d}_{identity}_{digest}{suffix}"
+
+
+def read_order_cleanup_plan(plan_path: str | Path, expected_plan_sha256: str) -> dict[str, Any]:
+    with frozen_plan.open_verified(plan_path, expected_plan_sha256) as (manifest, header):
+        preview = []
+        for (body,) in manifest.execute("SELECT row_json FROM rows WHERE table_name='orders' ORDER BY key_json LIMIT 25"):
+            row = json.loads(body)
+            timestamp = row.get('received_at')
+            preview.append({'id': row['id'], 'received_at': timestamp.get('value') if isinstance(timestamp, dict) else timestamp})
+        return {**header, 'manifest': {'path': str(plan_path), 'sha256': expected_plan_sha256, 'schema': 1},
+            'preview_orders': preview, 'blocked': header.get('protected_orders') != 0,
+            'total_rows_targeted': sum(header['counts'].values())}
 
 
 def export_order_pdfs_for_cleanup(
     *,
     scope: CleanupScope,
     output_dir: str | Path,
+    plan_path: str | Path | None = None,
+    expected_plan_sha256: str | None = None,
 ) -> dict[str, Any]:
-    plan = build_order_cleanup_plan(scope)
+    if plan_path is None:
+        plan = build_order_cleanup_plan(scope)
+        plan_path, expected_plan_sha256 = plan['manifest']['path'], plan['manifest']['sha256']
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
+    import tempfile
+    export_dir = Path(tempfile.mkdtemp(prefix='cleanup-export-', dir=target_dir))
+    receipts = export_dir / 'items.jsonl'
+    exported = failed = missing = 0
+    preview = []
+    with frozen_plan.open_verified(plan_path, expected_plan_sha256) as (database, header), receipts.open('w', encoding='utf-8') as output:
+        expected_scope = {'all_orders': scope.all_orders,
+            'received_from': scope.received_from.isoformat() if scope.received_from else None,
+            'received_to': scope.received_to.isoformat() if scope.received_to else None}
+        if header.get('scope') != expected_scope:
+            raise ValueError('cleanup_scope_does_not_match_reviewed_plan')
+        for index, (body,) in enumerate(database.execute("SELECT row_json FROM rows WHERE table_name='orders' ORDER BY key_json"), start=1):
+            order = json.loads(body)
+            order_id, uri = order['id'], order['document_uri']
+            if not isinstance(uri, str) or not uri.strip():
+                missing += 1
+                continue
+            target = export_dir / _safe_filename(order_id, uri, index)
+            item = {'order_id': order_id, 'source_uri': uri, 'target_path': str(target), 'bytes': 0, 'error': None}
+            try:
+                parsed = urlparse(uri)
+                if parsed.scheme in ('', 'file'):
+                    shutil.copyfile(Path(parsed.path if parsed.scheme else uri), target)
+                else:
+                    target.write_bytes(load_bytes_from_uri(uri))
+                item.update(bytes=target.stat().st_size, status='exported', sha256=frozen_plan.digest_file(target))
+                exported += 1
+            except Exception as error:
+                item.update(status='failed', error=type(error).__name__)
+                failed += 1
+            output.write(json.dumps(item, ensure_ascii=True) + '\n')
+            if len(preview) < 25:
+                preview.append(item)
+    manifest = {'exported_at': datetime.utcnow().isoformat(), 'scope': header['scope'],
+        'plan_sha256': expected_plan_sha256, 'items_receipt': {'path': str(receipts), 'sha256': frozen_plan.digest_file(receipts)},
+        'preview_items': preview, 'exported_count': exported, 'failed_count': failed, 'missing_reference_count': missing,
+        'source_proof': 'frozen_database_metadata; exported bytes hashed at copy time'}
+    summary = export_dir / 'manifest.json'
+    summary.write_text(json.dumps(manifest, ensure_ascii=True, indent=2), encoding='utf-8')
+    return {**manifest, 'manifest_path': str(summary)}
 
-    items: list[dict[str, Any]] = []
-    for index, (order_id, uri) in enumerate(zip(plan["order_ids"], plan["document_uris"]), start=1):
-        filename = _safe_filename(order_id, uri, index)
-        target = target_dir / filename
-        item = {
-            "order_id": order_id,
-            "source_uri": uri,
-            "target_path": str(target),
-            "status": "pending",
-            "bytes": 0,
-            "error": None,
-        }
-        try:
-            parsed = urlparse(uri)
-            if parsed.scheme in ("", "file"):
-                source_path = Path(parsed.path if parsed.scheme else uri)
-                shutil.copyfile(source_path, target)
-            else:
-                target.write_bytes(load_bytes_from_uri(uri))
-            item["bytes"] = target.stat().st_size
-            item["status"] = "exported"
-        except Exception as exc:  # pragma: no cover - depends on external storage credentials
-            item["status"] = "failed"
-            item["error"] = str(exc)
-        items.append(item)
 
-    manifest = {
-        "exported_at": datetime.utcnow().isoformat(),
-        "scope": plan["scope"],
-        "items": items,
-        "exported_count": len([item for item in items if item["status"] == "exported"]),
-        "failed_count": len([item for item in items if item["status"] == "failed"]),
-    }
-    (target_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    return manifest
-
-
-def apply_order_cleanup(scope: CleanupScope, *, confirm_token: str) -> dict[str, Any]:
+def apply_order_cleanup(scope: CleanupScope, *, confirm_token: str, plan_path: str | Path,
+                        expected_plan_sha256: str) -> dict[str, Any]:
     if confirm_token != "CLEAN_ORDER_DATA":
         raise ValueError("confirm_token must be CLEAN_ORDER_DATA")
-    plan = build_order_cleanup_plan(scope)
-    order_ids = list(plan["order_ids"])
-    message_ids = list(plan["message_ids"])
-    document_uris = list(plan["document_uris"])
-    if not order_ids:
-        return {**plan, "applied": True, "removed": {}}
-
-    removed: dict[str, int] = {}
-    with session_scope() as session:
-        for table_name, model, column in _ORDER_SCOPED_MODELS:
-            if table_name == "order_documents":
-                predicate = column.in_(message_ids) if message_ids else None
-            else:
-                predicate = column.in_(order_ids)
-            if predicate is None:
-                removed[table_name] = 0
-                continue
-            result = session.execute(delete(model).where(predicate))
-            removed[table_name] = int(result.rowcount or 0)
-
-        uploaded_filters = _uploaded_pdf_scope_filter(order_ids, message_ids)
-        uploaded_ids: list[str] = []
-        if uploaded_filters:
-            uploaded_predicate = or_(*uploaded_filters)
-            uploaded_ids = [
-                str(row.id)
-                for row in session.execute(select(UploadedPdf.id).where(uploaded_predicate)).all()
-            ]
-            if uploaded_ids:
-                result = session.execute(
-                    delete(UploadedPdfAttempt).where(
-                        UploadedPdfAttempt.uploaded_pdf_id.in_(uploaded_ids)
-                    )
-                )
-                removed["uploaded_pdf_attempts"] = int(result.rowcount or 0)
-            else:
-                removed["uploaded_pdf_attempts"] = 0
-            result = session.execute(delete(UploadedPdf).where(uploaded_predicate))
-            removed["uploaded_pdfs"] = int(result.rowcount or 0)
-
-        ocr_predicates = []
-        if order_ids:
-            ocr_predicates.append(OcrJob.id.in_([f"OCR-{order_id}" for order_id in order_ids]))
-        if document_uris:
-            ocr_predicates.append(OcrJob.input_reference.in_(document_uris))
-        if ocr_predicates:
-            result = session.execute(delete(OcrJob).where(or_(*ocr_predicates)))
-            removed["ocr_jobs"] = int(result.rowcount or 0)
-        else:
-            removed["ocr_jobs"] = 0
-
-        if message_ids:
-            result = session.execute(delete(IngestJob).where(IngestJob.id.in_(message_ids)))
-            removed["ingest_jobs"] = int(result.rowcount or 0)
-        else:
-            removed["ingest_jobs"] = 0
-
-        result = session.execute(delete(ManufacturingAggregateRow))
-        removed["manufacturing_aggregate_rows"] = int(result.rowcount or 0)
-
-        result = session.execute(delete(Order).where(Order.id.in_(order_ids)))
-        removed["orders"] = int(result.rowcount or 0)
-
-    return {**plan, "applied": True, "removed": removed}
+    expected_scope = {'all_orders': scope.all_orders,
+        'received_from': scope.received_from.isoformat() if scope.received_from else None,
+        'received_to': scope.received_to.isoformat() if scope.received_to else None}
+    removed: dict[str, int] = {name: 0 for name, _model, _owner in _LEAF_MODELS}
+    removed['orders'] = 0
+    with frozen_plan.open_verified(plan_path, expected_plan_sha256) as (manifest, header), session_scope() as session:
+        if header.get('scope') != expected_scope:
+            raise ValueError('cleanup_scope_does_not_match_reviewed_plan')
+        if header.get('protected_orders') != 0:
+            raise ValueError('cleanup_saved_history_is_retained')
+        _begin_cleanup_snapshot(session, readonly=False)
+        if header.get('database_sha256') != _database_identity(session):
+            raise ValueError('cleanup_database_does_not_match_reviewed_plan')
+        if session.get_bind().dialect.name == 'postgresql':
+            session.connection().exec_driver_sql("SELECT pg_advisory_xact_lock(hashtextextended('sawa_order_cleanup_manifest_v1',0))")
+        # Validate every row before the first delete; all locks last until commit.
+        for identities in frozen_plan.order_batches(manifest):
+            frozen_plan.require_current_rows(session, manifest, Order, Order.id, identities)
+            protected = session.execute(select(Order.id).where(Order.id.in_(identities),
+                ~and_(*unreferenced_order_predicates())).limit(1)).first()
+            if protected is not None:
+                raise ValueError('cleanup_saved_history_is_retained')
+            for _name, model, owner in _LEAF_MODELS:
+                frozen_plan.require_current_rows(session, manifest, model, owner, identities)
+        for identities in frozen_plan.order_batches(manifest):
+            for name, model, owner in _LEAF_MODELS:
+                result = session.execute(delete(model).where(owner.in_(identities)))
+                removed[name] += int(result.rowcount or 0)
+            result = session.execute(delete(Order).where(Order.id.in_(identities)))
+            removed['orders'] += int(result.rowcount or 0)
+        if header.get('counts') != removed:
+            raise ValueError('cleanup_reviewed_row_counts_changed')
+    return {**header, 'manifest': {'path': str(plan_path), 'sha256': expected_plan_sha256},
+            'applied': True, 'removed': removed}

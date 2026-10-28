@@ -13,6 +13,7 @@ from sqlalchemy import JSON, and_, case, column, func, literal, or_, select, tru
 
 from src.db import session_scope
 from src.models.ocr_job import OcrJob
+from src.models.ocr_metrics_v1 import split_metrics
 from src.services.workflow_attempt_guard_service import (
     lock_actual_write_ownership, lock_current_workflow_attempt,
     current_nonworkflow_execution, lock_nonworkflow_execution_job,
@@ -1078,7 +1079,11 @@ def update_job_for_workflow_attempt(
         if updates.get("metrics") is not None and not isinstance(updates["metrics"], dict):
             return None, False
         if isinstance(updates.get("metrics"), dict):
-            values["metrics"] = merge_own_job_metrics_patch(job.metrics, updates["metrics"])
+            evidence, progress = split_metrics(merge_own_job_metrics_patch(job.metrics, updates["metrics"]))
+            if evidence != job.evidence_metrics:
+                values["evidence_metrics"] = evidence
+            if progress != job.progress_metrics:
+                values["progress_metrics"] = progress
         values["updated_at"] = datetime.utcnow()
         terminal_statuses = ["done", "failed", "error", "completed", "success"]
         conditions = [

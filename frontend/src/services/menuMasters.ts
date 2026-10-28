@@ -20,8 +20,11 @@ export type MenuMasterDraft = {
 };
 
 export type MenuMasterListResponse = components["schemas"]["MenuMasterListResponse"];
-export type MenuMasterList = Omit<MenuMasterListResponse, "items"> & {
+export type MenuMasterList = Omit<MenuMasterListResponse, "items" | "total"> & {
   items: MenuMaster[];
+  total: number | null;
+  next_after_id?: string | null;
+  previous_before_id?: string | null;
 };
 
 export const MENU_MASTER_PAGE_SIZE = 50;
@@ -128,6 +131,7 @@ export const menuMasterSearchUrl = (asPath: string, query: string): string => {
   const value = query.trim();
   if (value) params.set("q", value);
   else params.delete("q");
+  for (const key of ["page", "after_id", "before_id"]) params.delete(key);
   const serialized = params.toString();
   return `${pathname}${serialized ? `?${serialized}` : ""}${hash ? `#${hash}` : ""}`;
 };
@@ -152,18 +156,25 @@ export const parseMenuMasterUrl = (asPath: string) => {
   ) {
     throw new Error("一覧のページ指定を確認してください。");
   }
-  return { q: params.get("q") || "", page, pageSize };
+  const afterId = params.get("after_id");
+  const beforeId = params.get("before_id");
+  if ((afterId !== null && (!afterId.trim() || afterId !== afterId.trim()))
+    || (beforeId !== null && (!beforeId.trim() || beforeId !== beforeId.trim())) || (afterId && beforeId))
+    throw new Error("一覧の位置指定を確認してください。");
+  return { q: params.get("q") || "", page, pageSize, ...(afterId ? { afterId } : {}), ...(beforeId ? { beforeId } : {}) };
 };
 
 export const menuMasterListUrl = (
   asPath: string,
-  state: { q: string; page: number; pageSize: number },
+  state: { q: string; page: number; pageSize: number; afterId?: string; beforeId?: string },
 ) => {
   const [pathWithQuery, hash = ""] = asPath.split("#", 2);
   const [pathname, rawQuery = ""] = pathWithQuery.split("?", 2);
   const params = new URLSearchParams(rawQuery);
   state.q.trim() ? params.set("q", state.q.trim()) : params.delete("q");
   state.page ? params.set("page", String(state.page)) : params.delete("page");
+  state.page && state.afterId ? params.set("after_id", state.afterId) : params.delete("after_id");
+  state.page && state.beforeId ? params.set("before_id", state.beforeId) : params.delete("before_id");
   state.pageSize === MENU_MASTER_PAGE_SIZE
     ? params.delete("pageSize")
     : params.set("pageSize", String(state.pageSize));
@@ -176,10 +187,11 @@ export const parseMenuMasterList = (value: unknown): MenuMasterList => {
   if (
     !source ||
     !Array.isArray(source.items) ||
-    !Number.isInteger(source.total) ||
-    source.total < 0 ||
+    (source.total !== null && (!Number.isInteger(source.total) || source.total == null || source.total < 0)) ||
     !Number.isInteger(source.offset) ||
     !Number.isInteger(source.limit) || source.offset < 0 || source.limit < 1
+    || (source.next_after_id != null && (typeof source.next_after_id !== "string" || !source.next_after_id.trim()))
+    || (source.previous_before_id != null && (typeof source.previous_before_id !== "string" || !source.previous_before_id.trim()))
   ) {
     throw new Error("メニューマスター一覧の応答を確認できませんでした。");
   }
@@ -191,6 +203,8 @@ export const parseMenuMasterList = (value: unknown): MenuMasterList => {
     total: source.total,
     offset: source.offset,
     limit: source.limit,
+    next_after_id: source.next_after_id ?? null,
+    previous_before_id: source.previous_before_id ?? null,
   };
 };
 

@@ -45,6 +45,7 @@ CATALOG_HASHES: dict[str, dict[str, str | None]] = {
         "d5e831a7c902": "ac3a4d6f7a1f3f2cfc1bada77009fd54a783c0df46b1baf2a167b754adffb694",
         "f7c31a9e204b": "16ef38eccac6da6d7736aee5fbf3de2c98b986761c6d9f360f07dc2f9f5af700",
         "c6a9e2f8b104": "16ef38eccac6da6d7736aee5fbf3de2c98b986761c6d9f360f07dc2f9f5af700",
+        "a8c31e4f902d": "db57cb1ef8415e4d06d095a0032eb99c35381fe76d282ca6cfa8761b9172b8e2",
     },
     "postgresql": {
         "788d8e3b1f0e": "ceff3dae1cf7dc1407ceb0c52a36268cc99efe271e70a92050c769013cde8f40",
@@ -58,6 +59,7 @@ CATALOG_HASHES: dict[str, dict[str, str | None]] = {
         "d5e831a7c902": "1c5709c2dac3555fca21ee5a9c2d15386ba8cb3ce46a2235e9f076ee4701c42f",
         "f7c31a9e204b": "cfc95df957aa0bfd6922fb5f1e961b5af0e52fd3a5a46283aa6d1b75445ef074",
         "c6a9e2f8b104": "0a6cfba861288cde3389a632bbc0ffd4e864a57ba894c54506f5c4cbe82aec5e",
+        "a8c31e4f902d": "8487371f906b5bdb3a7c7020086c3b0fb9ae37fda40504b5c3c2ed817ade58dc",
     },
 }
 

@@ -3,7 +3,7 @@
 No DROP, UPDATE or DELETE against source/Test/current-copy databases. A partial
 attempt stays unpublished; only the registry CAS in the control service activates it.
 """
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import sqlite3
 import struct
 import subprocess
 import tempfile
@@ -242,9 +243,133 @@ def _copy_raw_rows(connection, schema, table, path):
         path.unlink(missing_ok=True)
 
 
+class _SnapshotMap:
+    def __init__(self, directory):
+        with tempfile.NamedTemporaryFile(dir=directory, prefix="snapshot-index-", suffix=".sqlite") as temporary:
+            self.path = Path(temporary.name)
+        self.writer = None
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("CREATE TABLE receipts (reference TEXT PRIMARY KEY, proof TEXT NOT NULL)")
+
+    @contextmanager
+    def collecting(self):
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            self.writer = connection
+            try:
+                yield
+            finally:
+                self.writer = None
+
+    def get(self, reference):
+        if self.writer is not None:
+            row = self.writer.execute("SELECT proof FROM receipts WHERE reference=?", (reference,)).fetchone()
+        else:
+            with closing(sqlite3.connect(self.path)) as connection:
+                row = connection.execute("SELECT proof FROM receipts WHERE reference=?", (reference,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def __contains__(self, reference):
+        return self.get(reference) is not None
+
+    def __getitem__(self, reference):
+        value = self.get(reference)
+        if value is None:
+            raise KeyError(reference)
+        return value
+
+    def __setitem__(self, reference, value):
+        values = (reference, json.dumps(value, separators=(",", ":")))
+        statement = "INSERT INTO receipts VALUES (?,?) ON CONFLICT(reference) DO UPDATE SET proof=excluded.proof"
+        if self.writer is not None:
+            self.writer.execute(statement, values)
+        else:
+            with closing(sqlite3.connect(self.path)) as connection, connection:
+                connection.execute(statement, values)
+
+    def items(self):
+        with closing(sqlite3.connect(self.path)) as connection:
+            for reference, proof in connection.execute("SELECT reference, proof FROM receipts ORDER BY rowid"):
+                yield reference, json.loads(proof)
+
+    def __iter__(self):
+        with closing(sqlite3.connect(self.path)) as connection:
+            for row in connection.execute("SELECT reference FROM receipts ORDER BY reference"):
+                yield row[0]
+
+    def values(self):
+        for _reference, proof in self.items():
+            yield proof
+
+    def __len__(self):
+        with closing(sqlite3.connect(self.path)) as connection:
+            return connection.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
+
+
+class _SnapshotKeys:
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def __iter__(self):
+        return iter(self.mapping)
+
+    def __len__(self):
+        return len(self.mapping)
+
+
+def _manifest_chunks(value):
+    if isinstance(value, (dict, _SnapshotMap, datasets._ManifestObjects)):
+        yield b"{"
+        for index, (key, item) in enumerate(value.items()):
+            if index:
+                yield b","
+            yield json.dumps(key, ensure_ascii=False).encode()
+            yield b":"
+            yield from _manifest_chunks(item)
+        yield b"}"
+    elif isinstance(value, (list, tuple, _SnapshotKeys)):
+        yield b"["
+        for index, item in enumerate(value):
+            if index:
+                yield b","
+            yield from _manifest_chunks(item)
+        yield b"]"
+    else:
+        yield json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+class _SortedReferences:
+    def __init__(self, path):
+        self.path = path
+
+    def __iter__(self):
+        with self.path.open("r", encoding="ascii") as source:
+            for line in source:
+                yield bytes.fromhex(line.rstrip("\n")).decode("utf-8", "surrogatepass")
+
+
 def fingerprints(connection, directory, local_receipts=None):
+    with tempfile.NamedTemporaryFile(mode="w", encoding="ascii", dir=directory,
+                                     prefix="references-", delete=False) as references:
+        path = Path(references.name)
+        try:
+            collecting = local_receipts.collecting() if isinstance(local_receipts, _SnapshotMap) else nullcontext()
+            with collecting:
+                result = _fingerprints(connection, directory, references, local_receipts)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+    try:
+        subprocess.run(["sort", "-u", "-S", "16M", "-T", str(directory), "-o", str(path), str(path)],
+                       env={**os.environ, "LC_ALL": "C"}, check=True, timeout=300, capture_output=True)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return result, _SortedReferences(path)
+
+
+def _fingerprints(connection, directory, references, local_receipts):
     """Full raw rows sorted on disk: bounded memory even for large OCR JSON."""
-    result, references = {}, set()
+    result = {}
     with connection.cursor() as cursor:
         cursor.execute("SELECT COUNT(*) FROM information_schema.foreign_tables")
         if cursor.fetchone()[0]:
@@ -258,7 +383,9 @@ def fingerprints(connection, directory, local_receipts=None):
             for row in _copy_raw_rows(connection, schema, table, directory / (str(index) + '.copy')):
                 output.write(row + "\n")
                 decoded = json.loads(row)
-                references.update(_references(decoded))
+                for reference in _references(decoded):
+                    # Hex preserves string ordering without newline/NUL delimiter ambiguity.
+                    references.write(reference.encode("utf-8", "surrogatepass").hex() + "\n")
                 if local_receipts is not None:
                     _collect_local_receipts(decoded, local_receipts)
                 count += 1
@@ -270,7 +397,7 @@ def fingerprints(connection, directory, local_receipts=None):
                 digest.update(chunk)
         result[schema + "." + table] = {"rows": count, "sha256": digest.hexdigest()}
         raw_path.unlink()
-    return result, references
+    return result
 
 
 def _heads(connection):
@@ -298,7 +425,7 @@ def clone_database(source, destination, target, directory, expected_heads, *, so
                 raise RefreshError("refresh_source_must_be_readonly")
             cursor.execute("SELECT pg_export_snapshot()")
             exported_snapshot = cursor.fetchone()[0]
-        local_receipts = {}
+        local_receipts = _SnapshotMap(directory)
         before, references = fingerprints(original, directory, local_receipts)
         if snapshot_callback is not None:
             snapshot_callback(exported_snapshot)
@@ -363,13 +490,13 @@ from src.services.staging_prod_settings_transport import export_runtime_settings
 
 
 class ObjectCopier:
-    def __init__(self, client, bucket, prefix, source_buckets, aliases, local_receipts=None, *, source_environment=None):
+    def __init__(self, client, bucket, prefix, source_buckets, aliases, local_receipts=None, *, source_environment=None, directory=None):
         self.client, self.bucket, self.prefix = client, bucket, prefix
         self.allowed = set(source_buckets)
         self.aliases = aliases
-        self.objects = {}
-        self.missing_at_source = set()
-        self.local_receipts = local_receipts or {}
+        self.objects = _SnapshotMap(directory) if directory is not None else {}
+        self.missing_at_source = _SnapshotMap(directory) if directory is not None else {}
+        self.local_receipts = local_receipts if local_receipts is not None else {}
         self.source_environment = source_environment or {}
 
     def copy_exported_setting(self, key, exported):
@@ -447,7 +574,7 @@ class ObjectCopier:
             # Absence is source data, not a reason to inject an old/different file.
             if original in self.aliases or required:
                 raise RefreshError("refresh_required_original_missing_at_source") from None
-            self.missing_at_source.add(original)
+            self.missing_at_source[original] = True
             return None
         digest = hashlib.sha256(content).hexdigest()
         local_proof = None
@@ -552,23 +679,24 @@ def build_snapshot(job, config, progress):
             destination_bucket = client.bucket(entry["destination_bucket"])
             copier = ObjectCopier(client, destination_bucket, "stg-replay/" + job["dataset"] + "/" + job["attempt"] + "/" + name,
                                   entry["source_buckets"], entry["local_objects"], local_receipts,
-                                  source_environment={'TEMPLATE_BUCKET': source_environment.get('TEMPLATE_BUCKET')})
+                                  source_environment={'TEMPLATE_BUCKET': source_environment.get('TEMPLATE_BUCKET')}, directory=directory)
             settings = {}
-            for key, setting in settings_source.items():
-                if exported_settings and key in {"FACILITY_MASTER_URI", "INGEST_POLICY_URI"} and isinstance(setting, dict):
-                    settings[key] = copier.copy_exported_setting(key, exported_settings)
-                elif key == "GCS_BUCKET_NAME":
-                    if setting not in entry["source_buckets"]:
-                        raise RefreshError("refresh_storage_setting_source_mismatch")
-                    settings[key] = destination_bucket.name
-                else:
-                    settings[key] = copier.copy(setting, required=True)
-            for reference in sorted(references):
-                copier.copy(reference)
-            if name == "order" and runtime_settings.get("SHIPPING_TEMPLATE_PATH"):
-                copier.copy(runtime_settings["SHIPPING_TEMPLATE_PATH"], required=True)
-            for reference in sorted(entry["local_objects"]):
-                copier.copy(reference, required=True)
+            with copier.objects.collecting(), copier.missing_at_source.collecting():
+                for key, setting in settings_source.items():
+                    if exported_settings and key in {"FACILITY_MASTER_URI", "INGEST_POLICY_URI"} and isinstance(setting, dict):
+                        settings[key] = copier.copy_exported_setting(key, exported_settings)
+                    elif key == "GCS_BUCKET_NAME":
+                        if setting not in entry["source_buckets"]:
+                            raise RefreshError("refresh_storage_setting_source_mismatch")
+                        settings[key] = destination_bucket.name
+                    else:
+                        settings[key] = copier.copy(setting, required=True)
+                for reference in references:
+                    copier.copy(reference)
+                if name == "order" and runtime_settings.get("SHIPPING_TEMPLATE_PATH"):
+                    copier.copy(runtime_settings["SHIPPING_TEMPLATE_PATH"], required=True)
+                for reference in sorted(entry["local_objects"]):
+                    copier.copy(reference, required=True)
             value["components"][name] = {"database": target, "verified": True,
                 "runtime_settings": runtime_settings, "producer_runtime_settings": producer_runtime_settings, "producer_revision": producer_revision,
                 "table_digests": {table: proof["sha256"] for table, proof in tables.items()},
@@ -577,22 +705,36 @@ def build_snapshot(job, config, progress):
                 "migration": migration,
                 "source_instance": source["instance"], "source_database": source["database"],
                 "source_configuration_sha256": job["source_configuration_sha256"], "source_revision": source_revision,
-                "missing_at_source": sorted(copier.missing_at_source)}
-    progress("verifying_manifest")
-    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
-    digest = hashlib.sha256(raw).hexdigest()
-    destinations = {entry["destination_bucket"] for entry in config["components"].values()}
-    if len(destinations) != 3 or control.netloc not in destinations:
-        raise RefreshError("refresh_destination_buckets_invalid")
-    published = {}
-    for destination in sorted(destinations):
-        mirror = client.bucket(destination)
-        manifest = mirror.blob("stg-replay/" + job["dataset"] + "/manifests/" + digest + ".json")
-        manifest.upload_from_string(raw, if_generation_match=0, content_type="application/json")
-        uri = "gs://" + mirror.name + "/" + manifest.name
-        if datasets._read_manifest(uri, digest) != value:
-            raise RefreshError("refresh_manifest_verification_failed")
-        published[destination] = {"uri": uri, "sha256": digest, "snapshot_at": value["snapshot_at"]}
-    # Control service commits active + terminal state together, after every replica exists.
-    return {"id": job["dataset"], **published[control.netloc],
-            "missing_at_source": {name: len(component["missing_at_source"]) for name, component in value["components"].items() if name not in value.get("retained_components", {})}}
+                "missing_at_source": _SnapshotKeys(copier.missing_at_source)}
+        progress("verifying_manifest")
+        datasets._validate_manifest(value, object_map_type=(dict, _SnapshotMap, datasets._ManifestObjects))
+        manifest_path = Path(temporary) / "manifest.json"
+        digest_state = hashlib.sha256()
+        with manifest_path.open("wb") as output:
+            for chunk in _manifest_chunks(value):
+                output.write(chunk)
+                digest_state.update(chunk)
+        digest = digest_state.hexdigest()
+        destinations = {entry["destination_bucket"] for entry in config["components"].values()}
+        if len(destinations) != 3 or control.netloc not in destinations:
+            raise RefreshError("refresh_destination_buckets_invalid")
+        published = {}
+        for destination in sorted(destinations):
+            mirror = client.bucket(destination)
+            manifest = mirror.blob("stg-replay/" + job["dataset"] + "/manifests/" + digest + ".json")
+            manifest.upload_from_filename(str(manifest_path), if_generation_match=0, content_type="application/json")
+            uri = "gs://" + mirror.name + "/" + manifest.name
+            received = Path(temporary) / "received-manifest.json"
+            with received.open("wb") as output:
+                manifest.download_to_file(output, if_generation_match=int(manifest.generation), timeout=120)
+            actual = hashlib.sha256()
+            with received.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    actual.update(chunk)
+            if actual.hexdigest() != digest or received.stat().st_size != manifest_path.stat().st_size:
+                raise RefreshError("refresh_manifest_verification_failed")
+            received.unlink()
+            published[destination] = {"uri": uri, "sha256": digest, "snapshot_at": value["snapshot_at"]}
+        # Registry activation follows verification of every complete, immutable replica.
+        return {"id": job["dataset"], **published[control.netloc],
+                "missing_at_source": {name: len(component["missing_at_source"]) for name, component in value["components"].items() if name not in value.get("retained_components", {})}}

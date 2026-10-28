@@ -3,38 +3,26 @@ import hashlib
 import json
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy import case, select
+from sqlalchemy.orm import Session, load_only
 
 from .models import CandidateSchedule, CandidateStaffStatus, ScheduleConfirmation, SolveRun, Staff
 
 
 def _run_end_date(run: SolveRun) -> date | None:
-    config = run.config_json or {}
-    raw_end = config.get("end_date_exclusive") or config.get("end_date")
-    if raw_end:
-        try:
-            return date.fromisoformat(raw_end)
-        except (TypeError, ValueError):
-            return None
-    if len(run.target_month) != 7:
-        return None
-    try:
-        year, month = (int(part) for part in run.target_month.split("-"))
-        return date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
-    except ValueError:
-        return None
+    from .period_metadata_v1 import predecessor_end
+    return predecessor_end(run.target_month, run.config_json)
 
 
 def predecessor_runs(session: Session, next_start_date: date) -> list[SolveRun]:
-    confirmed_run_ids = {
-        row[0] for row in session.query(ScheduleConfirmation.solve_run_id).all()
-    }
-    runs = [run for run in session.query(SolveRun).filter(SolveRun.status == "succeeded").all()
-            if _run_end_date(run) == next_start_date]
-    runs.sort(key=lambda row: ((row.config_json or {}).get("prior_candidate_for_start_date") == next_start_date.isoformat()
-                               and bool((row.config_json or {}).get("prior_candidate_id")),
-                               row.id in confirmed_run_ids, row.id), reverse=True)
-    return runs
+    confirmed = select(1).where(ScheduleConfirmation.solve_run_id == SolveRun.id).exists()
+    return session.query(SolveRun).options(load_only(
+        SolveRun.id, SolveRun.target_month, SolveRun.status, SolveRun.started_at, SolveRun.finished_at,
+        SolveRun.period_summary_json,
+    )).filter(SolveRun.status == "succeeded", SolveRun.period_end_key == next_start_date.isoformat()).order_by(
+        case((SolveRun.prior_candidate_start_key == next_start_date.isoformat(), 1), else_=0).desc(),
+        confirmed.desc(), SolveRun.id.desc(),
+    ).all()
 
 
 def direct_predecessor_run(session: Session, next_start_date: date) -> SolveRun | None:
@@ -79,8 +67,13 @@ def unresolved_candidate_detail(
 
 def unresolved_predecessor_detail(session: Session, next_start_date: date) -> dict:
     runs = predecessor_runs(session, next_start_date)
-    candidates = [candidate for run in runs for candidate in
-                  session.query(CandidateSchedule).filter_by(solve_run_id=run.id).order_by(CandidateSchedule.candidate_no).all()]
+    candidates_by_run = {run.id: [] for run in runs}
+    if candidates_by_run:
+        for candidate in session.query(CandidateSchedule).filter(
+            CandidateSchedule.solve_run_id.in_(candidates_by_run),
+        ).order_by(CandidateSchedule.candidate_no).all():
+            candidates_by_run[candidate.solve_run_id].append(candidate)
+    candidates = [candidate for run in runs for candidate in candidates_by_run[run.id]]
     detail = unresolved_candidate_detail(runs[0], candidates)
     detail["message"] = "前期間に複数の履歴または候補があります。使用する案を選んでください。"
     return detail

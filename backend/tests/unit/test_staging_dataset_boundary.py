@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from hashlib import sha256
 import json
+import io
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -160,8 +161,12 @@ def test_manifest_requires_all_systems_and_verified_file_proofs(monkeypatch):
     monkeypatch.setenv("K_SERVICE", "worker-stg")
     content = json.dumps({"schema": 1, "id": "replay-synthetic", "state": "ready", "snapshot_at": "now", "components": {}}).encode()
     class Blob:
-        def download_as_bytes(self):
-            return content
+        generation = 7
+        def reload(self):
+            pass
+        def download_to_file(self, target, *, if_generation_match):
+            assert if_generation_match == 7
+            target.write(content)
     class Bucket:
         def blob(self, _path):
             return Blob()
@@ -173,6 +178,47 @@ def test_manifest_requires_all_systems_and_verified_file_proofs(monkeypatch):
         data._read_manifest("gs://sawahospitalsystem-stg-raw/stg-replay/fixture/manifest.json", sha256(content).hexdigest())
     with pytest.raises(data.DatasetUnavailable, match="changed"):
         data._read_manifest("gs://sawahospitalsystem-stg-raw/stg-replay/fixture/manifest.json", "0" * 64)
+
+
+def test_manifest_stream_indexes_exact_objects_without_unbounded_reads(snapshot):
+    proof={"uri":"gs://sawahospitalsystem-stg-raw/stg-replay/replay-synthetic/objects/source", "sha256":"b"*64, "generation":"9", "raw":[0,None,False,"原本",1.25]}
+    snapshot['components']['order']['objects']={f'gs://source/{i}':proof for i in range(3000)}
+    class Bounded(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 <= size <= 65536
+            return super().read(size)
+    value=data._parse_manifest(Bounded(json.dumps(snapshot,ensure_ascii=False).encode()))
+    objects=value['components']['order']['objects']
+    assert isinstance(objects,data._ManifestObjects)
+    assert len(objects)==3000
+    assert objects['gs://source/2999']==proof
+    assert objects==snapshot['components']['order']['objects']
+    second=data._parse_manifest(Bounded(json.dumps(snapshot).encode()))
+    assert value==second
+    assert objects.path.is_file()
+    with pytest.raises(KeyError):
+        objects['gs://source/not-present']
+
+
+@pytest.mark.parametrize('duplicate', ['objects','reference','nested'])
+def test_manifest_stream_rejects_duplicate_keys_at_every_index_level(snapshot,duplicate):
+    proof='{"uri":"gs://sawahospitalsystem-stg-raw/stg-replay/replay-synthetic/x","sha256":"'+'a'*64+'","generation":"2"}'
+    content=json.dumps(snapshot)
+    if duplicate=='objects':
+        content=content.replace('"objects": {}','"objects": {}, "objects": {}',1)
+    elif duplicate=='reference':
+        content=content.replace('"objects": {}','"objects": {"same":'+proof+',"same":'+proof+'}',1)
+    else:
+        content=content.replace('"objects": {}','"objects": {"one":'+proof[:-1]+',"generation":"3"}}',1)
+    with pytest.raises(data.DatasetUnavailable,match='duplicate_key'):
+        data._parse_manifest(io.BytesIO(content.encode()))
+
+
+@pytest.mark.parametrize('suffix',[b' {}',b' trailing',b'\xff'])
+def test_manifest_stream_never_accepts_a_valid_prefix(snapshot,suffix):
+    import ijson
+    with pytest.raises((ValueError,ijson.JSONError,UnicodeDecodeError)):
+        data._parse_manifest(io.BytesIO(json.dumps(snapshot).encode()+suffix))
 
 
 def test_original_and_retry_task_contracts_keep_selected_snapshot(snapshot, monkeypatch):

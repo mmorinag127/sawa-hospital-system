@@ -1,8 +1,9 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, and_
 
 from src.db import Base
+from src.models.upload_visibility_v1 import unresolved_upload_conditions
 
 
 class UploadedPdf(Base):
@@ -38,6 +39,11 @@ class UploadedPdf(Base):
     current_document_id = Column(String, ForeignKey("order_documents.id"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+_visible_upload = and_(*unresolved_upload_conditions(UploadedPdf))
+Index("ix_uploaded_pdfs_unresolved_received_id", UploadedPdf.received_at, UploadedPdf.id,
+      sqlite_where=_visible_upload, postgresql_where=_visible_upload)
 
 
 class UploadedPdfAttempt(Base):

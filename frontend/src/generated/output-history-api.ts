@@ -46,7 +46,7 @@ export interface components {
              * Validation
              * @enum {string}
              */
-            validation: "validated" | "blocked";
+            validation: "validated" | "blocked" | "not_loaded";
         };
         /** OutputHistoryResponse */
         OutputHistoryResponse: {
@@ -56,6 +56,11 @@ export interface components {
             entries: components["schemas"]["OutputHistoryEntry"][];
             /** Limit */
             limit: number;
+            /**
+             * Next Before Id
+             * @default null
+             */
+            next_before_id: string | null;
             /** Order Id */
             order_id: string;
             /** Page */
@@ -81,6 +86,9 @@ export interface operations {
                 expected_workflow_revision: number;
                 page: number;
                 limit: number;
+                before_id?: string | null;
+                validate_records?: boolean;
+                record_id?: string | null;
             };
             header?: never;
             path?: never;

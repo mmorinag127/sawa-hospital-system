@@ -53,6 +53,15 @@
     <path id="zone-contaminated" d="M1142 269 H1447 V374 H1564 V214 H1801 V1122 H1142 Z" class="zone" stroke="#ec4c9c" />
   </g>
   <g id="equipment" data-layer="equipment" inkscape:groupmode="layer" inkscape:label="設備">
+    <g id="storage-fridge-d2" data-name="冷蔵庫D-2" data-storage-area="fridge-d2" display="none">
+      <rect x="652" y="1010" width="43" height="75" fill="none" stroke="none" />
+    </g>
+    <g id="storage-fridge-d2-anchors" display="none">
+      <circle id="anchor-storage-fridge-d2-west" cx="652" cy="1047.5" r="0" />
+      <circle id="anchor-storage-fridge-d2-east" cx="695" cy="1047.5" r="0" />
+      <circle id="anchor-storage-fridge-d2-north" cx="673.5" cy="1010" r="0" />
+      <circle id="anchor-storage-fridge-d2-south" cx="673.5" cy="1085" r="0" />
+    </g>
     <g id="rice-cooker" data-name="炊飯器">
       <rect x="375" y="210" width="90" height="55" class="equipment" />
       <text x="380" y="231" font-size="18" style="font-size:18px" id="equipment-label-rice-cooker">

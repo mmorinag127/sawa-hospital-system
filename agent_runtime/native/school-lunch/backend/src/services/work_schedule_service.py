@@ -72,7 +72,7 @@ def _serialize_schedule(schedule: DailyWorkSchedule) -> dict[str, Any]:
         "time_profile": schedule.time_profile,
         "source_menu_versions": schedule.source_menu_versions,
         "source_process_revisions": schedule.source_process_revisions,
-        "pattern_missing": missing_execution(patterns),
+        "pattern_missing": missing_execution(patterns,session),
         "current_menu_versions": current,
         "stale": schedule.source_menu_versions != current or (schedule.source_process_revisions or {}) != process_revisions,
         "rows": [
@@ -214,6 +214,9 @@ def build_work_schedule_draft(session: Session, facility_name: str, service_date
 
     from src.services.process_work_schedule import saved_patterns, project_tasks, revision_map, missing_execution
     patterns = saved_patterns(session, facility.id, service_date)
+    from src.services.shared_menu_review import school_direct_document
+    rows=[row for row in rows if not (str(row['menu_execution_id']) in patterns
+        and school_direct_document(session,patterns[str(row['menu_execution_id'])][1].document))]
     previous = get_work_schedule(session, existing) if existing is not None else {}
     for row in rows:
         for task in row["tasks"]:
@@ -237,7 +240,7 @@ def build_work_schedule_draft(session: Session, facility_name: str, service_date
         "time_profile": previous.get("time_profile"),
         "source_menu_versions": _menu_versions(session, facility.id, service_date),
         "source_process_revisions": revision_map(patterns) if not source_import else None,
-        "pattern_missing": missing_execution(patterns),
+        "pattern_missing": missing_execution(patterns,session),
         "current_menu_versions": _menu_versions(session, facility.id, service_date),
         "stale": False,
         "rows": rows,
@@ -248,10 +251,10 @@ def _validate_payload(session: Session, payload: dict[str, Any], *, facility: Fa
     from src.services.process_work_schedule import saved_patterns, assert_pattern_rows, missing_execution
     patterns = saved_patterns(session, facility.id, payload['service_date'])
     try:
-        assert_pattern_rows(payload, patterns)
+        assert_pattern_rows(payload, patterns,session)
     except ValueError as exc:
         raise WorkScheduleConflict(str(exc)) from exc
-    if payload.get('status') != 'draft' and missing_execution(patterns):
+    if payload.get('status') != 'draft' and missing_execution(patterns,session):
         raise WorkScheduleConflict('工程グラフの実績が未入力です。下書きとして保存し、実績を入力してください。')
     if payload.get("status") != "draft" and missing_task_times(payload):
         raise WorkScheduleConflict("時刻未入力の工程表は下書き（draft）として保存してください。")

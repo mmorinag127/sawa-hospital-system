@@ -19,7 +19,7 @@ from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter, range_boundaries
 from openpyxl.worksheet.print_settings import PrintArea
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.db import session_scope
 from src.models.order import Order
@@ -38,9 +38,7 @@ from src.services.storage_service import (
 
 _MONTH_ID_RE = re.compile(r"^\d{4}-\d{2}$")
 _OUTPUT_DIR = Path(os.getenv("ORDER_FORM_OUTPUT_DIR", "/tmp/order-form-outputs"))
-_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 _FAX_OUTPUT_DIR = Path(os.getenv("FAX_ORDER_FORM_OUTPUT_DIR", "/tmp/fax-order-form-prototypes"))
-_FAX_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 _DEFAULT_WEEK_SHEET = "3月22日～3月28日"
 _ORDER_FORM_BODY_START_ROW = 11
 _ORDER_FORM_BODY_END_ROW = 67
@@ -98,18 +96,23 @@ def _current_order_version_metadata(session, order_id: str) -> dict[str, Any]:
         return {}
     order = session.get(Order, order_id) if hasattr(session, "get") else None
     try:
-        rows = (
+        count = session.execute(select(func.count()).select_from(OrderVersion).where(
+            OrderVersion.order_id == order_id,
+        )).scalar_one()
+        current = (
             session.execute(
-                select(OrderVersion)
+                select(OrderVersion.version_no, OrderVersion.document_id, OrderVersion.message_id,
+                       OrderVersion.received_at)
                 .where(OrderVersion.order_id == order_id)
-                .order_by(OrderVersion.version_no.desc(), OrderVersion.received_at.desc(), OrderVersion.id.desc())
+                .order_by(OrderVersion.is_current.desc(), OrderVersion.version_no.desc(),
+                          OrderVersion.received_at.desc(), OrderVersion.id.desc())
+                .limit(1)
             )
-            .scalars()
-            .all()
+            .first()
         )
     except Exception:
         return {}
-    if not rows:
+    if current is None:
         if order is None or not str(getattr(order, "current_document_id", "") or "").strip():
             return {}
         received_at = getattr(order, "received_at", None)
@@ -120,10 +123,9 @@ def _current_order_version_metadata(session, order_id: str) -> dict[str, Any]:
             "fax_version_message_id": getattr(order, "message_id", "") or "",
             "fax_version_received_at": received_at.isoformat() if hasattr(received_at, "isoformat") else "",
         }
-    current = next((row for row in rows if bool(row.is_current)), rows[0])
     return {
         "fax_version_no": int(current.version_no or 0),
-        "fax_version_count": len(rows),
+        "fax_version_count": count,
         "fax_version_document_id": current.document_id,
         "fax_version_message_id": current.message_id,
         "fax_version_received_at": current.received_at.isoformat() if current.received_at else "",

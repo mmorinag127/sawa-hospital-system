@@ -5,14 +5,18 @@ import json
 import os
 import re
 import zipfile
+import tempfile
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from src.db import session_scope
+from src.staging_data import local_directory
 from src.models.ocr_job import OcrJob
 from src.models.ocr_training_sample import OcrTrainingSample
 from src.models.order import Order, OrderLine
@@ -20,7 +24,6 @@ from src.models.order_ocr_cache import OrderOcrCache
 from src.services.storage_service import load_bytes_from_uri
 
 _EXPORT_DIR = Path(os.getenv("OCR_TRAINING_EXPORT_DIR", "/tmp/ocr-training-exports"))
-_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _sanitize_json(value: Any) -> Any:
@@ -96,38 +99,51 @@ def _has_line_correction(line: OrderLine) -> bool:
     return float(line.quantity_corrected) != float(line.quantity_original)
 
 
-def _load_ocr_payload(order: Order) -> tuple[dict | None, str | None]:
+@contextmanager
+def _ocr_output_references(order_id):
+    # Snapshot small references to disk; do not hold a DB connection during GCS reads.
+    with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as references:
+        with session_scope() as session:
+            rows = session.execute(select(OcrJob.id, OcrJob.output_reference).where(
+                OcrJob.order_id == order_id,
+            ).order_by(OcrJob.updated_at.desc(), OcrJob.created_at.desc(), OcrJob.id.desc())
+                .execution_options(yield_per=200))
+            try:
+                for job_id, reference in rows:
+                    if reference:
+                        references.write(json.dumps([job_id, reference]) + "\n")
+            finally:
+                rows.close()
+        references.seek(0)
+        yield (json.loads(line) for line in references)
+
+
+def _load_ocr_payload(order: Order) -> tuple[dict | None, str | None, str | None]:
     with session_scope() as session:
         cache = session.get(OrderOcrCache, order.id)
         if cache and isinstance(cache.payload, dict):
             payload = _sanitize_json(cache.payload)
             if isinstance(payload, dict):
                 provider = payload.get("engine") or payload.get("provider")
-                return payload, str(provider) if provider else None
+                execution = payload.get("_ocr_execution")
+                job_id = execution.get("job_id") if isinstance(execution, dict) else None
+                recorded_job_id = session.scalar(select(OcrJob.id).where(
+                    OcrJob.id == job_id, OcrJob.order_id == order.id,
+                )) if isinstance(job_id, str) and job_id else None
+                return payload, str(provider) if provider else None, recorded_job_id
 
-    with session_scope() as session:
-        jobs = (
-            session.execute(
-                select(OcrJob)
-                .where(OcrJob.order_id == order.id)
-                .order_by(OcrJob.updated_at.desc(), OcrJob.created_at.desc(), OcrJob.id.desc())
-            )
-            .scalars()
-            .all()
-        )
-    for job in jobs:
-        if not job.output_reference:
-            continue
-        try:
-            raw = load_bytes_from_uri(job.output_reference)
-            parsed = json.loads(raw.decode("utf-8"))
-            payload = _sanitize_json(parsed)
-            if isinstance(payload, dict):
-                provider = payload.get("engine") or payload.get("provider")
-                return payload, str(provider) if provider else None
-        except Exception:
-            continue
-    return None, None
+    with _ocr_output_references(order.id) as references:
+        for job_id, reference in references:
+            try:
+                raw = load_bytes_from_uri(reference)
+                parsed = json.loads(raw.decode("utf-8"))
+                payload = _sanitize_json(parsed)
+                if isinstance(payload, dict):
+                    provider = payload.get("engine") or payload.get("provider")
+                    return payload, str(provider) if provider else None, job_id
+            except Exception:
+                continue
+    return None, None, None
 
 
 def register_order_sample(
@@ -151,24 +167,23 @@ def register_order_sample(
         )
         if not lines:
             return None, "lines_not_found"
-
-    labeled_lines = [_line_payload(line) for line in lines]
-    has_corrections = any(_has_line_correction(line) for line in lines)
-    ocr_output, ocr_provider = _load_ocr_payload(order)
+        labeled_lines = [_line_payload(line) for line in lines]
+        has_corrections = any(_has_line_correction(line) for line in lines)
+        order = SimpleNamespace(**{name: getattr(order, name) for name in (
+            "id", "current_document_id", "document_uri", "lines_updated_at", "facility_code", "week_code", "message_id")})
+    ocr_output, ocr_provider, ocr_job_id = _load_ocr_payload(order)
     now = datetime.utcnow()
-    with session_scope() as session:
-        latest_job_id = (
-            session.execute(
-                select(OcrJob.id)
-                .where(OcrJob.order_id == order_id)
-                .order_by(OcrJob.updated_at.desc(), OcrJob.created_at.desc(), OcrJob.id.desc())
-            )
-            .scalars()
-            .first()
-        )
-    ocr_job_id = str(latest_job_id or "").strip() or None
 
     with session_scope() as session:
+        if session.get_bind().dialect.name == "sqlite":
+            session.execute(update(Order).where(Order.id == order_id).values(status=Order.status))
+        current_order = session.execute(select(Order).where(Order.id == order_id).with_for_update()).scalar_one_or_none()
+        if current_order is None:
+            return None, "order_not_found"
+        if (current_order.current_document_id, current_order.document_uri, current_order.lines_updated_at,
+            current_order.facility_code, current_order.week_code) != (order.current_document_id, order.document_uri,
+            order.lines_updated_at, order.facility_code, order.week_code):
+            return None, "order_training_input_changed"
         sample = (
             session.execute(
                 select(OcrTrainingSample).where(OcrTrainingSample.order_id == order_id)
@@ -297,7 +312,7 @@ def export_registered_pdfs(
     samples = _query_sample_models(limit=limit)
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     filename = f"ocr_training_pdfs_{stamp}.zip"
-    output = _EXPORT_DIR / filename
+    output = local_directory(_EXPORT_DIR) / filename
 
     manifest: list[dict] = []
     successful_sample_ids: list[str] = []
@@ -367,7 +382,7 @@ def export_samples(
 
     if normalized_format == "jsonl":
         filename = f"ocr_training_samples_{stamp}.jsonl"
-        output = _EXPORT_DIR / filename
+        output = local_directory(_EXPORT_DIR) / filename
         with output.open("w", encoding="utf-8") as f:
             for item in items:
                 payload = {
@@ -392,7 +407,7 @@ def export_samples(
         return output, filename, "application/x-ndjson"
 
     filename = f"ocr_training_samples_{stamp}.csv"
-    output = _EXPORT_DIR / filename
+    output = local_directory(_EXPORT_DIR) / filename
     fieldnames = [
         "sample_id",
         "order_id",

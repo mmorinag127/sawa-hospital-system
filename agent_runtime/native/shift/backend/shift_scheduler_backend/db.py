@@ -2,7 +2,8 @@ from collections.abc import Generator
 from dataclasses import dataclass
 import os
 from typing import Any
-from functools import lru_cache
+from collections import OrderedDict
+from threading import RLock
 from . import staging_data
 
 from sqlalchemy import create_engine
@@ -61,11 +62,27 @@ def get_database_url() -> str:
     return staging_data.database_uri(configure_database(), "shift")
 
 
-@lru_cache(maxsize=4)
-def _replay_runtime(database_url):
+_replay_runtimes = OrderedDict()
+_replay_runtime_lock = RLock()
+
+
+def _create_replay_runtime(database_url):
     selected_engine = create_engine(database_url, pool_pre_ping=True)
     return _DatabaseRuntime(database_url, selected_engine,
         sessionmaker(bind=selected_engine, autoflush=False, autocommit=False))
+
+
+def _replay_runtime(database_url):
+    with _replay_runtime_lock:
+        if database_url in _replay_runtimes:
+            _replay_runtimes.move_to_end(database_url)
+            return _replay_runtimes[database_url]
+        selected = _create_replay_runtime(database_url)
+        _replay_runtimes[database_url] = selected
+        while len(_replay_runtimes) > 4:
+            _, retired = _replay_runtimes.popitem(last=False)
+            retired.engine.dispose()
+        return selected
 
 
 def _selected_runtime():

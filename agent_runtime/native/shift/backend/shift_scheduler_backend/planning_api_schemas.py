@@ -166,18 +166,21 @@ class PlanningDeleteResponse(PlanningCommandResponse[PlanningDeletedItemResponse
     pass
 
 
-class PlanningOverviewResponse(PlanningResponse):
+class PlanningReferenceOverviewResponse(PlanningResponse):
     skills: list[PlanningSkillResponse]
     shift_templates: list[ShiftTemplateResponse]
     positions: list[PositionResponse]
-    workdays: list[WorkdayResponse]
-    demands: list[DemandResponse]
     priorities: list[PositionPriorityResponse]
     position_rules: list[StaffPositionRuleResponse]
+    position_assignment_rules: list[PositionAssignmentRuleResponse]
+
+
+class PlanningOverviewResponse(PlanningReferenceOverviewResponse):
+    workdays: list[WorkdayResponse]
+    demands: list[DemandResponse]
     pair_rules: list[StaffPairRuleResponse]
     rotations: list[RotationResponse]
     exceptions: list[ScheduleExceptionResponse]
-    position_assignment_rules: list[PositionAssignmentRuleResponse]
 
 
 class PeriodCopyDemandExclusionResponse(PlanningResponse):

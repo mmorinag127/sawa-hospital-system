@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, JSON, String
+from sqlalchemy import Column, DateTime, ForeignKey, JSON, String, Index
 
 from src.db import Base
 
@@ -21,6 +21,7 @@ class OrderBaggingResult(Base):
 
 class OrderOutputBundle(Base):
     __tablename__ = "order_output_bundles"
+    __table_args__ = (Index("ix_order_output_bundles_order_created_id", "order_id", "created_at", "id"),)
 
     id = Column(String, primary_key=True)
     order_id = Column(String, ForeignKey("orders.id"), nullable=False, index=True)

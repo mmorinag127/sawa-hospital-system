@@ -33,5 +33,6 @@ RUN pip install -r requirements.txt
 COPY backend/src ./src
 COPY backend/alembic.ini ./alembic.ini
 COPY backend/migrations ./migrations
+RUN python -m compileall -q src migrations
 
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips", "*"]

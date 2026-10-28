@@ -29,7 +29,6 @@ SHIPPING_TEMPLATE_PATH = Path(
     os.getenv("SHIPPING_TEMPLATE_PATH", DATA_DIR / "shipping_template.xlsx")
 )
 OUTPUT_DIR = Path(os.getenv("SHIPPING_OUTPUT_DIR", "/tmp/shipping-outputs"))
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 _TRACKING_PATTERN = re.compile(r"お問い合せ送り状№：([0-9\\-]+)")
 _SHIP_DATE_PATTERN = re.compile(r"出荷予定日：\s*([0-9]{4}/[0-9]{2}/[0-9]{2})")
@@ -281,7 +280,7 @@ def build_shipping_excel(records: list[ShippingRecord]) -> Path:
         if record.arrival_date:
             ws.cell(row=row_idx, column=col_map["arrival"]).value = record.arrival_date
 
-    output_path = OUTPUT_DIR / f"shipping_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    output_path = datasets.local_directory(OUTPUT_DIR) / f"shipping_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     workbook.save(output_path)
     logger.info("Shipping Excel created", path=str(output_path), records=len(records))
     return output_path
@@ -448,7 +447,7 @@ def enrich_tracking_excel(excel_bytes: bytes) -> tuple[Path, dict]:
             else:
                 flag_cell.value = "未完了"
 
-    output_path = OUTPUT_DIR / f"shipping_enriched_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    output_path = datasets.local_directory(OUTPUT_DIR) / f"shipping_enriched_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     workbook.save(output_path)
     summary = {
         "total_rows": len(row_refs),

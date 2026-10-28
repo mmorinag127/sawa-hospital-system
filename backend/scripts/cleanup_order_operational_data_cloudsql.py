@@ -82,8 +82,8 @@ def _load_gcloud_access_token() -> str:
 
 def _configure_cloudsql_session(args: argparse.Namespace) -> Connector:
     credentials = Credentials(token=_load_gcloud_access_token())
-    connector = Connector(credentials=credentials, quota_project=PROJECT_ID)
     password = _load_secret(args.secret)
+    connector = Connector(credentials=credentials, quota_project=PROJECT_ID)
 
     def getconn() -> Any:
         return connector.connect(
@@ -94,19 +94,27 @@ def _configure_cloudsql_session(args: argparse.Namespace) -> Connector:
             db=args.db_name,
         )
 
-    engine = create_engine(
-        "postgresql+pg8000://",
-        creator=getconn,
-        future=True,
-        pool_pre_ping=True,
-        pool_recycle=300,
-        pool_use_lifo=True,
-    )
-
-    import src.db as db
-
-    db.engine = engine
-    db.SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    engine = None
+    try:
+        engine = create_engine(
+            "postgresql+pg8000://",
+            creator=getconn,
+            future=True,
+            pool_pre_ping=True,
+            pool_recycle=300,
+            pool_use_lifo=True,
+        ).execution_options(sawa_cleanup_source_identity={
+            'instance': args.instance, 'database': args.db_name, 'user': args.db_user})
+        import src.db as db
+        db.engine = engine
+        db.SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    except BaseException:
+        try:
+            if engine is not None:
+                engine.dispose()
+        finally:
+            connector.close()
+        raise
     return connector
 
 
@@ -127,12 +135,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--received-to", help="Target orders received on or before YYYY-MM-DD.")
     parser.add_argument("--export-pdfs-dir", help="Copy target order PDFs before cleanup and write manifest.json.")
     parser.add_argument("--apply", action="store_true", help="Actually delete targeted order data.")
+    parser.add_argument('--plan-file', help='Previously reviewed plan.sqlite from a dry run.')
+    parser.add_argument('--plan-sha256', help='SHA256 printed by that dry run.')
     parser.add_argument(
         "--confirm",
         default="",
         help="Required with --apply. Must be CLEAN_ORDER_DATA.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if bool(args.plan_file) != bool(args.plan_sha256) or (args.apply and not args.plan_file):
+        parser.error('--apply requires the reviewed --plan-file and --plan-sha256; run a dry run first')
+    return args
 
 
 def main() -> int:
@@ -144,6 +157,7 @@ def main() -> int:
             apply_order_cleanup,
             build_order_cleanup_plan,
             export_order_pdfs_for_cleanup,
+            read_order_cleanup_plan,
         )
 
         cleanup_scope = CleanupScope(
@@ -152,7 +166,7 @@ def main() -> int:
             received_to=_parse_date(args.received_to),
         )
 
-        plan = build_order_cleanup_plan(cleanup_scope)
+        plan = read_order_cleanup_plan(args.plan_file, args.plan_sha256) if args.plan_file else build_order_cleanup_plan(cleanup_scope)
         result: dict[str, object] = {
             "mode": "apply" if args.apply else "dry_run",
             "cleanup_plan": plan,
@@ -162,18 +176,24 @@ def main() -> int:
             result["pdf_export"] = export_order_pdfs_for_cleanup(
                 scope=cleanup_scope,
                 output_dir=args.export_pdfs_dir,
+                plan_path=plan['manifest']['path'], expected_plan_sha256=plan['manifest']['sha256'],
             )
 
         if args.apply:
             result["cleanup_result"] = apply_order_cleanup(
                 cleanup_scope,
                 confirm_token=str(args.confirm or ""),
+                plan_path=plan['manifest']['path'], expected_plan_sha256=plan['manifest']['sha256'],
             )
 
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     finally:
-        connector.close()
+        import src.db as db
+        try:
+            db.engine.dispose()
+        finally:
+            connector.close()
 
 
 if __name__ == "__main__":

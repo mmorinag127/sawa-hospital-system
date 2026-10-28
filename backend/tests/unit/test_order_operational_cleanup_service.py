@@ -132,7 +132,7 @@ def test_cleanup_requires_explicit_scope() -> None:
         build_order_cleanup_plan(CleanupScope())
 
 
-def test_cleanup_plan_and_apply_delete_order_data_but_preserve_facility_config(tmp_path: Path) -> None:
+def test_cleanup_refuses_saved_history_and_preserves_facility_config(tmp_path: Path) -> None:
     pdf_path = tmp_path / "fax.pdf"
     pdf_path.write_bytes(b"%PDF-test")
     facility_id = _id("FAC_KEEP_")
@@ -148,18 +148,26 @@ def test_cleanup_plan_and_apply_delete_order_data_but_preserve_facility_config(t
     scope = CleanupScope(all_orders=True)
     plan = build_order_cleanup_plan(scope)
 
-    assert order_id in plan["order_ids"]
-    assert message_id in plan["message_ids"]
+    from src.services.order_cleanup_manifest_v1 import open_verified
+    import json
+    with open_verified(plan['manifest']['path'], plan['manifest']['sha256']) as (manifest, _header):
+        assert any(json.loads(body)['id'] == order_id for (body,) in manifest.execute(
+            "SELECT row_json FROM rows WHERE table_name='orders'"))
+    assert plan['blocked'] and plan['protected_orders'] >= 1
     assert plan["counts"]["orders"] >= 1
     assert plan["counts"]["order_lines"] >= 1
-    assert plan["counts"]["order_ocr_evidence_runs"] >= 1
     assert plan["preserved_canonical_counts"]["facilities"] >= 1
 
-    result = apply_order_cleanup(scope, confirm_token="CLEAN_ORDER_DATA")
+    with pytest.raises(ValueError, match='cleanup_saved_history_is_retained'):
+        apply_order_cleanup(scope, confirm_token="CLEAN_ORDER_DATA", plan_path=plan['manifest']['path'],
+                            expected_plan_sha256=plan['manifest']['sha256'])
 
-    assert result["removed"]["orders"] >= 1
     with session_scope() as session:
-        assert session.get(Order, order_id) is None
+        assert session.get(Order, order_id) is not None
+        assert session.get(IngestJob, message_id) is not None
+        assert session.get(OcrJob, f'OCR-{order_id}') is not None
+        assert session.query(OrderSheetDraft).filter_by(order_id=order_id).count() == 1
+        assert session.query(OrderOcrEvidenceRun).filter_by(order_id=order_id).count() == 1
         assert session.get(Facility, facility_id) is not None
         assert session.get(FacilityConfig, facility_id) is not None
 
@@ -173,7 +181,8 @@ def test_cleanup_apply_rejects_missing_confirmation(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError):
-        apply_order_cleanup(CleanupScope(received_from=date(2026, 5, 2), received_to=date(2026, 5, 2)), confirm_token="")
+        apply_order_cleanup(CleanupScope(received_from=date(2026, 5, 2), received_to=date(2026, 5, 2)),
+                            confirm_token="", plan_path=tmp_path / 'not-a-plan', expected_plan_sha256='0' * 64)
 
     with session_scope() as session:
         assert session.get(Order, order_id) is not None
@@ -193,8 +202,37 @@ def test_export_pdfs_for_cleanup_writes_manifest_and_copies_local_pdf(tmp_path: 
         output_dir=export_dir,
     )
 
-    exported_items = [item for item in manifest["items"] if item["order_id"] == order_id]
+    import json
+    exported_items = [json.loads(line) for line in Path(manifest['items_receipt']['path']).read_text().splitlines()
+                      if json.loads(line)['order_id'] == order_id]
     assert exported_items
     assert exported_items[0]["status"] == "exported"
     assert Path(exported_items[0]["target_path"]).read_bytes() == b"%PDF-export"
-    assert (export_dir / "manifest.json").exists()
+    assert Path(manifest['manifest_path']).is_file()
+
+
+def test_cleanup_freezes_target_set_and_rejects_changed_rows(tmp_path):
+    received = datetime(2097, 4, 3, 12)
+    scope = CleanupScope(received_from=received.date(), received_to=received.date())
+    first, later = _id('ORDfrozen'), _id('ORDlate')
+    with session_scope() as session:
+        session.add(Order(id=first, facility_code='FAC_KEEP', week_code='2097-04', status='要確認',
+                          message_id=_id('message'), document_uri='', received_at=received))
+    plan = build_order_cleanup_plan(scope)
+    with session_scope() as session:
+        session.add(Order(id=later, facility_code='FAC_KEEP', week_code='2097-04', status='要確認',
+                          message_id=_id('message'), document_uri='', received_at=received))
+        session.get(Order, first).status = 'changed-after-review'
+    with pytest.raises(ValueError):
+        apply_order_cleanup(scope, confirm_token='CLEAN_ORDER_DATA', plan_path=plan['manifest']['path'],
+                            expected_plan_sha256=plan['manifest']['sha256'])
+    with session_scope() as session:
+        assert session.get(Order, first) is not None
+        assert session.get(Order, later) is not None
+        session.get(Order, first).status = '要確認'
+    result = apply_order_cleanup(scope, confirm_token='CLEAN_ORDER_DATA', plan_path=plan['manifest']['path'],
+                                 expected_plan_sha256=plan['manifest']['sha256'])
+    assert result['removed']['orders'] == 1
+    with session_scope() as session:
+        assert session.get(Order, first) is None
+        assert session.get(Order, later) is not None

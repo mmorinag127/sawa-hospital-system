@@ -47,8 +47,17 @@ class SavedImportResponse(ImportResponse):
     current_review: ImportReview
 
 
+class ImportSummaryResponse(ImportResponse):
+    id: str
+    month_id: str
+    state: Literal["review", "applied"]
+    source: ImportSource
+    created_at: str
+
+
 class ImportListResponse(ImportResponse):
-    items: list[SavedImportResponse]
+    items: list[ImportSummaryResponse]
+    next_before_id: str | None
 
 
 class MonthlyMasterChecks(ImportResponse):

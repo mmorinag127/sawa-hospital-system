@@ -687,7 +687,7 @@ def list_orders(
     include_archived: bool | None = None,
     include_runtime: bool | None = None,
     include_candidate_summary: bool = False,
-    limit: int | None = Query(default=None, ge=1, le=1000),
+    limit: int | None = Query(default=100, ge=1, le=1000),
     before_received_at: str | None = None,
     before_id: str | None = None,
     response_view: Literal["ocr_monitor", "stored_facts"] | None = None,
@@ -823,9 +823,14 @@ def get_facility_candidates(order_ids: list[str] = Query(min_length=1, max_lengt
 
 @router.get("/facility-overview", dependencies=[Depends(require_role("operator"))])
 def get_facility_order_overview(facility: str | None = None, week: str | None = None, status: str | None = None,
-                                limit: int = Query(default=25, ge=1, le=200), offset: int = Query(default=0, ge=0)):
+                                limit: int = Query(default=25, ge=1, le=200), offset: int = Query(default=0, ge=0),
+                                before_id: str | None = None, before_source_kind: str | None = None):
     from src.services.order_overview_read import list_facility_orders
-    return list_facility_orders(facility=facility, week=week, status=status, limit=limit, offset=offset)
+    try:
+        return list_facility_orders(facility=facility, week=week, status=status, limit=limit, offset=offset,
+                                   before_id=before_id, before_source_kind=before_source_kind)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @router.post("/cache-refresh", dependencies=[Depends(require_role("admin"))])
@@ -1418,7 +1423,44 @@ def _resolve_order_document_version(order_id: str, document_id: str | None = Non
     order = order_service.get_order_by_id(order_id, allow_unresolved_menu_amount=True)
     if not order:
         raise HTTPException(status_code=404, detail="order not found")
-    return order, _select_order_document_version(order, document_id)
+    if document_id and str(document_id).strip():
+        from src.services.order_serialization_service import read_order_document_version
+        selected = read_order_document_version(order_id, str(document_id).strip())
+        if selected is None or not str(selected.get("storage_uri") or "").strip():
+            raise HTTPException(status_code=404, detail="document version not found")
+        return order, selected
+    selected = _select_order_document_version(order, document_id)
+    if selected.get("id") is not None:
+        from src.services.order_serialization_service import read_order_version
+        complete = read_order_version(order_id, selected["id"])
+        if complete is None or complete.get("document_id") != selected.get("document_id"):
+            raise HTTPException(status_code=409, detail="document version changed")
+        selected = complete
+    return order, selected
+
+
+@router.get("/{order_id}/versions", dependencies=[Depends(require_role("operator"))])
+def get_order_version_history(order_id: str, before_id: str | None = None,
+                              expected_workflow_revision: int | None = Query(None, ge=0)):
+    from src.services.order_serialization_service import read_order_version_history
+    try:
+        result = read_order_version_history(order_id, before_id=before_id,
+            expected_revision=expected_workflow_revision)
+    except ValueError as exc:
+        raise HTTPException(409 if str(exc) == 'order_version_workflow_revision_changed' else 422,
+                            detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(404, detail="order not found")
+    return result
+
+
+@router.get("/{order_id}/versions/{version_id}", dependencies=[Depends(require_role("operator"))])
+def get_order_version(order_id: str, version_id: str):
+    from src.services.order_serialization_service import read_order_version
+    result = read_order_version(order_id, version_id)
+    if result is None:
+        raise HTTPException(404, detail="document version not found")
+    return result
 
 
 def _select_order_document_version(order: dict, document_id: str | None = None) -> dict:
@@ -1848,10 +1890,19 @@ def confirm_order_workflow_v2(
 @router.get("/{order_id}/workflow-v2/display", dependencies=[Depends(require_role("operator"))])
 def get_order_workflow_v2_display(
     order_id: str, response: Response, scope: Literal["initial", "summary", "ocr", "sheet", "output", "inspection"] = "summary",
+    history_before_id: str | None = None,
+    selected_document_id: str | None = None,
 ):
     from src.services.workflow_display_read_service import get_display
     response.headers["Cache-Control"] = "no-store"
-    return _workflow_v2_or_404(get_display(order_id, scope=scope))
+    try:
+        result = get_display(order_id, scope=scope, history_before_id=history_before_id,
+                             selected_document_id=selected_document_id)
+    except ValueError as error:
+        if str(error) in {"ocr_history_cursor_invalid", "order_version_selected_document_missing"}:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        raise
+    return _workflow_v2_or_404(result)
 
 
 @router.get("/{order_id}/workflow-v2/inspection", dependencies=[Depends(require_role("operator"))])

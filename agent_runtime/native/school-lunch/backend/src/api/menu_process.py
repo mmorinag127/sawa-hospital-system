@@ -82,7 +82,11 @@ def preview_day_routes(request: Request, body: DayRoutePreviewWrite, progress: b
         service.check_versions(menu, binding, recipe, item)
         document = item.document.model_dump()
         service.check_materials(menu, document)
-        entries.append((menu, document, item.color))
+        from src.services.shared_menu_review import school_direct_document
+        if not school_direct_document(session,document):
+            entries.append((menu, document, item.color))
+    if not entries:
+        raise HTTPException(422,'選択日は学校直納の献立のみです。厨房の動線図を作る作業はありません。')
     try:
         if progress:
             return _preview_stream(engine.preview_day_events(entries, body.template_id))
@@ -94,6 +98,19 @@ def preview_day_routes(request: Request, body: DayRoutePreviewWrite, progress: b
 @router.get('/menu-executions/{menu_id}/process', responses={200: {'model': contract.ProcessContext}})
 def read_process(menu_id: int, session=Depends(get_school_lunch_session)):
     return service.context(session, menu_id)
+
+
+@router.get('/menu-executions/{menu_id}/process/history', responses={200: {'model': contract.ProcessHistoryPage}})
+def process_history(menu_id: int, expected_version: int, before: int | None = None, session=Depends(get_school_lunch_session)):
+    menu, binding, recipe, _ = service.state(session, menu_id)
+    if (binding.version if binding else 0) != expected_version:
+        service.conflict()
+    return service.history_page(session, menu, recipe, before=before)
+
+
+@router.get('/menu-executions/{menu_id}/process/history/{revision_id}', responses={200: {'model': contract.ProcessHistoryDocument}})
+def process_history_document(menu_id: int, revision_id: int, expected_version: int, session=Depends(get_school_lunch_session)):
+    return service.history_document(session, menu_id, revision_id, expected_version)
 
 
 @router.get('/menu-executions/{menu_id}/process/route-options', responses={200: {'model': contract.RouteOptions}})

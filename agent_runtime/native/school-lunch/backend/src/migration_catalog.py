@@ -8,8 +8,8 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine.reflection import ObjectKind, ObjectScope
 from sqlalchemy.engine import URL, make_url
 
-CATALOG_HEAD = "0030_shared_menus"
-HEAD = "0030_shared_menus"
+CATALOG_HEAD = "0032_route_source_references"
+HEAD = "0032_route_source_references"
 AUTH_TABLES = ("users", "audit_logs", "notifications")
 CONTRACT_PATH = Path(__file__).with_name("migration_catalog_contracts.json")
 

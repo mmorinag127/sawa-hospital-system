@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import select, and_, or_
 
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 
@@ -14,7 +14,7 @@ def history_statement(order_id: str):
     ).execution_options(yield_per=4)
 
 
-def read_history_summary(session, order_id: str) -> list[SimpleNamespace]:
+def read_history_summary(session, order_id: str, *, limit=None, before=None, template_id=None, evidence_id=None) -> list[SimpleNamespace]:
     table = OrderOcrEvidenceRun.__table__
     columns = (
         "id", "order_id", "template_version_id", "schema_version",
@@ -23,6 +23,15 @@ def read_history_summary(session, order_id: str) -> list[SimpleNamespace]:
     statement = select(*(table.c[name] for name in columns)).where(
         table.c.order_id == order_id,
     ).order_by(table.c.created_at.desc(), table.c.id.desc())
+    if template_id is not None:
+        statement = statement.where(table.c.template_version_id == template_id)
+    if evidence_id is not None:
+        statement = statement.where(table.c.id == evidence_id)
+    if before is not None:
+        statement = statement.where(or_(table.c.created_at < before.created_at,
+            and_(table.c.created_at == before.created_at, table.c.id < before.id)))
+    if limit is not None:
+        statement = statement.limit(limit)
     result = session.execute(statement)
     try:
         return [SimpleNamespace(**dict(row)) for row in result.mappings()]

@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime
 import os
 import sqlite3
 import importlib.util
@@ -123,6 +124,105 @@ def formal_database(request, tmp_path, monkeypatch):
                         connection.exec_driver_sql(f'DROP DATABASE "{database}"')
             finally:
                 admin.dispose()
+
+
+def test_scaling_dashboard_counts_follow_commit_rollback_and_group_changes(formal_database):
+    engine, config = formal_database
+    command.upgrade(config, 'head')
+    with engine.begin() as connection:
+        orders = sa.Table('orders', sa.MetaData(), autoload_with=connection)
+        counts = sa.Table('order_dashboard_counts', sa.MetaData(), autoload_with=connection)
+    total = sa.select(sa.func.coalesce(sa.func.sum(counts.c.row_count), 0))
+    values = dict(facility_code='fixture', week_code='fixture-week', status='pending',
+                  document_uri='fixture-only.pdf', received_at=datetime(2026, 10, 1))
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        connection.execute(orders.insert(), [{**values, 'id': str(i), 'message_id': str(i)} for i in range(2)])
+        assert connection.scalar(total) == 2
+        connection.execute(orders.update().where(orders.c.id == '0').values(status='processed'))
+        assert dict(connection.execute(sa.select(counts.c.status, counts.c.row_count).where(counts.c.row_count > 0)).all()) == {'pending': 1, 'processed': 1}
+        connection.execute(orders.delete().where(orders.c.id == '0'))
+        assert connection.scalar(total) == 1
+        transaction.rollback()
+    with engine.begin() as connection:
+        assert connection.scalar(total) == 0
+        connection.execute(orders.insert().values(**values, id='committed', message_id='committed'))
+    with engine.begin() as connection:
+        assert connection.scalar(total) == 1
+        from src.models.uploaded_pdf import UploadedPdf
+        uploads = UploadedPdf.__table__
+        connection.execute(uploads.insert().values(id='upload', message_id='upload-message',
+            content_sha256='fixture-digest', original_filename='fixture-only.pdf', storage_uri='upload-only.pdf',
+            received_at=datetime(2026, 10, 1), facility_hint='fixture', week_hint='fixture-week', status='pending'))
+        assert connection.scalar(total) == 2
+        connection.execute(uploads.update().where(uploads.c.id == 'upload').values(current_order_id='committed'))
+        assert connection.scalar(total) == 1
+        connection.execute(uploads.delete().where(uploads.c.id == 'upload'))
+        connection.execute(orders.delete())
+        assert connection.scalar(total) == 0
+
+
+def test_scaling_document_reference_rejects_missing_and_locks_existing_parent(formal_database):
+    engine, config = formal_database
+    command.upgrade(config, 'head')
+    with engine.begin() as connection:
+        metadata = sa.MetaData()
+        orders = sa.Table('orders', metadata, autoload_with=connection)
+        documents = sa.Table('order_documents', metadata, autoload_with=connection)
+        values = dict(document_uri='fixture-only.pdf', message_id='fixture-message', received_at=datetime(2026, 10, 1))
+        with pytest.raises(sa.exc.DBAPIError, match='retained_document_reference_missing'):
+            with connection.begin_nested():
+                connection.execute(orders.insert().values(**values, id='missing', current_document_id='absent'))
+        connection.execute(documents.insert().values(id='document', storage_uri='fixture-only.pdf', source_email_id='fixture-message',
+            received_at=datetime(2026, 10, 1), ocr_attempts=0, status='pending'))
+        connection.execute(orders.insert().values(**values, id='owned', current_document_id='document'))
+        with pytest.raises(sa.exc.DBAPIError, match='retained_document_reference_missing'):
+            with connection.begin_nested():
+                connection.execute(orders.update().where(orders.c.id == 'owned').values(current_document_id='absent'))
+        assert connection.scalar(sa.select(orders.c.current_document_id)) == 'document'
+    if engine.dialect.name == 'postgresql':
+        with engine.connect() as writer, engine.connect() as retention:
+            transaction = writer.begin()
+            try:
+                writer.execute(orders.update().where(orders.c.id == 'owned').values(current_document_id='document'))
+                assert retention.execute(sa.select(documents.c.id).with_for_update(skip_locked=True)).all() == []
+            finally:
+                transaction.rollback()
+                retention.rollback()
+            assert retention.execute(sa.select(documents.c.id).with_for_update(skip_locked=True)).scalar_one() == 'document'
+
+
+def test_scaling_revision_roundtrip_preserves_ocr_evidence_and_progress(formal_database):
+    engine, config = formal_database
+    command.upgrade(config, '0037')
+    original = {'operator_values': ['', '0', None, '001'], 'processing_stage': 'old', 'unknown': {'raw': False}}
+    with engine.begin() as connection:
+        jobs = sa.Table('ocr_jobs', sa.MetaData(), autoload_with=connection)
+        connection.execute(jobs.insert().values(id='scaling-roundtrip', status='running', input_reference='fixture-only',
+            metrics=original, created_at=datetime(2026, 10, 1), updated_at=datetime(2026, 10, 1)))
+    command.upgrade(config, 'head')
+    with engine.begin() as connection:
+        jobs = sa.Table('ocr_jobs', sa.MetaData(), autoload_with=connection)
+        row = connection.execute(sa.select(jobs.c.metrics, jobs.c.progress_metrics)).one()
+        assert row.metrics == original and row.progress_metrics is None
+        connection.execute(jobs.update().where(jobs.c.id == 'scaling-roundtrip').values(
+            progress_metrics={'processing_stage': 'new', 'elapsed_seconds': None}))
+        from src.models.ocr_job import OcrJob
+        assert connection.scalar(sa.select(OcrJob.metrics)) == {**original, 'processing_stage': 'new', 'elapsed_seconds': None}
+        assert connection.scalar(sa.select(OcrJob.metrics['processing_stage'].as_string())) == 'new'
+        assert connection.scalar(sa.select(OcrJob.metrics['operator_values'])) == original['operator_values']
+    command.downgrade(config, '0037')
+    with engine.connect() as connection:
+        jobs = sa.Table('ocr_jobs', sa.MetaData(), autoload_with=connection)
+        assert 'progress_metrics' not in jobs.c
+        expected = {**original, 'processing_stage': 'new', 'elapsed_seconds': None}
+        assert connection.execute(sa.select(jobs.c.metrics)).scalar_one() == expected
+        require_revision_catalog(connection, '0037')
+    command.upgrade(config, 'head')
+    with engine.connect() as connection:
+        require_formal_head(connection)
+        jobs = sa.Table('ocr_jobs', sa.MetaData(), autoload_with=connection)
+        assert connection.execute(sa.select(jobs.c.metrics)).scalar_one() == expected
 
 
 @pytest.mark.parametrize("revision", formal_revision_chain())
@@ -441,9 +541,10 @@ def test_postgres_unsupported_semantics_stop_migration_and_runtime(formal_databa
         else:
             connection.exec_driver_sql("CREATE TABLE owned_child() INHERITS (facilities)")
     before = _pg_unsupported_snapshot(engine)
-    with pytest.raises(RuntimeError, match="unsupported"):
+    rejection = "mismatch: native" if mutation == "trigger" else "unsupported"
+    with pytest.raises(RuntimeError, match=rejection):
         command.upgrade(config, "head")
-    with engine.connect() as connection, pytest.raises(RuntimeError, match="unsupported"):
+    with engine.connect() as connection, pytest.raises(RuntimeError, match=rejection):
         require_formal_head(connection)
     assert _pg_unsupported_snapshot(engine) == before
 

@@ -16,3 +16,4 @@ Pillow==13.0.0
 opencv-python-headless>=4.9.0.80
 pytest>=8.3.0
 httpx>=0.28.0
+ijson==3.6.0

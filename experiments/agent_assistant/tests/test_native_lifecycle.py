@@ -250,7 +250,18 @@ def test_os_denied_owner_inspection_never_signals_unknown_process(monkeypatch):
     monkeypatch.setattr(module.os, 'killpg', lambda *args: signals.append(args))
     with pytest.raises(Conflict, match='OS'):
         module.require_process_group_owner(123456, 'a' * 32, 12)
-    assert signals == []
+    assert signals == [(123456, 0)]
+
+
+def test_disappeared_group_after_denied_inspection_is_not_signalled(monkeypatch):
+    def denied(_):
+        raise module.psutil.AccessDenied(123456)
+    def gone(pid, action):
+        assert (pid, action) == (123456, 0)
+        raise ProcessLookupError
+    monkeypatch.setattr(module.psutil, 'Process', denied)
+    monkeypatch.setattr(module.os, 'killpg', gone)
+    assert module.require_process_group_owner(123456, 'a' * 32, 12) is False
 
 
 @pytest.mark.parametrize('denied_action', [0, module.signal.SIGTERM])

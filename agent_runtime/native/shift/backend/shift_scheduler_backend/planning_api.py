@@ -6,16 +6,16 @@ import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
-from sqlalchemy import func, text, update
+from sqlalchemy import func, or_, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from .db import get_session
 from .planning_api_schemas import (
     PlanningCollectionResponse, PlanningCommandResponse, PlanningDeleteResponse, PositionDetailResponse,
     ShiftTemplateResponse, PositionResponse, WorkdayResponse, DemandResponse,
     PositionPriorityResponse, StaffPositionRuleResponse, StaffPositionPreferenceResponse,
-    StaffPairRuleResponse, RotationResponse, ScheduleExceptionResponse, PlanningOverviewResponse, PositionAssignmentRuleResponse,
+    StaffPairRuleResponse, RotationResponse, ScheduleExceptionResponse, PlanningOverviewResponse, PlanningReferenceOverviewResponse, PositionAssignmentRuleResponse,
     PeriodCopyResponse, PdfReferenceSourceResponse, PdfComparisonResponse,
 )
 from .models import (
@@ -42,6 +42,7 @@ from .models import (
     StaffPositionRule,
     StaffSkill,
     SolveRun,
+    SolveRunRotationReference,
     WorkdayRule,
     EditorRevision,
 )
@@ -55,7 +56,7 @@ from .candidate_validation import validate_candidate
 from .validation_snapshot import begin_confirmation_snapshot, historical_candidate_validation, validate_for_confirmation
 from .schedule_selection import confirmed_candidate, prior_candidate_state_hash, prior_history_coverage_errors, require_direct_predecessor, unresolved_candidate_detail
 from .rule_config_utils import is_position_prohibited
-from .rotation_queue import resolve_rotation_queue, validate_rotation_snapshot
+from .rotation_queue import resolve_rotation_queue, resolve_rotation_queues, validate_rotation_snapshot
 
 
 router = APIRouter(prefix="/planning", tags=["planning"])
@@ -519,12 +520,13 @@ def _rotation_error(code: str, message: str, status_code: int = 409) -> HTTPExce
 def _rotation_payload(
     policy: RotationPolicy, session: Session, as_of: date | None = None,
     *, staff_by_id: dict[int, str] | None = None,
+    resolved_queue: tuple[RotationQueueState | None, list[int]] | None = None,
 ) -> dict:
     if staff_by_id is None:
         staff_by_id = {staff.id: staff.name for staff in session.query(Staff).all()}
     as_of = as_of or date.today()
     try:
-        state, queue = resolve_rotation_queue(session, policy, as_of)
+        state, queue = resolved_queue if resolved_queue is not None else resolve_rotation_queue(session, policy, as_of)
     except ValueError as error:
         raise _rotation_error("rotation_conflict", str(error)) from error
     return {
@@ -841,13 +843,19 @@ def delete_position(position_id: int, revision: int | None = None, collection_re
 WORKDAY_KINDS = {"normal", "half_day", "closed"}
 
 
+def _require_read_period(start, end):
+    if not isinstance(start, date) or not isinstance(end, date) or start >= end:
+        raise HTTPException(status_code=422, detail="planning_period_required")
+
+
 @router.get("/workdays", responses={200: {"model": PlanningCollectionResponse[WorkdayResponse]}})
 def list_workdays(
     start: date | None = None,
     end: date | None = None,
     session: Session = Depends(get_session),
 ) -> dict:
-    query = session.query(WorkdayRule)
+    _require_read_period(start, end)
+    query = session.query(WorkdayRule).options(joinedload(WorkdayRule.shift_template), joinedload(WorkdayRule.full_day_shift_template))
     if start:
         query = query.filter(WorkdayRule.work_date >= start)
     if end:
@@ -914,7 +922,8 @@ def delete_workday(workday_id: int, revision: int | None = None, collection_revi
 
 @router.get("/demands", responses={200: {"model": PlanningCollectionResponse[DemandResponse]}})
 def list_demands(start: date | None = None, end: date | None = None, session: Session = Depends(get_session)) -> dict:
-    query = session.query(Demand)
+    _require_read_period(start, end)
+    query = session.query(Demand).options(joinedload(Demand.shift_template), joinedload(Demand.position))
     if start:
         query = query.filter(Demand.work_date >= start)
     if end:
@@ -1151,7 +1160,9 @@ def _normalized_pair_rule_values(payload: StaffPairRuleInput, session: Session) 
 
 @router.get("/pair-rules", responses={200: {"model": PlanningCollectionResponse[StaffPairRuleResponse]}})
 def list_staff_pair_rules(session: Session = Depends(get_session)) -> dict:
-    return read_collection(session, "pair_rules", lambda: [_staff_pair_rule_payload(row) for row in session.query(StaffPairRule).order_by(StaffPairRule.id).all()])
+    return read_collection(session, "pair_rules", lambda: [_staff_pair_rule_payload(row) for row in session.query(StaffPairRule).options(
+        joinedload(StaffPairRule.first_staff), joinedload(StaffPairRule.second_staff),
+    ).order_by(StaffPairRule.id).all()])
 
 
 @router.post("/pair-rules", status_code=201, responses={201: {"model": PlanningCommandResponse[StaffPairRuleResponse]}})
@@ -1210,38 +1221,45 @@ def delete_staff_pair_rule(pair_rule_id: int, revision: int | None = None, colle
 @router.get("/rotations", responses={200: {"model": PlanningCollectionResponse[RotationResponse]}})
 def list_rotations(session: Session = Depends(get_session), as_of: date | None = None) -> dict:
     def items() -> list[dict]:
-        rows = session.query(RotationPolicy).order_by(RotationPolicy.name).all()
-        staff_by_id = {staff.id: staff.name for staff in session.query(Staff).all()} if rows else {}
-        return [_rotation_payload(row, session, as_of, staff_by_id=staff_by_id) for row in rows]
+        rows = session.query(RotationPolicy).options(joinedload(RotationPolicy.position)).order_by(RotationPolicy.name).all()
+        staff_by_id = dict(session.query(Staff.id, Staff.name).all()) if rows else {}
+        effective_date = as_of or date.today()
+        try:
+            queues = resolve_rotation_queues(session, rows, effective_date)
+        except ValueError as error:
+            raise _rotation_error("rotation_conflict", str(error)) from error
+        return [_rotation_payload(row, session, effective_date, staff_by_id=staff_by_id, resolved_queue=queues[row.id]) for row in rows]
 
     return read_collection(session, "rotations", items)
 
 
 def _confirmed_rotation_end(session: Session, policy: RotationPolicy) -> date | None:
-    ends = [
-        row.effective_from
-        for row in session.query(RotationQueueState).filter(
+    last_state = session.query(func.max(RotationQueueState.effective_from)).filter(
             RotationQueueState.rotation_policy_id == policy.id,
             RotationQueueState.source_solve_run_id.is_not(None),
-        ).all()
-    ]
-    for run in session.query(SolveRun).join(ScheduleConfirmation).all():
-        config = run.config_json or {}
-        referenced = (
-            str(policy.id) in config.get("rotation_state_snapshot", {})
-            or str(policy.id) in config.get("rotation_queue_snapshot", {})
-            or policy.id in config.get("input_snapshot", {}).get("rotation_policy_ids", [])
-            or session.query(Assignment.id).join(CandidateSchedule).filter(
-                CandidateSchedule.solve_run_id == run.id,
-                Assignment.position_id == policy.position_id,
-            ).first() is not None
-        )
-        if referenced:
-            end = config.get("end_date") or config.get("end_date_exclusive")
-            try:
-                ends.append(date.fromisoformat(end))
-            except (TypeError, ValueError) as error:
-                raise _rotation_error("rotation_history_locked", "確定済み期間を確認できないため交代順を変更できません") from error
+        ).scalar()
+    used_runs = session.query(CandidateSchedule.solve_run_id).join(
+        Assignment, Assignment.candidate_id == CandidateSchedule.id,
+    ).filter(Assignment.position_id == policy.position_id).distinct().subquery()
+    assignment_reference = session.query(used_runs.c.solve_run_id).filter(
+        used_runs.c.solve_run_id == SolveRun.id,
+    ).exists()
+    policy_reference = session.query(SolveRunRotationReference.solve_run_id).filter(
+        SolveRunRotationReference.solve_run_id == SolveRun.id,
+        SolveRunRotationReference.policy_key == str(policy.id),
+    ).exists()
+    confirmed = session.query(SolveRun.id, SolveRun.rotation_end_key).join(
+        ScheduleConfirmation, ScheduleConfirmation.solve_run_id == SolveRun.id,
+    )
+    if confirmed.filter(SolveRun.rotation_reference_error.is_(True)).first() is not None:
+        raise _rotation_error("rotation_history_locked", "確定済みの交代順参照を確認できないため変更できません")
+    referenced = confirmed.filter(or_(policy_reference, assignment_reference))
+    if referenced.filter(SolveRun.rotation_end_key.is_(None)).first() is not None:
+        raise _rotation_error("rotation_history_locked", "確定済み期間を確認できないため交代順を変更できません")
+    latest = referenced.with_entities(func.max(SolveRun.rotation_end_key)).scalar()
+    ends = [last_state] if last_state is not None else []
+    if latest is not None:
+        ends.append(date.fromisoformat(latest))
     return max(ends) if ends else None
 
 
@@ -1377,7 +1395,10 @@ def save_rotation_queue(rotation_id: int, payload: RotationQueueInput, session: 
 
 @router.get("/exceptions", responses={200: {"model": PlanningCollectionResponse[ScheduleExceptionResponse]}})
 def list_exceptions(start: date | None = None, end: date | None = None, session: Session = Depends(get_session)) -> dict:
-    query = session.query(ScheduleException)
+    _require_read_period(start, end)
+    query = session.query(ScheduleException).options(joinedload(ScheduleException.staff),
+        joinedload(ScheduleException.position), joinedload(ScheduleException.shift_template),
+        joinedload(ScheduleException.rotation_policy))
     if start:
         query = query.filter(ScheduleException.work_date >= start)
     if end:
@@ -1538,6 +1559,42 @@ def read_planning_period(month: str, session: Session = Depends(get_session)):
             "end_date_exclusive":resolved.end_date_exclusive,"period_mode":resolved.period_mode}
 
 
+@router.get('/constraint-date-counts')
+def constraint_date_counts(after: date | None = None, session: Session = Depends(get_session)):
+    def items():
+        query = session.query(Availability.work_date, func.count()).group_by(Availability.work_date)
+        if after is not None:
+            query = query.filter(Availability.work_date > after)
+        return [{'work_date': day.isoformat(), 'count': count}
+                for day, count in query.order_by(Availability.work_date).limit(201)]
+    page = read_collection(session, 'constraints', items)
+    page['next_after'] = page['items'][199]['work_date'] if len(page['items']) > 200 else None
+    page['items'] = page['items'][:200]
+    return page
+
+
+@router.get("/reference-overview", responses={200: {"model": PlanningReferenceOverviewResponse}})
+def planning_reference_overview(
+    start_date: date,
+    end_date_exclusive: date,
+    session: Session = Depends(get_session),
+) -> dict:
+    if start_date >= end_date_exclusive:
+        raise HTTPException(status_code=422, detail="planning_period_invalid")
+    return _planning_reference_values(session, start_date, end_date_exclusive)
+
+
+def _planning_reference_values(session: Session, start: date | None, end: date | None) -> dict:
+    return {
+        "skills": [_skill_payload(row) for row in session.query(Skill).order_by(Skill.name).all()],
+        "shift_templates": [_shift_template_payload(row) for row in session.query(ShiftTemplate).order_by(ShiftTemplate.name).all()],
+        "positions": [_position_payload(row) for row in session.query(Position).order_by(Position.name).all()],
+        "priorities": list_position_priorities(session=session)["items"],
+        "position_rules": list_staff_position_rules(session=session)["items"],
+        "position_assignment_rules": list_position_assignment_rules(start, end, session)["items"],
+    }
+
+
 @router.get("/overview", responses={200: {"model": PlanningOverviewResponse}})
 def planning_overview(
     month: str | None = None,
@@ -1561,20 +1618,14 @@ def planning_overview(
         start = resolved.start_date
         end = resolved.end_date_exclusive
     else:
-        start = None
-        end = None
+        raise HTTPException(status_code=422, detail="planning_period_required")
     return {
-        "skills": [_skill_payload(row) for row in session.query(Skill).order_by(Skill.name).all()],
-        "shift_templates": [_shift_template_payload(row) for row in session.query(ShiftTemplate).order_by(ShiftTemplate.name).all()],
-        "positions": [_position_payload(row) for row in session.query(Position).order_by(Position.name).all()],
+        **_planning_reference_values(session, start, end),
         "workdays": list_workdays(start, end, session)["items"],
         "demands": list_demands(start, end, session)["items"],
-        "priorities": list_position_priorities(session=session)["items"],
-        "position_rules": list_staff_position_rules(session=session)["items"],
         "pair_rules": list_staff_pair_rules(session)["items"],
         "rotations": list_rotations(session, as_of=start)["items"],
         "exceptions": list_exceptions(start, end, session)["items"],
-        "position_assignment_rules": list_position_assignment_rules(start, end, session)["items"],
     }
 
 

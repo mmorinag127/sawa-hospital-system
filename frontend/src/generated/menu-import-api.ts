@@ -145,7 +145,9 @@ export interface components {
         /** ImportListResponse */
         ImportListResponse: {
             /** Items */
-            items: components["schemas"]["SavedImportResponse"][];
+            items: components["schemas"]["ImportSummaryResponse"][];
+            /** Next Before Id */
+            next_before_id: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -201,6 +203,23 @@ export interface components {
             scope_override: string | null;
             /** Sheet Name */
             sheet_name: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ImportSummaryResponse */
+        ImportSummaryResponse: {
+            /** Created At */
+            created_at: string;
+            /** Id */
+            id: string;
+            /** Month Id */
+            month_id: string;
+            source: components["schemas"]["ImportSource"];
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "review" | "applied";
         } & {
             [key: string]: unknown;
         };
@@ -348,7 +367,9 @@ export interface operations {
     };
     list_menu_imports: {
         parameters: {
-            query?: never;
+            query?: {
+                before_id?: string | null;
+            };
             header?: never;
             path: {
                 month_id: string;

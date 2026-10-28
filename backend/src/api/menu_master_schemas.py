@@ -41,9 +41,11 @@ class MenuMasterResponse(BaseModel):
 
 class MenuMasterListResponse(BaseModel):
     items: list[MenuMasterResponse]
-    total: int
+    total: int | None
     offset: int
     limit: int
+    next_after_id: str | None = None
+    previous_before_id: str | None = None
 
 
 class MenuMasterItemResponse(BaseModel):

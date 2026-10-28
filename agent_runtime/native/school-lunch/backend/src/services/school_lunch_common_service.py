@@ -3,7 +3,7 @@ from __future__ import annotations
 from calendar import monthrange
 from datetime import date
 from typing import Any
-from sqlalchemy import select, update
+from sqlalchemy import select, update, or_, and_
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.orm.attributes import set_committed_value
 from src.models.route_diagram import RouteDiagram
@@ -209,7 +209,7 @@ def list_menu_executions(session: Session, facility_id=None, start=None, end=Non
     return [_serialize_menu(menu) for menu in session.execute(statement).scalars().all()]
 
 
-def get_monthly_overview(session: Session, month: str) -> dict[str, Any]:
+def get_monthly_overview(session: Session, month: str, *, after_id: int | None = None, limit: int = 25) -> dict[str, Any]:
     try:
         year_text, month_text = month.split("-", maxsplit=1)
         year = int(year_text)
@@ -219,13 +219,28 @@ def get_monthly_overview(session: Session, month: str) -> dict[str, Any]:
         raise ValueError("month must use YYYY-MM format") from exc
     end = date(year, month_number, monthrange(year, month_number)[1])
 
-    facilities = session.execute(select(Facility).order_by(Facility.name)).scalars().all()
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("overview limit must be between 1 and 100")
+    facility_query = select(Facility.id, Facility.name)
+    if after_id is not None:
+        cursor = session.execute(select(Facility.id, Facility.name).where(Facility.id == after_id)).first()
+        if cursor is None:
+            raise ValueError("overview facility cursor invalid")
+        facility_query = facility_query.where(or_(Facility.name > cursor.name,
+            and_(Facility.name == cursor.name, Facility.id > cursor.id)))
+    page = session.execute(facility_query.order_by(Facility.name, Facility.id).limit(limit + 1)).all()
+    facilities = page[:limit]
+    facility_ids = [facility.id for facility in facilities]
     menus = session.execute(
-        select(MenuExecution).where(MenuExecution.service_date.between(start, end))
-    ).scalars().all()
+        select(MenuExecution.id, MenuExecution.facility_id, MenuExecution.service_date,
+               MenuExecution.version, MenuExecution.status).where(MenuExecution.service_date.between(start, end),
+                                                                MenuExecution.facility_id.in_(facility_ids))
+    ).all()
     schedules = session.execute(
-        select(DailyWorkSchedule).where(DailyWorkSchedule.service_date.between(start, end))
-    ).scalars().all()
+        select(DailyWorkSchedule.id, DailyWorkSchedule.facility_id, DailyWorkSchedule.service_date,
+               DailyWorkSchedule.status, DailyWorkSchedule.source_menu_versions)
+        .where(DailyWorkSchedule.service_date.between(start, end), DailyWorkSchedule.facility_id.in_(facility_ids))
+    ).all()
 
     menu_index: dict[tuple[int, date], list[MenuExecution]] = {}
     for menu in menus:
@@ -236,7 +251,7 @@ def get_monthly_overview(session: Session, month: str) -> dict[str, Any]:
         for key, schedule in schedule_index.items()
     }
     diagrams = session.execute(
-        select(RouteDiagram).where(RouteDiagram.service_date.between(start, end))
+        select(RouteDiagram).where(RouteDiagram.service_date.between(start, end), RouteDiagram.facility_id.in_(facility_ids))
     ).scalars().all()
     diagram_blockers = blockers_for_diagrams(session, diagrams)
     diagram_index = {
@@ -254,6 +269,7 @@ def get_monthly_overview(session: Session, month: str) -> dict[str, Any]:
         "month": f"{year:04d}-{month_number:02d}",
         "start_date": start,
         "end_date": end,
+        "next_after_id": facilities[-1].id if len(page) > limit else None,
         "facilities": [
             {
                 "id": facility.id,

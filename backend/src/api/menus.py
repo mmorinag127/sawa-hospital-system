@@ -154,8 +154,8 @@ def upload_menu(
 
 
 @router.get("/{month_id}/imports", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": ImportListResponse}})
-def list_menu_imports(month_id: str):
-    return {"items": _monthly_call(menu_service.list_menu_imports, month_id)}
+def list_menu_imports(month_id: str, before_id: str | None = None):
+    return _monthly_call(menu_service.list_menu_imports, month_id, before_id=before_id)
 
 
 @router.get("/{month_id}/imports/{import_id}", dependencies=[Depends(require_role("operator"))], response_model=None, responses={200: {"model": SavedImportResponse}})
@@ -183,8 +183,11 @@ def apply_menu_import(month_id: str, import_id: str, if_match: str | None = Head
 
 
 @router.get("/{month_id}/uploads", dependencies=[Depends(require_role("operator"))])
-def list_menu_uploads(month_id: str):
-    return {"items": menu_service.list_menu_uploads(month_id)}
+def list_menu_uploads(month_id: str, before_id: str | None = None):
+    try:
+        return menu_service.list_menu_uploads(month_id, before_id=before_id)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
 
 
 @router.get("/{month_id}/uploads/{upload_id}/download", dependencies=[Depends(require_role("operator"))])

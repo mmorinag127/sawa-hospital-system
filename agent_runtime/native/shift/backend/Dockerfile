@@ -17,6 +17,7 @@ COPY shift_scheduler_backend ./shift_scheduler_backend
 COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
 RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m compileall -q shift_scheduler_backend migrations
 
 ENV PORT=8080
 CMD ["sh", "-c", "uvicorn shift_scheduler_backend.main:app --host 0.0.0.0 --port ${PORT:-8080}"]

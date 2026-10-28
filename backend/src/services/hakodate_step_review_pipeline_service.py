@@ -2529,12 +2529,8 @@ def _single_cell_bbox(
     row_edges: list[float],
     column_edges: list[float],
 ) -> list[float]:
-    return [
-        float(column_edges[col_index]),
-        float(row_edges[row_index]),
-        float(column_edges[col_index + 1]),
-        float(row_edges[row_index + 1]),
-    ]
+    from src.services.hakodate_grid_geometry import cell_bbox
+    return cell_bbox(row_index=row_index, col_index=col_index, row_edges=row_edges, column_edges=column_edges)
 
 
 def _step_review_worksheet_row_to_grid_index(worksheet_row: int, *, body_end_row: int = STEP_REVIEW_BODY_END_ROW) -> int | None:

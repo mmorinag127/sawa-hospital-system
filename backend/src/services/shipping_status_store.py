@@ -9,8 +9,9 @@ from src.staging_data import order_runtime_setting as _runtime_setting
 import re
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
+from contextlib import closing
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, select
@@ -25,7 +26,6 @@ from src.services.sagawa_tracking_service import normalize_tracking_key
 
 _DEFAULT_TZ = "Asia/Tokyo"
 _EXPORT_DIR = Path(os.getenv("SHIPPING_EXPORT_DIR", "/tmp/shipping-exports"))
-_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 _EVENT_TEXT_RE = re.compile(r"(\d{2})/(\d{2})\s*(\d{2}):(\d{2})")
 STATUS_SHIPPED = "発送済み"
 STATUS_NOT_SHIPPED = "発送しなかった"
@@ -194,13 +194,15 @@ def _serialize_current_row(
     }
 
 
-def _summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+def _summary(items: Iterable[dict[str, Any]]) -> dict[str, Any]:
     delivered = 0
     not_shipped = 0
     errors = 0
     facility_missing = 0
     attention = 0
+    total = 0
     for item in items:
+        total += 1
         if item.get("error"):
             errors += 1
         if item.get("delivered"):
@@ -211,7 +213,6 @@ def _summary(items: list[dict[str, Any]]) -> dict[str, Any]:
             facility_missing += 1
         if item.get("attention_reasons"):
             attention += 1
-    total = len(items)
     pending = max(total - delivered - not_shipped, 0)
     return {
         "total": total,
@@ -560,17 +561,18 @@ def record_tracking_statuses(
         for row in existing_event_rows:
             event_rows_by_tracking.setdefault(row.tracking_key, []).append(row)
 
-        latest_logs: dict[str, ShippingTrackingLog] = {}
-        for row in (
-            session.execute(
-                select(ShippingTrackingLog)
-                .where(ShippingTrackingLog.tracking_key.in_(tracking_keys))
-                .order_by(ShippingTrackingLog.looked_up_at.desc(), ShippingTrackingLog.created_at.desc())
-            )
-            .scalars()
-            .all()
-        ):
-            latest_logs.setdefault(row.tracking_key, row)
+        ranked_logs = select(
+            ShippingTrackingLog.id,
+            func.row_number().over(
+                partition_by=ShippingTrackingLog.tracking_key,
+                order_by=(ShippingTrackingLog.looked_up_at.desc(), ShippingTrackingLog.created_at.desc(),
+                          ShippingTrackingLog.id.desc()),
+            ).label("rank"),
+        ).where(ShippingTrackingLog.tracking_key.in_(tracking_keys)).subquery()
+        latest_logs = {row.tracking_key: row for row in session.execute(
+            select(ShippingTrackingLog).join(ranked_logs, ShippingTrackingLog.id == ranked_logs.c.id)
+            .where(ranked_logs.c.rank == 1),
+        ).scalars()}
 
         for tracking_key, payload in normalized_statuses:
             current_row = current_rows.get(tracking_key)
@@ -792,14 +794,14 @@ def mark_tracking_status(
         return _serialize_current_row(current_row)
 
 
-def _query_history_rows(
+def _iter_history_rows(
     *,
     limit: int,
     date_from: date | None = None,
     date_to: date | None = None,
     timezone_name: str = _DEFAULT_TZ,
     facility_names: Sequence[str] | None = None,
-) -> list[dict[str, Any]]:
+) -> Iterable[dict[str, Any]]:
     query_limit = max(1, min(limit, 1_000_000))
     normalized_names = [str(name).strip() for name in (facility_names or []) if str(name).strip()]
     with session_scope() as session:
@@ -812,16 +814,20 @@ def _query_history_rows(
         if date_to:
             _, end_utc = _day_range_utc(date_to, timezone_name)
             query = query.where(ShippingTrackingLog.looked_up_at < end_utc)
-        rows = (
-            session.execute(
+        rows = session.execute(
                 query.order_by(ShippingTrackingLog.looked_up_at.desc(), ShippingTrackingLog.created_at.desc()).limit(
                     query_limit
-                )
-            )
-            .scalars()
-            .all()
-        )
-        return [_serialize_log_row(row) for row in rows]
+                ).execution_options(yield_per=200)
+            ).scalars()
+        try:
+            for row in rows:
+                yield _serialize_log_row(row)
+        finally:
+            rows.close()
+
+
+def _query_history_rows(**kwargs) -> list[dict[str, Any]]:
+    return list(_iter_history_rows(**kwargs))
 
 
 def _query_latest_rows(
@@ -851,22 +857,18 @@ def _query_latest_rows(
             .all()
         )
         tracking_keys = [row.tracking_key for row in current_rows]
-        event_rows = []
-        if tracking_keys:
-            event_rows = (
-                session.execute(
-                    select(ShippingTrackingEvent)
-                    .where(ShippingTrackingEvent.tracking_key.in_(tracking_keys))
-                    .order_by(ShippingTrackingEvent.tracking_key.asc(), ShippingTrackingEvent.event_order.asc())
-                )
-                .scalars()
-                .all()
-            )
         events_by_tracking: dict[str, list[dict[str, Any]]] = {}
-        for row in event_rows:
-            events_by_tracking.setdefault(row.tracking_key, []).append(
-                _serialize_event_row(row, timezone_name=timezone_name)
-            )
+        for offset in range(0, len(tracking_keys), 200):
+            event_rows = session.scalars(select(ShippingTrackingEvent)
+                .where(ShippingTrackingEvent.tracking_key.in_(tracking_keys[offset:offset + 200]))
+                .order_by(ShippingTrackingEvent.tracking_key.asc(), ShippingTrackingEvent.event_order.asc())
+                .execution_options(yield_per=200))
+            try:
+                for row in event_rows:
+                    events_by_tracking.setdefault(row.tracking_key, []).append(
+                        _serialize_event_row(row, timezone_name=timezone_name))
+            finally:
+                event_rows.close()
 
         items = [
             _serialize_current_row(row, events=events_by_tracking.get(row.tracking_key, []))
@@ -1220,7 +1222,7 @@ def export_status_history(
     if normalized_format not in {"csv", "json"}:
         raise ValueError("format must be csv or json")
 
-    items = _query_history_rows(
+    items = _iter_history_rows(
         limit=limit,
         date_from=date_from,
         date_to=date_to,
@@ -1243,7 +1245,7 @@ def export_status_history(
             "error",
             "source",
         ]
-        with output_path.open("w", newline="", encoding="utf-8-sig") as file_obj:
+        with closing(items), output_path.open("w", newline="", encoding="utf-8-sig") as file_obj:
             writer = csv.DictWriter(file_obj, fieldnames=fieldnames)
             writer.writeheader()
             for item in items:
@@ -1252,14 +1254,24 @@ def export_status_history(
 
     filename = f"shipping_tracking_history_{stamp}.json"
     output_path = local_directory(_EXPORT_DIR) / filename
-    payload = {
-        "exported_at": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
-        "timezone": timezone_name,
-        "date_from": date_from.isoformat() if date_from else None,
-        "date_to": date_to.isoformat() if date_to else None,
-        "summary": _summary(items),
-        "quota": get_quota_status(),
-        "items": items,
-    }
-    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    with closing(items), output_path.open("w", encoding="utf-8") as file_obj:
+        file_obj.write('{"items":[')
+        def write_items():
+            first = True
+            for item in items:
+                if not first:
+                    file_obj.write(',\n')
+                json.dump(item, file_obj, ensure_ascii=False)
+                first = False
+                yield item
+        summary = _summary(write_items())
+        payload = {
+            "exported_at": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
+            "timezone": timezone_name,
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+            "summary": summary, "quota": get_quota_status(),
+        }
+        file_obj.write('],')
+        file_obj.write(json.dumps(payload, ensure_ascii=False)[1:])
     return output_path, filename, "application/json"

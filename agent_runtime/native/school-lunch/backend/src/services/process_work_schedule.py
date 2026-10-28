@@ -23,12 +23,15 @@ def revision_map(patterns):
     return {key: revision.id for key, (_, revision) in patterns.items()}
 
 
-def missing_execution(patterns):
+def missing_execution(patterns, session=None):
+    from src.services.shared_menu_review import school_direct_document
     missing = []
     for menu, revision in patterns.values():
         from src.services.agent_daily_process import has_daily_answers, answered_document
         if has_daily_answers(revision.document) and not answered_document(revision.document):
             missing.append(f'{menu.name}: 作業場所・釜の再確認')
+        if session is not None and school_direct_document(session,revision.document):
+            continue
         if not revision.document['steps']:
             missing.append(f'{menu.name}: 作業未登録')
         for step in revision.document['steps']:
@@ -86,13 +89,18 @@ def project_tasks(document):
     return tasks
 
 
-def assert_pattern_rows(payload, patterns):
+def assert_pattern_rows(payload, patterns, session=None):
+    from src.services.shared_menu_review import school_direct_document
     expected = revision_map(patterns)
     if (payload.get('source_process_revisions') or {}) != expected:
         raise ValueError('工程グラフが変更されています。保存済み工程から工程表を再作成してください。')
     rows = payload['rows']
     for key, (_, revision) in patterns.items():
         matched = [row for row in rows if str(row.get('menu_execution_id')) == key]
+        if session is not None and school_direct_document(session,revision.document):
+            if matched:
+                raise ValueError('学校直納の献立は厨房の工程表に含めません。工程表を再作成してください。')
+            continue
         if len(matched) != 1:
             raise ValueError('パターン工程の献立が工程表から欠落または重複しています。')
         projected = project_tasks(revision.document)

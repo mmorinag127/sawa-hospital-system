@@ -9,6 +9,7 @@ import tempfile
 import sys
 import time
 import signal
+import shutil
 from unittest.mock import patch
 from local_receipt_signing import sign, verify_signed
 import yaml
@@ -18,6 +19,7 @@ import run_local_frontend_e2e as E2E_RUNNER
 import local_hospital_legacy_step as LEGACY_RUNNER
 import run_local_pg_output_boundary as PG_OUTPUT_RUNNER
 import run_local_frontend_contracts as FRONTEND_RUNNER
+import local_command_evidence as COMMAND_EVIDENCE
 
 
 MODULE = Path(__file__).with_name("local_hospital_test_runner.py")
@@ -27,6 +29,12 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class ReceiptContractTest(unittest.TestCase):
+    def setUp(self):
+        baseline = patch.object(RUNNER, 'CommandEvidence')
+        self.command_evidence = baseline.start().return_value
+        self.command_evidence.reuse.return_value = None
+        self.addCleanup(baseline.stop)
+
     def test_native_selection_keeps_full_for_business_changes_and_unknown_base(self):
         full_paths = ('experiments/agent_assistant/runtime.py', 'agent_runtime/native/shift/backend/app.py',
                       'agent_runtime/baselines/shift.json', 'agent_runtime/Dockerfile',
@@ -129,7 +137,7 @@ class ReceiptContractTest(unittest.TestCase):
         for suite, command in {'readonly': 'hospital-readonly-pg', 'c1': 'hospital-c1-pg',
                                'c1-guards': 'hospital-c1-guard-pg', 'menu-identity': 'hospital-menu-identity-pg'}.items():
             self.assertEqual(BACKEND_RUNNER.DEDICATED_MODULES[command], BACKEND_RUNNER.MODULES[suite])
-            self.assertIn('--suite ' + suite, commands[command])
+            self.assertEqual(commands[command], 'python3 scripts/run_local_pg_batch.py')
         self.assertIn('test_live_schema_adoption.py', ' '.join(BACKEND_RUNNER.DEDICATED_MODULES['live-schema-adoption']))
         self.assertEqual(BACKEND_RUNNER.DEDICATED_MODULES['modernization-pg-output'],
                          BACKEND_RUNNER.MODULES['output'] + BACKEND_RUNNER.MODULES['formal'])
@@ -155,6 +163,7 @@ class ReceiptContractTest(unittest.TestCase):
                                     'PYTEST_ADDOPTS': '-k foreign', 'PYTEST_PLUGINS': 'foreign_selector',
                                     'CI': '', 'GITHUB_ACTIONS': '', 'SAWA_LOCAL_TEST_MODE': mode or 'impact'}), \
              patch.object(BACKEND_RUNNER, 'clean_tree', return_value=True), \
+             patch.object(BACKEND_RUNNER, 'require_impact_dependencies'), \
              patch.object(BACKEND_RUNNER, 'git', side_effect=lambda *args: str(Path(directory) / 'git') if '--git-common-dir' in args else branch if args == ('branch', '--show-current') else 'a' * 40), \
              patch.object(BACKEND_RUNNER.sys, 'argv', ['runner']), \
              patch.object(BACKEND_RUNNER, 'run_pytest', side_effect=execute_backend) as execute:
@@ -162,16 +171,10 @@ class ReceiptContractTest(unittest.TestCase):
                 os.environ.pop('SAWA_LOCAL_TEST_MODE')
             self.assertEqual(BACKEND_RUNNER.main(), 0)
             argv = execute.call_args.args[0]
-            focused = (mode == 'focused' or mode is None) and bool(branch) and not branch.startswith('release/prod-')
-            if focused:
-                self.assertNotIn('backend/tests', argv)
-                scope, modules = BACKEND_RUNNER.staging_scope()
-                self.assertTrue(all(module in argv for module in modules))
-                partition = json.loads((Path(directory) / 'backend-tests/partition.json').read_text())
-                self.assertEqual(partition['scope'], scope)
-                self.assertIn('not selected', partition['outside_scope'])
-            else:
-                self.assertIn('backend/tests', argv)
+            self.assertIn('backend/tests', argv)
+            partition = json.loads((Path(directory) / 'backend-tests/partition.json').read_text())
+            self.assertIsNone(partition['scope'])
+            self.assertIsNone(partition['outside_scope'])
             self.assertEqual({item.removeprefix('--ignore=') for item in argv if item.startswith('--ignore=')}, seen)
             env = execute.call_args.args[1]
             self.assertNotIn('DB_HOST', env)
@@ -182,29 +185,8 @@ class ReceiptContractTest(unittest.TestCase):
             self.assertEqual(env['SAWA_IMPACT_FULL'], full_flag)
             self.assertIn('--testmon', argv)
             self.assertTrue((Path(directory) / 'backend-tests/selection.json').is_file())
-            runtime = 'backend-focused-runtime.sqlite' if focused else 'backend-runtime.sqlite'
+            runtime = 'backend-runtime.sqlite'
             self.assertEqual(env['DB_URI'], 'sqlite:///' + str(Path(directory).resolve() / 'git/sawa-local-impact' / runtime))
-
-    def test_staging_scope_preserves_critical_boundaries_without_a_cold_full_suite(self):
-        scope, modules = BACKEND_RUNNER.staging_scope()
-        self.assertEqual(len(modules), len(set(modules)))
-        self.assertLess(len(modules), len(list((RUNNER.ROOT / 'backend/tests').rglob('test_*.py'))))
-        for name in ('test_order_list_response_ownership.py', 'test_ocr_read_projection_ownership.py',
-                     'test_inspection_demand_read.py', 'test_workflow_demand_parity.py',
-                     'test_rerun_atomic_receipt.py', 'test_modernization_facility_workbook_storage_source.py',
-                     'test_native_quantity_projection_contract.py', 'test_portal_session.py',
-                     'test_portal_session_catalog.py', 'test_cross_month_week_support.py',
-                     'test_saved_sheet_quantity_schema.py', 'test_orders_ocr_sheet_history_api.py',
-                     'test_modernization_saved_sheet_export.py', 'test_shipping_output_isolation.py',
-                     'test_monthly_menus_api.py', 'test_shipping_api.py',
-                     'test_acceptance_validation_dataflow.py',
-                     'test_auth_guardrails.py', 'test_portal_google_auth.py',
-                     'test_order_workflow_revision_contract.py', 'test_original_source_dataflow.py',
-                     'test_modernization_canonical_ocr_artifacts.py', 'test_ocr_quantity_content_editable_sheet.py',
-                     'test_ocr_history_projection.py', 'test_page_performance_projections.py'):
-            self.assertTrue(any(Path(module).name == name for module in modules), name)
-        dedicated = {name for names in BACKEND_RUNNER.DEDICATED_MODULES.values() for name in names}
-        self.assertFalse(set(modules) & dedicated)
 
     def test_focused_scope_retains_known_failures_and_interruptions_not_unstarted_cases(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -219,18 +201,6 @@ class ReceiptContractTest(unittest.TestCase):
             (state / 'failed-tests.json').write_text(json.dumps(['../../outside.py::test']))
             with self.assertRaisesRegex(ValueError, 'explicit current test mapping'):
                 BACKEND_RUNNER.retained_failure_modules(state)
-
-    def test_invalid_focused_scope_cannot_fall_back_to_a_full_or_empty_success(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            target = root / 'infra/ci/staging_backend_scope.json'
-            target.parent.mkdir(parents=True)
-            for groups, version in [({}, 1), ({'invalid': ['../../outside.py']}, 1),
-                                    ({'invalid': ['backend/tests/missing.py']}, 1), ({}, True)]:
-                target.write_text(json.dumps({'version': version, 'scope': 'staging-core-and-page-repair', 'groups': groups}))
-                with self.subTest(groups=groups, version=version), patch.object(BACKEND_RUNNER, 'ROOT', root):
-                    with self.assertRaises(ValueError):
-                        BACKEND_RUNNER.staging_scope()
 
     def test_failed_attempt_restores_consistent_database_and_metadata(self):
         import sqlite3
@@ -473,10 +443,16 @@ class ReceiptContractTest(unittest.TestCase):
                              ('hospital-additional-readonly', 'mjs'),
                              ('system-status-demand-read', 'mjs'), ('operator-entry-readonly', 'mjs'),
                              ('operational-page-demand-read', 'mjs'))
-        self.assertEqual(set(config), {'tests/' + name + '.test.cjs' for name in cjs}
-                         | {'tests/config/' + name + '.test.' + suffix for name, suffix in settings})
-        self.assertEqual(set(e2e), {'tests/e2e/' + name + '.spec.ts' for name in (
-            'api_proxy_stream', 'order_confirm', 'orders_index', 'pdf_upload', 'workflow_v2_sheet_edit')})
+        self.assertTrue({'tests/' + name + '.test.cjs' for name in cjs}
+                         | {'tests/config/' + name + '.test.' + suffix for name, suffix in settings} <= set(config))
+        frontend = RUNNER.ROOT / 'frontend'
+        discovered = {str(path.relative_to(frontend)) for path in (frontend / 'tests').rglob('*')
+                      if path.is_file() and '.test.' in path.name and path.suffix in {'.js', '.mjs', '.cjs'}}
+        self.assertEqual(set(config), discovered)
+        self.assertTrue({'tests/e2e/' + name + '.spec.ts' for name in (
+            'api_proxy_stream', 'order_confirm', 'orders_index', 'pdf_upload', 'workflow_v2_sheet_edit')} <= set(e2e))
+        self.assertEqual(set(e2e), {str(path.relative_to(frontend)) for path in (frontend / 'tests/e2e').rglob('*')
+                                  if path.is_file() and '.spec.' in path.name and path.suffix in {'.ts', '.tsx', '.js', '.mjs', '.cjs'}})
         for branch in ('release/prod-repair', ''):
             with patch.dict(os.environ, {'SAWA_LOCAL_TEST_MODE': 'focused'}), \
                  patch.object(RUNNER, 'git', return_value=branch):
@@ -610,6 +586,7 @@ class ReceiptContractTest(unittest.TestCase):
                  patch.object(E2E_RUNNER, 'clean_tree', return_value=True), \
                  patch.object(E2E_RUNNER, 'git', return_value='a' * 40), \
                  patch.object(E2E_RUNNER, 'frontend_scope', return_value=modules), \
+                 patch.object(E2E_RUNNER, 'copy_dependencies', side_effect=shutil.copytree), \
                  patch.object(E2E_RUNNER.sys, 'argv', ['runner']), \
                  patch.object(E2E_RUNNER.subprocess, 'check_output', return_value=b'frontend/next-env.d.ts\0'), \
                  patch.object(E2E_RUNNER.subprocess, 'run', side_effect=next_run):
@@ -645,6 +622,34 @@ class ReceiptContractTest(unittest.TestCase):
         with patch.dict(os.environ, {'SAWA_LOCAL_TEST_PUBLIC_KEY': ''}):
             with self.assertRaises(ValueError):
                 verify_signed(envelope)
+
+    def test_command_proof_rejects_changed_inputs_log_boolean_exit_and_unsigned_data(self):
+        payload = {'kind': 'executed-local-command-v1', 'source_sha': 'a' * 40,
+            'command_sha256': 'b' * 64, 'dependency_sha256': 'c' * 64,
+            'log_sha256': 'd' * 64, 'input_guard_sha256': 'e' * 64, 'exit_code': 0}
+        arguments = {'command_hash': 'b' * 64, 'dependency_hash': 'c' * 64, 'log_hash': 'd' * 64}
+        with patch.dict(os.environ, {'SAWA_LOCAL_TEST_SIGNING_KEY': str(self.key),
+                                    'SAWA_LOCAL_TEST_PUBLIC_KEY': self.public_key}):
+            proof = sign(payload)
+            self.assertEqual(COMMAND_EVIDENCE.validate_proof(proof, **arguments), payload)
+            for key in arguments:
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    COMMAND_EVIDENCE.validate_proof(proof, **{**arguments, key: 'f' * 64})
+            with self.assertRaises(ValueError):
+                COMMAND_EVIDENCE.validate_proof(sign({**payload, 'exit_code': False}), **arguments)
+            with self.assertRaises(ValueError):
+                COMMAND_EVIDENCE.validate_proof(payload, **arguments)
+
+    def test_file_digest_reuse_requires_identical_stat_and_rehashes_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'input'
+            path.write_bytes(b'first')
+            hashes = COMMAND_EVIDENCE.FileHashes()
+            first = hashes.digest(path)
+            with patch.object(COMMAND_EVIDENCE, 'file_digest', side_effect=AssertionError('unexpected rehash')):
+                self.assertEqual(hashes.digest(path), first)
+            path.write_bytes(b'other')
+            self.assertNotEqual(hashes.digest(path), first)
 
     def test_rejects_boolean_exit_version_and_dirty_flags(self):
         for field, value in [('receipt_version', True), ('clean_before', 1), ('clean_after', 'true')]:
@@ -692,6 +697,39 @@ class ReceiptContractTest(unittest.TestCase):
             failed = json.loads((output / 'failed-run.json').read_text())
             self.assertEqual([item['exit_code'] for item in failed['commands']], [2, 0, 3])
             self.assertFalse((output / 'receipt.json').exists())
+
+    def test_identical_commands_execute_once_without_hiding_alias_failures(self):
+        actual_run = subprocess.run
+        for code in (0, 2):
+            with self.subTest(exit_code=code), tempfile.TemporaryDirectory() as directory:
+                manifest = Path(directory) / 'manifest.json'
+                manifest.write_text(json.dumps({'version': 1, 'commands': [
+                    {'name': name, 'command': 'true'} for name in ('first-alias', 'second-alias')]}))
+                output = Path(directory) / 'evidence'
+                executions = []
+                def execute(command, **kwargs):
+                    if command[0] == 'bash':
+                        executions.append(command)
+                        return subprocess.CompletedProcess(command, code)
+                    return actual_run(command, **kwargs)
+                with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': '',
+                        'SAWA_LOCAL_TEST_SIGNING_KEY': str(self.key), 'SAWA_LOCAL_TEST_PUBLIC_KEY': self.public_key}), \
+                     patch.object(RUNNER, 'MANIFEST', manifest), \
+                     patch.object(RUNNER, 'require_frontend_dependencies'), \
+                     patch.object(RUNNER, 'clean_tree', return_value=True), \
+                     patch.object(RUNNER, 'git', return_value='a' * 40), \
+                     patch.object(RUNNER.subprocess, 'run', side_effect=execute):
+                    self.assertEqual(RUNNER.run(output), int(code != 0))
+                    if code == 0:
+                        receipt = verify_signed(json.loads((output / 'receipt.json').read_text()))
+                    else:
+                        self.assertFalse((output / 'receipt.json').exists())
+                        receipt = json.loads((output / 'failed-run.json').read_text())
+                self.assertEqual(len(executions), 1)
+                self.assertEqual([item['exit_code'] for item in receipt['commands']], [code, code])
+                self.assertEqual(receipt['commands'][0]['log_sha256'], receipt['commands'][1]['log_sha256'])
+                timings = [json.loads(line) for line in (output / 'command-timings.jsonl').read_text().splitlines()]
+                self.assertEqual([item['shared_batch_result'] for item in timings], [False, True])
 
     def test_full_receipt_does_not_inherit_external_test_selection(self):
         with tempfile.TemporaryDirectory() as directory:

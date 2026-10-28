@@ -13,12 +13,14 @@ router = APIRouter()
 @router.get("/history", dependencies=[Depends(require_role("operator"))], response_model=None,
             responses={200: {"model": OutputHistoryResponse}})
 def get_output_history(order_id: OrderIdQuery, expected_workflow_revision: WorkflowRevisionQuery,
-                       page: PageQuery, limit: LimitQuery):
+                       page: PageQuery, limit: LimitQuery, before_id: str | None = None,
+                       validate_records: bool = True, record_id: str | None = None):
     try:
         with SessionLocal() as session:
             return list_output_history(session, order_id=order_id,
                                        expected_workflow_revision=expected_workflow_revision,
-                                       page=page, limit=limit)
+                                       page=page, limit=limit, before_id=before_id,
+                                       validate_records=validate_records, record_id=record_id)
     except OutputHistoryNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

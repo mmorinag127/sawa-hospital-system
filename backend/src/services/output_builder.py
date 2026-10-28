@@ -52,7 +52,6 @@ from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
 from src.services.storage_service import load_bytes_from_uri
 
 OUTPUT_DIR = Path(os.getenv("ORDERS_OUTPUT_DIR", "/tmp/orders-outputs"))
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DAILY_DELIVERY_REFERENCE_TEMPLATE = DATA_DIR / "delivery_note_templates" / "daily_delivery_note_reference.xlsx"

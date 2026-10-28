@@ -1,5 +1,21 @@
 {
   "version": 1,
+  "python_contract_modules": [
+    "infra/terraform/tests/test_secret_manager_iam_migration.py",
+    "scripts/test_tls_trust.py",
+    "scripts/test_tls_workflows.py",
+    "infra/terraform/tests/test_ci_backend_parallel.py",
+    "scripts/test_runtime_cv_dependency_alignment.py",
+    "scripts/test_modernization_image_ci.py",
+    "scripts/test_resolve_backend_base_image.py",
+    "scripts/test_local_hospital_test_runner.py",
+    "scripts/test_local_runtime_audits.py",
+    "infra/ci/tests/test_workflow_impact.py",
+    "infra/ci/tests/test_impact_owned_inputs.py",
+    "infra/ci/tests/test_collection_impact.py",
+    "infra/ci/tests/test_node_impact.py",
+    "infra/ci/tests/test_pytest_impact.py"
+  ],
   "post_deploy_commands": [
     {
       "name": "stg-ocr-ui-readonly",
@@ -79,7 +95,7 @@
     },
     {
       "name": "frontend-inspection-read",
-      "command": "cd frontend && node --test tests/inspection-demand-read.test.mjs",
+      "command": "python3 scripts/run_local_frontend_contracts.py",
       "legacy_steps": []
     },
     {
@@ -139,7 +155,7 @@
     },
     {
       "name": "secret-iam-contracts",
-      "command": "python3 -m unittest infra/terraform/tests/test_secret_manager_iam_migration.py -v",
+      "command": "python3 scripts/run_local_backend_tests.py --contracts",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
@@ -150,7 +166,7 @@
     },
     {
       "name": "tls-trust-contracts",
-      "command": "python3 scripts/test_tls_trust.py -v",
+      "command": "python3 scripts/run_local_backend_tests.py --contracts",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
@@ -161,7 +177,7 @@
     },
     {
       "name": "tls-workflow-contracts",
-      "command": "python3 scripts/test_tls_workflows.py -v",
+      "command": "python3 scripts/run_local_backend_tests.py --contracts",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
@@ -172,7 +188,7 @@
     },
     {
       "name": "backend-partition-contracts",
-      "command": "python3 infra/terraform/tests/test_ci_backend_parallel.py -v",
+      "command": "python3 scripts/run_local_backend_tests.py --contracts",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
@@ -183,7 +199,7 @@
     },
     {
       "name": "runtime-cv-contracts",
-      "command": "python3 scripts/test_runtime_cv_dependency_alignment.py -v",
+      "command": "python3 scripts/run_local_backend_tests.py --contracts",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
@@ -194,22 +210,22 @@
     },
     {
       "name": "image-source-contracts",
-      "command": "python3 scripts/test_modernization_image_ci.py -v && python3 scripts/test_resolve_backend_base_image.py -v",
+      "command": "python3 scripts/run_local_backend_tests.py --contracts",
       "legacy_steps": []
     },
     {
       "name": "local-receipt-contracts",
-      "command": "python3 scripts/test_local_hospital_test_runner.py",
+      "command": "python3 scripts/run_local_backend_tests.py --contracts",
       "legacy_steps": []
     },
     {
       "name": "runtime-audit-contracts",
-      "command": "python3 scripts/test_local_runtime_audits.py",
+      "command": "python3 scripts/run_local_backend_tests.py --contracts",
       "legacy_steps": []
     },
     {
       "name": "impact-contracts",
-      "command": "python3 -m unittest discover -s infra/ci/tests -p 'test_*impact*.py' -v",
+      "command": "python3 scripts/run_local_backend_tests.py --contracts",
       "legacy_steps": [
         {
           "workflow": "ci.yml",
@@ -263,7 +279,7 @@
     },
     {
       "name": "modernization-pg-output",
-      "command": "python3 scripts/run_local_pg_output_boundary.py",
+      "command": "python3 scripts/run_local_pg_batch.py",
       "legacy_steps": [
         {
           "workflow": "modernization-pg-output.yml",
@@ -305,7 +321,7 @@
     },
     {
       "name": "hospital-readonly-pg",
-      "command": "python3 scripts/run_readonly_pg_tests.py --source . --run-id \"$SAWA_LOCAL_RUN_ID\" --attempt 1 --suite readonly",
+      "command": "python3 scripts/run_local_pg_batch.py",
       "legacy_steps": [
         {
           "workflow": "modernization-readonly-pg.yml",
@@ -316,7 +332,7 @@
     },
     {
       "name": "hospital-c1-pg",
-      "command": "python3 scripts/run_readonly_pg_tests.py --source . --run-id \"$SAWA_LOCAL_RUN_ID\" --attempt 1 --suite c1",
+      "command": "python3 scripts/run_local_pg_batch.py",
       "legacy_steps": [
         {
           "workflow": "modernization-readonly-pg.yml",
@@ -327,7 +343,7 @@
     },
     {
       "name": "hospital-c1-guard-pg",
-      "command": "python3 scripts/run_readonly_pg_tests.py --source . --run-id \"$SAWA_LOCAL_RUN_ID\" --attempt 1 --suite c1-guards",
+      "command": "python3 scripts/run_local_pg_batch.py",
       "legacy_steps": [
         {
           "workflow": "modernization-readonly-pg.yml",
@@ -338,7 +354,7 @@
     },
     {
       "name": "hospital-menu-identity-pg",
-      "command": "python3 scripts/run_readonly_pg_tests.py --source . --run-id \"$SAWA_LOCAL_RUN_ID\" --attempt 1 --suite menu-identity",
+      "command": "python3 scripts/run_local_pg_batch.py",
       "legacy_steps": [
         {
           "workflow": "modernization-readonly-pg.yml",

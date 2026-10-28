@@ -1,10 +1,15 @@
 """Paginated stored facts for navigation, not execution or confirmation gates."""
-from sqlalchemy import func, literal, or_, select, union_all
+from sqlalchemy import and_, func, literal, or_, select, union_all
 
 from src.db import session_scope
 from src.models.order import Order, OrderLine
 from src.models.uploaded_pdf import UploadedPdf
 from src.services.sheet_week_service import to_sheet_month_id
+from src.models.upload_visibility_v1 import unresolved_upload_conditions as upload_visibility
+
+
+def unresolved_upload_conditions():
+    return upload_visibility(UploadedPdf)
 
 
 def list_daily_order_facts(target_date, *, facility=None, status=None):
@@ -20,40 +25,45 @@ def list_daily_order_facts(target_date, *, facility=None, status=None):
         return [{**row, "week": to_sheet_month_id(row["week"])} for row in session.execute(query).mappings()]
 
 
-def list_facility_orders(*, facility=None, week=None, status=None, limit=25, offset=0):
+def list_facility_orders(*, facility=None, week=None, status=None, limit=25, offset=0,
+                         before_id=None, before_source_kind=None):
+    if (before_id is None) != (before_source_kind is None) or before_source_kind not in (None, "order", "uploaded_pdf"):
+        raise ValueError("order_overview_cursor_invalid")
+    if offset and before_id is None:
+        raise ValueError("order_overview_cursor_required")
     uploads = select(
         UploadedPdf.id, UploadedPdf.facility_hint, UploadedPdf.week_hint, UploadedPdf.received_at,
-        UploadedPdf.status, UploadedPdf.current_document_id,
-    ).where(UploadedPdf.current_order_id.is_(None)).order_by(
-        UploadedPdf.received_at.desc(), UploadedPdf.id.desc(),
-    ).limit(200).subquery()
+    ).where(*unresolved_upload_conditions()).subquery()
     facts = union_all(
         select(Order.id.label("id"), Order.facility_code.label("facility"), Order.week_code.label("week"),
                Order.status.label("status"), Order.received_at.label("received_at"),
                literal("order").label("source_kind"), literal(None).label("uploaded_pdf_id")),
         select((literal("UPLOAD-") + uploads.c.id), uploads.c.facility_hint, uploads.c.week_hint,
-               literal("アップロード済み"), uploads.c.received_at, literal("uploaded_pdf"), uploads.c.id).where(or_(
-                   func.lower(func.trim(func.coalesce(uploads.c.status, ""))) != "completed",
-                   uploads.c.current_document_id.is_(None), uploads.c.current_document_id == "",
-               )),
+               literal("アップロード済み"), uploads.c.received_at, literal("uploaded_pdf"), uploads.c.id),
     ).subquery()
     with session_scope() as session:
+        facility_options = session.execute(select(facts.c.facility).where(
+            facts.c.facility.is_not(None), facts.c.facility != "",
+        ).distinct()).scalars().all()
+        stored_weeks = session.execute(select(facts.c.week).distinct()).scalars().all()
+        week_options = sorted({value for raw in stored_weeks if (value := to_sheet_month_id(raw))})
+        filters = []
+        if week:
+            raw_weeks = [raw for raw in stored_weeks if to_sheet_month_id(raw) == week]
+            filters.append(facts.c.week.in_(raw_weeks))
+        if facility == "__unresolved__":
+            filters.append(or_(facts.c.facility.is_(None), facts.c.facility == ""))
+        elif facility:
+            filters.append(facts.c.facility == facility)
+        if status:
+            filters.append(facts.c.status == status)
         groups = session.execute(select(facts.c.facility, facts.c.week, facts.c.status, func.count().label("count"))
+                                 .where(*filters)
                                  .group_by(facts.c.facility, facts.c.week, facts.c.status)).mappings().all()
         progress = {}
         total = 0
-        raw_weeks = set()
         for group in groups:
             normalized_week = to_sheet_month_id(group["week"])
-            if week and normalized_week != week:
-                continue
-            raw_weeks.add(group["week"])
-            if facility == "__unresolved__" and group["facility"]:
-                continue
-            if facility and facility != "__unresolved__" and group["facility"] != facility:
-                continue
-            if status and group["status"] != status:
-                continue
             count = group["count"]
             total += count
             label = normalized_week or "未確定"
@@ -61,21 +71,27 @@ def list_facility_orders(*, facility=None, week=None, status=None, limit=25, off
             field = {"未着": "pending", "要確認": "review", "確定": "confirmed", "エラー": "error"}.get(group["status"])
             if field:
                 row[field] += count
-        query = select(facts)
-        if week:
-            query = query.where(facts.c.week.in_(raw_weeks))
-        if facility == "__unresolved__":
-            query = query.where(or_(facts.c.facility.is_(None), facts.c.facility == ""))
-        elif facility:
-            query = query.where(facts.c.facility == facility)
-        if status:
-            query = query.where(facts.c.status == status)
-        rows = session.execute(query.order_by(facts.c.received_at.desc().nullslast(), facts.c.id.desc())
-                               .offset(offset).limit(limit)).mappings().all()
+        query = select(facts).where(*filters)
+        if before_id is not None:
+            anchor = session.execute(select(facts.c.received_at).where(*filters,
+                facts.c.id == before_id, facts.c.source_kind == before_source_kind)).one_or_none()
+            if anchor is None:
+                raise ValueError("order_overview_cursor_invalid")
+            tie = or_(facts.c.id < before_id, and_(facts.c.id == before_id, facts.c.source_kind < before_source_kind))
+            if anchor.received_at is None:
+                query = query.where(facts.c.received_at.is_(None), tie)
+            else:
+                query = query.where(or_(facts.c.received_at < anchor.received_at,
+                    facts.c.received_at.is_(None), and_(facts.c.received_at == anchor.received_at, tie)))
+        rows = session.execute(query.order_by(facts.c.received_at.desc().nullslast(),
+            facts.c.id.desc(), facts.c.source_kind.desc()).limit(limit + 1)).mappings().all()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
         return {
             "orders": [{**row, "week": to_sheet_month_id(row["week"])} for row in rows],
             "total": total,
-            "facility_options": sorted({group["facility"] for group in groups if group["facility"]}),
-            "week_options": sorted({value for group in groups if (value := to_sheet_month_id(group["week"]))}),
+            "next_cursor": {"id": rows[-1]["id"], "source_kind": rows[-1]["source_kind"]} if has_more else None,
+            "facility_options": sorted(facility_options),
+            "week_options": week_options,
             "progress": [progress[key] for key in sorted(progress)],
         }

@@ -30,11 +30,13 @@ router = APIRouter(dependencies=[Depends(require_role("operator")), Depends(_req
     responses={200: {"model": MenuMasterListResponse}},
 )
 def list_menu_masters(
-    q: str | None = None, limit: int = 1000, offset: int = Query(default=0, ge=0),
-    sort: str = "name", order: str = "asc",
+    q: str | None = None, limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0),
+    sort: str = "name", order: str = "asc", after_id: str | None = None, before_id: str | None = None,
+    include_total: bool = True,
 ):
     try:
-        return menu_service.list_menu_masters_page(query=q, limit=limit, offset=offset, sort=sort, order=order)
+        return menu_service.list_menu_masters_page(query=q, limit=limit, offset=offset, sort=sort, order=order,
+                                                  after_id=after_id, before_id=before_id, include_total=include_total)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

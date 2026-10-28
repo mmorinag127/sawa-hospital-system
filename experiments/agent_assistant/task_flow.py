@@ -1,5 +1,6 @@
 """Selected scopes and version-bound human review shared by the named tasks."""
 import asyncio
+from bisect import bisect_left
 from copy import deepcopy
 from datetime import date
 import json
@@ -87,6 +88,27 @@ class TaskFlow:
         return run.get('task_id') in TASKS and run['task_id'] != 'hospital_pending_faxes'
 
     async def read(self, run, name, parameters=None):
+        if name == 'shift_get_constraints' and not parameters:
+            month = run.get('task_inputs', {}).get('inputs', {}).get('month')
+            if not month:
+                raise Conflict('予定を読む対象月がありません')
+            period = await self.read(run, 'shift_get_period', {'query': {'month': month}})
+            parameters = {'query': {'date_from': period['start_date'], 'date_to': period['end_date_exclusive']}}
+        if name == 'shift_get_runs' and not parameters:
+            result, query = [], {'limit': 200}
+            while True:
+                page = await self.read(run, name, {'query': query})
+                if not isinstance(page, list) or len(page) > 200:
+                    raise Conflict('シフト履歴のページを確認できません')
+                ids = [item.get('id') for item in page]
+                if any(type(ident) is not int or ident <= 0 for ident in ids) or any(a <= b for a, b in zip(ids, ids[1:])):
+                    raise Conflict('シフト履歴のID順を確認できません')
+                if ids and query.get('before_id') is not None and ids[0] >= query['before_id']:
+                    raise Conflict('シフト履歴のページが進みません')
+                result.extend(page)
+                if len(page) < 200:
+                    return result
+                query = {'limit': 200, 'before_id': ids[-1]}
         op = OPERATIONS[name]
         parameters = parameters or {}
         response = await self.tools.sandbox.request(run, op.domain, 'GET', build_path(op, parameters.get('ids',{})),
@@ -142,15 +164,39 @@ class TaskFlow:
                         raise Conflict('欠勤日に対応する勤務期間を一意に確認できません')
                     inputs['month'] = period_matches[0]['target_month']
                 else:
-                    source = rows(await self.read(run, 'shift_get_constraints'))
+                    source, query, revision = [], {}, None
+                    while True:
+                        page = await self.read(run, 'shift_get_constraint_dates', {'query': query})
+                        current_revision = page.get('collection_revision')
+                        if type(current_revision) is not int or (revision is not None and revision != current_revision):
+                            raise Conflict('予定が更新されています。月候補を読み直してください')
+                        revision = current_revision
+                        values = rows(page)
+                        previous = query.get('after')
+                        for item in values:
+                            day = date.fromisoformat(item['work_date']).isoformat()
+                            if (previous is not None and day <= previous) or type(item.get('count')) is not int or item['count'] < 1:
+                                raise Conflict('予定の日別件数またはページ順が不正です')
+                            previous = day
+                        source.extend(values)
+                        cursor = page.get('next_after')
+                        if cursor is None:
+                            break
+                        if not values or cursor != previous:
+                            raise Conflict('予定の日別件数のページが進みません')
+                        query = {'after': cursor}
                     counts = {}
+                    days = [item['work_date'] for item in source]
+                    cumulative = [0]
+                    for item in source:
+                        cumulative.append(cumulative[-1] + item['count'])
                     candidate_months = {current, adjacent_month(current,1)}
                     for item in source:
                         day = date.fromisoformat(item['work_date'])
                         candidate_months.update(adjacent_month(day.strftime('%Y-%m'), offset) for offset in (-1,0,1))
                     for month in candidate_months:
                         period = await self.read(run, 'shift_get_period', {'query':{'month':month}})
-                        count = sum(period['start_date']<=item['work_date']<period['end_date_exclusive'] for item in source)
+                        count = cumulative[bisect_left(days, period['end_date_exclusive'])] - cumulative[bisect_left(days, period['start_date'])]
                         if count:
                             counts[month] = count
                     preferred = adjacent_month(current, 1) if task_id == 'shift_next_month' else current
@@ -371,11 +417,13 @@ class TaskFlow:
             if name.startswith('hospital_export_') and str(args.query.get('order_id')) not in order_ids:
                 raise Conflict('選択した注文を一件ずつ指定してください')
         elif op.domain == 'shift':
-            if name in ('shift_get_demands','shift_get_workdays'):
+            if name in ('shift_get_demands','shift_get_workdays','shift_get_constraints'):
                 period=await self.read(run,'shift_get_period',{'query':{'month':inputs['month']}})
                 start,end=period['start_date'],period['end_date_exclusive']
             if name in ('shift_get_demands','shift_get_workdays') and args.query != {'start':start,'end':end}:
                 raise Conflict('選択月の開始日と翌月開始日をstart・endに指定してください')
+            if name == 'shift_get_constraints' and args.query != {'date_from':start,'date_to':end}:
+                raise Conflict('選択期間をdate_from・date_toに指定してください')
             if name in ('shift_get_overview','shift_get_period') and args.query.get('month')!=inputs['month']:
                 raise Conflict('選択月を明示してください')
             if name in ('shift_solve','shift_preflight') and (args.body.get('target_month') != inputs['month'] or args.body.get('start_date') or args.body.get('end_date_exclusive')):
@@ -386,7 +434,8 @@ class TaskFlow:
                 if str(args.body.get('staff_id')) not in {x['key'] for x in targets} or args.body.get('work_date') != inputs.get('absence_date') or args.body.get('status') != 'unavailable' or args.body.get('strength') != 'hard':
                     raise Conflict('指定された職員・欠勤日だけを勤務不可にできます')
                 if name == 'shift_update_constraint':
-                    values = rows(await self.read(run,'shift_get_constraints'))
+                    values = rows(await self.read(run,'shift_get_constraints',{'query':{
+                        'date_from':period['start_date'],'date_to':period['end_date_exclusive']}}))
                     current = next((x for x in values if str(x['id']) == str(args.ids['constraint_id'])),None)
                     if not current or str(current['staff_id']) != str(args.body['staff_id']) or current['work_date'] != args.body['work_date']:
                         raise Conflict('別職員・別日の勤務条件を変更できません')

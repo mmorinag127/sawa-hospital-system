@@ -5,6 +5,7 @@ import json
 import uuid
 import struct
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -268,6 +269,31 @@ class MemoryBlob:
         self.owner.put(self.bucket.name,self.name,content)
         self.generation=self.owner.values[(self.bucket.name,self.name)][0]
 
+    def upload_from_filename(self, filename, if_generation_match, **kwargs):
+        self.upload_from_string(Path(filename).read_bytes(), if_generation_match, **kwargs)
+
+    def download_to_file(self, output, if_generation_match=None, **kwargs):
+        output.write(self.download_as_bytes(if_generation_match=if_generation_match, **kwargs))
+
+
+def test_disk_receipts_keep_exact_manifest_values_and_batch_writes(tmp_path):
+    mapping = engine._SnapshotMap(tmp_path)
+    expected = {'gs://original/1': {'uri': 'gs://copied/1', 'generation': '1'},
+                'gs://original/2': {'uri': 'gs://copied/2', 'generation': '2'}}
+    with mapping.collecting():
+        for key, value in expected.items():
+            mapping[key] = value
+            assert key in mapping and mapping[key] == value
+    assert len(mapping) == len(expected)
+    assert dict(mapping.items()) == expected
+    encoded = b''.join(engine._manifest_chunks({'objects': mapping, 'missing': engine._SnapshotKeys(mapping)}))
+    assert json.loads(encoded) == {'objects': expected, 'missing': sorted(expected)}
+    with pytest.raises(RuntimeError):
+        with mapping.collecting():
+            mapping['rollback'] = {'uri': 'never-published'}
+            raise RuntimeError('owned interrupted builder')
+    assert 'rollback' not in mapping
+
 
 @pytest.fixture
 def storage(monkeypatch):
@@ -421,7 +447,7 @@ def test_cloud_task_tombstone_renews_only_queued_generation_and_old_delivery_is_
 def test_original_gcs_absence_is_preserved_without_using_old_or_alternate_bytes(storage):
     copier=engine.ObjectCopier(storage,storage.bucket('fixture-stg-raw'),'stg-replay/replay-case/order',['fixture-prod'],{})
     assert copier.copy('gs://fixture-prod/original-already-missing.pdf') is None
-    assert copier.missing_at_source=={'gs://fixture-prod/original-already-missing.pdf'}
+    assert dict(copier.missing_at_source)=={'gs://fixture-prod/original-already-missing.pdf': True}
     assert not copier.objects
     with pytest.raises(service.RefreshError,match='required'):
         copier.copy('gs://fixture-prod/required-master-missing.json',required=True)
@@ -589,8 +615,9 @@ def test_runtime_settings_capture_backend_producer_school_and_exclude_secrets(co
     assert order['producer_runtime_settings']['OCR_TEMPLATE_MIN_CONFIDENCE'] == '0.8'
     assert order['producer_revision'] == 'producer-exact-revision'
     assert value['components']['school-lunch']['runtime_settings']['IMPLEMENTATION_PRICE_OCR_DPI'] == '400'
-    assert 'GEMINI_API_KEY' not in json.dumps(value)
-    assert 'never-copy-synthetic-key' not in json.dumps(value)
+    serialized=b''.join(engine._manifest_chunks(value)).decode()
+    assert 'GEMINI_API_KEY' not in serialized
+    assert 'never-copy-synthetic-key' not in serialized
 
 
 def test_business_endpoint_with_embedded_credentials_stops_before_copy_or_publication(control, storage, build_environment, monkeypatch):

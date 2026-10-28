@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Float, ForeignKey, Date, JSON
+from sqlalchemy import Column, String, DateTime, Float, ForeignKey, Date, JSON, Index
 from sqlalchemy.orm import relationship
 
 from src.db import Base
@@ -7,6 +7,10 @@ from src.db import Base
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        Index("ix_orders_current_document_id", "current_document_id"),
+        Index("ix_orders_document_uri", "document_uri", postgresql_using="hash"),
+    )
 
     id = Column(String, primary_key=True)
     facility_code = Column(String, nullable=True, index=True)
@@ -27,6 +31,7 @@ class Order(Base):
 
 class OrderLine(Base):
     __tablename__ = "order_lines"
+    __table_args__ = (Index("ix_order_lines_date_order", "date", "order_id"),)
 
     id = Column(String, primary_key=True)
     order_id = Column(String, ForeignKey("orders.id"), nullable=False, index=True)

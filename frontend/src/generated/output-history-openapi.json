@@ -55,7 +55,8 @@
           "validation": {
             "enum": [
               "validated",
-              "blocked"
+              "blocked",
+              "not_loaded"
             ],
             "title": "Validation",
             "type": "string"
@@ -91,6 +92,18 @@
           "limit": {
             "title": "Limit",
             "type": "integer"
+          },
+          "next_before_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Next Before Id"
           },
           "order_id": {
             "title": "Order Id",
@@ -156,7 +169,6 @@
             "name": "page",
             "required": true,
             "schema": {
-              "maximum": 100000,
               "minimum": 1,
               "type": "integer"
             }
@@ -169,6 +181,47 @@
               "maximum": 100,
               "minimum": 1,
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          {
+            "in": "query",
+            "name": "validate_records",
+            "required": false,
+            "schema": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "record_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
             }
           }
         ],

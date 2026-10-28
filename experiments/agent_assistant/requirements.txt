@@ -1,4 +1,5 @@
 fastapi>=0.136.1
+ijson==3.6.0
 uvicorn>=0.29
 httpx>=0.28
 pydantic>=2.6

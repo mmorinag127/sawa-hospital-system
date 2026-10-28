@@ -80,10 +80,14 @@ export interface components {
             items: components["schemas"]["MenuMasterResponse"][];
             /** Limit */
             limit: number;
+            /** Next After Id */
+            next_after_id?: string | null;
             /** Offset */
             offset: number;
+            /** Previous Before Id */
+            previous_before_id?: string | null;
             /** Total */
-            total: number;
+            total: number | null;
         };
         /**
          * MenuMasterResponse
@@ -174,6 +178,9 @@ export interface operations {
                 offset?: number;
                 sort?: string;
                 order?: string;
+                after_id?: string | null;
+                before_id?: string | null;
+                include_total?: boolean;
             };
             header?: never;
             path?: never;

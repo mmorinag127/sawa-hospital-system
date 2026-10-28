@@ -78,3 +78,24 @@ def test_owned_native_environment_keeps_auth_enabled(tmp_path,monkeypatch):
     assert 'SAWA_TEST_DISABLE_API_AUTH' not in env
     assert 'AUTH_DISABLED' not in env
     assert env['DATABASE_URL']=='sqlite:///'+str(data/'database.sqlite3')
+
+
+def test_uncommitted_source_is_explicitly_recorded_and_cannot_change_before_seal(tmp_path, monkeypatch):
+    relative, bundle, path, manifest, pin, report = source(
+        tmp_path, monkeypatch, b'a=1\n', b'a=1\n', b'a=2\n')
+    snapshot = {relative: b'a=3\n'}
+    monkeypatch.setattr(upgrade, 'working_snapshot', lambda *_: dict(snapshot))
+    result = upgrade.merge(tmp_path, bundle, manifest, 'target', report, working_tree=True)
+    assert result['conflicts'] == [] and path.read_bytes() == b'a=3\n'
+    assert result['working_source_files'] == {relative: hashlib.sha256(b'a=3\n').hexdigest()}
+    snapshot[relative] = b'a=4\n'
+    with pytest.raises(RuntimeError, match='changed after synchronization'):
+        upgrade.seal(tmp_path, bundle, pin, report)
+    assert json.loads(pin.read_text())['source_revision'] == 'base'
+    snapshot[relative] = b'a=3\n'
+    upgrade.seal(tmp_path, bundle, pin, report)
+    verify_source(bundle, pin)
+    sealed = json.loads(pin.read_text())
+    assert sealed['source_revision'] == 'target'
+    assert sealed['working_source_files'] == result['working_source_files']
+    assert sealed['retained_extensions'][0]['bundled_sha256'] == hashlib.sha256(b'a=3\n').hexdigest()

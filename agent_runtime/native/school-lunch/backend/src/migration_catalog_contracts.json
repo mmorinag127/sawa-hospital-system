@@ -7313,6 +7313,850 @@
             }
           }
         }
+      },
+      "0031_catalog_read_keys": {
+        "tables": {
+          "alembic_version": "209e56908f4e6f668cf9228c98633dc9d87f6b01a1b9109b487d7d9236fb26d2",
+          "audit_logs": "536eb4717ff3709a998f2585cc790173ab9f26147c4870824b04d3f9fb4ac225",
+          "implementation_price_drafts": "8d1ee5ef59e9f03fe3f577efc283f886c4ccdc9971083a6bdcfd2b24adee8b00",
+          "implementation_price_ocr_jobs": "17a3721c331ba7f3a8f5cb59efb5002fcf1a04d63b0bfec3a36dbba9165330ec",
+          "notifications": "b96a6c52ceb030ad0fdfabdea147d6b6d3a7684ae15a255bf305202290e63615",
+          "school_lunch_daily_work_schedules": "20b0e36825f3940e8c1f2b23f754e28a84f8b99c19433ba75a03f892cf2a8758",
+          "school_lunch_documents": "12ff5ad53cefd72ee1adfce3b6116f4aa47c56e99f2f1a6483a01c95d9068d2a",
+          "school_lunch_facilities": "50f3c84b54aee2786d2ba01aabd303625a889aaa138dda4d00169c5ed72853e3",
+          "school_lunch_ingredients": "530faca84110dc819c2e68b047fa083d0d66763d905e58fbe1f408fe04392dd5",
+          "school_lunch_kitchen_layouts": "268f532a41c2e3bddc1a4bacb539e0349235a7c0b3504106523b49b8253dc513",
+          "school_lunch_menu_assignees": "4d6d6cc25d37e4a6728983c3060ea2d5f09e1ef67e83b0c50dc1e3cdb97efc31",
+          "school_lunch_menu_executions": "02bfa8009153d83af868b8c52c8afdd357056c9c6d919418238969d9533b3ba5",
+          "school_lunch_menu_ingredients": "bad4b08abbc1f3f39178c6e74e3866b9522f7edd9fd9fd5049127ce4cb612b5f",
+          "school_lunch_menu_variants": "2251d982f2079059568e9acc5df0fe1885d9371b8d3aa91f31211ee1523d96ac",
+          "school_lunch_monthly_procurement": "d0577585b1aab3081534f1e167b907ddc1ff3dad846c333e4746b7a1895b14a3",
+          "school_lunch_process_bindings": "bf20c8aa5f80940180421bae78daba6894cfcdf5b78319782d9397a4d88f7202",
+          "school_lunch_process_pattern_applications": "d0d91a755b0b3b81ca4191dc55e23eebd50504b2e48fc81a33eae372a85a7485",
+          "school_lunch_process_pattern_revisions": "d8451ed297e8dd3632f79475bb95e4782adbb2679a05268642a63144755a9bcb",
+          "school_lunch_process_patterns": "ef9b8f2f2506dfa3f5199c0fbb040bfeea654f0a553ca6f9ed029859c1e98d8a",
+          "school_lunch_process_proposals": "5a142c29283cd914f9b755572bde4087571989b8855948ada74b5775ddf431c9",
+          "school_lunch_process_recipes": "e17cec827d983602a88dfe7df5246649bb80b009ca15a20ec01cd57c8519cef0",
+          "school_lunch_process_revisions": "f202be11a7fa6b8255d9049af9b6a545d324574a8a9273c05c48e031160840a2",
+          "school_lunch_process_route_artifacts": "ee2df7bf9acf125c76d3044160c86eccfa6ed8a0e1c5a69723e880f0bfba9d1a",
+          "school_lunch_process_route_profile_revisions": "20a88a42a582e91ad318fb2f29be4f0779517df3456c297f9c04b6cccadf9703",
+          "school_lunch_process_route_profiles": "9594d007bf1b1887592b96332427d3446ced7a6b0fb3ad02a16efecf5a3327e9",
+          "school_lunch_process_steps": "5e96163e635aca1fbf1d09f9bab254fb0eff45a37576b31ed3e89fda279344e0",
+          "school_lunch_route_diagrams": "fbb23ad2451ebd0d33fdd010d50a4e5e99546163a0f52e35fa9a29a04ad60194",
+          "school_lunch_route_source_sessions": "8c1bb0c9e3981b58f2af5442f404462026c462b6d5579a3c55473e58cbee80ea",
+          "school_lunch_shared_menu_adoptions": "3639284997a8fd7a041220536352608eefc8e5499c8f9b4c488e454ef07062dc",
+          "school_lunch_shared_menu_revisions": "ca4fecd82bfa98051cb6b47cd63e755866c0270fbda8aab7f46af7c661ba01c2",
+          "school_lunch_shared_menu_vocabulary": "f5cc175a90f6b8ab9ee144da4585c599705f603f3476a4bf8665e8b36feec337",
+          "school_lunch_shared_menus": "e263afbe04e993b0c5708fe670e91b16b01186fb1ead51ed3f2b376b3dd92505",
+          "school_lunch_source_reviews": "60e88f69ca4fe9d66ae11e5935ab1447c49d736717430989dd8240463fdd03ec",
+          "school_lunch_staff": "57f7837279bb44c6b561492b2bbd5e2a941c6eacdb5c6624525c9f61454a7644",
+          "school_lunch_timing_profiles": "1b634c13ad436d462a9361568b1b967a2b7a642ca7a50312173d8b6df69d46b2",
+          "school_lunch_work_schedule_assignees": "addd0d1ac2f53871cb9857a6a4983415a78706eee7091017f42e47b3989d1adb",
+          "school_lunch_work_schedule_rows": "776352b8c602f6982fc89448fa19786e1dd2da99e66c6f28a4593b4c3eb8ac9b",
+          "school_lunch_work_schedule_tasks": "a592ec3bcd61b3e653d7fa3474daf12ec8b02b7fbe81283b885477b30033bf3f",
+          "users": "518d26cd7d06ee2e5bfd90b15edbdf12b8fdc37acb5d79488a4d2e9e8c08768e"
+        },
+        "sequences": {
+          "school_lunch_daily_work_schedules_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_daily_work_schedules",
+              "column": "id"
+            }
+          },
+          "school_lunch_facilities_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_facilities",
+              "column": "id"
+            }
+          },
+          "school_lunch_ingredients_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_ingredients",
+              "column": "id"
+            }
+          },
+          "school_lunch_kitchen_layouts_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_kitchen_layouts",
+              "column": "id"
+            }
+          },
+          "school_lunch_menu_assignees_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_menu_assignees",
+              "column": "id"
+            }
+          },
+          "school_lunch_menu_executions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_menu_executions",
+              "column": "id"
+            }
+          },
+          "school_lunch_menu_ingredients_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_menu_ingredients",
+              "column": "id"
+            }
+          },
+          "school_lunch_menu_variants_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_menu_variants",
+              "column": "id"
+            }
+          },
+          "school_lunch_monthly_procurement_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_monthly_procurement",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_pattern_applications_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_pattern_applications",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_pattern_revisions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_pattern_revisions",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_patterns_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_patterns",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_proposals_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_proposals",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_recipes_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_recipes",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_revisions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_revisions",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_route_artifacts_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_route_artifacts",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_route_profile_revisions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_route_profile_revisions",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_route_profiles_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_route_profiles",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_steps_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_steps",
+              "column": "id"
+            }
+          },
+          "school_lunch_route_diagrams_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_route_diagrams",
+              "column": "id"
+            }
+          },
+          "school_lunch_route_source_sessions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_route_source_sessions",
+              "column": "id"
+            }
+          },
+          "school_lunch_shared_menu_adoptions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_shared_menu_adoptions",
+              "column": "id"
+            }
+          },
+          "school_lunch_shared_menu_revisions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_shared_menu_revisions",
+              "column": "id"
+            }
+          },
+          "school_lunch_shared_menus_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_shared_menus",
+              "column": "id"
+            }
+          },
+          "school_lunch_staff_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_staff",
+              "column": "id"
+            }
+          },
+          "school_lunch_timing_profiles_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_timing_profiles",
+              "column": "id"
+            }
+          },
+          "school_lunch_work_schedule_assignees_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_work_schedule_assignees",
+              "column": "id"
+            }
+          },
+          "school_lunch_work_schedule_rows_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_work_schedule_rows",
+              "column": "id"
+            }
+          },
+          "school_lunch_work_schedule_tasks_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_work_schedule_tasks",
+              "column": "id"
+            }
+          }
+        }
+      },
+      "0032_route_source_references": {
+        "tables": {
+          "alembic_version": "209e56908f4e6f668cf9228c98633dc9d87f6b01a1b9109b487d7d9236fb26d2",
+          "audit_logs": "536eb4717ff3709a998f2585cc790173ab9f26147c4870824b04d3f9fb4ac225",
+          "implementation_price_drafts": "8d1ee5ef59e9f03fe3f577efc283f886c4ccdc9971083a6bdcfd2b24adee8b00",
+          "implementation_price_ocr_jobs": "17a3721c331ba7f3a8f5cb59efb5002fcf1a04d63b0bfec3a36dbba9165330ec",
+          "notifications": "b96a6c52ceb030ad0fdfabdea147d6b6d3a7684ae15a255bf305202290e63615",
+          "school_lunch_daily_work_schedules": "20b0e36825f3940e8c1f2b23f754e28a84f8b99c19433ba75a03f892cf2a8758",
+          "school_lunch_documents": "d70301a013928f3aaada040ee9c744c0794e575ff6dd0caede34edfb20feb4e3",
+          "school_lunch_facilities": "50f3c84b54aee2786d2ba01aabd303625a889aaa138dda4d00169c5ed72853e3",
+          "school_lunch_ingredients": "530faca84110dc819c2e68b047fa083d0d66763d905e58fbe1f408fe04392dd5",
+          "school_lunch_kitchen_layouts": "268f532a41c2e3bddc1a4bacb539e0349235a7c0b3504106523b49b8253dc513",
+          "school_lunch_menu_assignees": "4d6d6cc25d37e4a6728983c3060ea2d5f09e1ef67e83b0c50dc1e3cdb97efc31",
+          "school_lunch_menu_executions": "02bfa8009153d83af868b8c52c8afdd357056c9c6d919418238969d9533b3ba5",
+          "school_lunch_menu_ingredients": "bad4b08abbc1f3f39178c6e74e3866b9522f7edd9fd9fd5049127ce4cb612b5f",
+          "school_lunch_menu_variants": "2251d982f2079059568e9acc5df0fe1885d9371b8d3aa91f31211ee1523d96ac",
+          "school_lunch_monthly_procurement": "d0577585b1aab3081534f1e167b907ddc1ff3dad846c333e4746b7a1895b14a3",
+          "school_lunch_process_bindings": "bf20c8aa5f80940180421bae78daba6894cfcdf5b78319782d9397a4d88f7202",
+          "school_lunch_process_pattern_applications": "d0d91a755b0b3b81ca4191dc55e23eebd50504b2e48fc81a33eae372a85a7485",
+          "school_lunch_process_pattern_revisions": "d8451ed297e8dd3632f79475bb95e4782adbb2679a05268642a63144755a9bcb",
+          "school_lunch_process_patterns": "ef9b8f2f2506dfa3f5199c0fbb040bfeea654f0a553ca6f9ed029859c1e98d8a",
+          "school_lunch_process_proposals": "5a142c29283cd914f9b755572bde4087571989b8855948ada74b5775ddf431c9",
+          "school_lunch_process_recipes": "e17cec827d983602a88dfe7df5246649bb80b009ca15a20ec01cd57c8519cef0",
+          "school_lunch_process_revisions": "f202be11a7fa6b8255d9049af9b6a545d324574a8a9273c05c48e031160840a2",
+          "school_lunch_process_route_artifacts": "ee2df7bf9acf125c76d3044160c86eccfa6ed8a0e1c5a69723e880f0bfba9d1a",
+          "school_lunch_process_route_profile_revisions": "20a88a42a582e91ad318fb2f29be4f0779517df3456c297f9c04b6cccadf9703",
+          "school_lunch_process_route_profiles": "9594d007bf1b1887592b96332427d3446ced7a6b0fb3ad02a16efecf5a3327e9",
+          "school_lunch_process_steps": "5e96163e635aca1fbf1d09f9bab254fb0eff45a37576b31ed3e89fda279344e0",
+          "school_lunch_route_diagrams": "fbb23ad2451ebd0d33fdd010d50a4e5e99546163a0f52e35fa9a29a04ad60194",
+          "school_lunch_route_source_sessions": "371761e39c2a1641ada5ba17315e26a68596c0b8e338b11236284c3dbbe33118",
+          "school_lunch_shared_menu_adoptions": "3639284997a8fd7a041220536352608eefc8e5499c8f9b4c488e454ef07062dc",
+          "school_lunch_shared_menu_revisions": "ca4fecd82bfa98051cb6b47cd63e755866c0270fbda8aab7f46af7c661ba01c2",
+          "school_lunch_shared_menu_vocabulary": "f5cc175a90f6b8ab9ee144da4585c599705f603f3476a4bf8665e8b36feec337",
+          "school_lunch_shared_menus": "e263afbe04e993b0c5708fe670e91b16b01186fb1ead51ed3f2b376b3dd92505",
+          "school_lunch_source_reviews": "60e88f69ca4fe9d66ae11e5935ab1447c49d736717430989dd8240463fdd03ec",
+          "school_lunch_staff": "57f7837279bb44c6b561492b2bbd5e2a941c6eacdb5c6624525c9f61454a7644",
+          "school_lunch_timing_profiles": "1b634c13ad436d462a9361568b1b967a2b7a642ca7a50312173d8b6df69d46b2",
+          "school_lunch_work_schedule_assignees": "addd0d1ac2f53871cb9857a6a4983415a78706eee7091017f42e47b3989d1adb",
+          "school_lunch_work_schedule_rows": "776352b8c602f6982fc89448fa19786e1dd2da99e66c6f28a4593b4c3eb8ac9b",
+          "school_lunch_work_schedule_tasks": "a592ec3bcd61b3e653d7fa3474daf12ec8b02b7fbe81283b885477b30033bf3f",
+          "users": "518d26cd7d06ee2e5bfd90b15edbdf12b8fdc37acb5d79488a4d2e9e8c08768e"
+        },
+        "sequences": {
+          "school_lunch_daily_work_schedules_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_daily_work_schedules",
+              "column": "id"
+            }
+          },
+          "school_lunch_facilities_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_facilities",
+              "column": "id"
+            }
+          },
+          "school_lunch_ingredients_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_ingredients",
+              "column": "id"
+            }
+          },
+          "school_lunch_kitchen_layouts_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_kitchen_layouts",
+              "column": "id"
+            }
+          },
+          "school_lunch_menu_assignees_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_menu_assignees",
+              "column": "id"
+            }
+          },
+          "school_lunch_menu_executions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_menu_executions",
+              "column": "id"
+            }
+          },
+          "school_lunch_menu_ingredients_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_menu_ingredients",
+              "column": "id"
+            }
+          },
+          "school_lunch_menu_variants_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_menu_variants",
+              "column": "id"
+            }
+          },
+          "school_lunch_monthly_procurement_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_monthly_procurement",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_pattern_applications_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_pattern_applications",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_pattern_revisions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_pattern_revisions",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_patterns_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_patterns",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_proposals_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_proposals",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_recipes_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_recipes",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_revisions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_revisions",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_route_artifacts_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_route_artifacts",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_route_profile_revisions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_route_profile_revisions",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_route_profiles_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_route_profiles",
+              "column": "id"
+            }
+          },
+          "school_lunch_process_steps_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_process_steps",
+              "column": "id"
+            }
+          },
+          "school_lunch_route_diagrams_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_route_diagrams",
+              "column": "id"
+            }
+          },
+          "school_lunch_route_source_sessions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_route_source_sessions",
+              "column": "id"
+            }
+          },
+          "school_lunch_shared_menu_adoptions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_shared_menu_adoptions",
+              "column": "id"
+            }
+          },
+          "school_lunch_shared_menu_revisions_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_shared_menu_revisions",
+              "column": "id"
+            }
+          },
+          "school_lunch_shared_menus_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_shared_menus",
+              "column": "id"
+            }
+          },
+          "school_lunch_staff_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_staff",
+              "column": "id"
+            }
+          },
+          "school_lunch_timing_profiles_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_timing_profiles",
+              "column": "id"
+            }
+          },
+          "school_lunch_work_schedule_assignees_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_work_schedule_assignees",
+              "column": "id"
+            }
+          },
+          "school_lunch_work_schedule_rows_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_work_schedule_rows",
+              "column": "id"
+            }
+          },
+          "school_lunch_work_schedule_tasks_id_seq": {
+            "type": "integer",
+            "start": "1",
+            "min": "1",
+            "max": "2147483647",
+            "increment": "1",
+            "cache": "1",
+            "cycle": false,
+            "owner": {
+              "table": "school_lunch_work_schedule_tasks",
+              "column": "id"
+            }
+          }
+        }
       }
     },
     "sqlite": {
@@ -8097,6 +8941,94 @@
           "school_lunch_work_schedule_rows": "1cbf28a7f63303772128b6c161a7df4d6da20743ad7f90c4f45ed24f33c5616e",
           "school_lunch_work_schedule_tasks": "211956edb926096a67631cd6bf06022b48d3b83c49b20608d6adb603906ef0f5",
           "users": "7b657c0a897ef957dd9f29966af55c921ad9cf3088c97699e7bba5971474694c"
+        },
+        "sequences": {}
+      },
+      "0031_catalog_read_keys": {
+        "tables": {
+          "alembic_version": "61894de23a2d6e6424ef166d9b4729cf271a40620159d2a97dfacc2155584831",
+          "audit_logs": "b5d9877010bb2b41a70fbf33559c16fcddcd6efaf2201e4501d2d1e62ff0fba1",
+          "implementation_price_drafts": "b5265add5fc0d2d39583b2f1d5a79a777edc0ed649a41e5f1cb74739e41bad1e",
+          "implementation_price_ocr_jobs": "2e819ba70c47fef9583aba554c42a77da5dff535d514d8ab7853be5eced21498",
+          "notifications": "c7820781a680138347286ee8ea0ef2fb28364fbfe835f24dc4a388ddbd2818b5",
+          "school_lunch_daily_work_schedules": "d85308af9eb49484203fd3374e6b2bed2ea8b88ca958e7e4fbf72bedbf109870",
+          "school_lunch_documents": "7d3e00ff1f35db669eb9636e894447ebe55ad59cb68053b93cd7567a921e368a",
+          "school_lunch_facilities": "1c6faca66225e32953e05bfb02cbb29351a60bbd63cf77ed5a22da16e1d83d89",
+          "school_lunch_ingredients": "3c422906fc5687fc258d0264a5ddda28aee5c3b0eef35e925a23effdc04f382d",
+          "school_lunch_kitchen_layouts": "05b6ba41a4230754f0f33f5d4d47ea8e001e0e222382cc55d839ab28fbbf5134",
+          "school_lunch_menu_assignees": "e98093d9220c49366312100d352881a8d5d08c5fc85ea6993e4e20b5eac60152",
+          "school_lunch_menu_executions": "4665e4cc4d04620bea5ed57c1ddd61a27ec6b156e1d292a4afab4c2b5850c6a3",
+          "school_lunch_menu_ingredients": "db585ab634b3fc970aa6d4d4a985ae934044ad4af08db3ca155898a0342ab5fb",
+          "school_lunch_menu_variants": "dd8a5c5634115f447874fe3381eb440f5644ce212ea667c1218042a46d08fc0a",
+          "school_lunch_monthly_procurement": "bd0a930786d1ff304be1ae81b913e0561a09aae7a0677904e9a013f472556b9b",
+          "school_lunch_process_bindings": "16618518dca3cc931eb7707fd61611f9ac17bb3c5f29805bfe02e80055b79c68",
+          "school_lunch_process_pattern_applications": "afd2b29f5c5b232a0fa12a2cbbd7ee715d432fb152ecfc9ccfa51143784d91ef",
+          "school_lunch_process_pattern_revisions": "64d0033cdd8c7a7d76332d38e7f0fc1668725ad7d93d1bfe8acf5d9c3cc69934",
+          "school_lunch_process_patterns": "7bba2e790d30bc66376b682294b80fa4c1f6747547203c84230be90acb2359a5",
+          "school_lunch_process_proposals": "edc6aa24f8187c86468057d88075ace8fe5581f99ab74ff2102666452b0ac49a",
+          "school_lunch_process_recipes": "f93060689515ff311800aebebbcfea99f93460f46d2b091029dd4cb9f280afab",
+          "school_lunch_process_revisions": "36e2506f7d11789a1a6f6e7c4744f72bef06a66ffcd7ebed969a51f58e9f41c1",
+          "school_lunch_process_route_artifacts": "94cb8550858cef3725533095be1b4b5684f4e4eeaaae76adac3fa0ff072aad7d",
+          "school_lunch_process_route_profile_revisions": "66eaa702458c1df50ca72ff501766dd71e7d3e920bbb2a180f5daf83bc263609",
+          "school_lunch_process_route_profiles": "e0de9b949a1fa0044455e67422c2e217b0daf2a40ecedbe906263917aeff710f",
+          "school_lunch_process_steps": "9b656754ca9d7dd7427767b9ceb4c7bab5dcaef66ae4cf1095797d1fd2986d8b",
+          "school_lunch_route_diagrams": "06c47f09de57a6f6506d509f5f2fa303dd1a648e2a892ddceba613f5755d9255",
+          "school_lunch_route_source_sessions": "9312f96c801fc27c3a76ccafcfe57bcba34885dcf02d8debdd5c1bd0a21bdb94",
+          "school_lunch_shared_menu_adoptions": "a1afa4c6aafa97b1eca8d6e6489918bf24d201fca823158fca8bc1700102d0c7",
+          "school_lunch_shared_menu_revisions": "abba20be21cd137ea130f72326b30474338506eb81e1e6a9e6136f6c1f64169d",
+          "school_lunch_shared_menu_vocabulary": "ee1fd2d1eab7f78e00c321807b05cb02ade9d7485f0eee9fd4eaa41e1cc4ee4d",
+          "school_lunch_shared_menus": "937f3e3ec1ff8276f8f4cfa9f9f24949d8b273c45e32bb8ae668a316c92e45c3",
+          "school_lunch_source_reviews": "b764b7b0e7379148c714744ceae3b143292a4e6fd4a728a6846ce00d1a87593d",
+          "school_lunch_staff": "190fd8e2eb81e76ed600a11869cc283a344b6599c32c06d4cf1ad6fe261dc7cb",
+          "school_lunch_timing_profiles": "0aeb4610646390169ec85c4615901aef86b54500af1307f59d3d59c4a81bbef3",
+          "school_lunch_work_schedule_assignees": "e61dbe96709c1f4ee384d039012235b4cb5a8eaf6c9bbadc6522b9d016e90ea6",
+          "school_lunch_work_schedule_rows": "1cbf28a7f63303772128b6c161a7df4d6da20743ad7f90c4f45ed24f33c5616e",
+          "school_lunch_work_schedule_tasks": "36c641a5bc1107ae08932b7b24e3f2d71520269752e1abcd32308d8691d876d5",
+          "users": "03842f98b202bf0501f3ed65f04c1c0c03cb2dbae5c7db7b95d0785869b402b8"
+        },
+        "sequences": {}
+      },
+      "0032_route_source_references": {
+        "tables": {
+          "alembic_version": "61894de23a2d6e6424ef166d9b4729cf271a40620159d2a97dfacc2155584831",
+          "audit_logs": "b5d9877010bb2b41a70fbf33559c16fcddcd6efaf2201e4501d2d1e62ff0fba1",
+          "implementation_price_drafts": "b5265add5fc0d2d39583b2f1d5a79a777edc0ed649a41e5f1cb74739e41bad1e",
+          "implementation_price_ocr_jobs": "2e819ba70c47fef9583aba554c42a77da5dff535d514d8ab7853be5eced21498",
+          "notifications": "c7820781a680138347286ee8ea0ef2fb28364fbfe835f24dc4a388ddbd2818b5",
+          "school_lunch_daily_work_schedules": "d85308af9eb49484203fd3374e6b2bed2ea8b88ca958e7e4fbf72bedbf109870",
+          "school_lunch_documents": "bfeef2e2775fbaccc1a6cc203724863c7769e4665f40bffcde390c9739e865fc",
+          "school_lunch_facilities": "1c6faca66225e32953e05bfb02cbb29351a60bbd63cf77ed5a22da16e1d83d89",
+          "school_lunch_ingredients": "3c422906fc5687fc258d0264a5ddda28aee5c3b0eef35e925a23effdc04f382d",
+          "school_lunch_kitchen_layouts": "05b6ba41a4230754f0f33f5d4d47ea8e001e0e222382cc55d839ab28fbbf5134",
+          "school_lunch_menu_assignees": "e98093d9220c49366312100d352881a8d5d08c5fc85ea6993e4e20b5eac60152",
+          "school_lunch_menu_executions": "4665e4cc4d04620bea5ed57c1ddd61a27ec6b156e1d292a4afab4c2b5850c6a3",
+          "school_lunch_menu_ingredients": "db585ab634b3fc970aa6d4d4a985ae934044ad4af08db3ca155898a0342ab5fb",
+          "school_lunch_menu_variants": "dd8a5c5634115f447874fe3381eb440f5644ce212ea667c1218042a46d08fc0a",
+          "school_lunch_monthly_procurement": "bd0a930786d1ff304be1ae81b913e0561a09aae7a0677904e9a013f472556b9b",
+          "school_lunch_process_bindings": "16618518dca3cc931eb7707fd61611f9ac17bb3c5f29805bfe02e80055b79c68",
+          "school_lunch_process_pattern_applications": "afd2b29f5c5b232a0fa12a2cbbd7ee715d432fb152ecfc9ccfa51143784d91ef",
+          "school_lunch_process_pattern_revisions": "64d0033cdd8c7a7d76332d38e7f0fc1668725ad7d93d1bfe8acf5d9c3cc69934",
+          "school_lunch_process_patterns": "7bba2e790d30bc66376b682294b80fa4c1f6747547203c84230be90acb2359a5",
+          "school_lunch_process_proposals": "edc6aa24f8187c86468057d88075ace8fe5581f99ab74ff2102666452b0ac49a",
+          "school_lunch_process_recipes": "f93060689515ff311800aebebbcfea99f93460f46d2b091029dd4cb9f280afab",
+          "school_lunch_process_revisions": "36e2506f7d11789a1a6f6e7c4744f72bef06a66ffcd7ebed969a51f58e9f41c1",
+          "school_lunch_process_route_artifacts": "94cb8550858cef3725533095be1b4b5684f4e4eeaaae76adac3fa0ff072aad7d",
+          "school_lunch_process_route_profile_revisions": "66eaa702458c1df50ca72ff501766dd71e7d3e920bbb2a180f5daf83bc263609",
+          "school_lunch_process_route_profiles": "e0de9b949a1fa0044455e67422c2e217b0daf2a40ecedbe906263917aeff710f",
+          "school_lunch_process_steps": "9b656754ca9d7dd7427767b9ceb4c7bab5dcaef66ae4cf1095797d1fd2986d8b",
+          "school_lunch_route_diagrams": "06c47f09de57a6f6506d509f5f2fa303dd1a648e2a892ddceba613f5755d9255",
+          "school_lunch_route_source_sessions": "384146f30b399a2c77610537f51c64d283d23c92da6842192c0a3bb1eb4c1398",
+          "school_lunch_shared_menu_adoptions": "a1afa4c6aafa97b1eca8d6e6489918bf24d201fca823158fca8bc1700102d0c7",
+          "school_lunch_shared_menu_revisions": "abba20be21cd137ea130f72326b30474338506eb81e1e6a9e6136f6c1f64169d",
+          "school_lunch_shared_menu_vocabulary": "ee1fd2d1eab7f78e00c321807b05cb02ade9d7485f0eee9fd4eaa41e1cc4ee4d",
+          "school_lunch_shared_menus": "937f3e3ec1ff8276f8f4cfa9f9f24949d8b273c45e32bb8ae668a316c92e45c3",
+          "school_lunch_source_reviews": "b764b7b0e7379148c714744ceae3b143292a4e6fd4a728a6846ce00d1a87593d",
+          "school_lunch_staff": "190fd8e2eb81e76ed600a11869cc283a344b6599c32c06d4cf1ad6fe261dc7cb",
+          "school_lunch_timing_profiles": "0aeb4610646390169ec85c4615901aef86b54500af1307f59d3d59c4a81bbef3",
+          "school_lunch_work_schedule_assignees": "e61dbe96709c1f4ee384d039012235b4cb5a8eaf6c9bbadc6522b9d016e90ea6",
+          "school_lunch_work_schedule_rows": "1cbf28a7f63303772128b6c161a7df4d6da20743ad7f90c4f45ed24f33c5616e",
+          "school_lunch_work_schedule_tasks": "36c641a5bc1107ae08932b7b24e3f2d71520269752e1abcd32308d8691d876d5",
+          "users": "03842f98b202bf0501f3ed65f04c1c0c03cb2dbae5c7db7b95d0785869b402b8"
         },
         "sequences": {}
       }
@@ -44535,6 +45467,3349 @@
       "native_constraints": [
         [
           "school_lunch_shared_menus_pkey",
+          "p",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "PRIMARY KEY (id)"
+        ]
+      ]
+    },
+    "9b656754ca9d7dd7427767b9ceb4c7bab5dcaef66ae4cf1095797d1fd2986d8b": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "menu_ingredient_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "sequence",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "location",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(200)"
+        },
+        {
+          "name": "operation",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(300)"
+        },
+        {
+          "name": "scheduled_time",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "TIME"
+        },
+        {
+          "name": "work_zone",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "name": "route_line_style",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(16)"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": null
+      },
+      "unique": [
+        {
+          "name": "uq_school_lunch_process_step_sequence",
+          "column_names": [
+            "menu_ingredient_id",
+            "sequence"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": null,
+          "constrained_columns": [
+            "menu_ingredient_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_menu_ingredients",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {
+            "ondelete": "CASCADE"
+          }
+        }
+      ],
+      "checks": [
+        {
+          "sqltext": "route_line_style IS NULL OR route_line_style IN ('solid', 'dashed')",
+          "name": "ck_school_lunch_process_step_line_style"
+        },
+        {
+          "sqltext": "length(trim(location)) > 0",
+          "name": "ck_school_lunch_process_step_location"
+        },
+        {
+          "sqltext": "length(trim(operation)) > 0",
+          "name": "ck_school_lunch_process_step_operation"
+        },
+        {
+          "sqltext": "sequence >= 1",
+          "name": "ck_school_lunch_process_step_sequence"
+        },
+        {
+          "sqltext": "work_zone IS NULL OR work_zone IN ('contaminated', 'non_contaminated', 'contaminated_meat_fish')",
+          "name": "ck_school_lunch_process_step_work_zone"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_school_lunch_process_steps_menu_ingredient_id",
+          "column_names": [
+            "menu_ingredient_id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        }
+      ],
+      "native": [
+        [
+          "index",
+          "ix_school_lunch_process_steps_menu_ingredient_id",
+          "CREATE INDEX ix_school_lunch_process_steps_menu_ingredient_id ON school_lunch_process_steps (menu_ingredient_id)"
+        ],
+        [
+          "index",
+          "sqlite_autoindex_school_lunch_process_steps_1",
+          null
+        ],
+        [
+          "table",
+          "school_lunch_process_steps",
+          "CREATE TABLE \"school_lunch_process_steps\" (\n\tid INTEGER NOT NULL, \n\tmenu_ingredient_id INTEGER NOT NULL, \n\tsequence INTEGER NOT NULL, \n\tlocation VARCHAR(200) NOT NULL, \n\toperation VARCHAR(300) NOT NULL, \n\tscheduled_time TIME, \n\twork_zone VARCHAR(32), \n\troute_line_style VARCHAR(16), \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_school_lunch_process_step_sequence CHECK (sequence >= 1), \n\tCONSTRAINT uq_school_lunch_process_step_sequence UNIQUE (menu_ingredient_id, sequence), \n\tCONSTRAINT ck_school_lunch_process_step_line_style CHECK (route_line_style IS NULL OR route_line_style IN ('solid', 'dashed')), \n\tCONSTRAINT ck_school_lunch_process_step_operation CHECK (length(trim(operation)) > 0), \n\tCONSTRAINT ck_school_lunch_process_step_location CHECK (length(trim(location)) > 0), \n\tCONSTRAINT ck_school_lunch_process_step_work_zone CHECK (work_zone IS NULL OR work_zone IN ('contaminated', 'non_contaminated', 'contaminated_meat_fish')), \n\tFOREIGN KEY(menu_ingredient_id) REFERENCES school_lunch_menu_ingredients (id) ON DELETE CASCADE\n)"
+        ]
+      ]
+    },
+    "3c422906fc5687fc258d0264a5ddda28aee5c3b0eef35e925a23effdc04f382d": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "name",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(200)"
+        },
+        {
+          "name": "category",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(100)"
+        },
+        {
+          "name": "stock_unit",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "name": "order_unit",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "name": "conversion_rate",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "NUMERIC(18, 6)"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": null
+      },
+      "unique": [
+        {
+          "name": null,
+          "column_names": [
+            "name"
+          ]
+        }
+      ],
+      "foreign_keys": [],
+      "checks": [
+        {
+          "sqltext": "conversion_rate > 0",
+          "name": "ck_school_lunch_ingredient_conversion_rate"
+        },
+        {
+          "sqltext": "length(trim(name)) > 0",
+          "name": "ck_school_lunch_ingredient_name"
+        },
+        {
+          "sqltext": "length(trim(order_unit)) > 0",
+          "name": "ck_school_lunch_ingredient_order_unit"
+        },
+        {
+          "sqltext": "length(trim(stock_unit)) > 0",
+          "name": "ck_school_lunch_ingredient_stock_unit"
+        }
+      ],
+      "indexes": [],
+      "native": [
+        [
+          "index",
+          "sqlite_autoindex_school_lunch_ingredients_1",
+          null
+        ],
+        [
+          "table",
+          "school_lunch_ingredients",
+          "CREATE TABLE \"school_lunch_ingredients\" (\n\tid INTEGER NOT NULL, \n\tname VARCHAR(200) NOT NULL, \n\tcategory VARCHAR(100), \n\tstock_unit VARCHAR(32), \n\torder_unit VARCHAR(32), \n\tconversion_rate NUMERIC(18, 6), \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_school_lunch_ingredient_conversion_rate CHECK (conversion_rate > 0), \n\tCONSTRAINT ck_school_lunch_ingredient_order_unit CHECK (length(trim(order_unit)) > 0), \n\tCONSTRAINT ck_school_lunch_ingredient_name CHECK (length(trim(name)) > 0), \n\tCONSTRAINT ck_school_lunch_ingredient_stock_unit CHECK (length(trim(stock_unit)) > 0), \n\tUNIQUE (name)\n)"
+        ]
+      ]
+    },
+    "db585ab634b3fc970aa6d4d4a985ae934044ad4af08db3ca155898a0342ab5fb": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "menu_execution_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "ingredient_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "required_quantity",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "NUMERIC(18, 6)"
+        },
+        {
+          "name": "unit",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "name": "process_text",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(1000)"
+        },
+        {
+          "name": "route_color",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(7)"
+        },
+        {
+          "name": "unconfirmed_ingredient_fields",
+          "nullable": false,
+          "default": "'[]'",
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": null
+      },
+      "unique": [],
+      "foreign_keys": [
+        {
+          "name": null,
+          "constrained_columns": [
+            "ingredient_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_ingredients",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {
+            "ondelete": "RESTRICT"
+          }
+        },
+        {
+          "name": null,
+          "constrained_columns": [
+            "menu_execution_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_menu_executions",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {
+            "ondelete": "CASCADE"
+          }
+        }
+      ],
+      "checks": [
+        {
+          "sqltext": "required_quantity >= 0",
+          "name": "ck_school_lunch_menu_ingredient_quantity"
+        },
+        {
+          "sqltext": "length(trim(unit)) > 0",
+          "name": "ck_school_lunch_menu_ingredient_unit"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_school_lunch_menu_ingredients_ingredient_id",
+          "column_names": [
+            "ingredient_id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        },
+        {
+          "name": "ix_school_lunch_menu_ingredients_menu_execution_id",
+          "column_names": [
+            "menu_execution_id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        }
+      ],
+      "native": [
+        [
+          "index",
+          "ix_school_lunch_menu_ingredients_ingredient_id",
+          "CREATE INDEX ix_school_lunch_menu_ingredients_ingredient_id ON school_lunch_menu_ingredients (ingredient_id)"
+        ],
+        [
+          "index",
+          "ix_school_lunch_menu_ingredients_menu_execution_id",
+          "CREATE INDEX ix_school_lunch_menu_ingredients_menu_execution_id ON school_lunch_menu_ingredients (menu_execution_id)"
+        ],
+        [
+          "table",
+          "school_lunch_menu_ingredients",
+          "CREATE TABLE \"school_lunch_menu_ingredients\" (\n\tid INTEGER NOT NULL, \n\tmenu_execution_id INTEGER NOT NULL, \n\tingredient_id INTEGER NOT NULL, \n\trequired_quantity NUMERIC(18, 6) NOT NULL, \n\tunit VARCHAR(32) NOT NULL, \n\tprocess_text VARCHAR(1000) NOT NULL, \n\troute_color VARCHAR(7) NOT NULL, \n\tunconfirmed_ingredient_fields JSON DEFAULT '[]' NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_school_lunch_menu_ingredient_quantity CHECK (required_quantity >= 0), \n\tCONSTRAINT ck_school_lunch_menu_ingredient_unit CHECK (length(trim(unit)) > 0), \n\tFOREIGN KEY(menu_execution_id) REFERENCES school_lunch_menu_executions (id) ON DELETE CASCADE, \n\tFOREIGN KEY(ingredient_id) REFERENCES school_lunch_ingredients (id) ON DELETE RESTRICT\n)"
+        ]
+      ]
+    },
+    "36c641a5bc1107ae08932b7b24e3f2d71520269752e1abcd32308d8691d876d5": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "row_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "sequence",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "start_time",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "TIME"
+        },
+        {
+          "name": "end_time",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "TIME"
+        },
+        {
+          "name": "operation",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(500)"
+        },
+        {
+          "name": "work_zone",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "name": "ingredient_name",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(200)"
+        },
+        {
+          "name": "duration_minutes",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "offset_before_plating_minutes",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "phase",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(20)"
+        },
+        {
+          "name": "kettle",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(1)"
+        },
+        {
+          "name": "kettle_use",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "uses_raw_meat",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "BOOLEAN"
+        },
+        {
+          "name": "assignees",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": null
+      },
+      "unique": [
+        {
+          "name": "uq_school_lunch_work_schedule_task_sequence",
+          "column_names": [
+            "row_id",
+            "sequence"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": null,
+          "constrained_columns": [
+            "row_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_work_schedule_rows",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {
+            "ondelete": "CASCADE"
+          }
+        }
+      ],
+      "checks": [
+        {
+          "sqltext": "length(trim(operation)) > 0",
+          "name": "ck_school_lunch_work_schedule_task_operation"
+        },
+        {
+          "sqltext": "sequence >= 1",
+          "name": "ck_school_lunch_work_schedule_task_sequence"
+        },
+        {
+          "sqltext": "end_time > start_time",
+          "name": "ck_school_lunch_work_schedule_task_time_range"
+        },
+        {
+          "sqltext": "work_zone IN ('contaminated', 'non_contaminated', 'contaminated_meat_fish')",
+          "name": "ck_school_lunch_work_schedule_task_work_zone"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_school_lunch_work_schedule_tasks_row_id",
+          "column_names": [
+            "row_id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        }
+      ],
+      "native": [
+        [
+          "index",
+          "ix_school_lunch_work_schedule_tasks_row_id",
+          "CREATE INDEX ix_school_lunch_work_schedule_tasks_row_id ON school_lunch_work_schedule_tasks (row_id)"
+        ],
+        [
+          "index",
+          "sqlite_autoindex_school_lunch_work_schedule_tasks_1",
+          null
+        ],
+        [
+          "table",
+          "school_lunch_work_schedule_tasks",
+          "CREATE TABLE \"school_lunch_work_schedule_tasks\" (\n\tid INTEGER NOT NULL, \n\trow_id INTEGER NOT NULL, \n\tsequence INTEGER NOT NULL, \n\tstart_time TIME, \n\tend_time TIME, \n\toperation VARCHAR(500) NOT NULL, \n\twork_zone VARCHAR(32), \n\tingredient_name VARCHAR(200) NOT NULL, \n\tduration_minutes INTEGER, \n\toffset_before_plating_minutes INTEGER, \n\tphase VARCHAR(20), \n\tkettle VARCHAR(1), \n\tkettle_use INTEGER, \n\tuses_raw_meat BOOLEAN, \n\tassignees JSON, \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_school_lunch_work_schedule_task_operation CHECK (length(trim(operation)) > 0), \n\tCONSTRAINT ck_school_lunch_work_schedule_task_work_zone CHECK (work_zone IN ('contaminated', 'non_contaminated', 'contaminated_meat_fish')), \n\tCONSTRAINT ck_school_lunch_work_schedule_task_sequence CHECK (sequence >= 1), \n\tCONSTRAINT ck_school_lunch_work_schedule_task_time_range CHECK (end_time > start_time), \n\tCONSTRAINT uq_school_lunch_work_schedule_task_sequence UNIQUE (row_id, sequence), \n\tFOREIGN KEY(row_id) REFERENCES school_lunch_work_schedule_rows (id) ON DELETE CASCADE\n)"
+        ]
+      ]
+    },
+    "4665e4cc4d04620bea5ed57c1ddd61a27ec6b156e1d292a4afab4c2b5850c6a3": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "facility_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "service_date",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "DATE"
+        },
+        {
+          "name": "name",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(200)"
+        },
+        {
+          "name": "servings",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "status",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "name": "version",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "cooking_instructions",
+          "nullable": false,
+          "default": "''",
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "TEXT"
+        },
+        {
+          "name": "cooking_instruction_sources",
+          "nullable": false,
+          "default": "'[]'",
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "source_document_id",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(32)"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": null
+      },
+      "unique": [
+        {
+          "name": "uq_school_lunch_menu_identity",
+          "column_names": [
+            "facility_id",
+            "service_date",
+            "name"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": null,
+          "constrained_columns": [
+            "facility_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_facilities",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {
+            "ondelete": "RESTRICT"
+          }
+        },
+        {
+          "name": "fk_menu_source_document",
+          "constrained_columns": [
+            "source_document_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_documents",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {
+            "ondelete": "RESTRICT"
+          }
+        }
+      ],
+      "checks": [
+        {
+          "sqltext": "length(trim(name)) > 0",
+          "name": "ck_school_lunch_menu_name"
+        },
+        {
+          "sqltext": "servings > 0",
+          "name": "ck_school_lunch_menu_servings"
+        },
+        {
+          "sqltext": "version >= 1",
+          "name": "ck_school_lunch_menu_version"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_school_lunch_menu_executions_facility_id",
+          "column_names": [
+            "facility_id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        },
+        {
+          "name": "ix_school_lunch_menu_executions_service_date",
+          "column_names": [
+            "service_date"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        },
+        {
+          "name": "ix_school_lunch_menu_executions_source_document_id",
+          "column_names": [
+            "source_document_id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        }
+      ],
+      "native": [
+        [
+          "index",
+          "ix_school_lunch_menu_executions_facility_id",
+          "CREATE INDEX ix_school_lunch_menu_executions_facility_id ON school_lunch_menu_executions (facility_id)"
+        ],
+        [
+          "index",
+          "ix_school_lunch_menu_executions_service_date",
+          "CREATE INDEX ix_school_lunch_menu_executions_service_date ON school_lunch_menu_executions (service_date)"
+        ],
+        [
+          "index",
+          "ix_school_lunch_menu_executions_source_document_id",
+          "CREATE INDEX ix_school_lunch_menu_executions_source_document_id ON school_lunch_menu_executions (source_document_id)"
+        ],
+        [
+          "index",
+          "sqlite_autoindex_school_lunch_menu_executions_1",
+          null
+        ],
+        [
+          "table",
+          "school_lunch_menu_executions",
+          "CREATE TABLE \"school_lunch_menu_executions\" (\n\tid INTEGER NOT NULL, \n\tfacility_id INTEGER NOT NULL, \n\tservice_date DATE NOT NULL, \n\tname VARCHAR(200) NOT NULL, \n\tservings INTEGER NOT NULL, \n\tstatus VARCHAR(32) NOT NULL, \n\tversion INTEGER NOT NULL, \n\tcooking_instructions TEXT DEFAULT ('') NOT NULL, \n\tcooking_instruction_sources JSON DEFAULT '[]' NOT NULL, \n\tsource_document_id VARCHAR(32), \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_school_lunch_menu_servings CHECK (servings > 0), \n\tCONSTRAINT ck_school_lunch_menu_version CHECK (version >= 1), \n\tCONSTRAINT ck_school_lunch_menu_name CHECK (length(trim(name)) > 0), \n\tCONSTRAINT uq_school_lunch_menu_identity UNIQUE (facility_id, service_date, name), \n\tCONSTRAINT fk_menu_source_document FOREIGN KEY(source_document_id) REFERENCES school_lunch_documents (id) ON DELETE RESTRICT, \n\tFOREIGN KEY(facility_id) REFERENCES school_lunch_facilities (id) ON DELETE RESTRICT\n)"
+        ]
+      ]
+    },
+    "abba20be21cd137ea130f72326b30474338506eb81e1e6a9e6136f6c1f64169d": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "shared_menu_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "number",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "parent_revision_id",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "status",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(12)"
+        },
+        {
+          "name": "source_month",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(7)"
+        },
+        {
+          "name": "provenance",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "document",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "pattern_associations",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "change_note",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "TEXT"
+        },
+        {
+          "name": "created_at",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "DATETIME"
+        },
+        {
+          "name": "ingredient_count",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "step_count",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "question_count",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "unanswered_count",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": null
+      },
+      "unique": [
+        {
+          "name": "uq_shared_menu_revision_number",
+          "column_names": [
+            "shared_menu_id",
+            "number"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": null,
+          "constrained_columns": [
+            "parent_revision_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_shared_menu_revisions",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {}
+        },
+        {
+          "name": null,
+          "constrained_columns": [
+            "shared_menu_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_shared_menus",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {}
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "ix_school_lunch_shared_menu_revisions_shared_menu_id",
+          "column_names": [
+            "shared_menu_id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        },
+        {
+          "name": "ix_school_lunch_shared_menu_revisions_source_month",
+          "column_names": [
+            "source_month"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        }
+      ],
+      "native": [
+        [
+          "index",
+          "ix_school_lunch_shared_menu_revisions_shared_menu_id",
+          "CREATE INDEX ix_school_lunch_shared_menu_revisions_shared_menu_id ON school_lunch_shared_menu_revisions (shared_menu_id)"
+        ],
+        [
+          "index",
+          "ix_school_lunch_shared_menu_revisions_source_month",
+          "CREATE INDEX ix_school_lunch_shared_menu_revisions_source_month ON school_lunch_shared_menu_revisions (source_month)"
+        ],
+        [
+          "index",
+          "sqlite_autoindex_school_lunch_shared_menu_revisions_1",
+          null
+        ],
+        [
+          "table",
+          "school_lunch_shared_menu_revisions",
+          "CREATE TABLE \"school_lunch_shared_menu_revisions\" (\n\tid INTEGER NOT NULL, \n\tshared_menu_id INTEGER NOT NULL, \n\tnumber INTEGER NOT NULL, \n\tparent_revision_id INTEGER, \n\tstatus VARCHAR(12) NOT NULL, \n\tsource_month VARCHAR(7) NOT NULL, \n\tprovenance JSON NOT NULL, \n\tdocument JSON NOT NULL, \n\tpattern_associations JSON NOT NULL, \n\tchange_note TEXT NOT NULL, \n\tcreated_at DATETIME NOT NULL, \n\tingredient_count INTEGER NOT NULL, \n\tstep_count INTEGER NOT NULL, \n\tquestion_count INTEGER NOT NULL, \n\tunanswered_count INTEGER NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_shared_menu_revision_number UNIQUE (shared_menu_id, number), \n\tFOREIGN KEY(shared_menu_id) REFERENCES school_lunch_shared_menus (id), \n\tFOREIGN KEY(parent_revision_id) REFERENCES school_lunch_shared_menu_revisions (id)\n)"
+        ]
+      ]
+    },
+    "ee1fd2d1eab7f78e00c321807b05cb02ade9d7485f0eee9fd4eaa41e1cc4ee4d": {
+      "columns": [
+        {
+          "name": "kind",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(12)"
+        },
+        {
+          "name": "value",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(500)"
+        },
+        {
+          "name": "first_revision_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "kind",
+          "value"
+        ],
+        "name": null
+      },
+      "unique": [],
+      "foreign_keys": [
+        {
+          "name": null,
+          "constrained_columns": [
+            "first_revision_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_shared_menu_revisions",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {}
+        }
+      ],
+      "checks": [],
+      "indexes": [],
+      "native": [
+        [
+          "index",
+          "sqlite_autoindex_school_lunch_shared_menu_vocabulary_1",
+          null
+        ],
+        [
+          "table",
+          "school_lunch_shared_menu_vocabulary",
+          "CREATE TABLE school_lunch_shared_menu_vocabulary (\n\tkind VARCHAR(12) NOT NULL, \n\tvalue VARCHAR(500) NOT NULL, \n\tfirst_revision_id INTEGER NOT NULL, \n\tPRIMARY KEY (kind, value), \n\tFOREIGN KEY(first_revision_id) REFERENCES school_lunch_shared_menu_revisions (id)\n)"
+        ]
+      ]
+    },
+    "937f3e3ec1ff8276f8f4cfa9f9f24949d8b273c45e32bb8ae668a316c92e45c3": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "name",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(200)"
+        },
+        {
+          "name": "version",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "head_revision_id",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "name_identity",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "name": "search_name",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "TEXT"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": null
+      },
+      "unique": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "ix_school_lunch_shared_menus_name",
+          "column_names": [
+            "name"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        },
+        {
+          "name": "ix_school_lunch_shared_menus_name_identity",
+          "column_names": [
+            "name_identity"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        }
+      ],
+      "native": [
+        [
+          "index",
+          "ix_school_lunch_shared_menus_name",
+          "CREATE INDEX ix_school_lunch_shared_menus_name ON school_lunch_shared_menus (name)"
+        ],
+        [
+          "index",
+          "ix_school_lunch_shared_menus_name_identity",
+          "CREATE INDEX ix_school_lunch_shared_menus_name_identity ON school_lunch_shared_menus (name_identity)"
+        ],
+        [
+          "table",
+          "school_lunch_shared_menus",
+          "CREATE TABLE \"school_lunch_shared_menus\" (\n\tid INTEGER NOT NULL, \n\tname VARCHAR(200) NOT NULL, \n\tversion INTEGER NOT NULL, \n\thead_revision_id INTEGER, \n\tname_identity VARCHAR(64) NOT NULL, \n\tsearch_name TEXT NOT NULL, \n\tPRIMARY KEY (id)\n)"
+        ]
+      ]
+    },
+    "03842f98b202bf0501f3ed65f04c1c0c03cb2dbae5c7db7b95d0785869b402b8": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "role",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "account",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "status",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "created_at",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "DATETIME"
+        },
+        {
+          "name": "account_lookup",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": null
+      },
+      "unique": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "ix_users_normalized_account",
+          "column_names": [
+            "account_lookup"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        }
+      ],
+      "native": [
+        [
+          "index",
+          "ix_users_normalized_account",
+          "CREATE INDEX ix_users_normalized_account ON users (account_lookup)"
+        ],
+        [
+          "index",
+          "sqlite_autoindex_users_1",
+          null
+        ],
+        [
+          "table",
+          "users",
+          "CREATE TABLE \"users\" (\n\tid VARCHAR NOT NULL, \n\trole VARCHAR NOT NULL, \n\taccount VARCHAR NOT NULL, \n\tstatus VARCHAR, \n\tcreated_at DATETIME, \n\taccount_lookup VARCHAR NOT NULL, \n\tPRIMARY KEY (id)\n)"
+        ]
+      ]
+    },
+    "bfeef2e2775fbaccc1a6cc203724863c7769e4665f40bffcde390c9739e865fc": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "name": "facility_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "target_month",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(7)"
+        },
+        {
+          "name": "filename",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(300)"
+        },
+        {
+          "name": "content",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "BLOB"
+        },
+        {
+          "name": "sha256",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "name": "extracted_json",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "ocr_job_id",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "created_at",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "DATETIME"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": null
+      },
+      "unique": [
+        {
+          "name": null,
+          "column_names": [
+            "ocr_job_id"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": null,
+          "constrained_columns": [
+            "facility_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_facilities",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {
+            "ondelete": "RESTRICT"
+          }
+        },
+        {
+          "name": null,
+          "constrained_columns": [
+            "ocr_job_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "implementation_price_ocr_jobs",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {
+            "ondelete": "RESTRICT"
+          }
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "ix_school_documents_history",
+          "column_names": [
+            "facility_id",
+            "target_month",
+            "created_at",
+            "id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        },
+        {
+          "name": "ix_school_lunch_documents_facility_id",
+          "column_names": [
+            "facility_id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        }
+      ],
+      "native": [
+        [
+          "index",
+          "ix_school_documents_history",
+          "CREATE INDEX ix_school_documents_history ON school_lunch_documents (facility_id, target_month, created_at, id)"
+        ],
+        [
+          "index",
+          "ix_school_lunch_documents_facility_id",
+          "CREATE INDEX ix_school_lunch_documents_facility_id ON school_lunch_documents (facility_id)"
+        ],
+        [
+          "index",
+          "sqlite_autoindex_school_lunch_documents_1",
+          null
+        ],
+        [
+          "index",
+          "sqlite_autoindex_school_lunch_documents_2",
+          null
+        ],
+        [
+          "table",
+          "school_lunch_documents",
+          "CREATE TABLE school_lunch_documents (\n\tid VARCHAR(32) NOT NULL, \n\tfacility_id INTEGER NOT NULL, \n\ttarget_month VARCHAR(7) NOT NULL, \n\tfilename VARCHAR(300) NOT NULL, \n\tcontent BLOB NOT NULL, \n\tsha256 VARCHAR(64) NOT NULL, \n\textracted_json JSON, \n\tocr_job_id VARCHAR, \n\tcreated_at DATETIME NOT NULL, \n\tPRIMARY KEY (id), \n\tFOREIGN KEY(facility_id) REFERENCES school_lunch_facilities (id) ON DELETE RESTRICT, \n\tUNIQUE (ocr_job_id), \n\tFOREIGN KEY(ocr_job_id) REFERENCES implementation_price_ocr_jobs (id) ON DELETE RESTRICT\n)"
+        ]
+      ]
+    },
+    "384146f30b399a2c77610537f51c64d283d23c92da6842192c0a3bb1eb4c1398": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "diagram_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "diagram_version",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "layout_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "layout_version",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "source_versions",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "filename",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(300)"
+        },
+        {
+          "name": "source_pdf",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "BLOB"
+        },
+        {
+          "name": "source_sha256",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "name": "page",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "image",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "BLOB"
+        },
+        {
+          "name": "image_sha256",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "name": "version",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "status",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(30)"
+        },
+        {
+          "name": "settings",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "candidates",
+          "nullable": false,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "confirmation",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "artifact_source_id",
+          "nullable": true,
+          "default": null,
+          "autoincrement": null,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": null
+      },
+      "unique": [],
+      "foreign_keys": [
+        {
+          "name": "fk_route_source_artifact_source",
+          "constrained_columns": [
+            "artifact_source_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_route_source_sessions",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {}
+        },
+        {
+          "name": null,
+          "constrained_columns": [
+            "diagram_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_route_diagrams",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {}
+        },
+        {
+          "name": null,
+          "constrained_columns": [
+            "layout_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_kitchen_layouts",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {}
+        }
+      ],
+      "checks": [
+        {
+          "sqltext": "(artifact_source_id IS NULL AND source_pdf IS NOT NULL AND image IS NOT NULL) OR (artifact_source_id IS NOT NULL AND artifact_source_id <> id AND source_pdf IS NULL AND image IS NULL)",
+          "name": "ck_route_source_artifact_storage"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_school_lunch_route_source_sessions_artifact_source_id",
+          "column_names": [
+            "artifact_source_id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        },
+        {
+          "name": "ix_route_sources_diagram_id",
+          "column_names": [
+            "diagram_id",
+            "id"
+          ],
+          "unique": 0,
+          "dialect_options": {}
+        }
+      ],
+      "native": [
+        [
+          "index",
+          "ix_route_sources_diagram_id",
+          "CREATE INDEX ix_route_sources_diagram_id ON school_lunch_route_source_sessions (diagram_id, id)"
+        ],
+        [
+          "index",
+          "ix_school_lunch_route_source_sessions_artifact_source_id",
+          "CREATE INDEX ix_school_lunch_route_source_sessions_artifact_source_id ON school_lunch_route_source_sessions (artifact_source_id)"
+        ],
+        [
+          "table",
+          "school_lunch_route_source_sessions",
+          "CREATE TABLE \"school_lunch_route_source_sessions\" (\n\tid INTEGER NOT NULL, \n\tdiagram_id INTEGER NOT NULL, \n\tdiagram_version INTEGER NOT NULL, \n\tlayout_id INTEGER NOT NULL, \n\tlayout_version INTEGER NOT NULL, \n\tsource_versions JSON NOT NULL, \n\tfilename VARCHAR(300) NOT NULL, \n\tsource_pdf BLOB, \n\tsource_sha256 VARCHAR(64) NOT NULL, \n\tpage INTEGER NOT NULL, \n\timage BLOB, \n\timage_sha256 VARCHAR(64) NOT NULL, \n\tversion INTEGER NOT NULL, \n\tstatus VARCHAR(30) NOT NULL, \n\tsettings JSON NOT NULL, \n\tcandidates JSON NOT NULL, \n\tconfirmation JSON, \n\tartifact_source_id INTEGER, \n\tPRIMARY KEY (id), \n\tCONSTRAINT fk_route_source_artifact_source FOREIGN KEY(artifact_source_id) REFERENCES school_lunch_route_source_sessions (id), \n\tCONSTRAINT ck_route_source_artifact_storage CHECK ((artifact_source_id IS NULL AND source_pdf IS NOT NULL AND image IS NOT NULL) OR (artifact_source_id IS NOT NULL AND artifact_source_id <> id AND source_pdf IS NULL AND image IS NULL)), \n\tFOREIGN KEY(layout_id) REFERENCES school_lunch_kitchen_layouts (id), \n\tFOREIGN KEY(diagram_id) REFERENCES school_lunch_route_diagrams (id)\n)"
+        ]
+      ]
+    },
+    "ca4fecd82bfa98051cb6b47cd63e755866c0270fbda8aab7f46af7c661ba01c2": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": "nextval('school_lunch_shared_menu_revisions_id_seq'::regclass)",
+          "autoincrement": true,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "shared_menu_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "number",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "parent_revision_id",
+          "nullable": true,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "status",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(12)"
+        },
+        {
+          "name": "source_month",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(7)"
+        },
+        {
+          "name": "provenance",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "document",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "pattern_associations",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "change_note",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "TEXT"
+        },
+        {
+          "name": "created_at",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "TIMESTAMP WITH TIME ZONE"
+        },
+        {
+          "name": "ingredient_count",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "step_count",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "question_count",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "unanswered_count",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": "school_lunch_shared_menu_revisions_pkey",
+        "comment": null,
+        "dialect_options": {
+          "postgresql_include": []
+        }
+      },
+      "unique": [
+        {
+          "column_names": [
+            "shared_menu_id",
+            "number"
+          ],
+          "name": "uq_shared_menu_revision_number",
+          "comment": null,
+          "dialect_options": {
+            "postgresql_include": [],
+            "postgresql_nulls_not_distinct": false
+          }
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "school_lunch_shared_menu_revisions_parent_revision_id_fkey",
+          "constrained_columns": [
+            "parent_revision_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_shared_menu_revisions",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {},
+          "comment": null
+        },
+        {
+          "name": "school_lunch_shared_menu_revisions_shared_menu_id_fkey",
+          "constrained_columns": [
+            "shared_menu_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_shared_menus",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {},
+          "comment": null
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "uq_shared_menu_revision_number",
+          "unique": true,
+          "column_names": [
+            "shared_menu_id",
+            "number"
+          ],
+          "duplicates_constraint": "uq_shared_menu_revision_number",
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        },
+        {
+          "name": "ix_school_lunch_shared_menu_revisions_shared_menu_id",
+          "unique": false,
+          "column_names": [
+            "shared_menu_id"
+          ],
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        },
+        {
+          "name": "ix_school_lunch_shared_menu_revisions_source_month",
+          "unique": false,
+          "column_names": [
+            "source_month"
+          ],
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        }
+      ],
+      "native_indexes": [
+        [
+          "ix_school_lunch_shared_menu_revisions_shared_menu_id",
+          "CREATE INDEX ix_school_lunch_shared_menu_revisions_shared_menu_id ON public.school_lunch_shared_menu_revisions USING btree (shared_menu_id)"
+        ],
+        [
+          "ix_school_lunch_shared_menu_revisions_source_month",
+          "CREATE INDEX ix_school_lunch_shared_menu_revisions_source_month ON public.school_lunch_shared_menu_revisions USING btree (source_month)"
+        ],
+        [
+          "school_lunch_shared_menu_revisions_pkey",
+          "CREATE UNIQUE INDEX school_lunch_shared_menu_revisions_pkey ON public.school_lunch_shared_menu_revisions USING btree (id)"
+        ],
+        [
+          "uq_shared_menu_revision_number",
+          "CREATE UNIQUE INDEX uq_shared_menu_revision_number ON public.school_lunch_shared_menu_revisions USING btree (shared_menu_id, number)"
+        ]
+      ],
+      "native_columns": [
+        [
+          "id",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "shared_menu_id",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "number",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "parent_revision_id",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "status",
+          "character varying(12)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "source_month",
+          "character varying(7)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "provenance",
+          "json",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "document",
+          "json",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "pattern_associations",
+          "json",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "change_note",
+          "text",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "created_at",
+          "timestamp with time zone",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "ingredient_count",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "step_count",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "question_count",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "unanswered_count",
+          "integer",
+          "-",
+          "",
+          ""
+        ]
+      ],
+      "native_constraints": [
+        [
+          "school_lunch_shared_menu_revisions_parent_revision_id_fkey",
+          "f",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "FOREIGN KEY (parent_revision_id) REFERENCES school_lunch_shared_menu_revisions(id)"
+        ],
+        [
+          "school_lunch_shared_menu_revisions_pkey",
+          "p",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "PRIMARY KEY (id)"
+        ],
+        [
+          "school_lunch_shared_menu_revisions_shared_menu_id_fkey",
+          "f",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "FOREIGN KEY (shared_menu_id) REFERENCES school_lunch_shared_menus(id)"
+        ],
+        [
+          "uq_shared_menu_revision_number",
+          "u",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "UNIQUE (shared_menu_id, number)"
+        ]
+      ]
+    },
+    "f5cc175a90f6b8ab9ee144da4585c599705f603f3476a4bf8665e8b36feec337": {
+      "columns": [
+        {
+          "name": "kind",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(12)"
+        },
+        {
+          "name": "value",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(500)"
+        },
+        {
+          "name": "first_revision_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "kind",
+          "value"
+        ],
+        "name": "school_lunch_shared_menu_vocabulary_pkey",
+        "comment": null,
+        "dialect_options": {
+          "postgresql_include": []
+        }
+      },
+      "unique": [],
+      "foreign_keys": [
+        {
+          "name": "school_lunch_shared_menu_vocabulary_first_revision_id_fkey",
+          "constrained_columns": [
+            "first_revision_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_shared_menu_revisions",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {},
+          "comment": null
+        }
+      ],
+      "checks": [],
+      "indexes": [],
+      "native_indexes": [
+        [
+          "school_lunch_shared_menu_vocabulary_pkey",
+          "CREATE UNIQUE INDEX school_lunch_shared_menu_vocabulary_pkey ON public.school_lunch_shared_menu_vocabulary USING btree (kind, value)"
+        ]
+      ],
+      "native_columns": [
+        [
+          "kind",
+          "character varying(12)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "value",
+          "character varying(500)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "first_revision_id",
+          "integer",
+          "-",
+          "",
+          ""
+        ]
+      ],
+      "native_constraints": [
+        [
+          "school_lunch_shared_menu_vocabulary_first_revision_id_fkey",
+          "f",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "FOREIGN KEY (first_revision_id) REFERENCES school_lunch_shared_menu_revisions(id)"
+        ],
+        [
+          "school_lunch_shared_menu_vocabulary_pkey",
+          "p",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "PRIMARY KEY (kind, value)"
+        ]
+      ]
+    },
+    "e263afbe04e993b0c5708fe670e91b16b01186fb1ead51ed3f2b376b3dd92505": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": "nextval('school_lunch_shared_menus_id_seq'::regclass)",
+          "autoincrement": true,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "name",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(200)"
+        },
+        {
+          "name": "version",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "head_revision_id",
+          "nullable": true,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "name_identity",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "name": "search_name",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "TEXT"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": "school_lunch_shared_menus_pkey",
+        "comment": null,
+        "dialect_options": {
+          "postgresql_include": []
+        }
+      },
+      "unique": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "ix_school_lunch_shared_menus_name",
+          "unique": false,
+          "column_names": [
+            "name"
+          ],
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        },
+        {
+          "name": "ix_school_lunch_shared_menus_name_identity",
+          "unique": false,
+          "column_names": [
+            "name_identity"
+          ],
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        }
+      ],
+      "native_indexes": [
+        [
+          "ix_school_lunch_shared_menus_name",
+          "CREATE INDEX ix_school_lunch_shared_menus_name ON public.school_lunch_shared_menus USING btree (name)"
+        ],
+        [
+          "ix_school_lunch_shared_menus_name_identity",
+          "CREATE INDEX ix_school_lunch_shared_menus_name_identity ON public.school_lunch_shared_menus USING btree (name_identity)"
+        ],
+        [
+          "school_lunch_shared_menus_pkey",
+          "CREATE UNIQUE INDEX school_lunch_shared_menus_pkey ON public.school_lunch_shared_menus USING btree (id)"
+        ]
+      ],
+      "native_columns": [
+        [
+          "id",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "name",
+          "character varying(200)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "version",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "head_revision_id",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "name_identity",
+          "character varying(64)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "search_name",
+          "text",
+          "\"default\"",
+          "",
+          ""
+        ]
+      ],
+      "native_constraints": [
+        [
+          "school_lunch_shared_menus_pkey",
+          "p",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "PRIMARY KEY (id)"
+        ]
+      ]
+    },
+    "518d26cd7d06ee2e5bfd90b15edbdf12b8fdc37acb5d79488a4d2e9e8c08768e": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "role",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "account",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "status",
+          "nullable": true,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "created_at",
+          "nullable": true,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "TIMESTAMP WITHOUT TIME ZONE"
+        },
+        {
+          "name": "account_lookup",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": "users_pkey",
+        "comment": null,
+        "dialect_options": {
+          "postgresql_include": []
+        }
+      },
+      "unique": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "ix_users_normalized_account",
+          "unique": false,
+          "column_names": [
+            "account_lookup"
+          ],
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        }
+      ],
+      "native_indexes": [
+        [
+          "ix_users_normalized_account",
+          "CREATE INDEX ix_users_normalized_account ON public.users USING btree (account_lookup)"
+        ],
+        [
+          "users_pkey",
+          "CREATE UNIQUE INDEX users_pkey ON public.users USING btree (id)"
+        ]
+      ],
+      "native_columns": [
+        [
+          "id",
+          "character varying",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "role",
+          "character varying",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "account",
+          "character varying",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "status",
+          "character varying",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "created_at",
+          "timestamp without time zone",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "account_lookup",
+          "character varying",
+          "\"default\"",
+          "",
+          ""
+        ]
+      ],
+      "native_constraints": [
+        [
+          "users_pkey",
+          "p",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "PRIMARY KEY (id)"
+        ]
+      ]
+    },
+    "d70301a013928f3aaada040ee9c744c0794e575ff6dd0caede34edfb20feb4e3": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(32)"
+        },
+        {
+          "name": "facility_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "target_month",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(7)"
+        },
+        {
+          "name": "filename",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(300)"
+        },
+        {
+          "name": "content",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "BYTEA"
+        },
+        {
+          "name": "sha256",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "name": "extracted_json",
+          "nullable": true,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "ocr_job_id",
+          "nullable": true,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR"
+        },
+        {
+          "name": "created_at",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "TIMESTAMP WITHOUT TIME ZONE"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": "school_lunch_documents_pkey",
+        "comment": null,
+        "dialect_options": {
+          "postgresql_include": []
+        }
+      },
+      "unique": [
+        {
+          "column_names": [
+            "ocr_job_id"
+          ],
+          "name": "school_lunch_documents_ocr_job_id_key",
+          "comment": null,
+          "dialect_options": {
+            "postgresql_include": [],
+            "postgresql_nulls_not_distinct": false
+          }
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "school_lunch_documents_facility_id_fkey",
+          "constrained_columns": [
+            "facility_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_facilities",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {
+            "ondelete": "RESTRICT"
+          },
+          "comment": null
+        },
+        {
+          "name": "school_lunch_documents_ocr_job_id_fkey",
+          "constrained_columns": [
+            "ocr_job_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "implementation_price_ocr_jobs",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {
+            "ondelete": "RESTRICT"
+          },
+          "comment": null
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "ix_school_documents_history",
+          "unique": false,
+          "column_names": [
+            "facility_id",
+            "target_month",
+            "created_at",
+            "id"
+          ],
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        },
+        {
+          "name": "ix_school_lunch_documents_facility_id",
+          "unique": false,
+          "column_names": [
+            "facility_id"
+          ],
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        },
+        {
+          "name": "school_lunch_documents_ocr_job_id_key",
+          "unique": true,
+          "column_names": [
+            "ocr_job_id"
+          ],
+          "duplicates_constraint": "school_lunch_documents_ocr_job_id_key",
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        }
+      ],
+      "native_indexes": [
+        [
+          "ix_school_documents_history",
+          "CREATE INDEX ix_school_documents_history ON public.school_lunch_documents USING btree (facility_id, target_month, created_at, id)"
+        ],
+        [
+          "ix_school_lunch_documents_facility_id",
+          "CREATE INDEX ix_school_lunch_documents_facility_id ON public.school_lunch_documents USING btree (facility_id)"
+        ],
+        [
+          "school_lunch_documents_ocr_job_id_key",
+          "CREATE UNIQUE INDEX school_lunch_documents_ocr_job_id_key ON public.school_lunch_documents USING btree (ocr_job_id)"
+        ],
+        [
+          "school_lunch_documents_pkey",
+          "CREATE UNIQUE INDEX school_lunch_documents_pkey ON public.school_lunch_documents USING btree (id)"
+        ]
+      ],
+      "native_columns": [
+        [
+          "id",
+          "character varying(32)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "facility_id",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "target_month",
+          "character varying(7)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "filename",
+          "character varying(300)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "content",
+          "bytea",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "sha256",
+          "character varying(64)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "extracted_json",
+          "json",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "ocr_job_id",
+          "character varying",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "created_at",
+          "timestamp without time zone",
+          "-",
+          "",
+          ""
+        ]
+      ],
+      "native_constraints": [
+        [
+          "school_lunch_documents_facility_id_fkey",
+          "f",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "FOREIGN KEY (facility_id) REFERENCES school_lunch_facilities(id) ON DELETE RESTRICT"
+        ],
+        [
+          "school_lunch_documents_ocr_job_id_fkey",
+          "f",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "FOREIGN KEY (ocr_job_id) REFERENCES implementation_price_ocr_jobs(id) ON DELETE RESTRICT"
+        ],
+        [
+          "school_lunch_documents_ocr_job_id_key",
+          "u",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "UNIQUE (ocr_job_id)"
+        ],
+        [
+          "school_lunch_documents_pkey",
+          "p",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "PRIMARY KEY (id)"
+        ]
+      ]
+    },
+    "371761e39c2a1641ada5ba17315e26a68596c0b8e338b11236284c3dbbe33118": {
+      "columns": [
+        {
+          "name": "id",
+          "nullable": false,
+          "default": "nextval('school_lunch_route_source_sessions_id_seq'::regclass)",
+          "autoincrement": true,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "diagram_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "diagram_version",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "layout_id",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "layout_version",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "source_versions",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "filename",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(300)"
+        },
+        {
+          "name": "source_pdf",
+          "nullable": true,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "BYTEA"
+        },
+        {
+          "name": "source_sha256",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "name": "page",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "image",
+          "nullable": true,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "BYTEA"
+        },
+        {
+          "name": "image_sha256",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(64)"
+        },
+        {
+          "name": "version",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        },
+        {
+          "name": "status",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "VARCHAR(30)"
+        },
+        {
+          "name": "settings",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "candidates",
+          "nullable": false,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "confirmation",
+          "nullable": true,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "JSON"
+        },
+        {
+          "name": "artifact_source_id",
+          "nullable": true,
+          "default": null,
+          "autoincrement": false,
+          "computed": null,
+          "identity": null,
+          "type": "INTEGER"
+        }
+      ],
+      "pk": {
+        "constrained_columns": [
+          "id"
+        ],
+        "name": "school_lunch_route_source_sessions_pkey",
+        "comment": null,
+        "dialect_options": {
+          "postgresql_include": []
+        }
+      },
+      "unique": [],
+      "foreign_keys": [
+        {
+          "name": "fk_route_source_artifact_source",
+          "constrained_columns": [
+            "artifact_source_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_route_source_sessions",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {},
+          "comment": null
+        },
+        {
+          "name": "school_lunch_route_source_sessions_diagram_id_fkey",
+          "constrained_columns": [
+            "diagram_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_route_diagrams",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {},
+          "comment": null
+        },
+        {
+          "name": "school_lunch_route_source_sessions_layout_id_fkey",
+          "constrained_columns": [
+            "layout_id"
+          ],
+          "referred_schema": null,
+          "referred_table": "school_lunch_kitchen_layouts",
+          "referred_columns": [
+            "id"
+          ],
+          "options": {},
+          "comment": null
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_route_source_artifact_storage",
+          "sqltext": "artifact_source_id IS NULL AND source_pdf IS NOT NULL AND image IS NOT NULL OR artifact_source_id IS NOT NULL AND artifact_source_id <> id AND source_pdf IS NULL AND image IS NULL",
+          "comment": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_school_lunch_route_source_sessions_artifact_source_id",
+          "unique": false,
+          "column_names": [
+            "artifact_source_id"
+          ],
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        },
+        {
+          "name": "ix_route_sources_diagram_id",
+          "unique": false,
+          "column_names": [
+            "diagram_id",
+            "id"
+          ],
+          "include_columns": [],
+          "dialect_options": {
+            "postgresql_include": []
+          }
+        }
+      ],
+      "native_indexes": [
+        [
+          "ix_route_sources_diagram_id",
+          "CREATE INDEX ix_route_sources_diagram_id ON public.school_lunch_route_source_sessions USING btree (diagram_id, id)"
+        ],
+        [
+          "ix_school_lunch_route_source_sessions_artifact_source_id",
+          "CREATE INDEX ix_school_lunch_route_source_sessions_artifact_source_id ON public.school_lunch_route_source_sessions USING btree (artifact_source_id)"
+        ],
+        [
+          "school_lunch_route_source_sessions_pkey",
+          "CREATE UNIQUE INDEX school_lunch_route_source_sessions_pkey ON public.school_lunch_route_source_sessions USING btree (id)"
+        ]
+      ],
+      "native_columns": [
+        [
+          "id",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "diagram_id",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "diagram_version",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "layout_id",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "layout_version",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "source_versions",
+          "json",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "filename",
+          "character varying(300)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "source_pdf",
+          "bytea",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "source_sha256",
+          "character varying(64)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "page",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "image",
+          "bytea",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "image_sha256",
+          "character varying(64)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "version",
+          "integer",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "status",
+          "character varying(30)",
+          "\"default\"",
+          "",
+          ""
+        ],
+        [
+          "settings",
+          "json",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "candidates",
+          "json",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "confirmation",
+          "json",
+          "-",
+          "",
+          ""
+        ],
+        [
+          "artifact_source_id",
+          "integer",
+          "-",
+          "",
+          ""
+        ]
+      ],
+      "native_constraints": [
+        [
+          "ck_route_source_artifact_storage",
+          "c",
+          true,
+          false,
+          false,
+          true,
+          0,
+          false,
+          "CHECK (artifact_source_id IS NULL AND source_pdf IS NOT NULL AND image IS NOT NULL OR artifact_source_id IS NOT NULL AND artifact_source_id <> id AND source_pdf IS NULL AND image IS NULL)"
+        ],
+        [
+          "fk_route_source_artifact_source",
+          "f",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "FOREIGN KEY (artifact_source_id) REFERENCES school_lunch_route_source_sessions(id)"
+        ],
+        [
+          "school_lunch_route_source_sessions_diagram_id_fkey",
+          "f",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "FOREIGN KEY (diagram_id) REFERENCES school_lunch_route_diagrams(id)"
+        ],
+        [
+          "school_lunch_route_source_sessions_layout_id_fkey",
+          "f",
+          true,
+          false,
+          false,
+          true,
+          0,
+          true,
+          "FOREIGN KEY (layout_id) REFERENCES school_lunch_kitchen_layouts(id)"
+        ],
+        [
+          "school_lunch_route_source_sessions_pkey",
           "p",
           true,
           false,

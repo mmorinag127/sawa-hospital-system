@@ -1,8 +1,8 @@
 """Read persisted generation records, never materialize or repair outputs."""
 from datetime import datetime, timezone
 
-from sqlalchemy import select, func
-from sqlalchemy.orm import Session
+from sqlalchemy import select, func, or_, and_
+from sqlalchemy.orm import Session, load_only
 
 from src.models.order import Order
 from src.models.order_output_artifact import OrderOutputBundle
@@ -30,7 +30,8 @@ def _meta_reference(actions):
 
 
 def list_output_history(session: Session, *, order_id: str, expected_workflow_revision: int,
-                        page: int, limit: int) -> dict:
+                        page: int, limit: int, before_id: str | None = None,
+                        validate_records: bool = True, record_id: str | None = None) -> dict:
     if session.new or session.dirty or session.deleted:
         raise ValueError("output_history_clean_read_session_required")
     if not isinstance(order_id, str) or not order_id.strip() or order_id != order_id.strip():
@@ -60,19 +61,41 @@ def list_output_history(session: Session, *, order_id: str, expected_workflow_re
         if current.get("template_version_id") != workflow.template_version_id:
             raise ValueError("output_history_current_template_mismatch")
         total = session.scalar(select(func.count()).select_from(OrderOutputBundle).where(OrderOutputBundle.order_id == order_id))
-        records = session.scalars(select(OrderOutputBundle).where(OrderOutputBundle.order_id == order_id)
-                                  .order_by(OrderOutputBundle.created_at.desc(), OrderOutputBundle.id.desc())
-                                  .offset((page - 1) * limit).limit(limit)).all()
+        statement = select(OrderOutputBundle).where(OrderOutputBundle.order_id == order_id)
+        if not validate_records:
+            statement = statement.options(load_only(OrderOutputBundle.id, OrderOutputBundle.order_id,
+                OrderOutputBundle.source_saved_sheet_id, OrderOutputBundle.source_bagging_result_id,
+                OrderOutputBundle.template_version_id, OrderOutputBundle.created_at))
+        if record_id is not None:
+            if not _identity(record_id) or before_id is not None or page != 1:
+                raise ValueError("output_history_record_request_invalid")
+            statement = statement.where(OrderOutputBundle.id == record_id)
+        elif before_id is not None:
+            cursor = session.execute(select(OrderOutputBundle.id, OrderOutputBundle.created_at).where(
+                OrderOutputBundle.order_id == order_id, OrderOutputBundle.id == before_id,
+            )).first()
+            if cursor is None:
+                raise ValueError("output_history_cursor_invalid")
+            if cursor.created_at is None:
+                statement = statement.where(OrderOutputBundle.created_at.is_(None), OrderOutputBundle.id < cursor.id)
+            else:
+                statement = statement.where(or_(OrderOutputBundle.created_at < cursor.created_at,
+                    OrderOutputBundle.created_at.is_(None),
+                    and_(OrderOutputBundle.created_at == cursor.created_at, OrderOutputBundle.id < cursor.id)))
+        elif page > 1:
+            raise ValueError("output_history_cursor_required")
+        records = session.scalars(statement.order_by(OrderOutputBundle.created_at.desc().nullslast(), OrderOutputBundle.id.desc())
+                                  .limit(limit + 1)).all()
         entries = []
-        for record in records:
+        for record in records[:limit]:
             if record is None or any(not _identity(getattr(record, field))
                                      for field in ("id", "order_id", "source_saved_sheet_id", "source_bagging_result_id")):
                 raise ValueError("output_history_metadata_invalid")
             if record.template_version_id is not None and not _identity(record.template_version_id):
                 raise ValueError("output_history_metadata_invalid")
             reasons = []
-            payload = load_output_bundle_payload(session, record.id, expected_order_id=order_id)
-            if payload is None:
+            payload = load_output_bundle_payload(session, record.id, expected_order_id=order_id) if validate_records else None
+            if validate_records and payload is None:
                 reasons.append("output_bundle_artifact_invalid")
             created_at = None
             if isinstance(record.created_at, datetime):
@@ -90,7 +113,7 @@ def list_output_history(session: Session, *, order_id: str, expected_workflow_re
                 "source_bagging_result_id": record.source_bagging_result_id,
                 "template_version_id": record.template_version_id, "created_at": created_at,
                 "current": record.id == current_id,
-                "validation": "blocked" if reasons else "validated", "blocked_reasons": reasons,
+                "validation": "blocked" if reasons else "validated" if validate_records else "not_loaded", "blocked_reasons": reasons,
             })
         # A concurrent writer must not make the page look like the captured revision.
         observed = session.execute(select(OrderWorkflowState.revision, OrderWorkflowState.secondary_actions_json)
@@ -104,4 +127,5 @@ def list_output_history(session: Session, *, order_id: str, expected_workflow_re
             raise ValueError("output_history_current_artifact_invalid")
         return {"order_id": order_id, "workflow_revision": expected_workflow_revision,
                 "current_output_bundle_id": current_id, "page": page, "limit": limit,
-                "total": total, "entries": entries}
+                "total": total, "entries": entries,
+                "next_before_id": records[limit-1].id if len(records) > limit else None}

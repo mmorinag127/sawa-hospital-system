@@ -2,7 +2,7 @@
 from copy import deepcopy
 from types import SimpleNamespace
 
-from sqlalchemy import JSON, case, column, func, literal, or_, select, true
+from sqlalchemy import JSON, case, cast, column, func, literal, or_, select, true, type_coerce
 
 from src.db import retain_read_models, session_scope
 from src.models.ocr_job import OcrJob
@@ -14,6 +14,7 @@ from src.models.order_confirmed_snapshot import OrderConfirmedSnapshot
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.models.order_sheet_draft import OrderSheetDraft
 from src.models.order_version import OrderVersion
+from src.models.ocr_display_projection_v1 import JOB_KEYS, VERSION_KEYS
 from src.services import order_workflow_v2_service as workflow
 from src.services import order_output_artifact_service
 from src.services.ocr_history_read import read_history_summary
@@ -90,19 +91,16 @@ def _reference_error(session, order, state, meta, *, reads=None, include_overlay
     return None
 
 
-_JOB_KEYS = ("workflow_attempt_id", "workflow_completion_revision", "ocr_started_at", "run_started_at", "ocr_finished_at",
-            "run_finished_at", "stage_updated_at", "ocr_elapsed_seconds", "elapsed_seconds",
-            "processing_stage", "result_state", "progress_step", "progress_total", "progress_label",
-            "error", "error_detail", "error_user_message", "recovery_action", "evidence_run_id", "rerun_terminal_receipt",
-            "auto_recovery_count", "next_recovery_at", "selected_pdf_receipt")
-_VERSION_KEYS = tuple(item.key for item in OrderVersion.__table__.columns if item.key != "line_snapshot")
+_JOB_KEYS = JOB_KEYS
+_VERSION_KEYS = VERSION_KEYS
 
 
 def read_recorded_job_values(session, identities):
     if not identities:
         return {}
     keys = _JOB_KEYS
-    metrics = OcrJob.metrics
+    metrics = (cast(OcrJob.display_read_json, JSON) if session.get_bind().dialect.name == "postgresql"
+               else type_coerce(OcrJob.display_read_json, JSON))
     fields = [
         OcrJob.id, OcrJob.order_id, OcrJob.order_document_id, OcrJob.uploaded_pdf_id,
         OcrJob.input_artifact_digest, OcrJob.template_version_id, OcrJob.status,
@@ -132,7 +130,7 @@ def read_recorded_job_values(session, identities):
         version = case((or_(projected.c.workflow_attempt_id.is_(None),
             func.json_typeof(projected.c.workflow_attempt_id) == "null"), native_fields.c.selected_version_input),
             else_=projected.c.selected_version_input)
-        version_kind = func.json_typeof(version)
+        version_kind = metrics["selected_version_kind"].as_string()
         version_fields = func.json_to_record(case((version_kind == "object", version),
             else_=literal({}, type_=JSON))).table_valued(
                 *(column(key, JSON) for key in _VERSION_KEYS)).render_derived(with_types=True).lateral("display_version")
@@ -153,7 +151,7 @@ def read_recorded_job_values(session, identities):
         native_pdf = native["selected_pdf_receipt"]
         version = case((metrics["workflow_attempt_id"].as_string().is_(None), native["selected_version_input"]),
             else_=metrics["selected_version_input"])
-        version_kind = func.json_type(version)
+        version_kind = metrics["selected_version_kind"].as_string()
         statement = statement.add_columns(*(version[key].label("version_" + key) for key in _VERSION_KEYS))
         generation = native["ingest_lease"]["generation"]
         native_owner = metrics["workflow_attempt_id"].as_string().is_(None)
@@ -278,16 +276,35 @@ def _job_summary(session, order, state, meta, *, _rows=None):
     return serialized, None, common
 
 
-def _candidates(session, order, state, meta, *, history=None):
-    rows = read_history_summary(session, order.id) if history is None else history
+def _candidates(session, order, state, meta, *, before_id=None, total_count=None):
     template = workflow._effective_workflow_template_version_id(state, meta) if state else None
-    visible = [row for row in rows if state is None or (template and row.template_version_id == template)]
+    before = None
+    if before_id:
+        rows = read_history_summary(session, order.id, evidence_id=before_id)
+        if not rows:
+            raise ValueError("ocr_history_cursor_invalid")
+        before = rows[0]
+    total = total_count if total_count is not None else session.scalar(select(func.count()).select_from(OrderOcrEvidenceRun).where(
+        OrderOcrEvidenceRun.order_id == order.id))
+    visible_count = total if state is None else (session.scalar(select(func.count()).select_from(
+        OrderOcrEvidenceRun).where(OrderOcrEvidenceRun.order_id == order.id,
+        OrderOcrEvidenceRun.template_version_id == template)) if template else 0)
+    rows = read_history_summary(session, order.id, limit=26, before=before,
+                               template_id=template) if state is None or template else []
+    visible = rows[:25]
+    next_before_id = visible[-1].id if len(rows) > 25 else None
+    if not before_id and state and state.evidence_run_id and all(row.id != state.evidence_run_id for row in visible):
+        selected = read_history_summary(session, order.id, evidence_id=state.evidence_run_id, template_id=template)
+        if template:
+            visible.extend(selected)
     return {
         "order_id": order.id, "workflow_state": state.state if state else "not_initialized",
         "selected_ocr_result_id": state.evidence_run_id if state else None,
         "blockers": list(state.blockers_json or []) if state else ["workflow_not_initialized"],
         "candidate_template_version_id": template,
-        "hidden_template_mismatch_result_count": len(rows) - len(visible),
+        "hidden_template_mismatch_result_count": total - visible_count,
+        "next_before_id": next_before_id,
+        "total_count": total,
         "results": [{"ocr_result_id": row.id, "order_id": row.order_id,
                      "template_version_id": row.template_version_id, "schema_version": row.schema_version,
                      "producer_version": row.producer_version, "source": row.source, "status": row.status,
@@ -298,9 +315,10 @@ def _candidates(session, order, state, meta, *, history=None):
 
 
 @workflow._measure_inspection
-def get_display(order_id, *, scope="summary"):
+def get_display(order_id, *, scope="summary", history_before_id=None, selected_document_id=None):
     if scope not in {"initial", "summary", "ocr", "sheet", "output", "inspection"}:
         return None, "workflow_display_scope_invalid"
+    overlay_reference = None
     with session_scope() as session, session.no_autoflush, retain_read_models(session):
         workflow._inspection_next("display_order")
         identity = workflow._normalize_id(order_id)
@@ -332,16 +350,15 @@ def get_display(order_id, *, scope="summary"):
                      "output" if current_state in {"sheet_saved", "bagging_ready", "bagging_confirmed", "output_review", "confirmed"} else
                      "summary")
         workflow._inspection_next("display_header")
-        history = read_history_summary(session, order.id) if scope in {"ocr", "sheet", "inspection"} else None
-        versions = [dict(row) for row in session.execute(select(
-            OrderVersion.version_no, OrderVersion.document_id, OrderVersion.message_id,
-            OrderVersion.received_at, OrderVersion.is_current,
-        ).where(OrderVersion.order_id == order.id).order_by(OrderVersion.version_no.desc(), OrderVersion.id.desc())).mappings()]
-        count = len(history) if history is not None else session.scalar(select(func.count()).select_from(
+        from src.services.order_serialization_service import order_version_metadata_page
+        version_page = order_version_metadata_page(session, order.id, selected_document_id=selected_document_id)
+        count = session.scalar(select(func.count()).select_from(
             OrderOcrEvidenceRun).where(OrderOcrEvidenceRun.order_id == order.id))
         result = {"order_id": order.id, "source": "workflow_display/v1", "display_scope": scope,
-                  "workflow": serialized, "order_header": {"id": order.id, "document_id": order.current_document_id, "versions": versions,
-                    "version_count": len(versions), "current_version": next((row for row in versions if row["is_current"]), None)},
+                  "workflow": serialized, "order_header": {"id": order.id, "document_id": order.current_document_id,
+                    "versions": version_page['items'], "version_count": version_page['total'],
+                    "versions_next_before_id": version_page['next_before_id'],
+                    "current_version": version_page['current_version']},
                   "ocr_result_count": count, "loaded_sections": [],
                   "artifact_lineage": {"selected_ocr_result_id": state.evidence_run_id if state else None,
                     "saved_sheet_id": state.draft_id if state else None,
@@ -356,7 +373,7 @@ def get_display(order_id, *, scope="summary"):
                     "edited_at": workflow._serialize_datetime(saved.edited_at), "created_at": workflow._serialize_datetime(saved.created_at)}
         if scope in {"ocr", "sheet", "inspection"}:
             workflow._inspection_next("display_candidates")
-            result["ocr_candidates"] = _candidates(session, order, state, meta, history=history)
+            result["ocr_candidates"] = _candidates(session, order, state, meta, before_id=history_before_id, total_count=count)
             result["ocr_results"] = result["ocr_candidates"]["results"]
             result["loaded_sections"].append("ocr")
         if scope in {"sheet", "inspection"}:
@@ -406,15 +423,18 @@ def get_display(order_id, *, scope="summary"):
             overlay = evidence.overlay if isinstance(evidence.overlay, dict) else {}
             uri = workflow._normalize_id(overlay.get("uri") or overlay.get("overlay_uri"))
             url = workflow._normalize_id(overlay.get("url") or overlay.get("overlay_url"))
-            if uri and not url:
-                url = workflow._normalize_id(workflow._inspection_call(
-                    "sign_url", getattr(workflow._get_order_service_module(), "_signed_url_from_uri", lambda _uri: None), uri,
-                ))
-            preview = {"overlay_url": url or None, "overlay_uri": uri or None,
-                       "overlay_status": "ready" if url else "missing",
-                       "overlay_message": None if url else "このOCR結果には表示可能なoverlay成果物がありません。"}
-            # Preview metadata is not evidence selectability or command validation.
-            result["ocr_results"] = [{**row, **preview} if row["ocr_result_id"] == evidence.id else row for row in result["ocr_results"]]
-            result["ocr_candidates"]["results"] = result["ocr_results"]
+            overlay_reference = (evidence.id, uri, url)
         workflow._inspection_next("display_session_exit")
-        return result, None
+    if overlay_reference is not None:
+        evidence_id, uri, url = overlay_reference
+        if uri and not url:
+            url = workflow._normalize_id(workflow._inspection_call(
+                "sign_url", getattr(workflow._get_order_service_module(), "_signed_url_from_uri", lambda _uri: None), uri,
+            ))
+        preview = {"overlay_url": url or None, "overlay_uri": uri or None,
+                   "overlay_status": "ready" if url else "missing",
+                   "overlay_message": None if url else "このOCR結果には表示可能なoverlay成果物がありません。"}
+        # Preview signing is outside the transaction; it does not validate commands.
+        result["ocr_results"] = [{**row, **preview} if row["ocr_result_id"] == evidence_id else row for row in result["ocr_results"]]
+        result["ocr_candidates"]["results"] = result["ocr_results"]
+    return result, None

@@ -29,7 +29,7 @@ from uuid import uuid4
 from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import select, delete, func, or_, update
 
-from src.db import session_scope
+from src.db import session_scope, current_database_uri
 from src.models.order import Order, OrderLine, OrderMenuSnapshot
 from src.models.document import OrderDocument
 from src.models.order_version import OrderVersion
@@ -4626,6 +4626,7 @@ def create_order_from_ingest(
                 _apply_system_managed_order_week_code(order, effective_week_hint)
         else:
             session.add(document)
+        session.flush([document])
         if existing and continuation_document is None:
             order = existing
             native_transition = None
@@ -4764,7 +4765,22 @@ def create_order_from_ingest(
 
 
 _orders_cache_lock = threading.Lock()
-_orders_cache: dict[str, tuple[float, list[dict]]] = {}
+_orders_cache: dict[tuple, tuple[float, list[dict]]] = {}
+
+
+def _orders_cache_key(status, include_archived, limit):
+    return (current_database_uri(), status, bool(include_archived), limit)
+
+
+def _store_orders_cache(key, orders):
+    now = time.monotonic()
+    with _orders_cache_lock:
+        for expired in [name for name, (created, _) in _orders_cache.items() if now - created >= 30]:
+            del _orders_cache[expired]
+        _orders_cache.pop(key, None)
+        _orders_cache[key] = (now, deepcopy(orders))
+        while len(_orders_cache) > 32:
+            del _orders_cache[next(iter(_orders_cache))]
 
 
 def _invalidate_orders_cache() -> None:
@@ -4783,15 +4799,15 @@ def _invalidate_current_sheet_state_after_order_lines_write(order_id: str) -> No
     order_current_state_service.delete_current_state(normalized_order_id)
 
 
-def _normalize_order_list_limit(limit: int | None) -> int | None:
+def _normalize_order_list_limit(limit: int | None) -> int:
     if limit is None:
-        return None
+        return 100
     try:
         normalized = int(limit)
     except (TypeError, ValueError):
-        return None
+        raise ValueError("order_list_limit_invalid") from None
     if normalized <= 0:
-        return None
+        raise ValueError("order_list_limit_invalid")
     return min(normalized, 1000)
 
 
@@ -4814,6 +4830,7 @@ def _normalize_order_list_cursor_id(value: str | None) -> str:
 
 def get_order_dashboard() -> dict[str, Any]:
     """Stored order facts only; execution eligibility remains in guarded reads."""
+    from src.services.order_overview_read import unresolved_upload_conditions
     counts = {key: 0 for key in ("未着", "要確認", "確定", "エラー")}
     stats = {"counts": counts, "unresolved": 0, "latestReceived": None, "total": 0}
     weeks: dict[str, dict] = {}
@@ -4836,28 +4853,29 @@ def get_order_dashboard() -> dict[str, Any]:
             stats["latestReceived"] = received_at
 
     with session_scope() as session:
-        for facility, week, status, count, received in session.execute(select(
-            Order.facility_code, Order.week_code, Order.status, func.count(Order.id), func.max(Order.received_at),
-        ).group_by(Order.facility_code, Order.week_code, Order.status)):
-            accumulate(facility, week, status, count, received)
+        from src.models.dashboard_counts_v1 import DashboardCount
+        for facility, week, status, count in session.execute(select(
+            DashboardCount.facility, DashboardCount.week, DashboardCount.status, DashboardCount.row_count,
+        )):
+            accumulate(facility, week, status, count, None)
         pending = [dict(row) for row in session.execute(select(
             Order.id, Order.facility_code.label("facility"), Order.week_code.label("week"),
             Order.status, Order.received_at,
         ).where(or_(Order.status == "要確認", Order.facility_code.is_(None), Order.facility_code == ""))
             .order_by(Order.received_at.desc().nullslast(), Order.id.desc()).limit(8)).mappings()]
+        visible_upload = unresolved_upload_conditions()
+        latest_order = session.execute(select(Order.received_at).order_by(Order.received_at.desc()).limit(1)).scalar_one_or_none()
+        latest_upload = session.execute(select(UploadedPdf.received_at).where(*visible_upload)
+            .order_by(UploadedPdf.received_at.desc()).limit(1)).scalar_one_or_none()
+        stats["latestReceived"] = max((value for value in (latest_order, latest_upload) if value is not None), default=None)
         uploads = session.execute(select(
-            UploadedPdf.id, UploadedPdf.facility_hint, UploadedPdf.week_hint, UploadedPdf.status,
-            UploadedPdf.received_at, UploadedPdf.current_document_id,
-        ).where(UploadedPdf.current_order_id.is_(None))
-            .order_by(UploadedPdf.received_at.desc(), UploadedPdf.id.desc()).limit(200)).mappings()
+            UploadedPdf.id, UploadedPdf.facility_hint, UploadedPdf.week_hint, UploadedPdf.received_at,
+        ).where(*visible_upload, or_(UploadedPdf.facility_hint.is_(None), UploadedPdf.facility_hint == ""))
+            .order_by(UploadedPdf.received_at.desc().nullslast(), UploadedPdf.id.desc()).limit(8)).mappings()
         for upload in uploads:
-            if str(upload["status"] or "").strip().lower() == "completed" and upload["current_document_id"]:
-                continue
-            accumulate(upload["facility_hint"], str(upload["week_hint"] or "").strip(), "アップロード済み", 1, upload["received_at"])
-            if not upload["facility_hint"]:
-                pending.append({"id": f"UPLOAD-{upload['id']}", "facility": upload["facility_hint"],
-                                "source_kind": "uploaded_pdf", "uploaded_pdf_id": upload["id"],
-                                "week": upload["week_hint"], "status": "アップロード済み", "received_at": upload["received_at"]})
+            pending.append({"id": f"UPLOAD-{upload['id']}", "facility": upload["facility_hint"],
+                            "source_kind": "uploaded_pdf", "uploaded_pdf_id": upload["id"],
+                            "week": upload["week_hint"], "status": "アップロード済み", "received_at": upload["received_at"]})
         pending.sort(key=_order_list_sort_key, reverse=True)
         pending = [{**row, "week": _to_sheet_month_id(row["week"])} for row in pending[:8]]
     return {"stats": stats, "weeks": [weeks[key] for key in sorted(weeks)], "week_ids": sorted(week_ids), "pending_orders": pending}
@@ -5095,8 +5113,8 @@ def list_orders(
     limit: int | None = None,
 ):
     normalized_limit = _normalize_order_list_limit(limit)
-    key = f"{status or '__all__'}|archived:{1 if include_archived else 0}|limit:{normalized_limit or 'all'}"
-    now = time.time()
+    key = _orders_cache_key(status, include_archived, normalized_limit)
+    now = time.monotonic()
     cached: list[dict] | None = None
     cached_at = 0.0
     with _orders_cache_lock:
@@ -5106,8 +5124,7 @@ def list_orders(
     if cached is not None and now - cached_at < 30:
         return deepcopy(cached)
     orders = _fetch_orders(status, include_archived=include_archived, limit=normalized_limit)
-    with _orders_cache_lock:
-        _orders_cache[key] = (time.time(), deepcopy(orders))
+    _store_orders_cache(key, orders)
     return orders
 
 
@@ -5122,7 +5139,7 @@ def list_orders_page(
     only_unassigned: bool = False,
     include_job_bindings: bool = True,
 ) -> dict[str, Any]:
-    normalized_limit = _normalize_order_list_limit(limit)
+    normalized_limit = _normalize_order_list_limit(limit) or 100
     cursor_received_at = _parse_order_list_cursor_received_at(before_received_at)
     cursor_id = _normalize_order_list_cursor_id(before_id)
     if cursor_received_at is None and cursor_id:
@@ -5157,9 +5174,8 @@ def refresh_orders_cache(
 ) -> int:
     normalized_limit = _normalize_order_list_limit(limit)
     orders = _fetch_orders(status, include_archived=include_archived, limit=normalized_limit)
-    key = f"{status or '__all__'}|archived:{1 if include_archived else 0}|limit:{normalized_limit or 'all'}"
-    with _orders_cache_lock:
-        _orders_cache[key] = (time.time(), deepcopy(orders))
+    key = _orders_cache_key(status, include_archived, normalized_limit)
+    _store_orders_cache(key, orders)
     return len(orders)
 
 
@@ -7049,12 +7065,14 @@ def _resolve_order_current_sheet_week_value(order: Order | dict[str, Any] | None
     return str(selection.get("resolved_week_value") or "").strip() or None
 
 
-def get_order_by_id(order_id: str, *, allow_unresolved_menu_amount: bool = False, read_session: Any = None):
+def get_order_by_id(order_id: str, *, allow_unresolved_menu_amount: bool = False, read_session: Any = None,
+                    include_navigation: bool = True):
     with (nullcontext(read_session) if read_session is not None else session_scope()) as session:
         order = session.get(Order, order_id)
         if not order:
             return None
-        payload = serialize_order(order, allow_unresolved_menu_amount=allow_unresolved_menu_amount)
+        payload = serialize_order(order, allow_unresolved_menu_amount=allow_unresolved_menu_amount,
+                                  include_navigation=include_navigation)
         selection = _resolve_order_current_week_selection(order)
         stored_week_value = str(selection.get("stored_week_value") or "").strip() or None
         resolved_week_value = str(selection.get("resolved_week_value") or "").strip() or None
@@ -7067,7 +7085,7 @@ def get_order_by_id(order_id: str, *, allow_unresolved_menu_amount: bool = False
         return payload
 
 
-def get_order_for_output_read(order_id: str, *, read_session: Any = None):
+def get_order_for_output_read(order_id: str, *, read_session: Any = None, include_navigation: bool = True):
     from src.services.initial_saved_import_service import get_binding
 
     with (nullcontext(read_session) if read_session is not None else session_scope()) as session:
@@ -7077,6 +7095,7 @@ def get_order_for_output_read(order_id: str, *, read_session: Any = None):
         return get_order_by_id(
             order_id, read_session=session,
             allow_unresolved_menu_amount=binding is not None,
+            include_navigation=include_navigation,
         )
 
 
@@ -14845,25 +14864,8 @@ def _coerce_table_cell(value: object) -> str:
 
 
 def _normalize_header_token(value: str) -> str:
-    normalized = value.strip().lower()
-    normalized = re.sub(r"\s+", "", normalized)
-    translation = str.maketrans(
-        {
-            "０": "0",
-            "１": "1",
-            "２": "2",
-            "３": "3",
-            "４": "4",
-            "５": "5",
-            "６": "6",
-            "７": "7",
-            "８": "8",
-            "９": "9",
-            "ｆ": "f",
-            "Ｆ": "f",
-        }
-    )
-    return normalized.translate(translation)
+    from src.services.template_field_schema_service import normalize_ocr_header_token
+    return normalize_ocr_header_token(value)
 
 
 def _select_field(candidates: list[str], fields: set[str]) -> str | None:

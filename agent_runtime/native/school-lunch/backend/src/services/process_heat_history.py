@@ -4,6 +4,8 @@ Cooling does not undo heating. Separate-batch output selections preserve each
 material's history. This is diagram semantics, not proof of safe temperatures.
 """
 import re
+from copy import deepcopy
+import hashlib
 from src.schemas.menu_process import material_flow
 
 HEATING = ('炊飯','焼く','焼成','蒸す','蒸し','茹で','ゆで','煮る','煮込','煮含','煮詰','炒め',
@@ -77,6 +79,7 @@ def project_heat_styles(document,routes,topology):
     """Apply after material projection, so omitted seasonings add no raw lane."""
     states=heat_history(document)
     overrides=document['route_config'].get('edge_styles',{})
+    projected_routes=[]; projected_edges=[]
     for route,edge in zip(routes,topology):
         ids=set(edge['ingredient_ids']); heated=ids&states[edge['from_step_id']]
         edge['heated_ingredient_ids']=sorted(heated)
@@ -88,4 +91,19 @@ def project_heat_styles(document,routes,topology):
         elif not heated:
             route['style']='solid';edge['style_basis']='before_recorded_heating'
         else:
-            raise ValueError('加熱済みと未加熱の材料が同一動線に混在しています。線種を指定してください: '+route['id'])
+            # Preserve both histories instead of requiring an operator to label
+            # the complete mixture as heated or unheated. Each projected line
+            # keeps exactly its own materials; the recipe graph is unchanged.
+            for label, members, style in (('heated', heated, 'dashed'), ('unheated', ids-heated, 'solid')):
+                branch=deepcopy(route); branch_edge=deepcopy(edge)
+                branch['id']='heat-'+hashlib.sha256((route['id']+':'+label).encode()).hexdigest()[:24]
+                branch['style']=style
+                branch_edge['edge_id']=branch['id']
+                branch_edge['ingredient_ids']=[mid for mid in edge['ingredient_ids'] if mid in members]
+                branch_edge['heated_ingredient_ids']=sorted(members) if label=='heated' else []
+                branch_edge['source_edge_id']=route['id']
+                branch_edge['style_basis']='separate_material_heat_histories'
+                projected_routes.append(branch); projected_edges.append(branch_edge)
+            continue
+        projected_routes.append(route); projected_edges.append(edge)
+    routes[:]=projected_routes; topology[:]=projected_edges

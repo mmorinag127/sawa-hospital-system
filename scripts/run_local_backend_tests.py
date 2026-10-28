@@ -30,28 +30,6 @@ DEDICATED_MODULES = {
 }
 
 
-def staging_scope():
-    path = ROOT / 'infra/ci/staging_backend_scope.json'
-    value = json.loads(path.read_text())
-    if (not isinstance(value, dict) or set(value) != {'version', 'scope', 'groups'}
-            or type(value['version']) is not int or value['version'] != 1
-            or value['scope'] != 'staging-core-and-page-repair'
-            or not isinstance(value['groups'], dict) or not value['groups']):
-        raise ValueError('Invalid staging backend scope')
-    modules = []
-    dedicated = {name for names in DEDICATED_MODULES.values() for name in names}
-    for group, names in value['groups'].items():
-        if not isinstance(group, str) or not group or not isinstance(names, list) or not names:
-            raise ValueError('Invalid staging backend scope group')
-        for name in names:
-            if (not isinstance(name, str) or not name.startswith('backend/tests/')
-                    or not name.endswith('.py') or '..' in Path(name).parts
-                    or name in modules or name in dedicated or not (ROOT / name).is_file()):
-                raise ValueError('Invalid staging backend scope module')
-            modules.append(name)
-    return value, modules
-
-
 def retained_failure_modules(state):
     path = state / 'failed-tests.json'
     if path.exists():
@@ -264,13 +242,15 @@ def main():
         raise ValueError("Backend tests require a fixed clean source")
     require_impact_dependencies()
     source = git("rev-parse", "HEAD")
-    evidence = Path(os.environ["SAWA_LOCAL_EVIDENCE_DIR"]) / "backend-tests"
+    contracts = '--contracts' in sys.argv[1:]
+    arguments = [argument for argument in sys.argv[1:] if argument != '--contracts']
+    evidence = Path(os.environ["SAWA_LOCAL_EVIDENCE_DIR"]) / ("python-contracts" if contracts else "backend-tests")
     evidence.mkdir(exist_ok=False)
     excluded = sorted({name for modules in DEDICATED_MODULES.values() for name in modules})
     if any(not (ROOT / name).is_file() for name in excluded):
         raise ValueError("Dedicated PostgreSQL test module is missing")
     argv = [sys.executable, "-m", "pytest", "backend/tests",
-            *["--ignore=" + name for name in excluded], *sys.argv[1:]]
+            *["--ignore=" + name for name in excluded], *arguments]
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("DB_")
            and key not in ("DATABASE_URL", "ALEMBIC_DB_URI", "PYTEST_ADDOPTS", "PYTEST_PLUGINS")}
@@ -283,22 +263,29 @@ def main():
     if not branch or branch.startswith("release/prod-"):
         mode = "full"
     scope = None
-    if mode == 'focused':
-        scope, modules = staging_scope()
+    if contracts:
+        from local_hospital_test_runner import MANIFEST
+        modules = json.loads(MANIFEST.read_text())['python_contract_modules']
+        if (not isinstance(modules, list) or not modules or len(modules) != len(set(modules))
+                or any(not isinstance(name, str) or not name.endswith('.py')
+                       or Path(name).is_absolute() or '..' in Path(name).parts
+                       or not (ROOT / name).is_file() for name in modules)):
+            raise ValueError('Invalid local Python contract modules')
         argv[3:4] = modules
+        scope = {'kind': 'python-contracts', 'modules': modules}
     common = Path(git("rev-parse", "--git-common-dir"))
     if not common.is_absolute():
         common = ROOT / common
     retained = []
-    if mode == 'focused':
-        retained = [name for name in retained_failure_modules(common.resolve() / 'sawa-local-impact/backend')
-                    if name not in modules]
+    if mode == 'focused' and not contracts:
+        retained = retained_failure_modules(common.resolve() / 'sawa-local-impact/backend')
         if any(name in excluded for name in retained):
             raise ValueError('Retained dedicated PostgreSQL failure must use its owned runner')
-        argv[3:3] = retained
+        # Every general module is collected; the dependency selector decides
+        # execution. A fixed allowlist must not hide new or changed tests.
     # A new worktree must not discard the same repository's verified inputs.
     # The existing exclusive lock and per-case dependency checks still apply.
-    state = common.resolve() / "sawa-local-impact" / ('backend-focused' if mode == 'focused' else 'backend')
+    state = common.resolve() / "sawa-local-impact" / ('python-contracts' if contracts else 'backend')
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     env = {key: value for key, value in env.items()
            if not key.startswith("SAWA_IMPACT_") and key != "TESTMON_DATAFILE"}
@@ -308,7 +295,7 @@ def main():
     argv[3:3] = ["-p", "pytest_impact", "-p", "pytest-testmon", "--testmon"]
     runtime = state.parent / (state.name + '-runtime.sqlite')
     env["DB_URI"] = "sqlite:///" + str(runtime)
-    env["PYTHONPATH"] = os.pathsep.join(str(ROOT / path) for path in ("backend", "backend/tests/unit", "infra/ci"))
+    env["PYTHONPATH"] = os.pathsep.join(str(ROOT / path) for path in ("backend", "backend/tests/unit", "infra/ci", "scripts", "."))
     (evidence / "partition.json").write_text(json.dumps({
         "source_sha": source, "dedicated_modules": DEDICATED_MODULES,
         "general_argv": argv, "database_uri": env["DB_URI"],

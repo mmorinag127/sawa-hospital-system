@@ -4,13 +4,18 @@ The browser selects an immutable snapshot identity, never a connection string.
 Database credentials and authentication stay on the existing staging runtime.
 """
 from contextlib import contextmanager
+from collections.abc import Mapping
 from contextvars import ContextVar
 from functools import lru_cache
 from hashlib import sha256
+from itertools import zip_longest
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
+import tempfile
+from decimal import Decimal
 from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 COOKIE = "sawa_stg_dataset"
@@ -274,16 +279,134 @@ def retained_snapshot(entry):
     return entry
 
 
+class _ManifestObjects(Mapping):
+    """Immutable, file-backed object index owned by one cached manifest."""
+
+    def __init__(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="sawa-manifest-")
+        self.path = Path(self.directory.name) / "objects.sqlite"
+        with self._connection() as connection:
+            connection.execute("CREATE TABLE objects (reference TEXT PRIMARY KEY, proof TEXT NOT NULL)")
+
+    def _connection(self):
+        from contextlib import closing
+        return closing(sqlite3.connect(self.path))
+
+    def __getitem__(self, key):
+        with self._connection() as connection:
+            row = connection.execute("SELECT proof FROM objects WHERE reference=?", (key,)).fetchone()
+        if row is None:
+            raise KeyError(key)
+        return json.loads(row[0])
+
+    def __iter__(self):
+        with self._connection() as connection:
+            for row in connection.execute("SELECT reference FROM objects ORDER BY reference"):
+                yield row[0]
+
+    def __len__(self):
+        with self._connection() as connection:
+            return connection.execute("SELECT COUNT(*) FROM objects").fetchone()[0]
+
+    def items(self):
+        with self._connection() as connection:
+            for reference, proof in connection.execute("SELECT reference, proof FROM objects ORDER BY reference"):
+                yield reference, json.loads(proof)
+
+    def values(self):
+        for _, proof in self.items():
+            yield proof
+
+    def __eq__(self, other):
+        if not isinstance(other, Mapping) or len(self) != len(other):
+            return False
+        if isinstance(other, _ManifestObjects):
+            return all(left == right for left, right in zip_longest(self.items(), other.items()))
+        return all(key in other and other[key] == proof for key, proof in self.items())
+
+    def __deepcopy__(self, memo):
+        # Index files are immutable after parsing and owned for the object's lifetime.
+        return self
+
+
+def _parse_manifest(source):
+    import ijson
+    events = iter(ijson.basic_parse(source))
+    indexes = []
+
+    def read(event, value, path):
+        if event == "start_map":
+            indexed = len(path) == 3 and path[0] == "components" and path[2] == "objects"
+            result = _ManifestObjects() if indexed else {}
+            if indexed:
+                indexes.append(result)
+                connection = sqlite3.connect(result.path)
+            try:
+                while True:
+                    kind, key = next(events)
+                    if kind == "end_map":
+                        break
+                    if kind != "map_key":
+                        raise ValueError("Expected manifest object key")
+                    if not indexed and key in result:
+                        raise DatasetUnavailable("staging_dataset_manifest_duplicate_key")
+                    item = read(*next(events), (*path, key))
+                    if indexed:
+                        try:
+                            connection.execute("INSERT INTO objects VALUES (?,?)", (key, json.dumps(item, ensure_ascii=False)))
+                        except sqlite3.IntegrityError as exc:
+                            raise DatasetUnavailable("staging_dataset_manifest_duplicate_key") from exc
+                    else:
+                        result[key] = item
+                if indexed:
+                    connection.commit()
+                return result
+            finally:
+                if indexed:
+                    connection.close()
+        if event == "start_array":
+            result = []
+            while True:
+                kind, item = next(events)
+                if kind == "end_array":
+                    return result
+                result.append(read(kind, item, (*path, len(result))))
+        if event in {"null", "boolean", "number", "string"}:
+            return float(value) if isinstance(value, Decimal) else value
+        raise ValueError("Invalid manifest JSON event")
+
+    try:
+        result = read(*next(events), ())
+        if next(events, None) is not None or not isinstance(result, dict):
+            raise ValueError("Expected one manifest object")
+        return _validate_manifest(result, object_map_type=(dict, _ManifestObjects))
+    except Exception:
+        for index in indexes:
+            index.directory.cleanup()
+        raise
+
+
 @lru_cache(maxsize=4)
 def _read_manifest(uri, digest):
     parsed = _staging_uri(uri)
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise DatasetUnavailable("staging_dataset_manifest_digest_required")
     from google.cloud import storage
-    content = storage.Client().bucket(parsed.netloc).blob(parsed.path.lstrip("/")).download_as_bytes()
-    if sha256(content).hexdigest() != digest:
-        raise DatasetUnavailable("staging_dataset_manifest_changed")
-    value = json.loads(content, object_pairs_hook=_unique_object)
+    blob = storage.Client().bucket(parsed.netloc).blob(parsed.path.lstrip("/"))
+    blob.reload()
+    with tempfile.TemporaryFile() as source:
+        blob.download_to_file(source, if_generation_match=int(blob.generation))
+        source.seek(0)
+        hasher = sha256()
+        for chunk in iter(lambda: source.read(256 * 1024), b""):
+            hasher.update(chunk)
+        if hasher.hexdigest() != digest:
+            raise DatasetUnavailable("staging_dataset_manifest_changed")
+        source.seek(0)
+        return _parse_manifest(source)
+
+
+def _validate_manifest(value, *, object_map_type=dict):
     if (value.get("schema") != 1 or not _IDENTITY.fullmatch(str(value.get("id", "")))
             or value.get("state") != "ready" or not value.get("snapshot_at")
             or set(value.get("components", {})) != {"order", "shift", "school-lunch"}):
@@ -297,7 +420,7 @@ def _read_manifest(uri, digest):
             raise DatasetUnavailable("staging_dataset_retained_snapshot_invalid")
         if (not re.fullmatch(r"sawa_replay_[a-z0-9_]{1,40}", str(component.get("database", "")))
                 or not isinstance(component.get("settings"), dict)
-                or not isinstance(component.get("objects"), dict)
+                or not isinstance(component.get("objects"), object_map_type)
                 or component.get("verified") is not True
                 or not isinstance(component.get("table_digests"), dict) or not component["table_digests"]
                 or any(not re.fullmatch(r"[0-9a-f]{64}", str(digest)) for digest in component["table_digests"].values())):

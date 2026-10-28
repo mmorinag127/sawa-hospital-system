@@ -69,20 +69,21 @@ def readonly_history(fixture):
         assert database_snapshot() == before
 
 
-def service_page(fixture, *, expected=None, page=1, limit=100):
+def service_page(fixture, *, expected=None, page=1, limit=100, before_id=None):
     expected = revision(fixture) if expected is None else expected
     with fixture.session_scope() as session:
         return history.list_output_history(
             session, order_id=fixture.order_id, expected_workflow_revision=expected,
-            page=page, limit=limit,
+            page=page, limit=limit, before_id=before_id,
         )
 
 
-def http_page(fixture, client, *, expected=None, page=1, limit=100):
+def http_page(fixture, client, *, expected=None, page=1, limit=100, before_id=None):
     return client.get("/outputs/history", params={
         "order_id": fixture.order_id,
         "expected_workflow_revision": revision(fixture) if expected is None else expected,
         "page": page, "limit": limit,
+        **({'before_id': before_id} if before_id else {}),
     })
 
 
@@ -124,7 +125,7 @@ def test_real_producer_history_http_and_service_preserve_all_inputs(real_history
         assert response.status_code == 200, response.text
         assert response.json() == result
         assert set(result) == {"order_id", "workflow_revision", "current_output_bundle_id",
-                               "page", "limit", "total", "entries"}
+                               "page", "limit", "total", "entries", "next_before_id"}
         assert result["order_id"] == fixture.order_id
         assert result["workflow_revision"] == revision(fixture)
         assert result["current_output_bundle_id"] == produced["output_bundle"]["output_bundle_id"]
@@ -158,14 +159,20 @@ def test_real_regeneration_preserves_prior_and_current_pagination(real_history):
         by_id = {entry["output_bundle_id"]: entry for entry in full["entries"]}
         assert_entry(by_id[first_id], fixture, first, current=False)
         assert_entry(by_id[second_id], fixture, second, current=True)
-        for page in (1, 2, 3):
-            result = service_page(fixture, page=page, limit=1)
-            response = http_page(fixture, client, page=page, limit=1)
+        cursor = None
+        for page in (1, 2):
+            result = service_page(fixture, page=page, limit=1, before_id=cursor)
+            response = http_page(fixture, client, page=page, limit=1, before_id=cursor)
             assert response.status_code == 200, response.text
             assert response.json() == result
             assert (result["page"], result["limit"], result["total"]) == (page, 1, 2)
             assert result["current_output_bundle_id"] == second_id
             assert result["entries"] == full["entries"][page - 1:page]
+            cursor = result['next_before_id']
+        assert cursor is None
+        with pytest.raises(ValueError, match='output_history_cursor_required'):
+            service_page(fixture, page=2, limit=1)
+        assert http_page(fixture, client, page=2, limit=1).status_code == 409
     assert_inputs(fixture, inputs)
 
 

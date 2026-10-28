@@ -4,6 +4,7 @@ version = "0.0.1"
 description = "Backend API and workers for hospital order system"
 requires-python = ">=3.11"
 dependencies = [
+    "ijson==3.6.0",
     "certifi>=2026.10.19",
     "fastapi==0.136.1",
     "cryptography==50.0.2",

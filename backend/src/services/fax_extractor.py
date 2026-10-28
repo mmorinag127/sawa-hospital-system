@@ -343,25 +343,8 @@ def _extract_provider_debug(output: object) -> tuple[str | None, dict | None]:
 
 
 def _normalize_header_token(value: str) -> str:
-    normalized = value.strip().lower()
-    normalized = re.sub(r"\s+", "", normalized)
-    translation = str.maketrans(
-        {
-            "０": "0",
-            "１": "1",
-            "２": "2",
-            "３": "3",
-            "４": "4",
-            "５": "5",
-            "６": "6",
-            "７": "7",
-            "８": "8",
-            "９": "9",
-            "ｆ": "f",
-            "Ｆ": "f",
-        }
-    )
-    return normalized.translate(translation)
+    from src.services.template_field_schema_service import normalize_ocr_header_token
+    return normalize_ocr_header_token(value)
 
 
 def _select_field(candidates: list[str], fields: set[str]) -> str | None:
