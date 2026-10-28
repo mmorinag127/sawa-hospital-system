@@ -21,6 +21,12 @@ def service_configuration(service):
     return configuration(values)
 
 
+def migration_configuration(web, worker):
+    if web and web != worker:
+        raise StagingConfigBlocked("replay-schema-service-config-mismatch")
+    return worker
+
+
 @contextmanager
 def replay_environment(settings):
     names = (*KEYS, "K_SERVICE", "APP_ENV")

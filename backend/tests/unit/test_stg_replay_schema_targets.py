@@ -71,3 +71,14 @@ def test_replay_environment_restores_original_context_even_on_failure(monkeypatc
             raise RuntimeError("synthetic")
     assert os.environ["APP_ENV"] == "original"
     assert all(name not in os.environ for name in (*targets.KEYS, "K_SERVICE"))
+
+
+def test_worker_owns_replay_configuration_and_web_may_only_proxy():
+    worker = {targets.KEYS[0]: "gs://sawa-stg-raw/stg-replay/first/manifest.json", targets.KEYS[1]: "a" * 64}
+    assert targets.migration_configuration({}, worker) == worker
+    assert targets.migration_configuration(worker, worker) == worker
+    assert targets.migration_configuration({}, {}) == {}
+    with pytest.raises(targets.StagingConfigBlocked, match="service-config-mismatch"):
+        targets.migration_configuration(worker, {})
+    with pytest.raises(targets.StagingConfigBlocked, match="service-config-mismatch"):
+        targets.migration_configuration({**worker, targets.KEYS[1]: "b" * 64}, worker)
