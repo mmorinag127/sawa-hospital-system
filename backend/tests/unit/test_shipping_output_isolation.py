@@ -1,4 +1,5 @@
 import ast
+from copy import deepcopy
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -50,7 +51,11 @@ def test_shipping_business_rows_remain_unchanged_when_template_source_is_snapsho
     assert original.keys() == current.keys()
     for name in original:
         if name != "build_shipping_excel":
-            assert ast.dump(original[name]) == ast.dump(current[name]), name
+            expected = deepcopy(original[name])
+            if name == "enrich_tracking_excel":
+                expected.body.insert(0, ast.ImportFrom(module="openpyxl",
+                    names=[ast.alias(name="load_workbook")], level=0))
+            assert ast.dump(expected) == ast.dump(current[name]), name
     def business_tail(function):
         index = next(i for i, node in enumerate(function.body) if isinstance(node, ast.Assign)
                      and any(isinstance(target, ast.Name) and target.id == "workbook" for target in node.targets))
