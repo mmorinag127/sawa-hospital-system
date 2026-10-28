@@ -6,7 +6,6 @@ import math
 import re
 from typing import Any
 
-from openpyxl.utils import get_column_letter
 
 
 _FULLWIDTH_DIGIT_TRANS = str.maketrans("０１２３４５６７８９，．", "0123456789,.")
@@ -598,6 +597,8 @@ def has_resolved_blank_targets(result: dict[str, Any]) -> bool:
 
 
 def _logical_sheet_targets_for_assignment(assignment: dict[str, Any]) -> list[dict[str, Any]]:
+    from openpyxl.utils import get_column_letter
+
     metadata = assignment.get("target_metadata", {})
     if not isinstance(metadata, dict):
         raise ValueError("hakodate_logical_targets_invalid")
@@ -666,6 +667,8 @@ def sheet_output_from_assigned_results(
     blockers: list[str] | None = None,
     unassigned_evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    from openpyxl.utils import get_column_letter
+
     cells: dict[str, dict[str, Any]] = {}
     row_indexes: set[int] = set()
     col_indexes: set[int] = set()

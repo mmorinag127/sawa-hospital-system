@@ -8,7 +8,6 @@ from src.services import (
     facility_service,
     config_service,
     master_order_form_template_service,
-    order_form_service,
 )
 from src.services.config_validator import validate_facility_config
 from src.api.auth import require_role
@@ -151,6 +150,8 @@ def upload_order_form_source_workbook(
     month_id: str | None = Form(default=None),
     expected_revision: str = Form(...),
 ):
+    from src.services import order_form_service
+
     with canonical_errors():
         snapshot = facility_master_service.get_snapshot()
         check_revision(snapshot, expected_revision)

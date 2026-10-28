@@ -157,18 +157,82 @@ def gcs_master(monkeypatch):
         def bucket(self, name):
             assert name == "test-bucket"
             return Bucket()
+    class Response:
+        status_code = 200
+        def __init__(self):
+            import base64
+            import google_crc32c
+
+            generation = state["generation"]
+            data = json.dumps(state["master"]).encode()
+            self.raw = type("Body", (), {"read": lambda _self, **kwargs: data})()
+            self.headers = {"X-Goog-Generation": str(generation), "X-Goog-Hash":
+                "crc32c=" + base64.b64encode(google_crc32c.Checksum(data).digest()).decode()}
+            state["downloads"].append(generation)
+            if state["race_read"]:
+                state["generation"] += 1
+                state["master"] = {"facilities": [], "other_writer": True}
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def raise_for_status(self):
+            pass
+    class ReadSession:
+        def get(self, endpoint, **kwargs):
+            assert endpoint == "https://storage.googleapis.com/download/storage/v1/b/test-bucket/o/canonical.json"
+            assert kwargs == {"params": {"alt": "media"}, "headers": {"Accept-Encoding": "gzip"},
+                              "timeout": 30, "stream": True, "allow_redirects": False}
+            return Response()
     monkeypatch.setenv("FACILITY_MASTER_URI", "gs://test-bucket/canonical.json")
     monkeypatch.setenv("K_SERVICE", "worker-test")
     monkeypatch.setattr(store, "_get_thread_gcs_client", lambda: Client())
+    monkeypatch.setattr(store, "_get_thread_gcs_read_session", lambda: ReadSession())
     return state
 
 
-def test_gcs_read_pins_generation_and_rejects_race(gcs_master):
+@pytest.mark.parametrize("problem,expected", [
+    ("generation", "facility_master_generation_missing"),
+    ("checksum", "facility_master_checksum_mismatch"),
+    ("truncated", "facility_master_checksum_mismatch"),
+    ("redirect", "facility_master_storage_unavailable"),
+])
+def test_gcs_atomic_read_rejects_unbound_or_corrupt_response(monkeypatch, problem, expected):
+    import base64
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    import google_crc32c
+
+    body = b'{"facilities": []}'
+    headers = {"X-Goog-Generation": "10", "X-Goog-Hash":
+        "crc32c=" + base64.b64encode(google_crc32c.Checksum(body).digest()).decode()}
+    if problem == "generation":
+        headers.pop("X-Goog-Generation")
+    elif problem == "checksum":
+        headers.pop("X-Goog-Hash")
+    elif problem == "truncated":
+        body = body[:-1]
+    response = SimpleNamespace(headers=headers, status_code=302 if problem == "redirect" else 200,
+        raw=SimpleNamespace(read=lambda **kwargs: body), raise_for_status=lambda: None)
+    monkeypatch.setattr(store, "_get_thread_gcs_read_session",
+                        lambda: SimpleNamespace(get=lambda *args, **kwargs: nullcontext(response)))
+    with pytest.raises(store.CanonicalStoreError, match=expected):
+        store._read_gcs("gs://test-bucket/canonical.json")
+
+
+def test_gcs_read_binds_same_response_bytes_and_generation_across_later_write(gcs_master):
     gcs_master["race_read"] = True
-    with pytest.raises(store.CanonicalStoreError) as caught:
-        store.read_snapshot()
-    assert caught.value.status_code == 409
+    snapshot = store.read_snapshot()
+    assert snapshot.revision.endswith(":10")
+    assert snapshot.master == {"facilities": []}
+    assert gcs_master["generation"] == 11
+    assert gcs_master["master"] == {"facilities": [], "other_writer": True}
     assert gcs_master["downloads"] == [10]
+    assert gcs_master["reloads"] == 0
+    assert gcs_master["uploads"] == []
+    with pytest.raises(store.CanonicalStoreError) as caught:
+        store.update_snapshot(snapshot.revision, lambda current: {**current, "own": True})
+    assert caught.value.status_code == 409
     assert gcs_master["uploads"] == []
 
 
@@ -190,7 +254,7 @@ def test_gcs_success_returns_own_bytes_and_generation_not_later_get(gcs_master):
     assert saved.master == own
     assert saved.revision.endswith(":11")
     assert gcs_master["generation"] == 12
-    assert gcs_master["reloads"] == 2
+    assert gcs_master["reloads"] == 0
     assert gcs_master["uploads"] == [10]
 
 

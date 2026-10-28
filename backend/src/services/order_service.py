@@ -59,7 +59,6 @@ from src.services import (
     config_service,
     menu_service,
     fax_extractor,
-    order_form_service,
     daily_output_override_service,
     week_candidate_service,
 )
@@ -15841,7 +15840,7 @@ def _load_ocr_history_diagnostics(order_id: str) -> dict[str, Any]:
             .order_by(OrderOcrEvidenceRun.created_at.desc(), OrderOcrEvidenceRun.id.desc())
             .limit(1)
         ).scalar_one_or_none()
-        record = {column.name: getattr(evidence, column.name) for column in OrderOcrEvidenceRun.__table__.columns} if evidence is not None else None
+        record = {column.name: getattr(evidence, column.name) for column in OrderOcrEvidenceRun.__table__.columns if column.computed is None} if evidence is not None else None
     return {
         "cache": {"source": "order_ocr_cache", "payload": payload},
         "latest_evidence": {
@@ -24129,6 +24128,8 @@ def build_order_hakodate_assignment(
     template_to_use["facility_id"] = facility_id
     month_id, week_start, week_end = sheet_week_service.parse_sheet_week_value(week_code)
     if week_start and week_end:
+        from src.services import order_form_service
+
         template_to_use["hakodate_week_sheet_name"] = order_form_service._format_week_sheet_name(week_start, week_end)  # noqa: SLF001
     elif month_id:
         template_to_use["hakodate_week_sheet_name"] = str(week_code or "").strip()

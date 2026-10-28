@@ -8,7 +8,6 @@ import os
 import re
 
 from loguru import logger
-from openpyxl import load_workbook
 
 from src.services import config_service
 from src import staging_data as datasets
@@ -229,6 +228,8 @@ def _resolve_template_sheet(workbook, ship_date: date | None):
 
 
 def build_shipping_excel(records: list[ShippingRecord]) -> Path:
+    from openpyxl import load_workbook
+
     if datasets.current_dataset() != "test" and datasets.manifest().get("runtime_settings_provenance") != "legacy_stg_runtime":
         original = datasets.order_runtime_setting("SHIPPING_TEMPLATE_PATH")
         if original is None:
@@ -351,6 +352,8 @@ def get_tracking_status_records(tracking_numbers: list[str]) -> list[TrackingSta
 
 
 def enrich_tracking_excel(excel_bytes: bytes) -> tuple[Path, dict]:
+    from openpyxl import load_workbook
+
     workbook = load_workbook(BytesIO(excel_bytes))
     row_refs: list[dict] = []
     unique_numbers: list[str] = []

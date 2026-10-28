@@ -11,7 +11,6 @@ from src.db import session_scope
 from src.models.order import Order, OrderLine
 from src.services import config_service
 from src.services import order_service
-from src.services import output_builder
 from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
 
 _MEAL_PERIOD_LABELS = {
@@ -27,6 +26,8 @@ def _ensure_date(value: object) -> date | None:
     if hasattr(value, "isoformat"):
         return value
     try:
+        from src.services import output_builder
+
         return output_builder._ensure_date(value)  # noqa: SLF001
     except Exception:
         return None
@@ -100,6 +101,8 @@ def _final_quantity(quantity_corrected: object, quantity_original: object, zero_
 
 
 def build_totals(date_from: date | None, date_to: date | None, include_order_refs: bool = False) -> list[dict]:
+    from src.services import output_builder
+
     grouped: dict[tuple, dict] = {}
     for order in _iter_confirmed_orders(date_from, date_to):
         order_payload = order_service.get_order_for_output_read(order.id, read_session=object_session(order))

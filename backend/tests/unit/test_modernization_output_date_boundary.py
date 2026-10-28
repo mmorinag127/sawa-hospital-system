@@ -217,7 +217,7 @@ def test_raising_producer_boundary_keeps_status_and_exact_arguments(
         calls.append((args, kwargs))
         raise marker
 
-    monkeypatch.setattr(outputs, producer, fail)
+    monkeypatch.setattr(output_builder, producer, fail)
     params = {"order_id": fixture.order_id}
     if dated:
         params["date"] = "2026-03-01"
@@ -244,7 +244,7 @@ def test_omitted_date_csv_uses_unwrapped_preview_fault_contract(surface, monkeyp
         calls.append((args, kwargs))
         raise marker
 
-    monkeypatch.setattr(outputs, "build_output_preview", fail)
+    monkeypatch.setattr(output_builder, "build_output_preview", fail)
     with pytest.raises(exception_type) as caught:
         client.get("/outputs/labels", params={"order_id": fixture.order_id})
     assert caught.value is marker

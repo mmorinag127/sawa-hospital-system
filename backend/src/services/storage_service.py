@@ -211,6 +211,18 @@ def _get_thread_gcs_client():
     return client
 
 
+def _get_thread_gcs_read_session():
+    session = getattr(_GCS_CLIENT_LOCAL, "read_session", None)
+    if session is None:
+        import google.auth
+        from google.auth.transport.requests import AuthorizedSession
+
+        credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/devstorage.read_only"])
+        session = AuthorizedSession(credentials)
+        _GCS_CLIENT_LOCAL.read_session = session
+    return session
+
+
 def _thread_local_signing_service_account_email(credentials) -> str | None:
     service_account_email = getattr(_GCS_CLIENT_LOCAL, "signing_service_account_email", None)
     if service_account_email:

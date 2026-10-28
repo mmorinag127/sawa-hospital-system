@@ -7,15 +7,28 @@ from loguru import logger
 
 from src.services.storage_uri import parse_gcs_uri
 
-try:
-    from google.api_core.exceptions import NotFound
-    from google.cloud import storage  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    storage = None
+from google.api_core.exceptions import NotFound
+
+_STORAGE_UNLOADED = object()
+storage = _STORAGE_UNLOADED
 
 
 class OCRPipelineStateConfigError(RuntimeError):
     pass
+
+
+def _storage_sdk():
+    global storage
+    if storage is _STORAGE_UNLOADED:
+        try:
+            from google.cloud import storage as sdk
+        except ImportError:
+            storage = None
+        else:
+            storage = sdk
+    if storage is None:
+        raise OCRPipelineStateConfigError("pipeline state GCS storage SDK is unavailable")
+    return storage
 
 
 def _state_uri() -> str:
@@ -48,9 +61,7 @@ def _state_uri() -> str:
 
 
 def _load_gs(bucket: str, object_name: str) -> dict | None:
-    if storage is None:
-        raise OCRPipelineStateConfigError("pipeline state GCS storage SDK is unavailable")
-    client = storage.Client()
+    client = _storage_sdk().Client()
     blob = client.bucket(bucket).blob(object_name)
     try:
         payload = blob.download_as_bytes()
@@ -60,9 +71,7 @@ def _load_gs(bucket: str, object_name: str) -> dict | None:
 
 
 def _save_gs(bucket: str, object_name: str, payload: dict) -> None:
-    if storage is None:
-        raise OCRPipelineStateConfigError("pipeline state GCS storage SDK is unavailable")
-    client = storage.Client()
+    client = _storage_sdk().Client()
     blob = client.bucket(bucket).blob(object_name)
     blob.upload_from_string(json.dumps(payload), content_type="application/json")
 

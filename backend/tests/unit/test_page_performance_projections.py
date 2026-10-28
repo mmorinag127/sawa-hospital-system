@@ -19,6 +19,39 @@ def test_native_snapshot_avoids_round_trip_without_changing_types(monkeypatch):
     assert not snapshots.snapshots_equal({"x": 1.0}, {"x": 1})
 
 
+def test_generated_display_references_follow_raw_updates_without_changing_json_types(history_case):
+    from sqlalchemy import select, update
+    from src import db
+    from src.models.ocr_job import OcrJob
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+
+    case = history_case()
+    case.produce(cell_values="5")
+    with db.session_scope() as session:
+        evidence = session.execute(select(OrderOcrEvidenceRun).where(
+            OrderOcrEvidenceRun.order_id == case.id)).scalars().first()
+        original = dict(evidence.payload_json)
+        for overlay in ({"uri": "gs://bucket/one.png", "unknown": [False, 1, 1.0, None]}, None, [], "text"):
+            payload = {**original, "hakodate_overlay": overlay}
+            session.execute(update(OrderOcrEvidenceRun).where(OrderOcrEvidenceRun.id == evidence.id).values(payload_json=payload))
+            generated = session.scalar(select(OrderOcrEvidenceRun.display_overlay_json).where(OrderOcrEvidenceRun.id == evidence.id))
+            assert snapshots.snapshots_equal(generated, overlay)
+            assert session.scalar(select(OrderOcrEvidenceRun.payload_json).where(OrderOcrEvidenceRun.id == evidence.id)) == payload
+        job = session.execute(select(OcrJob).where(OcrJob.order_id == case.id)).scalars().first()
+        for current in ("source-document", 3, 3.0, False, None):
+            for attempt in (None, "workflow-attempt"):
+                metrics = {"workflow_attempt_id": attempt,
+                    "reparse_read_input": {"order": {"current_document_id": current}},
+                    "nonworkflow_execution": {"orders": {case.id: {"order": {
+                        "current_document_id": current, "template_version_id": "native-template"}}}}}
+                session.execute(update(OcrJob).where(OcrJob.id == job.id).values(metrics=metrics))
+                actual = session.scalar(select(OcrJob.display_current_document_json).where(OcrJob.id == job.id))
+                assert snapshots.snapshots_equal(actual, current)
+                assert session.scalar(select(OcrJob.display_native_template_json).where(OcrJob.id == job.id)) == "native-template"
+                assert session.scalar(select(OcrJob.metrics).where(OcrJob.id == job.id)) == metrics
+        session.rollback()
+
+
 def test_ocr_log_summary_never_loads_deferred_metrics():
     class Row(SimpleNamespace):
         @property
@@ -420,7 +453,9 @@ def test_http_startup_does_not_import_native_image_recognition():
     import subprocess
     import sys
     result = subprocess.run([sys.executable, "-c",
-        "import sys; import src.main; assert 'cv2' not in sys.modules, 'HTTP startup imported cv2'"],
+        "import sys; import src.main; "
+        "unexpected = {'cv2', 'openpyxl', 'google.cloud.storage', 'grpc'}.intersection(sys.modules); "
+        "assert not unexpected, f'HTTP startup imported unused producers: {sorted(unexpected)}'"],
         env={**os.environ, "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"},
         capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr[-2000:]

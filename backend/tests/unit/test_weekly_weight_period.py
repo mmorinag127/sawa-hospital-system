@@ -57,7 +57,7 @@ def test_exact_period_keeps_bounds(start, end):
 ])
 def test_api_invalid_or_conflicting_period_stops_before_build(client, monkeypatch, params):
     build = Mock(side_effect=AssertionError("must reject before output"))
-    monkeypatch.setattr(outputs, "build_weekly_weight_summary_workbook", build)
+    monkeypatch.setattr(builder, "build_weekly_weight_summary_workbook", build)
     response = client.get("/outputs/weekly-weight", params=params)
     assert response.status_code == 400
     build.assert_not_called()
@@ -67,7 +67,7 @@ def test_api_range_and_consistent_date_are_not_silently_discarded(client, monkey
     file = tmp_path / "synthetic.xlsx"
     file.write_bytes(b"synthetic")
     build = Mock(return_value=file)
-    monkeypatch.setattr(outputs, "build_weekly_weight_summary_workbook", build)
+    monkeypatch.setattr(builder, "build_weekly_weight_summary_workbook", build)
     response = client.get("/outputs/weekly-weight", params={
         "start": "2026-10-01", "end": "2026-10-03", "date": "2026-10-02", "status": "確定",
     })
@@ -79,7 +79,7 @@ def test_date_only_call_signature_and_sunday_week_stay_unchanged(client, monkeyp
     file = tmp_path / "synthetic.xlsx"
     file.write_bytes(b"synthetic")
     build = Mock(return_value=file)
-    monkeypatch.setattr(outputs, "build_weekly_weight_summary_workbook", build)
+    monkeypatch.setattr(builder, "build_weekly_weight_summary_workbook", build)
     assert client.get("/outputs/weekly-weight", params={"date": "2026-09-16"}).status_code == 200
     build.assert_called_once_with(date(2026, 9, 16), status=None)
     assert builder.weekly_weight_period(date(2026, 9, 16)) == (date(2026, 9, 13), date(2026, 9, 19))

@@ -9,7 +9,7 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 
 def history_statement(order_id: str):
     table = OrderOcrEvidenceRun.__table__
-    return select(*table.c).where(table.c.order_id == order_id).order_by(
+    return select(*(column for column in table.c if column.computed is None)).where(table.c.order_id == order_id).order_by(
         table.c.created_at.desc(), table.c.id.desc(),
     ).execution_options(yield_per=4)
 
@@ -42,7 +42,7 @@ def read_history(session, order_id: str) -> list[SimpleNamespace]:
 
 
 def history_row_view(row: OrderOcrEvidenceRun) -> SimpleNamespace:
-    values = {column.name: getattr(row, column.name) for column in OrderOcrEvidenceRun.__table__.columns}
+    values = {column.name: getattr(row, column.name) for column in OrderOcrEvidenceRun.__table__.columns if column.computed is None}
     return _history_view(values)
 
 

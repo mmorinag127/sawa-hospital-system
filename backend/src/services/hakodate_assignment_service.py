@@ -13,9 +13,6 @@ import unicodedata
 from typing import Any
 
 from loguru import logger
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
-from openpyxl.utils import range_boundaries
 
 from src.services.grid_detector import GridDetectionResult, detect_table_grid
 from src.services import master_order_form_template_service
@@ -367,6 +364,8 @@ def _worksheet_row_to_structure_grid_index(worksheet_row: int, *, body_end_row: 
 
 
 def _worksheet_merged_cell_map(worksheet: Any) -> dict[tuple[int, int], dict[str, Any]]:
+    from openpyxl.utils import range_boundaries
+
     merged: dict[tuple[int, int], dict[str, Any]] = {}
     for merged_range in worksheet.merged_cells.ranges:
         min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
@@ -444,6 +443,8 @@ def _worksheet_merge_regions_for_grid(
     column_edges: list[float],
     quantity_columns: set[int] | None = None,
 ) -> list[dict[str, Any]]:
+    from openpyxl.utils import range_boundaries
+
     quantity_columns = set(quantity_columns or set())
     body_end_row = master_order_form_template_service.validated_body_end_row(worksheet, allow_static=True)
     regions: list[dict[str, Any]] = []
@@ -1041,6 +1042,8 @@ def _detect_dense_vertical_edges_from_table_image(
 
 
 def _merged_value_map(worksheet: Any) -> dict[tuple[int, int], object]:
+    from openpyxl.utils import range_boundaries
+
     merged: dict[tuple[int, int], object] = {}
     for merged_range in worksheet.merged_cells.ranges:
         min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
@@ -1398,6 +1401,8 @@ def _normalize_order_form_header_text(value: object) -> str:
 
 
 def _worksheet_effective_merged_values(worksheet: Any) -> dict[tuple[int, int], object]:
+    from openpyxl.utils import range_boundaries
+
     values: dict[tuple[int, int], object] = {}
     for merged_range in worksheet.merged_cells.ranges:
         min_col, min_row, max_col, max_row = range_boundaries(str(merged_range))
@@ -1438,6 +1443,8 @@ def _worksheet_for_manifest_structure_template(
     facility_id: str,
     week_sheet_name: str,
 ) -> Any:
+    from openpyxl import load_workbook
+
     template_xlsx = str(item.get("template_xlsx") or item.get("structure_xlsx") or "").strip()
     if template_xlsx:
         sheet_name = str(item.get("template_sheet_name") or week_sheet_name or "").strip()
@@ -1723,6 +1730,8 @@ def build_structure_slot_assignment_from_pdf(
     strategy: str,
     skeleton_rows: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
+    from openpyxl.utils import get_column_letter
+
     facility_id = str(template.get("facility_id") or "").strip()
     if not facility_id:
         return _blocked_structure_slot_assignment(

@@ -41,7 +41,7 @@ def _reference_error(session, order, state, meta, *, reads=None, include_overlay
     if workflow._workflow_state_requires_selected_ocr(canonical):
         columns = [OrderOcrEvidenceRun.template_version_id]
         if include_overlay:
-            columns.append(OrderOcrEvidenceRun.payload_json["hakodate_overlay"].label("overlay"))
+            columns.append(OrderOcrEvidenceRun.display_overlay_json.label("overlay"))
         evidence = _saved_reference(session, OrderOcrEvidenceRun, state.evidence_run_id, order.id, *columns)
         if reads is not None:
             reads["selected_evidence"] = evidence
@@ -112,14 +112,14 @@ def read_recorded_job_values(session, identities):
     if session.get_bind().dialect.name == "postgresql":
         object_metrics = case((func.json_typeof(metrics) == "object", metrics), else_=literal({}, type_=JSON))
         projected = func.json_to_record(object_metrics).table_valued(
-            *(column(key, JSON) for key in (*keys, "nonworkflow_execution", "reparse_read_input", "selected_version_input")),
+            *(column(key, JSON) for key in (*keys, "nonworkflow_execution", "selected_version_input")),
         ).render_derived(with_types=True).lateral("display_metrics")
         native = projected.c.nonworkflow_execution
         native_object = case((func.json_typeof(native) == "object", native), else_=literal({}, type_=JSON))
         native_fields = func.json_to_record(native_object).table_valued(
             column("execution_id", JSON), column("ingest_ocr_mode", JSON), column("intake_protocol", JSON),
             column("job_id", JSON), column("order_id", JSON),
-            column("selected_pdf_receipt", JSON), column("selected_version_input", JSON), column("orders", JSON),
+            column("selected_pdf_receipt", JSON), column("selected_version_input", JSON),
             column("ingest_lease", JSON),
         ).render_derived(with_types=True).lateral("display_execution")
         statement = select(*fields, *(projected.c[key] for key in keys),
@@ -128,9 +128,7 @@ def read_recorded_job_values(session, identities):
             native_fields.c.intake_protocol.label("native_protocol"),
             native_fields.c.job_id.label("native_job_id"), native_fields.c.order_id.label("native_order_id"),
         ).select_from(OcrJob).join(projected, true()).join(native_fields, true())
-        captured = projected.c.reparse_read_input
         native_pdf = native_fields.c.selected_pdf_receipt
-        native_orders = native_fields.c.orders
         version = case((or_(projected.c.workflow_attempt_id.is_(None),
             func.json_typeof(projected.c.workflow_attempt_id) == "null"), native_fields.c.selected_version_input),
             else_=projected.c.selected_version_input)
@@ -146,7 +144,6 @@ def read_recorded_job_values(session, identities):
         receipt = projected.c.selected_pdf_receipt
     else:
         native = metrics["nonworkflow_execution"]
-        captured = metrics["reparse_read_input"]
         statement = select(*fields, *(metrics[key].label(key) for key in keys),
             metrics["nonworkflow_execution"]["execution_id"].label("native_execution_id"),
             metrics["nonworkflow_execution"]["ingest_ocr_mode"].label("native_mode"),
@@ -154,7 +151,6 @@ def read_recorded_job_values(session, identities):
             metrics["nonworkflow_execution"]["job_id"].label("native_job_id"),
             metrics["nonworkflow_execution"]["order_id"].label("native_order_id"))
         native_pdf = native["selected_pdf_receipt"]
-        native_orders = native["orders"]
         version = case((metrics["workflow_attempt_id"].as_string().is_(None), native["selected_version_input"]),
             else_=metrics["selected_version_input"])
         version_kind = func.json_type(version)
@@ -166,9 +162,8 @@ def read_recorded_job_values(session, identities):
     statement = statement.add_columns(
         native_pdf.label("native_pdf"), version_kind.label("version_kind"),
         generation.label("native_generation"),
-        native_orders.op("->")(OcrJob.order_id)["order"]["current_document_id"].label("native_current_document"),
-        native_orders.op("->")(OcrJob.order_id)["order"]["template_version_id"].label("native_template_version"),
-        captured["order"]["current_document_id"].label("workflow_current_document"))
+        OcrJob.display_current_document_json.label("current_document"),
+        OcrJob.display_native_template_json.label("native_template_version"))
     pdf = case((native_owner, native_pdf), else_=receipt)
     # Keep outer joins: a missing source must remain a visible binding error.
     related = (
@@ -188,7 +183,7 @@ def read_recorded_job_values(session, identities):
         native_owner = row["workflow_attempt_id"] is None
         row["_pdf"] = row["native_pdf"] if native_owner else row["selected_pdf_receipt"]
         row["_version"] = {key: row["version_" + key] for key in _VERSION_KEYS} if row["version_kind"] == "object" else None
-        row["_current_document"] = row["native_current_document"] if native_owner else row["workflow_current_document"]
+        row["_current_document"] = row["current_document"]
     for row in rows.values():
         for key, (model, _identity, names) in zip(("_document", "_upload", "_version_row"), related):
             values = {name: row.pop(model.__tablename__ + "__" + name) for name in names}
@@ -405,7 +400,7 @@ def get_display(order_id, *, scope="summary"):
             workflow._inspection_next("display_overlay")
             evidence = reads.get("selected_evidence") if "selected_evidence" in reads else _saved_reference(
                 session, OrderOcrEvidenceRun, state.evidence_run_id, order.id,
-                OrderOcrEvidenceRun.payload_json["hakodate_overlay"].label("overlay"))
+                OrderOcrEvidenceRun.display_overlay_json.label("overlay"))
             if evidence is None:
                 return None, "selected_ocr_missing"
             overlay = evidence.overlay if isinstance(evidence.overlay, dict) else {}

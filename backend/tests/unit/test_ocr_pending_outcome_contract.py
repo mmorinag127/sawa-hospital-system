@@ -225,7 +225,7 @@ def waiting_job(owned_pipeline):
     assert result["outcome"] == "pending"
     with session_scope() as session:
         row = session.get(OcrJob, f.job_id)
-        values = {column.name: deepcopy(getattr(row, column.name)) for column in OcrJob.__table__.columns}
+        values = {column.name: deepcopy(getattr(row, column.name)) for column in OcrJob.__table__.columns if column.computed is None}
     job = SimpleNamespace(**values, attempt=f.attempt, revision=f.revision,
         selected_document=f.receipt()["selected_pdf_receipt"]["document_id"],
         delivery_input=output["input_reference"], delivery_output=output["output_reference"],

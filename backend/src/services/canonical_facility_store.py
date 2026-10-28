@@ -12,10 +12,10 @@ import os
 from pathlib import Path
 import tempfile
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
-from src.services.storage_service import _get_thread_gcs_client
+from src.services.storage_service import _get_thread_gcs_client, _get_thread_gcs_read_session
 
 
 class CanonicalStoreError(Exception):
@@ -464,18 +464,30 @@ def _gcs_blob(source: str):
 
 
 def _read_gcs(source: str) -> MasterSnapshot:
-    from google.api_core.exceptions import PreconditionFailed
+    import base64
+    import gzip
+    import google_crc32c
 
-    blob = _gcs_blob(source)
-    blob.reload(retry=None)
-    generation = blob.generation
-    if generation is None or int(generation) <= 0:
-        raise CanonicalStoreError("facility_master_generation_missing")
-    try:
-        data = blob.download_as_bytes(if_generation_match=int(generation), retry=None)
-    except PreconditionFailed as exc:
-        raise CanonicalStoreError("facility_master_read_changed", status_code=409) from exc
-    return MasterSnapshot(_decode(data), f"gcs:{_source_key(source)}:{generation}", source)
+    parsed = urlparse(source)
+    endpoint = "https://storage.googleapis.com/download/storage/v1/b/{}/o/{}".format(
+        quote(parsed.netloc, safe=""), quote(parsed.path.lstrip("/"), safe=""))
+    # The same response binds bytes, generation and CRC; no metadata/body race.
+    with _get_thread_gcs_read_session().get(endpoint, params={"alt": "media"},
+            headers={"Accept-Encoding": "gzip"}, timeout=30, stream=True, allow_redirects=False) as response:
+        response.raise_for_status()
+        if response.status_code != 200:
+            raise CanonicalStoreError("facility_master_storage_unavailable")
+        generation = response.headers.get("X-Goog-Generation")
+        if not isinstance(generation, str) or not generation.isascii() or not generation.isdigit() or int(generation) <= 0:
+            raise CanonicalStoreError("facility_master_generation_missing")
+        data = response.raw.read(decode_content=False)
+        hashes = dict(part.strip().split("=", 1) for part in response.headers.get("X-Goog-Hash", "").split(",") if "=" in part)
+        checksum = base64.b64encode(google_crc32c.Checksum(data).digest()).decode("ascii")
+        if hashes.get("crc32c") != checksum:
+            raise CanonicalStoreError("facility_master_checksum_mismatch")
+        if response.headers.get("Content-Encoding", "").lower() == "gzip":
+            data = gzip.decompress(data)
+    return MasterSnapshot(_decode(data), f"gcs:{_source_key(source)}:{int(generation)}", source)
 
 
 def read_snapshot() -> MasterSnapshot:

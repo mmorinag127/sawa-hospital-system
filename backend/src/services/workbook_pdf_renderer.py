@@ -5,9 +5,6 @@ from io import BytesIO
 from pathlib import Path
 from typing import Iterable
 
-from openpyxl import load_workbook
-from openpyxl.cell.cell import MergedCell
-from openpyxl.utils import get_column_letter, range_boundaries
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 
@@ -23,6 +20,8 @@ _DEFAULT_FONT_PATHS = [
 
 
 def _sheet_print_range(worksheet) -> tuple[int, int, int, int]:
+    from openpyxl.utils import range_boundaries
+
     raw = str(worksheet.print_area or "").strip()
     if raw:
         area_ref = raw.split("!", 1)[-1].replace("$", "").split(",", 1)[0]
@@ -293,6 +292,8 @@ def _merged_rectangles(
     max_col: int,
     max_row: int,
 ) -> dict[tuple[int, int], dict[str, int]]:
+    from openpyxl.utils import range_boundaries
+
     merged: dict[tuple[int, int], dict[str, int]] = {}
     for merged_range in worksheet.merged_cells.ranges:
         start_col, start_row, end_col, end_row = range_boundaries(str(merged_range))
@@ -321,6 +322,8 @@ def worksheet_render_geometry(
     dpi: int = _DEFAULT_DPI,
     margin_px: int = _DEFAULT_MARGIN_PX,
 ) -> dict:
+    from openpyxl.utils import get_column_letter
+
     min_col, min_row, max_col, max_row = _sheet_print_range(worksheet)
     col_widths = {}
     row_heights = {}
@@ -411,6 +414,8 @@ def render_worksheet_to_image(
     dpi: int = _DEFAULT_DPI,
     margin_px: int = _DEFAULT_MARGIN_PX,
 ) -> Image.Image:
+    from openpyxl.cell.cell import MergedCell
+
     geometry = worksheet_render_geometry(worksheet, dpi=dpi, margin_px=margin_px)
     min_col, min_row, max_col, max_row = [int(value) for value in geometry["print_range"]]
     x_positions = geometry["x_positions"]
@@ -552,6 +557,8 @@ def render_workbook_path_to_pdf(
     sheet_name: str | None = None,
     dpi: int = _DEFAULT_DPI,
 ) -> Path:
+    from openpyxl import load_workbook
+
     workbook = load_workbook(Path(workbook_path))
     pdf_bytes = render_workbook_to_pdf_bytes(workbook, sheet_name=sheet_name, dpi=dpi)
     target = Path(output_path)

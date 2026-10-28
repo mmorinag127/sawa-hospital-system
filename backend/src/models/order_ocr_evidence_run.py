@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, JSON, String
+from sqlalchemy import Column, Computed, DateTime, ForeignKey, JSON, String
+from sqlalchemy.orm import deferred
 
 from src.db import Base
 
@@ -16,6 +17,7 @@ class OrderOcrEvidenceRun(Base):
     source = Column(String, nullable=True)
     status = Column(String, nullable=False, default="ready")
     payload_json = Column(JSON, nullable=False)
+    display_overlay_json = deferred(Column(JSON, Computed("payload_json -> 'hakodate_overlay'", persisted=True)))
     artifact_manifest_json = Column(JSON, nullable=True)
     artifact_digest = Column(String, nullable=False, index=True)
     capabilities_json = Column(JSON, nullable=True)

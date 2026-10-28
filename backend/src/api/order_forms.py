@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from src.api.auth import require_role
-from src.services import order_form_service
 from src.services.canonical_facility_store import CanonicalStoreError
 
 
@@ -11,6 +10,8 @@ router = APIRouter()
 
 @router.get("/order-forms/patterns", dependencies=[Depends(require_role("operator"))])
 def list_order_form_patterns():
+    from src.services import order_form_service
+
     return {"patterns": order_form_service.list_order_form_patterns()}
 
 
@@ -20,6 +21,8 @@ def generate_order_form(
     month_id: str,
     pattern_id: str | None = None,
 ):
+    from src.services import order_form_service
+
     try:
         output_path = order_form_service.build_order_form_excel(
             facility_id=facility_id,

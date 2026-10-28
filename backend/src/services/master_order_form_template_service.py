@@ -6,19 +6,13 @@ import hashlib
 import json
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.cell.cell import MergedCell
-from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor
-from openpyxl.drawing.xdr import XDRPositiveSize2D
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import column_index_from_string, coordinate_to_tuple, get_column_letter
-from openpyxl.utils.units import pixels_to_EMU
-from openpyxl.worksheet.print_settings import PrintArea
-from openpyxl.worksheet.worksheet import Worksheet
+if TYPE_CHECKING:
+    from openpyxl.styles import Side
+    from openpyxl.worksheet.worksheet import Worksheet
 
 from src.services import config_service, sheet_week_service
 
@@ -58,10 +52,14 @@ class FacilityTemplateBuildError(ValueError):
 
 
 def _style_side(style: str = "thin") -> Side:
+    from openpyxl.styles import Side
+
     return Side(style=style, color="000000")
 
 
 def _set_border(cell, *, left=None, right=None, top=None, bottom=None) -> None:
+    from openpyxl.styles import Border
+
     current = cell.border
     cell.border = Border(
         left=left or current.left,
@@ -176,6 +174,8 @@ def _ensure_generated_capacity(ws: Worksheet, required_count: int) -> int:
 
 
 def _trim_unused_generated_columns(ws: Worksheet, end_col: int) -> None:
+    from openpyxl.utils import column_index_from_string
+
     if end_col >= MASTER_GENERATED_END_COL:
         return
     # delete_cols does not move merged ranges; stale ranges recreate deleted cells on reload.
@@ -199,6 +199,10 @@ def _trim_unused_generated_columns(ws: Worksheet, end_col: int) -> None:
 
 
 def _normalize_static_right_merges(ws: Worksheet, end_col: int) -> None:
+    from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor
+    from openpyxl.styles import Alignment
+    from openpyxl.utils.units import pixels_to_EMU
+
     min_static_col = 7
     target_col = min_static_col if end_col >= min_static_col else GENERATED_START_COL
     if end_col < min_static_col:
@@ -239,6 +243,9 @@ def _normalize_static_right_merges(ws: Worksheet, end_col: int) -> None:
 
 
 def _clear_generated_area(ws: Worksheet, end_col: int, body_end_row: int = BODY_END_ROW) -> None:
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.styles import Alignment
+
     for row in range(HEADER_TOP_ROW, body_end_row + 1):
         for col in range(GENERATED_START_COL, end_col + 1):
             cell = ws.cell(row, col)
@@ -250,6 +257,8 @@ def _clear_generated_area(ws: Worksheet, end_col: int, body_end_row: int = BODY_
 
 
 def _write_header(ws: Worksheet, generated_columns: list[dict[str, Any]], end_col: int) -> None:
+    from openpyxl.styles import Font, PatternFill
+
     header_fill = PatternFill(fill_type="solid", start_color="F2F2F2", end_color="F2F2F2")
     thick = _style_side("thick")
     thin = _style_side("thin")
@@ -498,6 +507,8 @@ def _apply_configured_body_merges(
     end_col: int,
     body_spans: list[tuple[int, int, str]] | None = None,
 ) -> list[dict[str, Any]]:
+    from openpyxl.utils import get_column_letter
+
     selected_columns = _configured_body_merge_columns(
         facility_config=facility_config,
         generated_columns=generated_columns,
@@ -570,6 +581,8 @@ def _row_height_to_render_pixels(height_points: float | None, *, dpi: int = DEFA
 
 
 def _worksheet_positions(ws: Worksheet, *, max_col: int, max_row: int, dpi: int = DEFAULT_DPI) -> tuple[dict[int, int], dict[int, int]]:
+    from openpyxl.utils import get_column_letter
+
     x_positions = {1: 0}
     current_x = 0
     for col in range(1, max_col + 1):
@@ -593,6 +606,10 @@ def _anchor_offset_to_render_pixels(value: int | float | None, *, dpi: int = DEF
 
 def _freeze_images_to_master_render_size(ws: Worksheet) -> None:
     """Make top-area images independent from generated quantity-column widths."""
+    from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor
+    from openpyxl.drawing.xdr import XDRPositiveSize2D
+    from openpyxl.utils.units import pixels_to_EMU
+
     images = list(getattr(ws, "_images", []))
     if not images:
         return
@@ -631,6 +648,8 @@ def _freeze_images_to_master_render_size(ws: Worksheet) -> None:
 
 
 def _set_generated_widths(ws: Worksheet, generated_columns: list[dict[str, Any]], end_col: int) -> None:
+    from openpyxl.utils import get_column_letter
+
     widths = _generated_widths(generated_columns)
     expected_count = end_col - GENERATED_START_COL + 1
     if len(widths) != expected_count:
@@ -643,6 +662,8 @@ def _set_generated_widths(ws: Worksheet, generated_columns: list[dict[str, Any]]
 
 
 def _write_facility_name(ws: Worksheet, facility_name: str) -> None:
+    from openpyxl.styles import Alignment, Font
+
     text = str(facility_name or "").strip()
     if not text:
         return
@@ -708,6 +729,9 @@ def _cell_style_for_digest(cell: Any) -> dict[str, Any]:
 
 
 def _worksheet_digest_payload(ws: Worksheet, *, max_row: int, max_col: int) -> dict[str, Any]:
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.utils import get_column_letter
+
     cells: list[dict[str, Any]] = []
     for row in range(1, max_row + 1):
         for col in range(1, max_col + 1):
@@ -784,6 +808,8 @@ def build_facility_template_diagnostics(
     week_menu_entries: Any | None = None,
     master_template_path: Path | str = MASTER_TEMPLATE_PATH,
 ) -> dict[str, Any]:
+    from openpyxl.utils import get_column_letter
+
     master_path = Path(master_template_path)
     workbook = build_facility_template_workbook(
         facility_config=facility_config,
@@ -893,6 +919,8 @@ def _split_week_menu_identity_entries(entries: list[dict[str, Any]]) -> tuple[li
 
 def _resize_week_body(ws: Worksheet, body_end_row: int, *, source_body_end_row: int = BODY_END_ROW) -> None:
     """Resize only the generated copy; openpyxl does not shift merges/dimensions."""
+    from openpyxl.styles import Border
+
     delta = body_end_row - source_body_end_row
     footer_merges = []
     for region in list(ws.merged_cells.ranges):
@@ -951,6 +979,8 @@ def _write_week_menu_identity(
     ws: Worksheet, entries: list[dict[str, Any]], *, source_body_end_row: int = BODY_END_ROW,
     preserve_date_cells: bool = False,
 ) -> dict[str, Any]:
+    from openpyxl.styles import Alignment
+
     physical_entries, overflow_entries, source_rows = _split_week_menu_identity_entries(entries)
     if not physical_entries:
         raise FacilityTemplateBuildError("week_menu_body_entries_missing")
@@ -1008,6 +1038,8 @@ def _write_week_menu_identity(
 
 
 def _source_workbook_footer_plan(ws: Worksheet, *, body_end_row: int, marker_row: int) -> dict[str, Any]:
+    from openpyxl.worksheet.print_settings import PrintArea
+
     marker_rows = []
     for region in ws.merged_cells.ranges:
         if (region.min_col, region.max_col) != (2, 11) or region.min_row != region.max_row:
@@ -1087,6 +1119,9 @@ def write_source_workbook_body(
     body_merge_columns: set[int], source_marker_row: int,
 ) -> dict[str, Any]:
     """Use the source's explicit footer boundary, not the master's fixed body end."""
+    from openpyxl.cell.cell import MergedCell
+    from openpyxl.utils import column_index_from_string, get_column_letter
+
     footer_rows = [
         region.min_row for region in ws.merged_cells.ranges
         if region.min_col == 1 and region.max_col == 3
@@ -1181,6 +1216,9 @@ def _apply_week_menu_identity(
 
 def validated_body_row_plan(ws: Worksheet, *, allow_static: bool = False) -> list[dict[str, Any]] | None:
     """Validate generated physical identity before consumers map geometry to rows."""
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.print_settings import PrintArea
+
     wb = ws.parent
     if "generated_template_schema" not in wb.sheetnames:
         if allow_static and ws.title == MASTER_SHEET_NAME:
@@ -1355,6 +1393,9 @@ def _append_schema_sheet(wb, *, facility_config: dict[str, Any], generated_colum
 
 def _logical_master_workbook(master_path: Path, *, source_bytes: bytes | None = None):
     """Read authored values/merges without materializing print-only cell styles."""
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.utils import coordinate_to_tuple
+
     raw = master_path.read_bytes() if source_bytes is None else source_bytes
     source = load_workbook(BytesIO(raw), read_only=True)
     try:
@@ -1392,6 +1433,9 @@ def build_facility_template_workbook(
     logical_only: bool = False,
     _source_bytes: bytes | None = None,
 ):
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
     master_path = Path(master_template_path)
     if not master_path.exists():
         raise FacilityTemplateBuildError(f"master_template_not_found:{master_path}")

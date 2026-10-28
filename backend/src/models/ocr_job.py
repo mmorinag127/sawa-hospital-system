@@ -1,5 +1,6 @@
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, Computed, String, DateTime, ForeignKey, JSON
+from sqlalchemy.orm import deferred
 
 from src.db import Base
 
@@ -18,6 +19,12 @@ class OcrJob(Base):
     template_version_id = Column(String, ForeignKey("facility_template_versions.id"), nullable=True, index=True)
     output_reference = Column(String, nullable=True)
     metrics = Column(JSON, nullable=True)
+    display_current_document_json = deferred(Column(JSON, Computed(
+        "CASE WHEN metrics ->> 'workflow_attempt_id' IS NULL "
+        "THEN metrics -> 'nonworkflow_execution' -> 'orders' -> order_id -> 'order' -> 'current_document_id' "
+        "ELSE metrics -> 'reparse_read_input' -> 'order' -> 'current_document_id' END", persisted=True)))
+    display_native_template_json = deferred(Column(JSON, Computed(
+        "metrics -> 'nonworkflow_execution' -> 'orders' -> order_id -> 'order' -> 'template_version_id'", persisted=True)))
     error_message = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)

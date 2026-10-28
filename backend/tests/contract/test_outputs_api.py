@@ -135,7 +135,7 @@ def test_daily_label_bundle_returns_zip(monkeypatch, tmp_path):
         archive.write(inner_path, inner_path.name)
 
     monkeypatch.setattr(
-        outputs_api,
+        output_builder,
         "build_daily_output_bundle",
         lambda target_date, bundle_type="both", status="確定": (
             workbook_path,
@@ -169,7 +169,7 @@ def test_daily_label_csv_bundle_returns_zip(monkeypatch, tmp_path):
         archive.write(inner_path, inner_path.name)
 
     monkeypatch.setattr(
-        outputs_api,
+        output_builder,
         "build_daily_output_bundle",
         lambda target_date, bundle_type="both", status="確定": (
             csv_path,
@@ -202,7 +202,7 @@ def test_weekly_weight_returns_xlsx(monkeypatch, tmp_path):
     workbook.save(workbook_path)
 
     monkeypatch.setattr(
-        outputs_api,
+        output_builder,
         "build_weekly_weight_summary_workbook",
         lambda target_date, status=None: workbook_path,
     )
@@ -222,7 +222,7 @@ def test_weekly_weight_returns_xlsx(monkeypatch, tmp_path):
 
 def test_weekly_weight_returns_empty_xlsx_when_no_rows(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    monkeypatch.setattr(outputs_api, "build_weekly_weight_summary_workbook", output_builder.build_weekly_weight_summary_workbook)
+    monkeypatch.setattr(output_builder, "build_weekly_weight_summary_workbook", output_builder.build_weekly_weight_summary_workbook)
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(output_builder, "_weekly_weight_collect_rows", lambda target_date, status=None: {})
 
@@ -240,7 +240,7 @@ def test_weekly_weight_returns_empty_xlsx_when_no_rows(monkeypatch, tmp_path):
 
 def test_weekly_weight_returns_empty_xlsx_when_empty_package_patch_fails(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_DISABLED", "true")
-    monkeypatch.setattr(outputs_api, "build_weekly_weight_summary_workbook", output_builder.build_weekly_weight_summary_workbook)
+    monkeypatch.setattr(output_builder, "build_weekly_weight_summary_workbook", output_builder.build_weekly_weight_summary_workbook)
     monkeypatch.setattr(output_builder, "OUTPUT_DIR", tmp_path)
     monkeypatch.setattr(output_builder, "_weekly_weight_collect_rows", lambda target_date, status=None: {})
     monkeypatch.setattr(output_builder, "_patch_weekly_weight_package", lambda path, sheet_title: (_ for _ in ()).throw(KeyError(4)))
@@ -260,7 +260,7 @@ def test_weekly_weight_returns_empty_xlsx_when_empty_package_patch_fails(monkeyp
 def test_daily_bundle_returns_400_when_no_rows(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "true")
     monkeypatch.setattr(
-        outputs_api,
+        output_builder,
         "build_daily_output_bundle",
         lambda target_date, bundle_type="both", status=None: (_ for _ in ()).throw(
             ValueError("対象日の出力対象がありません")

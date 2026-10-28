@@ -8,7 +8,7 @@ from starlette.responses import JSONResponse
 
 from src.api import portal
 from src.http_middleware import configure_http_middleware
-from src.runtime_startup import completed_startup_scope, initialize_runtime
+from src.runtime_startup import _startup_step, completed_startup_scope, initialize_runtime
 
 
 class HospitalApplication:
@@ -54,7 +54,7 @@ class HospitalApplication:
         if self.business is None:
             async with self.business_lock:
                 if self.business is None:
-                    business = await run_in_threadpool(self.load_business)
+                    business = await run_in_threadpool(_startup_step, "business_import", self.load_business)
                     context = business.router.lifespan_context(business)
                     with completed_startup_scope():
                         await context.__aenter__()

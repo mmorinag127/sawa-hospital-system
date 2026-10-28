@@ -9,7 +9,7 @@ from statistics import median
 from time import perf_counter
 
 import pytest
-from sqlalchemy import Column, MetaData, Table, create_engine, event, select
+from sqlalchemy import Column, Computed, MetaData, Table, create_engine, event, select
 from sqlalchemy.orm import Session
 
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
@@ -29,7 +29,8 @@ def test_postgresql_job_display_extracts_small_native_and_workflow_references():
     engine = create_engine(url)
     metadata = MetaData()
     tables = {model: Table(model.__table__.name, metadata,
-        *[Column(column.name, column.type) for column in model.__table__.columns], prefixes=['TEMPORARY'])
+        *[Column(column.name, column.type, *([Computed(column.computed.sqltext, persisted=column.computed.persisted)]
+            if column.computed is not None else [])) for column in model.__table__.columns], prefixes=['TEMPORARY'])
         for model in (OcrJob, OrderDocument, UploadedPdf, OrderVersion)}
     pdf = {'order_id': 'display-order', 'document_id': 'display-doc', 'uploaded_pdf_id': 'display-upload',
         'message_id': 'display-message', 'storage_uri': 'owned-component.pdf', 'sha256': 'a' * 64}
@@ -67,7 +68,7 @@ def test_postgresql_job_display_extracts_small_native_and_workflow_references():
                 assert len(reads) == 1
                 assert all(name in reads[0] for name in ('order_documents', 'uploaded_pdfs', 'order_versions'))
                 assert rows['native-job']['native_template_version'] == 'display-template'
-                assert rows['native-job']['native_current_document'] == 'display-doc'
+                assert rows['native-job']['_current_document'] == 'display-doc'
                 assert rows['native-job']['native_generation'] == 3
                 assert 'line_snapshot' not in str(rows)
                 state = SimpleNamespace(state='ocr_completed', template_version_id='display-template')
@@ -101,7 +102,7 @@ def test_postgresql_projection_values_storage_and_memory(record_property):
     engine = create_engine(url)
     source = OrderOcrEvidenceRun.__table__
     table = Table(source.name, MetaData(), *[
-        Column(column.name, column.type) for column in source.columns
+        Column(column.name, column.type) for column in source.columns if column.computed is None
     ], prefixes=['TEMPORARY'])
     payloads = [
         {'diagnostic_pipeline_output': {'blob': 'x' * 1000000},

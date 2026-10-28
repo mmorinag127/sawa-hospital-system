@@ -47,6 +47,17 @@
     "upload-route-contracts": [
       "backend/tests/contract/test_monthly_menus_api.py",
       "backend/tests/contract/test_shipping_api.py"
+    ],
+    "generated-display-storage-and-deferred-workbooks": [
+      "backend/tests/unit/test_canonical_facility_store.py",
+      "backend/tests/contract/test_outputs_api.py",
+      "backend/tests/unit/test_weekly_weight_period.py",
+      "backend/tests/unit/test_modernization_output_date_boundary.py",
+      "backend/tests/unit/test_ocr_pending_outcome_contract.py",
+      "backend/tests/unit/test_modernization_pipeline_state_source.py",
+      "backend/tests/unit/test_modernization_pipeline_success_state_failure.py",
+      "backend/tests/unit/test_workbook_pdf_renderer.py",
+      "backend/tests/unit/test_master_order_form_template_service.py"
     ]
   }
 }

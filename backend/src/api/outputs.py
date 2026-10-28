@@ -1,26 +1,20 @@
+from __future__ import annotations
+
 import csv
 import json
 import re
 from datetime import date as dt_date
 from html import escape
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from fastapi.responses import FileResponse, HTMLResponse
 from loguru import logger
-from openpyxl import load_workbook
-from openpyxl.styles import PatternFill
+if TYPE_CHECKING:
+    from openpyxl.styles import PatternFill
 
-from src.services.output_builder import (
-    build_output_preview,
-    build_delivery_preview,
-    build_daily_output_bundle,
-    build_label_csv_for_order,
-    build_label_workbook_for_order,
-    build_weekly_weight_summary_workbook,
-    weekly_weight_period,
-)
-from src.services import order_form_service, order_service
+from src.services import order_service
 from src.api.auth import require_role
 
 router = APIRouter()
@@ -55,6 +49,8 @@ _FINAL_DIET_LABELS = {
 
 
 def _output_file_for_type(order_id: str, output_type: str) -> tuple[Path, str]:
+    from src.services.output_builder import build_output_preview
+
     if output_type == "labels":
         outputs = build_output_preview(order_id, "labels")
         return Path(outputs["labels"]), "ラベルCSV"
@@ -65,6 +61,8 @@ def _output_file_for_type(order_id: str, output_type: str) -> tuple[Path, str]:
         outputs = build_output_preview(order_id, "aggregate")
         return Path(outputs["aggregate"]), "総量CSV"
     if output_type == "order_form_saved_sheet":
+        from src.services import order_form_service
+
         return order_form_service.build_saved_sheet_order_form_excel(order_id=order_id), "FAX読取シートExcel"
     raise ValueError("invalid output type")
 
@@ -102,6 +100,8 @@ def _cell_css(cell) -> str:
 
 
 def _render_xlsx_preview(path: Path, title: str) -> str:
+    from openpyxl import load_workbook
+
     workbook = load_workbook(path, data_only=True)
     sheet_html: list[str] = []
     for worksheet in workbook.worksheets:
@@ -783,6 +783,8 @@ def _parse_iso_date(value: str) -> dt_date:
 
 @router.get("/labels", dependencies=[Depends(require_role("operator"))])
 def download_labels(order_id: str, date: str | None = None):
+    from src.services.output_builder import build_label_csv_for_order, build_output_preview
+
     if date:
         target_date = _parse_iso_date(date)
         try:
@@ -801,6 +803,8 @@ def download_labels(order_id: str, date: str | None = None):
 
 @router.get("/labels.xlsx", dependencies=[Depends(require_role("operator"))])
 def download_labels_xlsx(order_id: str, date: str | None = None):
+    from src.services.output_builder import build_label_workbook_for_order
+
     target_date = _parse_iso_date(date) if date else None
     try:
         path, filename = build_label_workbook_for_order(order_id, target_date=target_date)
@@ -818,6 +822,8 @@ def download_labels_xlsx(order_id: str, date: str | None = None):
 
 @router.get("/delivery-notes", dependencies=[Depends(require_role("operator"))])
 def download_delivery(order_id: str):
+    from src.services.output_builder import build_output_preview
+
     outputs = build_output_preview(order_id, "delivery")
     path = outputs["delivery_note"]
     logger.info("Output download", order_id=order_id, output="delivery", path=path)
@@ -830,6 +836,8 @@ def download_delivery(order_id: str):
 
 @router.get("/delivery-notes/html", response_class=HTMLResponse, dependencies=[Depends(require_role("operator"))])
 def view_delivery_note_html(order_id: str, date: str | None = None):
+    from src.services.output_builder import build_delivery_preview
+
     target_date = _parse_iso_date(date) if date else None
     try:
         preview = build_delivery_preview(order_id, include_diagnostics=False, target_date=target_date)
@@ -887,6 +895,8 @@ def view_daily_delivery_note_html(date: str, status: str | None = None):
 
 @router.get("/order-form-saved-sheet", dependencies=[Depends(require_role("operator"))])
 def download_order_form_saved_sheet(order_id: str):
+    from src.services import order_form_service
+
     try:
         path = order_form_service.build_saved_sheet_order_form_excel(order_id=order_id)
     except ValueError as exc:
@@ -906,6 +916,8 @@ def download_order_form_saved_sheet(order_id: str):
 
 @router.get("/manufacturing-aggregate", dependencies=[Depends(require_role("operator"))])
 def download_aggregate(order_id: str):
+    from src.services.output_builder import build_output_preview
+
     outputs = build_output_preview(order_id, "aggregate")
     path = outputs["aggregate"]
     logger.info("Output download", order_id=order_id, output="aggregate", path=path)
@@ -914,6 +926,8 @@ def download_aggregate(order_id: str):
 
 @router.get("/preview", dependencies=[Depends(require_role("operator"))])
 def preview_output(order_id: str, type: str, limit: int = _PREVIEW_LIMIT_DEFAULT):
+    from src.services.output_builder import build_delivery_preview, build_output_preview
+
     limit = max(1, min(limit, _PREVIEW_LIMIT_DEFAULT))
     if type == "labels":
         outputs = build_output_preview(order_id, "labels")
@@ -956,6 +970,8 @@ def download_daily_bundle(
     bundle_type: str = "both",
     status: str | None = None,
 ):
+    from src.services.output_builder import build_daily_output_bundle
+
     target_date = _parse_iso_date(date)
     try:
         bundle_path, summary = build_daily_output_bundle(
@@ -993,6 +1009,8 @@ def download_weekly_weight(
     date: str | None = None, status: str | None = None,
     start: str | None = None, end: str | None = None,
 ):
+    from src.services.output_builder import build_weekly_weight_summary_workbook, weekly_weight_period
+
     def date_only(value: str | None) -> dt_date | None:
         if value is None:
             return None
