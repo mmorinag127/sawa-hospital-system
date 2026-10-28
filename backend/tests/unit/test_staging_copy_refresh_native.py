@@ -144,14 +144,15 @@ def test_untracked_production_schema_is_adopted_only_in_fresh_copy(monkeypatch, 
     with psycopg2.connect(**{**parsed, 'dbname': 'untracked_source'}) as original:
         source_before = engine.fingerprints(original, before_dir)[0]
     receipt = {}
+    target_heads = [formal.formal_head_revision()]
     after, _, _ = engine.clone_database(source, destination, 'sawa_replay_ad0f7', tmp_path,
-        ['0036'], source_heads=[], upgrade=upgrade_hospital, receipt=receipt)
+        target_heads, source_heads=[], upgrade=upgrade_hospital, receipt=receipt)
     assert receipt['existing_values_preserved'] is True
     assert receipt['source_tables'] == source_before
     with psycopg2.connect(**{**parsed, 'dbname': 'untracked_source'}) as original:
         assert engine.fingerprints(original, before_dir)[0] == source_before
         assert engine._heads(original) == []
     with psycopg2.connect(**{**parsed, 'dbname': 'sawa_replay_ad0f7'}) as copied, copied.cursor() as cursor:
-        assert engine._heads(copied) == ['0036']
+        assert engine._heads(copied) == target_heads
         cursor.execute('SELECT name FROM facilities WHERE id=%s', ('preserved',))
         assert cursor.fetchone() == ('実データ保持',)
