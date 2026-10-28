@@ -4,7 +4,6 @@ import subprocess
 import sys
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -27,39 +26,38 @@ def test_auth_import_does_not_import_business_or_workbook_processing():
 
 
 def test_formal_schema_failure_still_prevents_startup(monkeypatch):
-    monkeypatch.setattr(entry.db.engine, "connect", MagicMock())
-
-    def reject(_connection):
+    def reject():
         raise RuntimeError("formal schema mismatch")
 
-    monkeypatch.setattr(entry, "require_formal_head", reject)
+    monkeypatch.setattr(entry, "initialize_runtime", reject)
     with pytest.raises(RuntimeError, match="formal schema mismatch"):
         with TestClient(entry.HospitalApplication()):
             pytest.fail("Failed formal schema must not serve authentication")
 
 
-def test_auth_denial_is_served_while_business_startup_is_blocked(monkeypatch):
+def test_auth_denial_is_served_while_business_import_is_blocked(monkeypatch):
     monkeypatch.setenv("AUTH_DISABLED", "false")
     monkeypatch.setattr(auth, "AUTH_PROVIDER", "local")
     started, released = threading.Event(), threading.Event()
     calls = []
     business = FastAPI()
 
-    @business.on_event("startup")
-    def initialize():
-        calls.append("startup")
+    def load(_application):
+        calls.append("business_import")
         started.set()
         assert released.wait(5)
+        return business
 
     @business.get("/probe")
     def probe():
         return {"unchanged": True}
 
-    monkeypatch.setitem(sys.modules, "src.main", SimpleNamespace(app=business))
+    monkeypatch.setattr(entry, "initialize_runtime", lambda: calls.append("formal"))
+    monkeypatch.setattr(entry.HospitalApplication, "load_business", load)
 
     async def exercise():
         application = entry.HospitalApplication()
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://fixture.invalid") as client:
+        async with application.lifespan(application.auth), httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://fixture.invalid") as client:
             pending = asyncio.create_task(client.get("/probe"))
             try:
                 assert await asyncio.to_thread(started.wait, 3)
@@ -72,28 +70,28 @@ def test_auth_denial_is_served_while_business_startup_is_blocked(monkeypatch):
             assert result.status_code == 200
             assert result.json() == {"unchanged": True}
             assert (await client.get("/probe")).json() == result.json()
-            assert calls == ["startup"]
+            assert calls == ["formal", "business_import"]
 
     asyncio.run(exercise())
 
 
-def test_business_startup_failure_is_not_cached_as_success(monkeypatch):
-    business = FastAPI()
+def test_business_import_failure_is_not_cached_as_success(monkeypatch):
     attempts = []
 
-    @business.on_event("startup")
-    def reject():
+    def reject(_application):
         attempts.append(1)
         raise RuntimeError("business schema unavailable")
 
-    monkeypatch.setitem(sys.modules, "src.main", SimpleNamespace(app=business))
+    monkeypatch.setattr(entry, "initialize_runtime", lambda: None)
+    monkeypatch.setattr(entry.HospitalApplication, "load_business", reject)
 
     async def exercise():
         application = entry.HospitalApplication()
-        for _ in range(2):
-            with pytest.raises(RuntimeError, match="business schema unavailable"):
-                await application.business_app()
-            assert application.business is None
+        async with application.lifespan(application.auth):
+            for _ in range(2):
+                with pytest.raises(RuntimeError, match="business schema unavailable"):
+                    await application.business_app()
+                assert application.business is None
         assert len(attempts) == 2
 
     asyncio.run(exercise())
@@ -102,18 +100,17 @@ def test_business_startup_failure_is_not_cached_as_success(monkeypatch):
 def test_business_shutdown_runs_once_after_formal_startup(monkeypatch):
     business = FastAPI()
     calls = []
-    monkeypatch.setattr(entry.db.engine, "connect", MagicMock())
-    monkeypatch.setattr(entry, "require_formal_head", lambda _connection: calls.append("formal"))
+    monkeypatch.setattr(entry, "initialize_runtime", lambda: calls.append("formal"))
 
-    @business.on_event("startup")
-    def startup():
-        calls.append("business")
+    def load(_application):
+        calls.append("business_import")
+        return business
 
     @business.on_event("shutdown")
     def shutdown():
         calls.append("shutdown")
 
-    monkeypatch.setitem(sys.modules, "src.main", SimpleNamespace(app=business))
+    monkeypatch.setattr(entry.HospitalApplication, "load_business", load)
 
     async def exercise():
         application = entry.HospitalApplication()
@@ -121,6 +118,36 @@ def test_business_shutdown_runs_once_after_formal_startup(monkeypatch):
             first, second = await asyncio.gather(application.business_app(), application.business_app())
             assert first is second is business
         assert application.business is None
-        assert calls == ["formal", "business", "shutdown"]
+        assert calls == ["formal", "business_import", "shutdown"]
+
+    asyncio.run(exercise())
+
+
+def test_business_import_does_not_repeat_startup_and_rejects_unknown_hooks(monkeypatch):
+    business = FastAPI()
+    calls = []
+
+    def initialize():
+        calls.append("must not run during GET")
+
+    monkeypatch.setattr(entry, "initialize_runtime", initialize)
+    business.add_event_handler("startup", initialize)
+    monkeypatch.setitem(sys.modules, "src.main", SimpleNamespace(app=business, _initialize_menu_schema=initialize))
+    application = entry.HospitalApplication()
+    assert application.load_business() is business
+    assert calls == []
+    business.add_event_handler("startup", lambda: None)
+    with pytest.raises(RuntimeError, match="unrecognized business startup lifecycle"):
+        application.load_business()
+    assert calls == []
+
+
+def test_requests_without_required_lifespan_are_not_served():
+    async def exercise():
+        application = entry.HospitalApplication()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://fixture.invalid") as client:
+            for path in ("/portal/auth/me", "/health"):
+                assert (await client.get(path)).status_code == 503
+            assert application.business is None
 
     asyncio.run(exercise())

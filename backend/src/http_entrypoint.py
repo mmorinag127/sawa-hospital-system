@@ -4,16 +4,17 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import JSONResponse
 
-from src import db
 from src.api import portal
 from src.http_middleware import configure_http_middleware
-from src.maintenance.formal_migration_schema import require_formal_head
+from src.runtime_startup import initialize_runtime
 
 
 class HospitalApplication:
     def __init__(self):
         self.business = None
+        self.runtime_ready = False
         self.business_lock = asyncio.Lock()
         self.auth = FastAPI(openapi_url=None, docs_url=None, redoc_url=None,
                             lifespan=self.lifespan)
@@ -23,11 +24,8 @@ class HospitalApplication:
     @asynccontextmanager
     async def lifespan(self, _app):
         self.business_lock = asyncio.Lock()
-        def require_schema():
-            with db.engine.connect() as connection:
-                require_formal_head(connection)
-
-        await run_in_threadpool(require_schema)
+        await run_in_threadpool(initialize_runtime)
+        self.runtime_ready = True
         try:
             yield
         finally:
@@ -35,23 +33,30 @@ class HospitalApplication:
                 if self.business is not None:
                     await self.business.router.shutdown()
                     self.business = None
+            self.runtime_ready = False
+
+    def load_business(self):
+        from src.main import app, _initialize_menu_schema
+
+        # The shared initializer already ran before the listener became ready.
+        # New startup hooks require explicit integration, not silent omission.
+        if app.router.on_startup != [_initialize_menu_schema] or _initialize_menu_schema is not initialize_runtime:
+            raise RuntimeError("unrecognized business startup lifecycle")
+        return app
 
     async def business_app(self):
+        if not self.runtime_ready:
+            raise RuntimeError("runtime startup is required")
         if self.business is None:
             async with self.business_lock:
                 if self.business is None:
-                    def initialize():
-                        from src.main import app
-
-                        # Import and synchronous schema/projection initialization
-                        # must not occupy the loop serving concurrent auth reads.
-                        asyncio.run(app.router.startup())
-                        return app
-
-                    self.business = await run_in_threadpool(initialize)
+                    self.business = await run_in_threadpool(self.load_business)
         return self.business
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and not self.runtime_ready:
+            await JSONResponse({"detail": "runtime startup is required"}, status_code=503)(scope, receive, send)
+            return
         path = scope.get("path", "")
         if scope["type"] == "lifespan" or (scope["type"] == "http" and
                 (path == "/portal" or path.startswith("/portal/"))):

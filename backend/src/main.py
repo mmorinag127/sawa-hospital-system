@@ -28,6 +28,7 @@ from src.http_middleware import configure_http_middleware
 from src import db
 from src.api import staging_datasets
 from src.maintenance.formal_migration_schema import require_formal_head
+from src.runtime_startup import initialize_runtime as _initialize_menu_schema
 
 app = FastAPI(title="Hospital Order System API")
 from src.api import staging_source_probe, staging_source_settings
@@ -63,10 +64,4 @@ app.include_router(portal.router, prefix="")
 app.include_router(staging_datasets.router)
 
 
-@app.on_event("startup")
-def _initialize_menu_schema() -> None:
-    with db.engine.connect() as connection:
-        require_formal_head(connection)
-    menu_service.ensure_menu_schema()
-    facility_template_version_service.ensure_facility_template_version_schema()
-    facility_service.sync_facility_names_from_master()
+app.add_event_handler("startup", _initialize_menu_schema)
