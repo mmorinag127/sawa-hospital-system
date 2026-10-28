@@ -8,12 +8,13 @@ from starlette.responses import JSONResponse
 
 from src.api import portal
 from src.http_middleware import configure_http_middleware
-from src.runtime_startup import initialize_runtime
+from src.runtime_startup import completed_startup_scope, initialize_runtime
 
 
 class HospitalApplication:
     def __init__(self):
         self.business = None
+        self.business_context = None
         self.runtime_ready = False
         self.business_lock = asyncio.Lock()
         self.auth = FastAPI(openapi_url=None, docs_url=None, redoc_url=None,
@@ -30,10 +31,13 @@ class HospitalApplication:
             yield
         finally:
             async with self.business_lock:
-                if self.business is not None:
-                    await self.business.router.shutdown()
+                try:
+                    if self.business_context is not None:
+                        await self.business_context.__aexit__(None, None, None)
+                finally:
                     self.business = None
-            self.runtime_ready = False
+                    self.business_context = None
+                    self.runtime_ready = False
 
     def load_business(self):
         from src.main import app, _initialize_menu_schema
@@ -50,7 +54,12 @@ class HospitalApplication:
         if self.business is None:
             async with self.business_lock:
                 if self.business is None:
-                    self.business = await run_in_threadpool(self.load_business)
+                    business = await run_in_threadpool(self.load_business)
+                    context = business.router.lifespan_context(business)
+                    with completed_startup_scope():
+                        await context.__aenter__()
+                    self.business_context = context
+                    self.business = business
         return self.business
 
     async def __call__(self, scope, receive, send):

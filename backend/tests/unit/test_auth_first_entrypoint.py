@@ -131,12 +131,12 @@ def test_business_import_does_not_repeat_startup_and_rejects_unknown_hooks(monke
         calls.append("must not run during GET")
 
     monkeypatch.setattr(entry, "initialize_runtime", initialize)
-    business.add_event_handler("startup", initialize)
+    business.router.add_event_handler("startup", initialize)
     monkeypatch.setitem(sys.modules, "src.main", SimpleNamespace(app=business, _initialize_menu_schema=initialize))
     application = entry.HospitalApplication()
     assert application.load_business() is business
     assert calls == []
-    business.add_event_handler("startup", lambda: None)
+    business.router.add_event_handler("startup", lambda: None)
     with pytest.raises(RuntimeError, match="unrecognized business startup lifecycle"):
         application.load_business()
     assert calls == []

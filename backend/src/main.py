@@ -64,4 +64,4 @@ app.include_router(portal.router, prefix="")
 app.include_router(staging_datasets.router)
 
 
-app.add_event_handler("startup", _initialize_menu_schema)
+app.router.add_event_handler("startup", _initialize_menu_schema)
