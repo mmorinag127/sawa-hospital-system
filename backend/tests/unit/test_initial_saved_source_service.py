@@ -92,6 +92,17 @@ def all_rows(session):
         ).mappings()] for model in MODELS}
 
 
+def test_display_generated_columns_do_not_change_saved_source_identity(saved):
+    from src.services.workflow_attempt_guard_service import captured_evidence_source
+
+    snapshot = service.capture_saved_source(saved, "O")
+    assert "display_overlay_json" not in snapshot["evidence"]
+    evidence = snapshot["evidence"]
+    original = captured_evidence_source("O", evidence)
+    assert captured_evidence_source("O", {**evidence, "display_overlay_json": {"url": "derived"}}) == original
+    assert captured_evidence_source("O", {**evidence, "payload_json": {"raw": "changed"}}) != original
+
+
 def test_exact_saved_values_selected_only_json_dates_and_no_writes(saved):
     before = all_rows(saved)
     statements = []

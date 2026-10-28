@@ -202,7 +202,7 @@ def _current_sheet_execution_input(session: Any, order: Any, *, lock: bool = Fal
     if unavailable:
         from src.models.facility_template_version import FacilityTemplateVersion
         def row_values(row):
-            return {column.key: getattr(row, column.key) for column in row.__table__.columns} if row is not None else None
+            return {column.key: getattr(row, column.key) for column in row.__table__.columns if column.computed is None} if row is not None else None
         workflow = session.get(OrderWorkflowState, order.id, populate_existing=True, with_for_update=lock)
         lines = session.execute(select(OrderLine).where(OrderLine.order_id == order.id).order_by(OrderLine.id).execution_options(populate_existing=True)).scalars().all()
         decisions = session.execute(select(OrderCriticalDecision).where(OrderCriticalDecision.order_id == order.id).order_by(OrderCriticalDecision.id).execution_options(populate_existing=True)).scalars().all()
@@ -341,7 +341,7 @@ def _order_execution_input(session: Any, order: Any, *, lock: bool = False, orig
     cache = session.get(OrderOcrCache, order.id, populate_existing=True, with_for_update=lock)
     document = session.get(OrderDocument, order.current_document_id, populate_existing=True, with_for_update=lock) if order.current_document_id else None
     def row_snapshot(row: Any) -> Any:
-        return {column.key: getattr(row, column.key) for column in row.__table__.columns} if row is not None else None
+        return {column.key: getattr(row, column.key) for column in row.__table__.columns if column.computed is None} if row is not None else None
     return _json_snapshot({
         "order_exists": True,
         "configured_input": configured_input,
@@ -624,6 +624,10 @@ def capture_nonworkflow_execution(
 
 
 def captured_evidence_source(order_id: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
+
+    derived = {column.key for column in OrderOcrEvidenceRun.__table__.columns if column.computed is not None}
+    evidence = {key: value for key, value in evidence.items() if key not in derived}
     return {
         "order_id": order_id, "evidence_run_id": evidence["id"],
         "input_sha256": sha256(json.dumps(_json_snapshot(evidence), sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
@@ -995,7 +999,7 @@ def synchronous_input_versions(
 ) -> dict[str, Any]:
     """Keep the exact read inputs, including in-place edits, for the write CAS."""
     versions = {
-        name: deepcopy({column.key: getattr(row, column.key) for column in row.__table__.columns})
+        name: deepcopy({column.key: getattr(row, column.key) for column in row.__table__.columns if column.computed is None})
         if row is not None else None
         for name, row in (("order", order), ("evidence", evidence), ("draft", draft), ("cache", cache))
     }

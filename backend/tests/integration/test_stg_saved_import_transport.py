@@ -51,7 +51,10 @@ def test_real_postgresql_capture_preserves_every_saved_value_and_closes_transact
             for model in MODELS:
                 rows = fixture[model.__tablename__]
                 if rows:
-                    connection.execute(sa.insert(model.__table__), rows)
+                    writable = {column.key for column in model.__table__.columns if column.computed is None}
+                    connection.execute(sa.insert(model.__table__), [
+                        {key: value for key, value in row.items() if key in writable} for row in rows
+                    ])
         with Session(engine) as session:
             before = all_rows(session)
             snapshot = capture_saved_source(session, "O")

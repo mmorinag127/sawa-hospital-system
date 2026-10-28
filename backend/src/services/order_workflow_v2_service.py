@@ -4467,7 +4467,7 @@ def _build_sheet_from_selected_ocr(
         serialized = ocr_evidence_service._serialize_evidence_run(evidence, include_payload=True)
         if evidence_run_override is not None and not snapshots_equal(evidence_run_override, serialized):
             return None, "candidate_evidence_changed"
-        evidence_snapshot = copy.deepcopy({column.key: getattr(evidence, column.key) for column in evidence.__table__.columns})
+        evidence_snapshot = copy.deepcopy({column.key: getattr(evidence, column.key) for column in evidence.__table__.columns if column.computed is None})
         from src.services.recognition_acceptance_service import payload_for_evidence
         payload = payload_for_evidence(evidence)
         meta = _workflow_meta(workflow)
@@ -4561,7 +4561,7 @@ def _build_sheet_from_selected_ocr(
         ))
         current = session.get(OrderOcrEvidenceRun, selected_ocr_result_id, populate_existing=True)
         if current is None or not snapshots_equal(
-            evidence_snapshot, {column.key: getattr(current, column.key) for column in current.__table__.columns},
+            evidence_snapshot, {column.key: getattr(current, column.key) for column in current.__table__.columns if column.computed is None},
         ):
             return None, "candidate_evidence_changed"
         if not verify_selected_pdf_receipt(session, captured["selected_pdf_receipt"], read_only=True):

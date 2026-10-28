@@ -105,7 +105,8 @@ def capture_saved_source(session, order_id):
         if identity is None:
             return None
         table = model.__table__
-        row = session.execute(select(*table.c).where(table.c[key] == identity)).mappings().one_or_none()
+        row = session.execute(select(*(column for column in table.c if column.computed is None))
+                              .where(table.c[key] == identity)).mappings().one_or_none()
         if row is None:
             raise ValueError("initial_saved_source_missing:" + table.name)
         return dict(row)
