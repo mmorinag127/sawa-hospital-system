@@ -9,7 +9,7 @@ from statistics import median
 from time import perf_counter
 
 import pytest
-from sqlalchemy import Column, MetaData, Table, create_engine, select
+from sqlalchemy import Column, MetaData, Table, create_engine, event, select
 from sqlalchemy.orm import Session
 
 from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
@@ -56,7 +56,16 @@ def test_postgresql_job_display_extracts_small_native_and_workflow_references():
                     uploaded_pdf_id='display-upload', input_artifact_digest=pdf['sha256'],
                     template_version_id=template, metrics=metrics))
             with Session(bind=connection) as session:
-                rows = read_recorded_job_values(session, ['native-job', 'workflow-job'])
+                reads = []
+                def observe(_connection, _cursor, sql, *_args):
+                    reads.append(sql)
+                event.listen(connection, 'before_cursor_execute', observe)
+                try:
+                    rows = read_recorded_job_values(session, ['native-job', 'workflow-job'])
+                finally:
+                    event.remove(connection, 'before_cursor_execute', observe)
+                assert len(reads) == 1
+                assert all(name in reads[0] for name in ('order_documents', 'uploaded_pdfs', 'order_versions'))
                 assert rows['native-job']['native_template_version'] == 'display-template'
                 assert rows['native-job']['native_current_document'] == 'display-doc'
                 assert rows['native-job']['native_generation'] == 3
@@ -70,6 +79,16 @@ def test_postgresql_job_display_extracts_small_native_and_workflow_references():
                     assert job['recorded_state'] == 'done'
                     assert common['jobId'] == identity
                 assert not session.new and not session.dirty
+            for index, malformed in enumerate((None, [], 'text', False, 9,
+                    {'selected_pdf_receipt': {**pdf, 'document_id': 9}},
+                    {'selected_version_input': []})):
+                identity = f'malformed-job-{index}'
+                connection.execute(tables[OcrJob].insert().values(id=identity, order_id='display-order',
+                    status='done', input_reference=pdf['storage_uri'], template_version_id='display-template',
+                    metrics=malformed))
+                with Session(bind=connection) as session:
+                    job, error, common = _job_summary(session, order, state, {'ocr_job_id': identity})
+                    assert job is None and error and common is None
             connection.rollback()
     finally:
         engine.dispose()

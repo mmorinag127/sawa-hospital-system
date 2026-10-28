@@ -164,6 +164,41 @@ def test_inspection_preview_does_not_validate_or_deserialize_full_evidence(histo
     assert result["saved_sheet"]["sheet"]["rows"] == produced["sheet"]["rows"]
 
 
+def test_inspection_reads_each_reference_once_and_joins_job_sources(history_case):
+    from sqlalchemy import event
+    from src.db import session_scope
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.services import workflow_display_read_service as display
+    case = history_case()
+    produced = case.produce(cell_values="5")
+    case.save(produced["sheet"])
+    statements = []
+
+    def observe(_connection, _cursor, sql, *_args):
+        statements.append(" ".join(sql.split()))
+
+    with case.readonly():
+        event.listen(case.engine, "before_cursor_execute", observe)
+        try:
+            result, error = display.get_display(case.id, scope="inspection")
+        finally:
+            event.remove(case.engine, "before_cursor_execute", observe)
+    assert error is None
+    job_reads = [sql for sql in statements if "FROM ocr_jobs" in sql]
+    assert len(job_reads) == 1
+    assert all(name in job_reads[0] for name in ("order_documents", "uploaded_pdfs", "order_versions"))
+    assert not any("count(*)" in sql.lower() and "order_ocr_evidence_runs" in sql for sql in statements)
+    assert sum("FROM orders LEFT OUTER JOIN order_workflow_states" in sql for sql in statements) == 1
+    assert sum("FROM order_sheet_drafts" in sql for sql in statements) == 2
+    assert sum("FROM order_ocr_evidence_runs" in sql for sql in statements) == 2
+    assert result["saved_sheet"]["sheet"]["rows"] == produced["sheet"]["rows"]
+    assert result["ocr_result_count"] == len(result["ocr_candidates"]["results"])
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, case.id)
+        assert state.evidence_run_id == result["artifact_lineage"]["selected_ocr_result_id"]
+        assert state.draft_id == result["artifact_lineage"]["saved_sheet_id"]
+
+
 def test_saved_output_display_does_not_materialize_and_sheet_scope_preserves_edits(history_case, monkeypatch):
     from src.services import workflow_display_read_service as display
     from src.services import order_workflow_v2_service as workflow
