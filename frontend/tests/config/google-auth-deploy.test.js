@@ -159,13 +159,13 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.match(stgWorkflow, /bash scripts\/bootstrap_automation_user\.sh stg/);
   const jobs = yaml.load(stgWorkflow).jobs;
   const backendChanged = "needs.source-gate.outputs.backend_changed == 'true'";
-  assert.deepEqual(jobs["menu-master-migration"].needs, ["source-gate", "automation-bootstrap"]);
+  assert.deepEqual(jobs["menu-master-migration"].needs, ["source-gate", "automation-bootstrap", "build-backend"]);
   assert.equal(jobs["menu-master-migration"].if, backendChanged);
   assert.ok(jobs["menu-master-migration"].steps.some(step =>
     step.run === "uv run --project backend --extra dev --frozen python scripts/run_stg_schema_adoption.py"));
   assert.ok(jobs["menu-master-migration"].steps.some(step =>
     step.run === "uv run --project backend --extra dev --frozen python scripts/run_stg_runtime_schema_preflight.py"));
-  assert.deepEqual(jobs["build-backend"].needs, ["source-gate", "automation-bootstrap", "menu-master-migration"]);
+  assert.deepEqual(jobs["build-backend"].needs, ["source-gate", "automation-bootstrap"]);
   assert.equal(jobs["build-backend"].if, backendChanged);
   assert.deepEqual(jobs["deploy-backend"].needs, ["source-gate", "build-backend", "menu-master-migration"]);
   assert.equal(jobs["deploy-backend"].if, backendChanged);
