@@ -18,6 +18,7 @@ from run_stg_menu_master_migration import (
 from staging_db_target import StagingConfigBlocked, verify_connection_target
 from src.maintenance.live_schema_adoption import adopt
 from src.maintenance.formal_migration_schema import require_formal_head
+from stg_replay_schema_targets import service_configuration, replay_environment, registered_databases
 
 
 def upgrade_connection(connection):
@@ -54,6 +55,9 @@ def run():
                 STAGING_INSTANCE, STAGING_DATABASE, "orders_app"):
             raise RuntimeError("adoption blocked: unexpected staging target")
     web = configs[0]
+    settings = service_configuration(os.environ["WEB_SERVICE"])
+    if settings != service_configuration(os.environ["WORKER_SERVICE"]):
+        raise RuntimeError("adoption blocked: staging replay configurations differ")
     with cloud_sql_proxy(web.instance_connection_name):
         url = URL.create("postgresql+psycopg2", username=web.db_user, password=web.db_password,
                          host="127.0.0.1", port=5432, database=web.db_name)
@@ -66,6 +70,27 @@ def run():
                 upgrade_connection(connection)
         finally:
             engine.dispose()
+        if settings:
+            from src import staging_data
+
+            with replay_environment(settings):
+                registry, generation = staging_data.read_registry()
+                databases = registered_databases(registry, staging_data.manifest_for)
+                for database in databases:
+                    replay_url = url.set(database=database)
+                    replay_engine = create_engine(replay_url, hide_parameters=True,
+                        connect_args={"options": "-c lock_timeout=5000 -c statement_timeout=300000"})
+                    try:
+                        with replay_engine.connect() as connection:
+                            verify_connection_target(connection, database=database)
+                            connection.rollback()
+                            upgrade_connection(connection)
+                        print("Verified registered staging replay schema: " + database)
+                    finally:
+                        replay_engine.dispose()
+                final_registry, final_generation = staging_data.read_registry()
+                if generation != final_generation or registry != final_registry:
+                    raise RuntimeError("adoption blocked: replay registry changed during migration")
 
 
 if __name__ == "__main__":

@@ -49,6 +49,7 @@
       "backend/tests/contract/test_shipping_api.py"
     ],
     "generated-display-storage-and-deferred-workbooks": [
+      "backend/tests/unit/test_stg_replay_schema_targets.py",
       "backend/tests/unit/test_canonical_facility_store.py",
       "backend/tests/contract/test_outputs_api.py",
       "backend/tests/unit/test_weekly_weight_period.py",

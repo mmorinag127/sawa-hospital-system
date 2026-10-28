@@ -445,7 +445,7 @@ def test_workflow_gates_both_deploy_surfaces_and_retains_bootstraps():
     jobs = workflow["jobs"]
     gate = jobs["menu-master-migration"]
     assert gate["timeout-minutes"] == "10"
-    assert gate["needs"] == ["source-gate", "automation-bootstrap"]
+    assert gate["needs"] == ["source-gate", "automation-bootstrap", "build-backend"]
     assert gate["if"] == "needs.source-gate.outputs.backend_changed == 'true'"
     assert gate["permissions"] == {"contents": "read", "id-token": "write"}
     auth_step = next(step for step in gate["steps"] if step.get("uses") == "google-github-actions/auth@v3")
@@ -458,7 +458,8 @@ def test_workflow_gates_both_deploy_surfaces_and_retains_bootstraps():
     assert gate_commands[1:] == [migration_command, preflight_command]
     assert 'sudo apt-get install --only-upgrade -y ca-certificates' in gate_commands[0]
     assert 'dpkg --compare-versions "$actual" ge "$minimum"' in gate_commands[0]
-    for name in ("build-backend", "deploy-backend", "deploy-frontend"):
+    assert jobs["build-backend"]["needs"] == ["source-gate", "automation-bootstrap"]
+    for name in ("deploy-backend", "deploy-frontend"):
         assert "menu-master-migration" in jobs[name]["needs"]
         assert "continue-on-error" not in jobs[name]
     for name in ("build-backend", "deploy-backend"):

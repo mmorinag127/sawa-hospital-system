@@ -7,8 +7,6 @@ from loguru import logger
 
 from src.services.storage_uri import parse_gcs_uri
 
-from google.api_core.exceptions import NotFound
-
 _STORAGE_UNLOADED = object()
 storage = _STORAGE_UNLOADED
 
@@ -61,6 +59,8 @@ def _state_uri() -> str:
 
 
 def _load_gs(bucket: str, object_name: str) -> dict | None:
+    from google.api_core.exceptions import NotFound
+
     client = _storage_sdk().Client()
     blob = client.bucket(bucket).blob(object_name)
     try:

@@ -330,7 +330,7 @@ jobs:
         run: bash scripts/bootstrap_automation_user.sh stg school-lunch
 
   menu-master-migration:
-    needs: [source-gate, automation-bootstrap]
+    needs: [source-gate, automation-bootstrap, build-backend]
     if: needs.source-gate.outputs.backend_changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -372,7 +372,7 @@ jobs:
         run: uv run --project backend --extra dev --frozen python scripts/run_stg_runtime_schema_preflight.py
 
   build-backend:
-    needs: [source-gate, automation-bootstrap, menu-master-migration]
+    needs: [source-gate, automation-bootstrap]
     if: needs.source-gate.outputs.backend_changed == 'true'
     runs-on: ubuntu-latest
     permissions:

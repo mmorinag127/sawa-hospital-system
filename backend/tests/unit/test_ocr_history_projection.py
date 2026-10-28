@@ -72,7 +72,8 @@ def test_postgresql_and_sqlite_query_contract():
         assert "order_ocr_evidence_runs.order_id = 'O'" in text
         assert 'ORDER BY order_ocr_evidence_runs.created_at DESC, order_ocr_evidence_runs.id DESC' in text
         assert ' LIMIT ' not in text and ' OFFSET ' not in text
-        assert set(statement.selected_columns.keys()) == set(OrderOcrEvidenceRun.__table__.c.keys())
+        assert set(statement.selected_columns.keys()) == {
+            column.key for column in OrderOcrEvidenceRun.__table__.c if column.computed is None}
         assert statement.get_execution_options()['yield_per'] == 4
 
 

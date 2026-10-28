@@ -68,6 +68,27 @@ class MemoryClient:
     def bucket(self, name):
         return MemoryBucket(self, name)
 
+    def get(self, endpoint, **kwargs):
+        import base64
+        from contextlib import nullcontext
+        from types import SimpleNamespace
+        from urllib.parse import unquote, urlsplit
+        import google_crc32c
+
+        assert kwargs == {"params": {"alt": "media"}, "headers": {"Accept-Encoding": "gzip"},
+                          "timeout": 30, "stream": True, "allow_redirects": False}
+        prefix = "/download/storage/v1/b/"
+        path = urlsplit(endpoint).path
+        assert path.startswith(prefix)
+        bucket, object_name = path[len(prefix):].split("/o/", 1)
+        key = (unquote(bucket), unquote(object_name))
+        data, generation = self.objects[key], self.generations[key]
+        self.events.append(("download-bound", key, generation, sha256(data).hexdigest()))
+        headers = {"X-Goog-Generation": str(generation), "X-Goog-Hash":
+            "crc32c=" + base64.b64encode(google_crc32c.Checksum(data).digest()).decode()}
+        return nullcontext(SimpleNamespace(status_code=200, headers=headers,
+            raise_for_status=lambda: None, raw=SimpleNamespace(read=lambda **options: data)))
+
 
 @pytest.fixture
 def storage_component(tmp_path, monkeypatch):
@@ -75,6 +96,7 @@ def storage_component(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     client = MemoryClient()
     monkeypatch.setattr(storage_service._GCS_CLIENT_LOCAL, "client", client, raising=False)
+    monkeypatch.setattr(storage_service._GCS_CLIENT_LOCAL, "read_session", client, raising=False)
     materialized = tmp_path / "materialized"
     monkeypatch.setattr(order_form_service, "_SOURCE_WORKBOOK_MATERIALIZED_DIR", materialized)
     source = tmp_path / "authored.xlsx"
@@ -180,8 +202,7 @@ def test_cloud_run_registered_endpoint_retains_missing_storage_503(
         assert client.objects == {master_key: master_bytes}
         assert client.generations == {master_key: master_generation}
         assert client.events == [
-            ("reload", master_key, master_generation),
-            ("download-pinned", master_key, master_generation, master_digest),
+            ("download-bound", master_key, master_generation, master_digest),
         ] * 3
     finally:
         upload.file.close()
