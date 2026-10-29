@@ -295,7 +295,7 @@ for (const state of ['sheet_saved', 'confirmed']) test(`${state} initial view do
     assert.equal(f.t.calls.some(call => call.url === DETAIL), false);
     await f.h.settle(() => f.probe.current.setVisibleStep(3));
     assert.ok(f.t.calls.some(call => call.url === `${BASE}/display?scope=sheet&selected_document_id=pdf`));
-    assert.ok(f.t.calls.some(call => call.url === DETAIL));
+    assert.equal(f.t.calls.some(call => call.url === DETAIL), false);
     assert.equal(f.h.document.querySelector('input[data-sheet-row="0"][data-sheet-col="0"]').value, '001');
   } finally { await f.h.close(); }
 });
