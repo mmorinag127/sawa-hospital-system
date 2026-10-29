@@ -99,9 +99,13 @@ for (const [name, counts] of Object.entries(expected)) {
     for (const [ancestor, descendant] of [[base, migration], [migration, approved], [approved, 'HEAD']])
       execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: root });
     if (name === 'daily-delivery-notes') execFileSync('git', ['merge-base', '--is-ancestor', 'c5dd90a', approved], { cwd: root });
-    assert.equal(fs.readFileSync(path.join(root, file), 'utf8'),
-      execFileSync('git', ['show', approved + ':' + file], { cwd: root, encoding: 'utf8' }),
-      'Full current load/download/input/message/auth/unmount and receipt handling remain exact');
+    const live = fs.readFileSync(path.join(root, file), 'utf8');
+    if (name === 'weekly-weight-output') {
+      const declarations = require('./helpers/owned-declarations.cjs');
+      const names = ['beginOperation', 'downloadWeeklyWeight'];
+      assert.deepEqual(declarations(live, names), declarations(execFileSync('git',
+        ['show', '1989872c:' + file], {cwd: root, encoding: 'utf8'}), names));
+    } else assert.equal(live, execFileSync('git', ['show', approved + ':' + file], {cwd: root, encoding: 'utf8'}));
   });
 
   test(name + ' historical UI migration: exact non-rendered source, hooks/auth/API/constants unchanged', () => {

@@ -328,7 +328,7 @@ function Screen({ authenticated }: { authenticated: boolean }) {
           <TableContainer tabIndex={0} role="region" aria-label="メニューマスター一覧">
             <Table size="small" aria-label="メニューマスター一覧">
               <TableHead><TableRow>{columns.map(column => <TableCell key={column.id}
-                scope="col" align={column.align}>{column.label}</TableCell>)}</TableRow></TableHead>
+                scope="col" align={column.align} sx={{whiteSpace: "nowrap"}}>{column.label}</TableCell>)}</TableRow></TableHead>
               <TableBody>{list.data.items.map(item => <TableRow key={item.id}>
                 {columns.map(column => <TableCell key={column.id} align={column.align}
                   sx={{minWidth: "4rem", maxWidth: "16rem", overflowWrap: "break-word"}}>{column.render(item)}</TableCell>)}

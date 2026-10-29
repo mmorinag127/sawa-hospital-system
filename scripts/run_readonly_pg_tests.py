@@ -93,6 +93,7 @@ def run(source, run_id, attempt, suite='readonly', *, suites=None):
     uri = 'sqlite:///' + str(root / 'bootstrap.sqlite3')
     env.update({key: uri for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')})
     env.update({
+        'PG_BIN': str(PG_BIN),
         'C2_MENU_READONLY_OWNED_ROOT': str(root),
         'SAWA_OWNED_PG_ROOT': str(pg), 'SAWA_OWNED_PG_PORT': port,
         'SAWA_OWNED_PG_SOURCE': str(source),

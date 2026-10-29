@@ -47,6 +47,12 @@ test('deps stage copies every declared committed local dependency before npm ci'
     .replaceAll('FROM node:20-slim', 'FROM trusted-base')
     .replace('ARG NEXT_PUBLIC_DEPLOYED_AT=unknown\n', 'ARG NEXT_PUBLIC_DEPLOYED_AT=unknown\nARG NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=false\n')
     .replace('ENV NEXT_PUBLIC_PORTAL_URL=${NEXT_PUBLIC_PORTAL_URL}\n', 'ENV NEXT_PUBLIC_PORTAL_URL=${NEXT_PUBLIC_PORTAL_URL}\nENV NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED=${NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED}\n')
+    .replace('ARG NEXT_PUBLIC_GIT_SHA=unknown\n', '')
+    .replace('ARG NEXT_PUBLIC_DEPLOYED_AT=unknown\n', '')
+    .replace('ENV NEXT_PUBLIC_GIT_SHA=${NEXT_PUBLIC_GIT_SHA}\n', '')
+    .replace('ENV NEXT_PUBLIC_DEPLOYED_AT=${NEXT_PUBLIC_DEPLOYED_AT}\n', '')
+    .replace('FROM trusted-base AS runner\nWORKDIR /app\n',
+      'FROM trusted-base AS runner\nWORKDIR /app\nARG NEXT_PUBLIC_GIT_SHA=unknown\nARG NEXT_PUBLIC_DEPLOYED_AT=unknown\nENV SAWA_GIT_SHA=${NEXT_PUBLIC_GIT_SHA}\nENV SAWA_DEPLOYED_AT=${NEXT_PUBLIC_DEPLOYED_AT}\n')
     .replace('COPY --from=builder /app/package.json ./package.json\nCOPY --from=builder /app/next.config.js ./next.config.js',
       'COPY --from=builder /app/.next/standalone ./')
     .replace('COPY --from=builder /app/.next ./.next\nCOPY --from=builder /app/node_modules ./node_modules\nCMD ["npm", "run", "start"]',

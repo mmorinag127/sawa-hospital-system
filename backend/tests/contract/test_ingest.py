@@ -801,6 +801,8 @@ def test_recover_ready_bulk_runs_ingest_uploaded_and_ocr_recovery(upload_case, m
                 next_recovery_at=current["progress_metrics"]["next_recovery_at"],
                 stage_updated_at=current["progress_metrics"]["stage_updated_at"],
             )
+            for key in ("auto_recovery_count", "next_recovery_at", "stage_updated_at"):
+                original["display_read_json"][key] = original["progress_metrics"][key]
     assert after == expected
     with session_scope() as session:
         for job_id, capture in captured.items():

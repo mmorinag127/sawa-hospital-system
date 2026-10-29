@@ -174,6 +174,8 @@ def run(output: Path, *, full: bool = False) -> int:
     os.environ["SAWA_LOCAL_RUN_ID"] = str(time.time_ns())
     os.environ["SAWA_LOCAL_EVIDENCE_DIR"] = str(output.resolve())
     environment = dict(os.environ)
+    environment['PYTHONPATH'] = os.pathsep.join(str(ROOT / item) for item in ('backend', 'scripts', '.'))
+    environment.setdefault('REFRESH_TEST_PG_BIN', environment.get('PG_BIN', '/usr/lib/postgresql/16/bin'))
     for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         environment.pop(key, None)
     branch = git("branch", "--show-current")

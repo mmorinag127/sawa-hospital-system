@@ -101,9 +101,19 @@ async function fixture(page: Page, info: TestInfo, options: { guest?: boolean; c
     if (path === "/menu-rules") return respond(200, { items: [] });
     if (path === "/menu-masters" && method === "GET") {
       if (state.listStatus !== 200) return respond(state.listStatus, { detail: "synthetic list failure" });
-      const offset = Number(url.searchParams.get("offset") || 0), limit = Number(url.searchParams.get("limit") || 50);
+      let offset = Number(url.searchParams.get("offset") || 0);
+      const limit = Number(url.searchParams.get("limit") || 50);
       const matches = state.items.filter(r => r.name.includes(url.searchParams.get("q") || ""));
-      return respond(200, { items: matches.slice(offset, offset + limit), total: matches.length, offset, limit });
+      const after = url.searchParams.get("after_id"), before = url.searchParams.get("before_id");
+      if (after || before) {
+        const index = matches.findIndex(row => row.id === (after || before));
+        expect(index, 'cursor belongs to the authored filtered collection').toBeGreaterThanOrEqual(0);
+        offset = after ? index + 1 : Math.max(0, index - limit);
+      }
+      const items = matches.slice(offset, offset + limit);
+      return respond(200, { items, total: url.searchParams.get("include_total") === "false" ? null : matches.length,
+        next_after_id: offset + items.length < matches.length ? items.at(-1)?.id : null,
+        previous_before_id: offset > 0 ? items[0]?.id : null, offset, limit });
     }
     if (path === "/menu-masters" && method === "POST") {
       await state.postGate?.wait;

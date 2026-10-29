@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -11,6 +12,11 @@ from experiments.agent_assistant.prepare_packaged import prepare
 from experiments.agent_assistant.runtime import source_manifest
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def interpreters():
+    return {domain: os.environ.get('SAWA_AGENT_NATIVE_' + domain.upper().replace('-', '_') + '_PYTHON', sys.executable)
+            for domain in ('hospital', 'shift', 'school-lunch')}
 
 
 @pytest.fixture
@@ -46,7 +52,7 @@ def test_formal_migration_preserves_all_data_and_seals_each_domain(bundle, monke
     for key in ("DB_URI", "DATABASE_URL", "ALEMBIC_DB_URI"):
         monkeypatch.setenv(key, "sqlite:///" + str(outsider))
     monkeypatch.setenv("DB_HOST", "must-not-be-used")
-    prepare(bundle, sys.executable)
+    prepare(bundle, interpreters())
     engine = create_engine("sqlite:///" + str(database))
     with engine.connect() as connection:
         require_formal_head(connection)
@@ -67,7 +73,7 @@ def test_formal_migration_preserves_all_data_and_seals_each_domain(bundle, monke
         assert {k: v for k, v in release['domains'][domain].items() if k != 'baseline_files'} == {k: v for k, v in release_before['domains'][domain].items() if k != 'baseline_files'}
     assert not outsider.exists()
     assert (ROOT / "agent_runtime/baselines/hospital/database.sqlite3").read_bytes() == source_before
-    prepare(bundle, sys.executable)
+    prepare(bundle, interpreters())
     assert rows(database) == after
 
 

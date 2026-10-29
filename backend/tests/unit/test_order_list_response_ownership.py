@@ -20,7 +20,7 @@ from test_ingest_delivery_contract import store
 @pytest.fixture
 def cache_world(monkeypatch):
     clock = SimpleNamespace(now=100.0)
-    monkeypatch.setattr(order_service, "time", SimpleNamespace(time=lambda: clock.now))
+    monkeypatch.setattr(order_service, "time", SimpleNamespace(time=lambda: clock.now, monotonic=lambda: clock.now))
     order_service.invalidate_orders_cache()
     rows = [{"id": "owned-list", "received_at": datetime(2026, 10, 19),
              "ocr_job_id": "OCR-owned-list", "superseded_document_ids": ["original"],

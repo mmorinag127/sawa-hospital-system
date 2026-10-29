@@ -363,6 +363,10 @@ for(const missing of ['saved','selected','both','null','empty'])test(`missing st
 function refreshHarness(){
   const h=harness();
   Object.assign(h.context,{refreshGenerationRef:{current:0},sheetDirtyRef:{current:false},pendingSheetCellEditsRef:{current:new Map()},
+    faxHistoryRequestRef:{current:0},faxHistoryAbortRef:{current:null},setFaxHistoryLoading:()=>{},
+    ocrHistoryRequestRef:{current:0},ocrHistoryAbortRef:{current:null},setOcrHistoryLoading:()=>{},setOcrHistoryBeforeId:()=>{},
+    initialDisplayReadRef:{current:null},selectedDocumentId:'pdf-A',orderDetail:{id:'order-A'},URLSearchParams,
+    stepIndexForState:actual('stepIndexForState',{}),
     displayReadyRef:{current:''},setDisplayEpoch:()=>{},
     ocrDetailRequestRef:{current:0},ocrDetailAbortRef:{current:null},rawInspectionRequestRef:{current:0},
     rawInspectionAbortRef:{current:null},rawInspectionOpenRef:{current:false},ocrCompletionRefreshRef:{current:null},setRawInspection:()=>{},
@@ -373,8 +377,12 @@ function refreshHarness(){
   h.context.refreshAll=(...args)=>actual('refreshAll',h.context)(...args);
   h.response=url=>{
     const workflow={order_id:'order-A',revision:8,state:'ocr_running',ocr_job:{ocr_job_id:'recorded-job',workflow_attempt_id:'recorded-attempt',status:'queued',attempt_count:0}};
+    const requested = new URL(url,'https://fixture.invalid').searchParams.get('scope');
+    const step = h.context.stepIndexForState(workflow.state);
+    const scope = requested === 'initial' ? ({2:'ocr',3:'sheet',4:'output'}[step] || 'summary') : requested;
     return {data:url.endsWith('/ocr-progress')?{...workflow,workflow_revision:8}:
-      url.includes('/display?')?{display_scope:'summary',loaded_sections:[],order_header:{id:'order-A'},workflow,saved_sheet:null}:
+      url.includes('/display?')?{display_scope:scope,loaded_sections:scope==='summary'?[]:[scope],order_header:{id:'order-A'},workflow,saved_sheet:null,
+        ...(scope==='ocr'?{ocr_candidates:require('./helpers/ocr-candidates.cjs')('order-A',[],workflow)}:{})}:
       url.endsWith('/workflow-v2')?workflow:{id:'order-A'}};
   };
   return h;
@@ -446,12 +454,15 @@ for(const edit of ['manual','sheet'])for(const outcome of ['success','error'])te
   await settle();assert.equal(h.state.workflow,undefined);assert.equal(h.state.error,'new-input-error');assert.equal(h.state.discard,0);
   h.context.apiClient.get=async url=>{
     calls++;const response=h.response(url);
-    if(url.endsWith('/ocr-progress')) response.data.workflow_revision=9;
+    if(url.endsWith('/ocr-progress')) {
+      response.data.workflow_revision=9;
+      response.data.ocr_job.status='running';response.data.ocr_job.progress_step=2;
+    }
     const workflow=response.data.workflow;
     if(workflow){workflow.revision=9;workflow.ocr_job.status='running';workflow.ocr_job.progress_step=2;}
     return response;
   };
-  h.timer.tick();await settle();assert.equal(calls,3);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);
+  h.timer.tick();await settle();assert.equal(calls,2);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);
   assert.equal(h.state.discard,0);assert.equal(h.context.pendingSheetCellEditsRef.current.get('own-cell').quantity,0);
   assert.equal(h.context.editorVersion(editor).dirty,true);assert.equal(h.context.editorVersion(editor).baseRevision,base);
   assert.equal(h.context.captureWorkflowInputVersion(editor).revision,base);assert.equal(h.context.workflowRevisionRef.current.revision,9);

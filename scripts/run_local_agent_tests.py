@@ -144,6 +144,7 @@ def main():
         environment = {
             "SAWA_AGENT_TEST_POSTGRES_DSN": f"postgresql://sawa_agent_local@127.0.0.1/agent_trial_{owner}",
             "SAWA_AGENT_NATIVE_TESTS": "1", "SAWA_AGENT_GATEWAY_PYTHON": "/opt/agent/gateway/bin/python",
+            "SAWA_AGENT_NATIVE_HOSPITAL_PYTHON": "/opt/agent/hospital/bin/python",
             "SAWA_AGENT_NATIVE_SHIFT_PYTHON": "/opt/agent/shift/bin/python",
             "SAWA_AGENT_NATIVE_SCHOOL_LUNCH_PYTHON": "/opt/agent/school-lunch/bin/python",
             "PYTHONPATH": f"{ROOT}:{ROOT}/backend", "PYTHONDONTWRITEBYTECODE": "1",

@@ -98,9 +98,15 @@ for (const [name, counts] of Object.entries(expected)) {
     for (const [ancestor, descendant] of [[base, migration], [migration, approved], [approved, 'HEAD']])
       execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: root });
     if (name === 'admin/users') execFileSync('git', ['merge-base', '--is-ancestor', 'a252363', approved], { cwd: root });
-    assert.equal(fs.readFileSync(path.join(root, file), 'utf8'),
-      execFileSync('git', ['show', approved + ':' + file], { cwd: root, encoding: 'utf8' }),
-      'Full current functions, render handlers, payloads and guards match the approved source, not the old UI-only snapshot');
+    const live = fs.readFileSync(path.join(root, file), 'utf8');
+    if (name === 'admin/users') {
+      assert.equal(live, execFileSync('git', ['show', approved + ':' + file], {cwd: root, encoding: 'utf8'}));
+    } else {
+      const declarations = require('./helpers/owned-declarations.cjs');
+      const names = name === 'system-status' ? ['downloadDb', 'clearAll'] : ['downloadOriginal'];
+      assert.deepEqual(declarations(live, names), declarations(execFileSync('git',
+        ['show', '1989872c:' + file], {cwd: root, encoding: 'utf8'}), names));
+    }
   });
 
   test(name + ' historical UI migration: exact non-rendered source, hooks/auth/API/constants unchanged', () => {

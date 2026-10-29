@@ -627,7 +627,7 @@ for (const outcome of ['success', 'error']) test(`AI initial POST late ${outcome
 
 for (const stage of ['refresh', 'load']) test(`facility save ${stage} failure is visible and cannot publish successful completion`, async () => {
   const f = await setup(), failure = `synthetic follow-up ${stage} failure`;
-  const path = stage === 'refresh' ? `${BASE}/display?scope=summary` : `${BASE}/facility-config`;
+  const path = stage === 'refresh' ? `${BASE}/display?scope=summary&selected_document_id=${PDF}` : `${BASE}/facility-config`;
   const raw = f.probe.current.sheetPayload, beforeRows = clone(raw.rows);
   try {
     const priorReads = calls(f, 'get', path).length;
@@ -650,7 +650,7 @@ for (const stage of ['refresh', 'load'])
 for (const boundary of ['route', 'auth'])
 for (const outcome of ['success', 'error']) test(`facility save ${stage} late ${outcome} after ${boundary} cannot publish completion`, async () => {
   const f = await setup(), pending = deferred(); let operation;
-  const path = stage === 'refresh' ? `${BASE}/display?scope=summary` : `${BASE}/facility-config`;
+  const path = stage === 'refresh' ? `${BASE}/display?scope=summary&selected_document_id=${PDF}` : `${BASE}/facility-config`;
   try {
     const priorReads = calls(f, 'get', path).length;
     f.t.on('get', path, () => pending.promise);

@@ -840,6 +840,7 @@ class ReceiptContractTest(unittest.TestCase):
             manifest = Path(directory) / 'manifest.json'
             manifest.write_text(json.dumps({'version': 1, 'commands': [{'name': 'full', 'command': 'true'}]}))
             with patch.dict(os.environ, {'CI': '', 'GITHUB_ACTIONS': '', 'SAWA_IMPACT_FULL': '0',
+                                        'PYTHONPATH': 'foreign/source', 'PG_BIN': '/owned/pg16/bin',
                                         'PYTEST_ADDOPTS': '-k hidden --last-failed', 'PYTEST_PLUGINS': 'foreign_selector'}), \
                  patch.object(RUNNER, 'MANIFEST', manifest), \
                  patch.object(RUNNER, 'require_frontend_dependencies'), \
@@ -852,6 +853,9 @@ class ReceiptContractTest(unittest.TestCase):
                 self.assertNotIn('PYTEST_PLUGINS', environment)
                 self.assertEqual(environment['SAWA_IMPACT_FULL'], '1')
                 self.assertEqual(environment['SAWA_LOCAL_TEST_MODE'], 'full')
+                self.assertEqual(environment['PYTHONPATH'], os.pathsep.join(str(RUNNER.ROOT / item)
+                    for item in ('backend', 'scripts', '.')))
+                self.assertEqual(environment['REFRESH_TEST_PG_BIN'], '/owned/pg16/bin')
                 self.assertEqual(os.environ['PYTEST_ADDOPTS'], '-k hidden --last-failed')
                 self.assertEqual(os.environ['SAWA_IMPACT_FULL'], '0')
 

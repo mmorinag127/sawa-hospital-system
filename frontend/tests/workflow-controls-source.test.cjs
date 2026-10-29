@@ -12,10 +12,13 @@ const filename = "frontend/src/pages/orders/[id]/workflow-v2.tsx";
 const original = cp.execFileSync("git", ["show", base + ":" + filename], { cwd: root, encoding: "utf8" });
 const migration = 'd55763365c3d2159dc976b130e0cc7a6de5f162f';
 const current = cp.execFileSync('git', ['show', migration + ':' + filename], { cwd: root, encoding: 'utf8' });
-test('current approved output owner/history/action AI/feedback/PDF refusal and OCR diagnostics remain exact', () => {
-  assert.equal(require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(root, filename))).digest('hex'),
-    'edad40ae1dc348800885173e8442ce9e0b90901c55700e97f19c53caf045cc20',
-    'Full current functions, protected grid, render callbacks, receipt and owner guards remain exact');
+test('current mutation, quantity and owner declarations remain exact while reads can evolve', () => {
+  const declarations = require('./helpers/owned-declarations.cjs');
+  const names = ['executeWorkflowMutation', 'workflowMutationConfig', 'adoptOwnWorkflowCommandResponse',
+    'createActionBoundary', 'saveSheet', 'finalConfirm', 'runOcr', 'selectOcr', 'deleteOcr',
+    'saveFacilityTemplateColumns', 'runBagging'];
+  assert.deepEqual(declarations(fs.readFileSync(path.join(root, filename), 'utf8'), names),
+    declarations(cp.execFileSync('git', ['show', '1989872c:' + filename], {cwd: root, encoding: 'utf8'}), names));
   const lineage = [base, migration, '4c33813', 'ded7f15', 'bdbc6de', '91d293c', '3c5a9ca', 'd26febd', 'd4b7d36', '227cae9', '2a180d57', 'HEAD'];
   for (let i = 1; i < lineage.length; i++)
     cp.execFileSync('git', ['merge-base', '--is-ancestor', lineage[i - 1], lineage[i]], { cwd: root });

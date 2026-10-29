@@ -33,7 +33,7 @@ async function setup(page: Page) {
     if (path.endsWith("/monthly-menus/scope-options")) return route.fulfill({ json: { facilities: [{ id: "F1", name: "Facility A" }], tags: [] } });
     if (path.endsWith("/monthly-menus/2026-10")) return route.fulfill({ json: snapshot });
     if (path.endsWith("/imports/saved-import-A")) return route.fulfill({ json: receipt });
-    if (path.endsWith("/imports")) return route.fulfill({ json: { items: [receipt] } });
+    if (path.endsWith("/imports")) return route.fulfill({ json: { items: [receipt], next_before_id: null } });
     return route.fulfill({ json: { items: [] } });
   });
 }

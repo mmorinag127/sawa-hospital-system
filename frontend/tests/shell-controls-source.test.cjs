@@ -65,9 +65,20 @@ function nonrender(source){
   visit(ast);for(const [a,b]of spans.reverse())source=source.slice(0,a)+'RENDER'+source.slice(b);
   return source.replace(/^import \{[^\n]+\} from "@mui\/material";\n/,'');
 }
-for(const [file,marker,counts]of cases)test(file+' full source contract, unexecuted definition',()=>{
+for(const [file,marker,counts]of cases)test(file+' historical UI conversion and current owned controls',()=>{
   const live=fs.readFileSync(file,'utf8');
   let source=file==='src/pages/auth/automation.tsx'?execFileSync('git',['show','2e8acf3:frontend/'+file],{encoding:'utf8'}):live;
+  if(file==='src/pages/hospital-dashboard.tsx') {
+    const declarations=require('./helpers/owned-declarations.cjs');
+    const names=['inlineFacilityHint','facilityLabel'];
+    assert.deepEqual(declarations(live,names),declarations(execFileSync('git',
+      ['show','1989872c:frontend/'+file],{encoding:'utf8'}),names));
+    assert.match(live,/apiClient\.get<OrderDashboard>\("\/orders\/dashboard", \{ signal: controller\.signal \}\)/);
+    assert.match(live,/apiClient\.get\(`\/monthly-menus\/summaries\?/);
+    execFileSync('git',['merge-base','--is-ancestor',behavioralBaseline[file],'1989872c']);
+    execFileSync('git',['merge-base','--is-ancestor','1989872c','HEAD']);
+    source=execFileSync('git',['show',behavioralBaseline[file]+':frontend/'+file],{encoding:'utf8'});
+  }
   if(file==='src/components/UnifiedShell.tsx') {
     const addition='          {!publicPage ? <StagingDatasetSelect /> : null}\n';
     assert.equal(source.split(addition).length-1,1);
