@@ -111,7 +111,9 @@ class ReceiptContractTest(unittest.TestCase):
         build = next(step for step in workflow['jobs']['build-agent']['steps'] if step.get('id') == 'image')['run']
         self.assertIn('agent-runtime:stg-$GITHUB_SHA', build)
         self.assertIn('--build-arg "SOURCE_REVISION=$GITHUB_SHA"', build)
-        self.assertIn('--cache-from "type=registry,ref=$cache_image" --cache-to type=inline', build)
+        self.assertIn('cache_args=(--cache-to type=inline)', build)
+        self.assertIn('cache_args+=(--cache-from "type=registry,ref=$cache_image")', build)
+        self.assertIn('"${cache_args[@]}"', build)
         self.assertIn('--tag "$image" --tag "$cache_image"', build)
         self.assertIn('echo "image=${image%:*}@$digest"', build)
         self.assertFalse(workflow['concurrency']['cancel-in-progress'])

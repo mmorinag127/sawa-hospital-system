@@ -782,6 +782,10 @@ jobs:
           gcloud auth configure-docker asia-northeast2-docker.pkg.dev --quiet
           image="asia-northeast2-docker.pkg.dev/$PROJECT_ID/backend/agent-runtime:stg-$GITHUB_SHA"
           cache_image="${image%:*}:stg-buildcache"
+          cache_args=(--cache-to type=inline)
+          if gcloud artifacts docker images describe "$cache_image" --format='value(image_summary.digest)' >/dev/null 2>&1; then
+            cache_args+=(--cache-from "type=registry,ref=$cache_image")
+          fi
           base_image="$BUILT_BACKEND_IMAGE"
           case "$BACKEND_CHANGED" in
             true) test -n "$base_image" ;;
@@ -796,7 +800,7 @@ jobs:
             echo "agent_backend_image_required" >&2; exit 1;
           }
           docker buildx build --platform linux/amd64 --push --metadata-file /tmp/agent-build.json \
-            --cache-from "type=registry,ref=$cache_image" --cache-to type=inline \
+            "${cache_args[@]}" \
             --label "sawa.git_sha=$GITHUB_SHA" --label sawa.component=agent-runtime \
             --build-arg "BASE_IMAGE=$base_image" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
             --file agent_runtime/Dockerfile --tag "$image" --tag "$cache_image" .
