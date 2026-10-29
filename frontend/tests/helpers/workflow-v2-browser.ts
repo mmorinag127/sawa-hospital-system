@@ -192,7 +192,13 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
             blockers: [], selected_ocr_result_id: currentWorkflow().selected_ocr_result_id,
             candidate_template_version_id: "TEMPLATE-E2E-001", hidden_template_mismatch_result_count: 0,
             results: currentResults().map((row) => ({ocr_result_id: row.ocr_result_id, selected: row.selected,
-              status: row.status, source: row.source, created_at: row.created_at, detail_state: "not_loaded"})),
+              status: row.status, source: row.source, created_at: row.created_at, detail_state: "not_loaded",
+              ...((scope === "sheet" || scope === "inspection") && row.ocr_result_id === currentWorkflow().selected_ocr_result_id ? {
+                overlay_url: row.overlay_url, overlay_uri: row.overlay_uri,
+                sheet_review_base_url: row.sheet_review_base_url, sheet_review_base_uri: row.sheet_review_base_uri,
+                overlay_status: row.overlay_status, overlay_message: row.overlay_message,
+              } : {}),
+            })),
           },
           saved_sheet: currentWorkflow().saved_sheet_id && currentWorkflow().selected_ocr_result_id ? {
             saved_sheet_id: currentWorkflow().saved_sheet_id,
