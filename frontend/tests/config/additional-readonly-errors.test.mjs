@@ -1,22 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { isolatedPage } from './browser-fixture.mjs';
 import { orderFormSelect, orderFormOptions, verifiedProcessHistory } from '../../scripts/hospital-additional-readonly-pages.mjs';
 import { assertNoVisibleReadMessages, READONLY_VISIBLE_ERRORS, readonlyPageStatus } from '../../scripts/hospital-readonly-pages.mjs';
 const require = createRequire(import.meta.url);
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 const { NativeSelect } = require('@mui/material');
-const { webkit, expect } = require('@playwright/test');
+const { expect } = require('@playwright/test');
 
 async function browserTest(action) {
-  const browser = await webkit.launch();
-  try {
-    const page = await browser.newPage();
+  return isolatedPage(async page => {
     await page.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<html><body></body></html>' }));
     await page.goto('http://fixture.invalid/system-process-logs');
     await action(page);
-  } finally { await browser.close(); }
+  });
 }
 
 test('real MUI NativeSelect reproduces exact-label failure; scoped label retains complete option equality', async () => browserTest(async page => {

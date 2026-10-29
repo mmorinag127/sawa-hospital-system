@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
@@ -22,7 +22,7 @@ from .sandbox import Sandbox, run_blocking, settle_process_task
 from .store import Store, Conflict
 from .tools import Tools
 from .tasks import TASKS, public_tasks
-from .conversation import conversation, pending_question
+from .conversation import conversation, pending_question, business_conversation
 
 
 def _complete_request(function):
@@ -268,11 +268,40 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         def read_response():
             with store.snapshot(view='runs', owner=owner):
                 listing = store.listing(owner)
-                return listing, [{**run, 'business': business.projection(run, tools.flow.review(run['id']), tools.faxes.items(run['id']) if tools.faxes.active(run) else [])} for run in listing]
+                reviews, faxes, questions = store.listing_business_inputs(listing)
+                return listing, [{**run, 'business': business.projection(run, reviews.get(run['id']),
+                    [{'state': 'awaiting_approval'}] if run['id'] in faxes else [],
+                    question=run['id'] in questions)} for run in listing]
 
         listing, response = await asyncio.to_thread(read_response)
         await business.kick_many([run['id'] for run in listing if owned(run)], request.headers.get('authorization', ''))
         return response
+
+    @app.get('/run-history')
+    async def run_history(request: Request, before_created: str | None = Query(default=None, max_length=64),
+                          before_id: str | None = Query(default=None, max_length=128), unfinished: bool = False):
+        def read_response():
+            with store.snapshot():
+                page = store.run_history(owner, before_created=before_created,
+                                         before_id=before_id, unfinished=unfinished)
+                reviews, faxes, questions = store.listing_business_inputs(page['items'])
+                for run in page['items']:
+                    version, phase = run.pop('_workflow_version'), run.pop('_workflow_phase')
+                    if version == 1 and phase is None:
+                        raise Conflict('業務の保存状態を確認できません。履歴を完了扱いにしません')
+                    context = {**run, 'task_inputs': {'business_workflow': {'version': version, 'phase': phase}}}
+                    run['business'] = business.projection(context, reviews.get(run['id']),
+                        [{'state': 'awaiting_approval'}] if run['id'] in faxes else [], question=run['id'] in questions)
+                return page
+        result = await asyncio.to_thread(read_response)
+        await business.kick_many([run['id'] for run in result['items']
+                                 if run['status'] not in ('completed', 'stopped', 'rolled_back', 'failed')],
+                                request.headers.get('authorization', ''))
+        return result
+
+    @app.get('/run-lookup')
+    async def run_lookup(request_key: str = Query(min_length=8, max_length=128)):
+        return {'run': await asyncio.to_thread(store.find_request, owner, request_key)}
 
     @app.post("/runs", status_code=201)
     @_complete_request
@@ -332,7 +361,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         return await asyncio.to_thread(store.get, run["id"], owner)
 
     @app.get("/runs/{ident}")
-    async def run_detail(ident: str, request: Request):
+    async def run_detail(ident: str, request: Request, events_after: int = Query(default=0, ge=0)):
         run = await asyncio.to_thread(store.get, ident, owner)
         if not owned(run) and run.get('task_id') in CONTRACTS and run['status'] in ('running', 'waiting_input', 'reconciliation_required'):
             await authorize(request.headers.get('authorization', ''), run['domains'])
@@ -346,18 +375,38 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 current = store.get(ident, owner)
                 with store.read() as db:
                     artifacts = [dict(row) for row in db.execute("SELECT id,name,sha256,size FROM artifacts WHERE run_id=?", (ident,))]
-                events = store.events(ident)
+                page = store.event_page(ident, after=events_after)
+                events = page['events']
                 from .shift_review import build_shift_review
                 from .lunch_review import build_lunch_review
                 review = tools.flow.review(ident) if current['status'] not in ('rolled_back','rollback_stop_pending') else None
-                reference = next((event['payload'] for event in events if event['kind']=='shift_reference'),None)
+                reference_event = store.latest_event(ident, 'shift_reference', first=True)
+                reference = reference_event['payload'] if reference_event else None
                 shift_review = build_shift_review(review,reference) if review and (current.get('task_id') or '').startswith('shift_') else None
                 lunch_review = build_lunch_review(review,current.get('task_inputs',{}).get('process_questions')) if current.get('task_id')=='lunch_daily_bundle' else None
                 faxes = tools.faxes.items(ident) if tools.faxes.active(current) and current["status"] not in ("rolled_back", "rollback_stop_pending") else []
-                business_events = [event for event in events if event['kind'] in ('operator_reply', 'task_decision', 'fax_decision', 'task_review', 'fax_review') or event['kind'] == 'tool_result' and event['payload'].get('result', {}).get('waiting_input')]
                 fax_labels = {str(item['fax_id']): item['snapshot'].get('name') or '対象のFAX' for item in faxes}
-                return {**current, 'business': business.projection(current, review, faxes), 'business_messages': conversation(business_events, fax_labels) if owned(current) else [], "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": pending_question(events) if current["status"] == "waiting_input" else None, "events": events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(current), "task_review": review, "fax_items": faxes}
+                source_event = store.latest_event(ident, 'source')
+                # Old clients also use this immutable binding to distinguish a
+                # source-upload question from an ordinary operator question.
+                context = [source_event] if source_event and all(event['id'] != source_event['id'] for event in events) else []
+                return {**current, 'business': business.projection(current, review, faxes), 'business_messages': business_conversation(events, fax_labels) if owned(current) else [], "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": store.pending_question(ident) if current["status"] == "waiting_input" else None, "events": context + events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(current), "task_review": review, "fax_items": faxes,
+                        'source_attached': source_event is not None, 'source_event': source_event,
+                        'event_page': {key: value for key, value in page.items() if key != 'events'}}
 
+        return await asyncio.to_thread(read_response)
+
+    @app.get('/runs/{ident}/events')
+    async def event_history(ident: str, before: int | None = Query(default=None, ge=1)):
+        def read_response():
+            with store.snapshot():
+                run = store.get(ident, owner)
+                page = store.event_page(ident, before=before)
+                with store.read() as db:
+                    labels = {str(row['fax_id']): json.loads(row['snapshot']).get('name') or '対象のFAX'
+                              for row in db.execute('SELECT fax_id,snapshot FROM fax_items WHERE run_id=?', (ident,))}
+                return {**page, 'conversation': conversation(page['events']),
+                        'business_messages': business_conversation(page['events'], labels) if owned(run) else []}
         return await asyncio.to_thread(read_response)
 
     @app.post("/runs/{ident}/faxes/{fax_id}/decision")
@@ -405,7 +454,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         tools.authorizations[ident] = request.headers.get("authorization", "")
         await authorize(request.headers.get('authorization', ''), run['domains'])
         if owned(run):
-            events = await asyncio.to_thread(store.events, ident)
+            events = await asyncio.to_thread(store.events, ident, kinds=('operator_reply',))
             replies = [event['payload'] for event in events if event['kind'] == 'operator_reply']
             if payload.question_id and any(item.get('question_id') == payload.question_id and item.get('message') == payload.message and item.get('option') == payload.option for item in replies):
                 return await asyncio.to_thread(store.get, ident, owner)
@@ -417,7 +466,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 return await asyncio.to_thread(store.get, ident, owner)
             state = await asyncio.to_thread(business.state, ident) if run['task_id'] == 'lunch_import' else None
             if state is not None and state['phase'] == 'source':
-                events = await asyncio.to_thread(store.events, ident)
+                events = await asyncio.to_thread(store.events, ident, kinds=('source',))
                 if not any(event['kind'] == 'source' for event in events):
                     raise Conflict('選択した学校・月と一致する原本を添付してください')
                 await run_blocking(business.source_ready, run, schedule=False)
@@ -429,7 +478,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             return await asyncio.to_thread(store.get, ident, owner)
         if run.get("task_id")=="lunch_import" and not run["session_id"]:
             await authorize(request.headers.get("authorization", ""),run["domains"])
-            events = await asyncio.to_thread(store.events, ident)
+            events = await asyncio.to_thread(store.events, ident, kinds=('source',))
             if run["status"] != "waiting_input" or not any(e["kind"]=="source" for e in events):
                 raise Conflict("原本を添付してから開始してください")
             async with control_lock(ident):
@@ -531,6 +580,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         if domain == "hospital" and not content.startswith(b"%PDF-"):
             raise ValueError("病院注文はPDF原本が必要です")
         def save_source():
+            if hasattr(store, "ensure_local_run"):
+                store.ensure_local_run(ident)
             source_id = secrets.token_hex(16)
             folder = sandbox.path(ident) / "sources"
             folder.mkdir(exist_ok=True)
@@ -546,12 +597,14 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     @app.get("/runs/{ident}/question-drawings/{digest}")
     def question_drawing(ident: str, digest: str, question_id: str):
         run = store.get(ident, owner)
-        question = pending_question(store.events(ident)) if run['status'] == 'waiting_input' else None
+        question = store.pending_question(ident) if run['status'] == 'waiting_input' else None
         if not question or question.get('question_id') != question_id or question.get('question_map', {}).get('sha256') != digest:
             raise Conflict('現在表示中の質問の原本ではありません')
         if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
             raise Conflict('原本の識別情報が不正です')
         path = sandbox.path(ident) / 'question-drawings' / (digest + '.svg')
+        if not path.is_file() and hasattr(store, 'materialize_file'):
+            store.materialize_file(path, expected=digest)
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise Conflict('原本図面を確認できません')
         return FileResponse(path, media_type='image/svg+xml', headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'"})
@@ -566,6 +619,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         if not row:
             raise KeyError(artifact_id)
         path = Path(row["path"])
+        if not path.is_file() and hasattr(store, 'materialize_file'):
+            store.materialize_file(path, expected=row['sha256'])
         if hashlib.sha256(path.read_bytes()).hexdigest() != row["sha256"]:
             raise Conflict("出力ファイルが変更されています")
         return FileResponse(path, filename=row["name"], headers={"X-Content-SHA256": row["sha256"]})

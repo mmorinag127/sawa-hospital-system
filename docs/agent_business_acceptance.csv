@@ -1,0 +1,13 @@
+task_id,正常系の確認対象,保存後の確認,停止・境界ケース,既存試験との対応,実モデル評価
+hospital_pending_faxes,開始時の未処理FAX集合と原本・施設・週・承認sheet,対象注文再取得とラベル・納品書・製造集計,誤施設・未承認・重複命令・OCR未完了,test_fax_workflow.py;test_workflow_completion.py,未実施
+hospital_review_faxes,選択した要確認FAXと原本訂正・人の承認,採用結果・保存sheet・確定後三帳票,保存履歴保持・訂正後の再承認・結果不明時再送禁止,test_fax_workflow.py;test_workflow_completion.py,未実施
+hospital_outputs,選択した確定注文・施設・週と数量,三帳票の対象注文と元数量一致,未確定・対象違い・原本数量の変更禁止,test_hospital_output_completion.py,未実施
+shift_next_month,正式勤務期間と必要人数・条件・候補,承認候補の確定GETと勤務表出力,不足条件・古い候補版・再開後二重確定禁止,test_native_workflows.py;test_shift_confirmation_receipt.py,未実施
+shift_wishes,登録済み希望休・勤務条件と候補,候補・validation・確定GET・出力,未指示条件新設禁止・訂正後再承認,test_shift_business_questions.py;test_selected_tasks.py,未実施
+shift_absence,対象職員・欠勤日・unavailable/hard,制約再取得と承認候補・確定GET・出力,他職員・他日・他条件保持,test_shift_business_questions.py;test_selected_tasks.py,未実施
+shift_check,選択候補の勤務と不足・違反,検査結果と対象版,違反を正常へ書換えない・確定状態を変更しない,test_selected_tasks.py;test_shift_review.py,未実施
+shift_export,選択した確定候補と承認対象,候補ID固定の勤務表出力,未確定・別候補・状態変更禁止,test_selected_tasks.py;test_shift_confirmation_receipt.py,未実施
+lunch_import,添付原本の学校・月・抽出結果・人の承認,保存献立GETと原本数量・単位・日付一致,別学校・別月・未承認・曖昧原文の推測禁止,test_school_source.py;test_selected_tasks.py,未実施
+lunch_daily_bundle,当日献立・工程・人の回答・確認した設備,工程表・動線図・実施価格の保存GETと三出力,工程質問の再開・取消・手動編集保持・古い版拒否,test_native_workflows.py;test_daily_completion.py,未実施
+lunch_procurement,学校・月・献立・在庫・価格・発注単位,計算結果fingerprintと出力一致,不足値は質問・発注送信禁止・別月混在禁止,test_other_workflows.py;test_selected_tasks.py,未実施
+lunch_month_exports,学校・月の全対象IDと版,月間工程表・月間動線図の対象日と内容,欠落日・古い工程・未確定を成功にしない,test_other_workflows.py;test_selected_tasks.py,未実施

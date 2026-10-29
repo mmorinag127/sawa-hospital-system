@@ -46,20 +46,19 @@ def retained_failure_modules(state):
         raise ValueError('Invalid retained backend failure identities')
     modules = set()
     for node in values:
-        module = node.split('::', 1)[0]
-        if module.startswith('tests/'):
-            module = 'backend/' + module
+        identity = 'backend/' + node if node.startswith('tests/') else node
+        module = identity.split('::', 1)[0]
         if (not module.startswith('backend/tests/') or not module.endswith('.py')
                 or '..' in Path(module).parts or not (ROOT / module).is_file()):
             raise ValueError('Retained backend failure needs an explicit current test mapping')
-        modules.add(module)
+        modules.add(identity)
     return sorted(modules)
 
 
 def run_scoped_backend(scope, evidence, env, source, legacy_state, excluded, arguments):
     state = legacy_state.parent / 'backend-scoped'
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
-    modules = sorted(set(scope['modules']) - set(excluded))
+    modules = sorted(target for target in scope['modules'] if target.split('::', 1)[0] not in excluded)
     if not modules:
         raise ValueError('Scoped staging verification has no general tests')
     env = {key: value for key, value in env.items()
@@ -334,7 +333,7 @@ def main():
         legacy_state = common.resolve() / 'sawa-local-impact/backend'
         retained = sorted(set(retained_failure_modules(legacy_state))
                           | set(retained_failure_modules(legacy_state.parent / 'backend-scoped')))
-        if any(name in excluded for name in retained):
+        if any(name.split('::', 1)[0] in excluded for name in retained):
             raise ValueError('Retained dedicated PostgreSQL failure must use its owned runner')
         from backend_test_scope import select_modules
         base = staging_scope_base()

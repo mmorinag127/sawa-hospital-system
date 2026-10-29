@@ -263,6 +263,10 @@ class Sandbox:
 
     async def start(self, run):
         await run_blocking(self.require_active_run, run)
+        if self.durable_store is not None and run.get('purpose') != 'target_lookup':
+            ensure_local = getattr(self.durable_store, 'ensure_local_run', None)
+            if ensure_local is not None:
+                await run_blocking(ensure_local, run['id'])
         async with self.lock:
             await run_blocking(self.require_active_run, run)
             processes = [process for key, process in self.children.items() if key[0] == run["id"]]
@@ -457,6 +461,10 @@ class Sandbox:
             return await run_blocking(self.restore_files, run)
 
     def restore_files(self, run):
+        if self.durable_store is not None:
+            ensure_local = getattr(self.durable_store, 'ensure_local_run', None)
+            if ensure_local is not None:
+                ensure_local(run['id'])
         directory = self.path(run["id"])
         if not (directory / "before").is_dir():
             raise Conflict("復元元がありません。元に戻したとは扱いません")
@@ -477,6 +485,17 @@ class Sandbox:
 
     def local_jobs(self, run):
         jobs = []
+        if self.durable_store is not None and hasattr(self.durable_store, 'has_local_run') and not self.durable_store.has_local_run(run['id']):
+            prefixes = [domain + '/local-deliveries/' for domain in run['domains']]
+            for relative, content in self.durable_store.checkpoint_files(run['id'], prefixes):
+                parts = Path(relative).parts
+                if len(parts) != 3 or parts[-1].startswith('.'):
+                    continue
+                receipt = json.loads(content)
+                contract = receipt.pop('contract', {})
+                jobs.append({'domain': parts[0], 'receipt': parts[-1], **receipt,
+                             'kind': contract.get('kind', 'solve'), 'generation': contract.get('generation')})
+            return jobs
         for domain in run["domains"]:
             for path in (self.path(run["id"]) / "data" / domain / "local-deliveries").glob("*"):
                 if path.name.startswith("."):

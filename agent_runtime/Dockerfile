@@ -1,4 +1,6 @@
 ARG BASE_IMAGE
+# BASE_IMAGE must be the fingerprint-verified backend dependency base, not the
+# deployed backend application image. Every application source is copied below.
 FROM ${BASE_IMAGE}
 USER root
 WORKDIR /app

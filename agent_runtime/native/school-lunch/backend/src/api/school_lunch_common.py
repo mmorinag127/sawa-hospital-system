@@ -296,6 +296,7 @@ class WorkScheduleWrite(BaseModel):
 
 class WorkScheduleResponse(BaseModel):
     source_process_revisions: dict[str, int] | None = None
+    current_process_revisions: dict[str, int] = Field(default_factory=dict)
     pattern_missing: list[str] = Field(default_factory=list)
     source_notes: list[WorkScheduleSourceNote] = Field(default_factory=list)
     time_profile: Literal["normal", "early"] | None = None

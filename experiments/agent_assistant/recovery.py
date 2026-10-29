@@ -98,7 +98,7 @@ class Recovery:
             return await run_blocking(self.store.get, ident)
 
     def waiting(self, ident, command):
-        events = self.store.events(ident)
+        events = self.store.events(ident, kinds=('operator_reply', 'operator_wait'))
         from .business_contracts import owned
         if owned(self.store.get(ident)) and any(event['kind'] == 'operator_reply' and event['payload'].get('question_id') == command for event in events):
             # The caller has proved this exact call is still unanswered remotely.

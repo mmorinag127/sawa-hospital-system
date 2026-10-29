@@ -1,8 +1,8 @@
 """Cloud SQL durability for the isolated staging trial.
 
-The existing SQLite ledger schema is serialized inside one PostgreSQL row lock.
-It is never placed on a FUSE mount. Before-images and sealed files are stored in
-that same database; working copies are checkpointed with their command receipts.
+The durable ledger uses native PostgreSQL rows. Legacy SQLite bytes are retained
+only for migration recovery, never reserialized on ordinary reads or writes.
+Working copies are checkpointed with the command receipts for the changed run.
 A replacement instance fences its predecessor and requires explicit recovery.
 """
 from contextlib import contextmanager, closing
@@ -13,9 +13,10 @@ import sqlite3
 import threading
 import weakref
 import zlib
+from contextvars import ContextVar
 
 from .store import Store, Conflict, now
-from . import ledger_reads
+from . import postgres_ledger
 
 
 SQLITE_HEADER = b"SQLite format 3\0"
@@ -78,25 +79,33 @@ def decode_ledger(payload):
 
 
 class PostgresStore(Store):
+    question_condition = ("COALESCE(payload::jsonb->'result'->>'question','')<>'' AND "
+                          "COALESCE(payload::jsonb->'result'->>'command_id','')<>''")
+    review_state_expression = "payload::jsonb->>'state'"
+    workflow_phase_expression = "task_inputs::jsonb->'business_workflow'->>'phase'"
+    workflow_version_expression = "task_inputs::jsonb->'business_workflow'->'version'"
     def __init__(self, root, connect):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.connect = connect
         self.working_ready = False
+        self._hydrated = set()
+        self._hydration_lock = threading.RLock()
+        self._read_snapshot = ContextVar('agent_read_snapshot', default=None)
+        self.path = self.root / 'ledger.sqlite3'
         with closing(connect()) as pg, pg:
             with pg.cursor() as c:
                 c.execute('CREATE SCHEMA IF NOT EXISTS sawa_agent_trial')
+                c.execute('SET LOCAL search_path TO sawa_agent_trial,pg_catalog')
                 c.execute('''CREATE TABLE IF NOT EXISTS sawa_agent_trial.ledger (
                     id integer PRIMARY KEY CHECK(id=1), epoch bigint NOT NULL,
                     payload bytea)''')
                 c.execute('''CREATE TABLE IF NOT EXISTS sawa_agent_trial.files (
                     path text PRIMARY KEY, digest text NOT NULL, payload bytea NOT NULL)''')
-                ledger_reads.initialize(c)
                 c.execute('INSERT INTO sawa_agent_trial.ledger(id,epoch,payload) VALUES (1,0,NULL) ON CONFLICT DO NOTHING')
                 c.execute('UPDATE sawa_agent_trial.ledger SET epoch=epoch+1 WHERE id=1 RETURNING epoch,payload IS NULL')
                 self.epoch,self.new_ledger = c.fetchone()
-        super().__init__(self.root)
-        self.hydrate()
+                self.columns, self.new_ledger = postgres_ledger.initialize(c, decode_ledger=decode_ledger)
         self.working_ready = True
 
     def close(self):
@@ -106,7 +115,17 @@ class PostgresStore(Store):
 
     def get(self, ident, owner=None):
         with self.snapshot(view='identities', owner=owner, identities=[ident]):
-            return super().get(ident, owner)
+            run = super().get(ident, owner)
+        return run
+
+    def create(self, *args, **kwargs):
+        run, fresh = super().create(*args, **kwargs)
+        if fresh:
+            # New sandbox data belongs to this instance; do not restore an
+            # older checkpoint over changes currently being prepared locally.
+            with self._hydration_lock:
+                self._hydrated.add(run['id'])
+        return run, fresh
 
     def budget(self):
         with self.snapshot(view='configuration'):
@@ -118,9 +137,9 @@ class PostgresStore(Store):
         with self.snapshot(view='configuration'):
             return super().provider()
 
-    def events(self, ident):
+    def events(self, ident, *, kinds=None):
         with self.snapshot(view='events', identities=[ident]):
-            return super().events(ident)
+            return super().events(ident, kinds=kinds)
 
     def listing(self, owner):
         with self.snapshot(view='runs', owner=owner):
@@ -144,81 +163,74 @@ class PostgresStore(Store):
 
     @contextmanager
     def snapshot_read(self, *, view=None, owner=None, identities=None):
-        if view is None or self._read_snapshot.get() is not None:
-            with self.read() as db:
-                yield db
-            return
-        with closing(self.connect()) as pg, pg:
-            pg.set_session(readonly=True, isolation_level='REPEATABLE READ')
-            with pg.cursor() as cursor:
-                cursor.execute('''SELECT epoch,read_schema,
-                    read_digest=encode(sha256(payload),'hex') FROM sawa_agent_trial.ledger WHERE id=1''')
-                epoch, schema, valid = cursor.fetchone()
-                if epoch != self.epoch:
-                    raise Conflict('実行環境が交代しました。画面を再読み込みしてください')
-                if valid is not True or not isinstance(schema, dict):
-                    raise Conflict('実行履歴の行索引が正本と一致しないため読取りを停止しました')
-                with ledger_reads.materialize(cursor, schema, view=view, owner=owner,
-                                               identities=identities) as db:
-                    yield db
+        # Store queries now execute against indexed canonical rows directly.
+        with self.read() as db:
+            yield db
 
     @contextmanager
     def _transaction(self, *, readonly):
+        from psycopg2.errors import SerializationFailure, DeadlockDetected
         with closing(self.connect()) as pg, pg:
-            pg.set_session(readonly=readonly, isolation_level='READ COMMITTED')
+            pg.set_session(readonly=readonly, isolation_level='REPEATABLE READ' if readonly else 'SERIALIZABLE')
             with pg.cursor() as c:
-                c.execute('''SELECT epoch,payload,read_schema,
-                    read_digest=encode(sha256(payload),'hex') FROM sawa_agent_trial.ledger WHERE id=1'''
-                    + ('' if readonly else ' FOR UPDATE'))
-                epoch, payload, read_schema, indexed = c.fetchone()
-                indexed = indexed is True and isinstance(read_schema, dict)
-                if epoch != self.epoch:
+                c.execute('SET LOCAL search_path TO sawa_agent_trial,pg_catalog')
+                # Shared epoch locks fence replacement instances without making
+                # unrelated run updates queue behind an exclusive ledger lock.
+                c.execute('SELECT epoch,storage_format FROM sawa_agent_trial.ledger WHERE id=1'
+                          + ('' if readonly else ' FOR SHARE'))
+                epoch, storage = c.fetchone()
+                if epoch != self.epoch or storage != postgres_ledger.FORMAT:
                     raise Conflict('実行環境が交代しました。画面を再読み込みし、履歴から停止・巻き戻しを行ってください')
-                known_files = None
                 if not readonly:
-                    c.execute('SELECT path,digest FROM sawa_agent_trial.files')
-                    known_files = dict(c.fetchall())
-                db = sqlite3.connect(':memory:')
-                db.row_factory = sqlite3.Row
+                    c.execute('CREATE TEMP TABLE changed_agent_runs(run_id text PRIMARY KEY) ON COMMIT DROP')
+                db = postgres_ledger.Connection(pg, self.columns)
                 try:
-                    if payload is not None:
-                        db.deserialize(decode_ledger(payload))
-                    indexed_before = ledger_reads.capture(db) if not readonly and indexed is True else ({}, {})
-                    db.execute('PRAGMA query_only=' + ('ON' if readonly else 'OFF'))
-                    db.execute('BEGIN' if readonly else 'BEGIN IMMEDIATE')
                     yield db
                     if readonly:
-                        db.commit()
                         return
-                    db.execute('CREATE TABLE IF NOT EXISTS working_copies(run_id TEXT PRIMARY KEY,manifest TEXT NOT NULL)')
-                    if self.working_ready:
-                        from .working_copy import checkpoint
-                        for row in db.execute('SELECT id FROM runs').fetchall():
-                            manifest = checkpoint(self.root, row['id'], c, encode_blob, known=known_files)
+                    c.execute('SELECT run_id FROM pg_temp.changed_agent_runs ORDER BY run_id')
+                    changed = [row[0] for row in c.fetchall()]
+                    from .working_copy import checkpoint
+                    for ident in changed:
+                        # Only this run's immutable originals/checkpoints are
+                        # relevant to the receipt being committed.
+                        known_files = {}
+                        for folder in ('before', 'sources', 'question-drawings', 'artifacts'):
+                            prefix = 'runs/' + ident + '/' + folder + '/'
+                            c.execute('SELECT path,digest FROM sawa_agent_trial.files '
+                                      'WHERE path COLLATE "C">=%s AND path COLLATE "C"<%s',
+                                      (prefix, prefix[:-1] + '0'))
+                            known_files.update(c.fetchall())
+                        c.execute('SELECT manifest FROM working_copies WHERE run_id=%s', (ident,))
+                        current_copy = c.fetchone()
+                        if current_copy:
+                            try:
+                                current_manifest = json.loads(current_copy[0])
+                            except (TypeError, ValueError) as exc:
+                                raise Conflict('保存済みcheckpointのmanifest形式が不正です') from exc
+                            if not isinstance(current_manifest, dict):
+                                raise Conflict('保存済みcheckpointのmanifest形式が不正です')
+                            keys = list({'runs/' + ident + '/checkpoints/' + digest
+                                         for digest in current_manifest.values()
+                                         if isinstance(digest, str)})
+                            for offset in range(0, len(keys), 200):
+                                c.execute('SELECT path,digest FROM sawa_agent_trial.files WHERE path=ANY(%s)',
+                                          (keys[offset:offset + 200],))
+                                known_files.update(c.fetchall())
+                        if self.working_ready and ident in self._hydrated:
+                            manifest = checkpoint(self.root, ident, c, encode_blob, known=known_files)
                             if manifest is not None:
-                                db.execute('INSERT INTO working_copies VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET manifest=excluded.manifest', (row['id'], manifest))
-                            # A question receipt must never commit before the
-                            # original drawing or source binding it references.
+                                db.execute('INSERT INTO working_copies VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET manifest=excluded.manifest', (ident, manifest))
                             for name in ('before','sources','question-drawings'):
-                                for path in sorted((self.root/'runs'/row['id']/name).rglob('*')):
+                                for path in sorted((self.root/'runs'/ident/name).rglob('*')):
                                     if path.is_file():
                                         self._file(c, path, known=known_files)
-                    db.commit()
-                    # Persist a sealed artifact before acknowledging its ledger row.
-                    if db.execute("SELECT 1 FROM sqlite_master WHERE name='artifacts'").fetchone():
-                        for row in db.execute('SELECT path,sha256 FROM artifacts'):
+                        for row in db.execute('SELECT path,sha256 FROM artifacts WHERE run_id=?', (ident,)):
                             self._file(c, Path(row['path']), expected=row['sha256'], known=known_files)
-                    if indexed is not True:
-                        c.execute('DELETE FROM sawa_agent_trial.read_rows')
-                    indexed_after = ledger_reads.capture(db)
-                    ledger_reads.synchronize(c, indexed_before, indexed_after)
-                    from psycopg2.extras import Json
-                    encoded = encode_ledger(db.serialize())
-                    c.execute('UPDATE sawa_agent_trial.ledger SET payload=%s,read_schema=%s,read_digest=%s WHERE id=1',
-                              (encoded, Json(indexed_after[0]), hashlib.sha256(encoded).hexdigest()))
-                except BaseException:
-                    db.rollback()
-                    raise
+                    pg.commit()
+                except (SerializationFailure, DeadlockDetected) as exc:
+                    # Never replay unknown business mutations automatically.
+                    raise Conflict('同時更新のため履歴保存を中断しました。実行結果を照合してから再開してください') from exc
                 finally:
                     db.close()
 
@@ -275,24 +287,122 @@ class PostgresStore(Store):
                     self._file(c, path, known=known_files)
 
     def hydrate(self):
-        with closing(self.connect()) as pg, pg:
-            with pg.cursor() as c:
-                c.execute('SELECT path,digest,payload FROM sawa_agent_trial.files ORDER BY path')
-                for relative,digest,payload in c:
-                    path = self.root / relative
-                    path, checked = self._relative(path)
-                    content = decode_blob(payload, expected=digest)
-                    if checked != relative:
-                        raise Conflict('保存済みの試用原本・帳票を照合できません')
-                    path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-                    path.write_bytes(content)
-        from .working_copy import restore
+        """Explicit full repair only; startup and normal reads restore one run."""
         with self.read() as db:
-            snapshots = db.execute('SELECT run_id,manifest FROM working_copies').fetchall()
-        for row in snapshots:
-            restore(self.root, row['run_id'], row['manifest'])
+            for row in db.execute('SELECT id FROM runs'):
+                self._hydrate_run(row['id'], force=True)
+
+    def ensure_local_run(self, ident):
+        self._hydrate_run(ident)
+
+    def has_local_run(self, ident):
+        return ident in self._hydrated
+
+    def materialize_file(self, path, *, expected):
+        """Fetch one immutable display artifact, not the working database."""
+        path, relative = self._relative(Path(path))
+        with self._hydration_lock:
+            if path.is_file():
+                return
+            with self.read() as db:
+                row = db.execute('SELECT digest,payload FROM sawa_agent_trial.files WHERE path=?', (relative,)).fetchone()
+                if row is None or row['digest'] != expected:
+                    raise Conflict('保存済み原本・帳票の参照を照合できません')
+                content = decode_blob(row['payload'], expected=expected)
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path.write_bytes(content)
+
+    def checkpoint_files(self, ident, prefixes):
+        """Read small progress receipts without hydrating the native database."""
+        with self.read() as db:
+            row = db.execute('SELECT manifest FROM working_copies WHERE run_id=?', (ident,)).fetchone()
+            if row is None:
+                return []
+            try:
+                manifest = json.loads(row['manifest'])
+            except (TypeError, ValueError) as exc:
+                raise Conflict('保存済みcheckpointのmanifest形式が不正です') from exc
+            if not isinstance(manifest, dict) or any(not isinstance(name, str) for name in manifest):
+                raise Conflict('保存済みcheckpointのmanifest形式が不正です')
+            selected = {name: digest for name, digest in manifest.items()
+                        if isinstance(name, str) and any(name.startswith(prefix) for prefix in prefixes)}
+            for name, digest in selected.items():
+                if ('..' in Path(name).parts or Path(name).is_absolute()
+                        or not isinstance(digest, str) or len(digest) != 64
+                        or any(char not in '0123456789abcdef' for char in digest)):
+                    raise Conflict('保存済み進捗の参照が不正です')
+            content = {}
+            keys = ['runs/' + ident + '/checkpoints/' + digest for digest in set(selected.values())]
+            for offset in range(0, len(keys), 200):
+                batch = keys[offset:offset + 200]
+                for item in db.execute('SELECT path,digest,payload FROM sawa_agent_trial.files WHERE path IN ('
+                                       + ','.join('?' for _ in batch) + ')', batch):
+                    if item['path'] != 'runs/' + ident + '/checkpoints/' + item['digest']:
+                        raise Conflict('保存済み進捗の原本参照が一致しません')
+                    content[item['digest']] = decode_blob(item['payload'], expected=item['digest'])
+            if set(content) != set(selected.values()):
+                raise Conflict('保存済み進捗のcheckpointが不足しています')
+            return [(name, content[digest]) for name, digest in sorted(selected.items())]
+
+    def _hydrate_run(self, ident, *, force=False):
+        from .working_copy import restore
+        from uuid import uuid4
+        with self._hydration_lock:
+            if ident in self._hydrated and not force:
+                return
+            with closing(self.connect()) as pg, pg:
+                pg.set_session(isolation_level='REPEATABLE READ')
+                with pg.cursor() as query:
+                    query.execute('SELECT epoch FROM sawa_agent_trial.ledger WHERE id=1 FOR SHARE')
+                    if query.fetchone()[0] != self.epoch:
+                        raise Conflict('実行環境が交代したため作業コピーを復元しません')
+                    query.execute('SELECT manifest FROM sawa_agent_trial.working_copies WHERE run_id=%s', (ident,))
+                    row = query.fetchone()
+                    manifest = row[0] if row else None
+                keys = []
+                if manifest is not None:
+                    try:
+                        contents = json.loads(manifest)
+                    except (TypeError, ValueError) as exc:
+                        raise Conflict('保存済みcheckpointのmanifest形式が不正です') from exc
+                    if not isinstance(contents, dict) or any(not isinstance(name, str) for name in contents):
+                        raise Conflict('保存済みcheckpointのmanifest形式が不正です')
+                    for digest in contents.values():
+                        if not isinstance(digest, str) or len(digest) != 64 or any(char not in '0123456789abcdef' for char in digest):
+                            raise Conflict('保存済みcheckpointの照合値が不正です')
+                        keys.append('runs/' + ident + '/checkpoints/' + digest)
+
+                def receive(cursor):
+                    for relative, digest, payload in cursor:
+                        path, checked = self._relative(self.root / relative)
+                        if checked != relative:
+                            raise Conflict('保存済みの試用原本・帳票を照合できません')
+                        content = decode_blob(payload, expected=digest)
+                        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        path.write_bytes(content)
+
+                ranges, parameters = [], []
+                for name in ('before', 'artifacts', 'sources', 'question-drawings'):
+                    prefix = 'runs/' + ident + '/' + name + '/'
+                    ranges.append('(path COLLATE "C">=%s AND path COLLATE "C"<%s)')
+                    parameters.extend((prefix, prefix[:-1] + '0'))
+                with pg.cursor(name='agent_files_' + uuid4().hex) as files:
+                    files.itersize = 20
+                    files.execute('SELECT path,digest,payload FROM sawa_agent_trial.files WHERE '
+                                  + ' OR '.join(ranges) + ' ORDER BY path', parameters)
+                    receive(files)
+                for offset in range(0, len(keys), 200):
+                    with pg.cursor(name='agent_checkpoint_' + uuid4().hex) as files:
+                        files.itersize = 20
+                        files.execute('SELECT path,digest,payload FROM sawa_agent_trial.files WHERE path=ANY(%s)',
+                                      (keys[offset:offset + 200],))
+                        receive(files)
+                if manifest is not None:
+                    restore(self.root, ident, manifest)
+            self._hydrated.add(ident)
 
     def require_working_copy(self, ident):
+        self._hydrate_run(ident)
         with self.read() as db:
             row = db.execute('SELECT manifest FROM working_copies WHERE run_id=?', (ident,)).fetchone()
         if not row:

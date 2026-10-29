@@ -10,6 +10,31 @@ from uuid import uuid4
 from local_hospital_test_runner import ROOT, clean_tree, focused_staging, git, reject_hosted_runner, staging_scope_base
 
 
+DOMAIN_TESTS = {
+    'shift': (
+        'test_shift_review.py', 'test_shift_read_scopes.py', 'test_shift_confirmation_receipt.py',
+        'test_shift_business_questions.py',
+        'test_native_workflows.py::test_real_shift_approval_restart_confirmation_output_and_rollback',
+        'test_native_workflows.py::test_real_shift_business_condition_question_parse_confirm_resolve_and_output',
+    ),
+    'school-lunch': (
+        'test_daily_lunch.py', 'test_daily_completion.py', 'test_route_generation_binding.py',
+        'test_lunch_review.py', 'test_canonical_route_layout.py', 'test_lunch_process_questions.py',
+        'test_work_day_proposals.py', 'test_question_drawing_asset.py', 'test_selection_proposals.py',
+        'test_school_source.py',
+        'test_native_workflows.py::test_real_registered_day_suggestions_do_not_need_calendar_input',
+        'test_native_workflows.py::test_real_lunch_questions_save_approval_restart_and_three_official_outputs',
+    ),
+}
+SHARED_NATIVE_TESTS = (
+    'test_native_contract_comparison.py', 'test_prepare_packaged.py', 'test_staging_runtime.py',
+    'test_native_lifecycle.py', 'test_runtime_gateway.py', 'test_recovery.py',
+    'test_durable_postgres.py', 'test_generation_fence.py', 'test_workflow_completion.py',
+    'test_business_workflow.py', 'test_selected_tasks.py', 'test_other_workflows.py',
+    'test_native_workflows.py::test_packaged_api_auth_and_extensions_with_latest_contracts',
+)
+
+
 def select_test_targets():
     full = {"mode": "full", "targets": ["experiments/agent_assistant/tests"]}
     if not focused_staging():
@@ -19,6 +44,21 @@ def select_test_targets():
         paths = [path for path in git("diff", "--name-only", "-z", base, "HEAD").split("\0") if path]
     except subprocess.CalledProcessError:
         return full
+    native = {domain for domain in DOMAIN_TESTS
+              if any(path.startswith('agent_runtime/native/' + domain + '/')
+                     or path == 'agent_runtime/manifests/' + domain + '.json' for path in paths)}
+    native_only = native and all(
+        any(path.startswith('agent_runtime/native/' + domain + '/') for domain in native)
+        or any(path == 'agent_runtime/manifests/' + domain + '.json' for domain in native)
+        or path.startswith('docs/') for path in paths)
+    if native_only:
+        names = sorted(set(SHARED_NATIVE_TESTS).union(*(DOMAIN_TESTS[domain] for domain in native)))
+        targets = ['experiments/agent_assistant/tests/' + name for name in names]
+        if any(not (ROOT / target.split('::', 1)[0]).is_file() for target in targets):
+            raise ValueError('Native domain verification target is missing')
+        return {'mode': 'native-domain-and-shared-recovery', 'targets': targets,
+                'domains': sorted(native), 'base_sha': base, 'changed_paths': paths,
+                'outside_scope': 'Other domain implementation is unchanged; its tests are not claimed as passed'}
     if not paths or any(
         path.startswith("experiments/agent_assistant/")
         or path.startswith("agent_runtime/baselines/")

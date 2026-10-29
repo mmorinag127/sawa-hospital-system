@@ -33,14 +33,15 @@ const runnerEnvironmentKey = (key) => volatile.has(key) || /^(GITHUB_|RUNNER_|AC
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   !runnerEnvironmentKey(key)).sort());
 const configs = Object.fromEntries([...tracked].sort().filter((name) =>
-  /\.(toml|ini|cfg|ya?ml|lock)$/.test(name) ||
-  /(^|\/)(package(-lock)?|tsconfig[^/]*)\.json$/.test(name) || name.startsWith('infra/ci/'))
+  // Only Node resolution/compiler settings are global. A test's explicit YAML,
+  // Python or workflow reads are already recorded as that test's dependencies.
+  /(^|\/)(package(-lock)?|tsconfig[^/]*)\.json$/.test(name) || name.startsWith('infra/ci/node-impact/'))
   .map((name) => [name, fileHash(path.join(root, name))]));
 const trackerFiles = Object.fromEntries(['core.cjs', 'register.mjs', 'test.cjs']
   .map((name) => [name, fileHash(path.join(__dirname, name))]));
 Object.assign(configs, Object.fromEntries(Object.entries(trackerFiles).map(([name, value]) =>
   ['node-impact-tracker:' + name, value])));
-const context = hash(JSON.stringify({ version: 2, node: process.version, platform: process.platform, root, cwd: process.cwd(), arch: process.arch,
+const context = hash(JSON.stringify({ version: 3, node: process.version, platform: process.platform, root, cwd: process.cwd(), arch: process.arch,
   tracked: [...tracked].sort(), configs, env }));
 // Diagnose cache misses without persisting environment values or changing selection.
 const contextParts = Object.fromEntries(Object.entries({ node: process.version, platform: process.platform, root, cwd: process.cwd(), arch: process.arch,

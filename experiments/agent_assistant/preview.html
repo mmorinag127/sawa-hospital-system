@@ -17,7 +17,40 @@ function showError(error){$('error').hidden=false;$('error').textContent=error.m
 let selected=null,settings=null,key=null,tasks=[],selection=null,targetKeys=[],currentRun=null,corrections={},reviewMessage='',lastReview='',lastReviewId=null,lastFaxes='';
 const states={preparing:'準備中',running:'処理中',waiting_input:'確認待ち',completed:'完了',stopped:'停止済み',stopping:'停止中',rolled_back:'元に戻しました',failed:'準備失敗',reconciliation_required:'結果照合が必要',stop_pending:'業務停止済み・接続先の停止確認中',rollback_stop_pending:'復元済み・接続先の停止確認中',budget_reached:'予算到達'};
 function cents(v){if(!/^\d+(\.\d{1,2})?$/.test(v))throw Error('金額は小数点以下2桁までで入力してください');let[a,b='']=v.split('.');return Number(a)*100+Number(b.padEnd(2,'0'));}
-async function api(path,method='GET',body){let r=await fetch('/'+path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});let data=await r.json();if(!r.ok)throw Error(data.detail||'処理に失敗しました');return data;}
+let progressHistory=null,olderCursor=null,olderRun=null;
+const olderButton=document.createElement('button'),olderMessages=document.createElement('div');
+olderButton.type='button';olderButton.textContent='保存済み履歴を表示';olderButton.hidden=true;
+$('chat').after(olderButton,olderMessages);
+olderButton.onclick=async()=>{
+ const ident=olderRun,before=olderCursor;if(!ident)return;
+ olderButton.disabled=true;
+ try{
+  const page=await api('runs/'+ident+'/events'+(before?'?before='+before:''));
+  if(selected!==ident||olderRun!==ident)return;
+  const fragment=document.createDocumentFragment();
+  for(const message of page.conversation){const p=document.createElement('p');p.textContent=(message.role==='user'?'あなた：':'エージェント：')+message.text;fragment.append(p);}
+  olderMessages.prepend(fragment);olderCursor=page.previous_event;olderButton.hidden=!page.has_previous;olderButton.textContent='以前のやり取りを表示';
+ }catch(error){showError(error);}finally{olderButton.disabled=false;}
+};
+function mergeHistory(previous,incoming){
+ const values=new Map(previous.map(item=>[String(item.id),item]));
+ for(const item of incoming)values.set(String(item.id),item);
+ return [...values.values()].sort((a,b)=>Number(a.id)-Number(b.id)).slice(-500);
+}
+async function api(path,method='GET',body){
+ const progress=method==='GET'&&/^runs\/[a-f0-9]+$/.test(path);
+ const previous=progressHistory?.path===path?progressHistory:null;
+ const target=progress?path+'?events_after='+(previous?.cursor||0):path;
+ const r=await fetch('/'+target,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+ const data=await r.json();if(!r.ok)throw Error(data.detail||'処理に失敗しました');
+ if(progress&&data.event_page&&selected===data.id){
+  if(!previous){olderRun=data.id;olderCursor=null;olderMessages.replaceChildren();olderButton.hidden=false;olderButton.textContent='保存済み履歴を表示';}
+  for(const field of ['events','conversation','business_messages'])data[field]=mergeHistory(previous?.[field]||[],data[field]||[]);
+  progressHistory={path,cursor:data.event_page.next_event,...Object.fromEntries(['events','conversation','business_messages'].map(field=>[field,data[field]]))};
+  if(data.source_event&&!data.events.some(event=>event.id===data.source_event.id))data.events=[data.source_event,...data.events];
+ }
+ return data;
+}
 async function action(fn){if(busy)return;busy=true;$('pollNotice').hidden=true;$('error').hidden=true;$('error').textContent='';document.querySelector('main').setAttribute('aria-busy','true');try{await fn();await load();if(selected)await detail(selected);}catch(e){showError(e);}finally{busy=false;document.querySelector('main').removeAttribute('aria-busy');}}
 function task(){return tasks.find(x=>x.id===$('task').value);}
 function progress(stage){for(const [i,li] of [...$('progress').children].entries()){if(i===stage)li.setAttribute('aria-current','step');else li.removeAttribute('aria-current');li.classList.toggle('done',i<stage);li.firstElementChild.textContent=i<stage?'✓':String(i+1);}}
@@ -29,7 +62,51 @@ function radioChoices(id,items,value,onchange){$(id).replaceChildren();for(const
 function chooseTask(){let t=task();if(!t)return;choosingTask=false;resetTargets();$('taskPicker').hidden=true;$('requestForm').hidden=false;$('backTasks').hidden=false;$('requestTitle').textContent='作業の対象を教えてください';$('requestEyebrow').textContent=labels[t.domain];$('taskLabel').textContent=t.label;$('taskDescription').textContent=t.description;$('targetForm').hidden=t.id==='hospital_pending_faxes';$('faxInfo').hidden=t.id!=='hospital_pending_faxes';$('loadTargets').hidden=t.id==='hospital_pending_faxes';$('monthLabel').hidden=!t.month;$('serviceDateLabel').hidden=!t.date;$('month').value=t.default_month||'';$('serviceDate').value='';$('absenceLabel').hidden=t.id!=='shift_absence';$('absence').value='';$('schoolLabel').hidden=true;$('school').value='';progress(1);scheduleTargets();focusGuide($('requestTitle'));}
 function backTasks(){choosingTask=true;resetTargets();$('taskPicker').hidden=false;$('requestForm').hidden=true;$('backTasks').hidden=true;$('requestTitle').textContent='どの作業を行いますか？';$('requestEyebrow').textContent='作業の選択';progress(0);focusGuide($('requestTitle'));}
 function scheduleTargets(){resetTargets();clearTimeout(targetTimer);let t=task();if(!t||t.id==='hospital_pending_faxes'||!settings?.domains[t.domain]?.baseline_ready||t.month&&!$('month').value||t.date&&!$('serviceDate').value&&t.domain!=='school-lunch'||t.id==='shift_absence'&&!$('absence').value)return;targetTimer=setTimeout(()=>fetchTargets().catch(showError),250);}
-async function load(){settings=await api('config');const b=settings.budget;renderProviders();$('spent').textContent=money(b.spent_cents);$('reserved').textContent=money(b.reserved_cents);$('limit').textContent=money(b.monthly_cents);const requested=currentRun?.domains||(choosingTask?Object.keys(settings.domains).filter(k=>settings.domains[k].baseline_ready):[task()?.domain]);$('setup').hidden=adminView||!settings.missing.length&&requested.length>0&&requested.every(k=>settings.domains[k]?.baseline_ready);$('setup').replaceChildren();if(!$('setup').hidden){let title=document.createElement('strong'),p=document.createElement('p');title.textContent='試用の準備中です';p.textContent='管理者の接続・試用データ設定が完了すると、選んだ作業を開始できます。';$('setup').append(title,p);let d=document.createElement('details'),s=document.createElement('summary'),text=document.createElement('p');s.textContent='設定状況';text.textContent=(settings.missing.length?'接続先が未設定です。':'接続先は設定済みです。')+Object.entries(settings.domains).map(([k,v])=>labels[k]+'：'+(v.baseline_ready?(v.data==='empty_schema_no_real_order_test'?'業務データの準備が必要':'準備済み'):'未設定')).join(' ／ ');d.append(s,text);$('setup').append(d);}if(!tasks.length){tasks=await api('tasks');taskOptions();}ready();const runs=await api('runs');if(!initialOpened){initialOpened=true;const pending=runs.filter(x=>!['completed','stopped','rolled_back','failed'].includes(x.status));if(!adminView&&pending.length===1)selected=pending[0].id;}$('historyCount').textContent=runs.length+'件';$('runs').replaceChildren();if(!runs.length)$('runs').textContent='まだ依頼した作業はありません。';for(const r of runs){let li=document.createElement('li'),b=document.createElement('button'),info=document.createElement('span'),title=document.createElement('strong'),domain=document.createElement('small'),status=document.createElement('span');b.className='history-row';title.textContent=r.instruction;domain.textContent=r.domains.map(x=>labels[x]).join(' ／ ');status.className='status-tag';status.textContent=(states[r.status]||r.status)+(adminView?' · '+money(r.spent):'');info.append(title,domain);b.append(info,status);b.onclick=()=>{selected=r.id;action(()=>detail(r.id));};li.append(b);$('runs').append(li);}}
+let historyGeneration=0,historyCursor=null,historyNext=null,historyStack=[];
+const historyFilter=document.createElement('select'),historyPrevious=document.createElement('button'),historyMore=document.createElement('button');
+historyFilter.setAttribute('aria-label','依頼履歴の状態');
+historyFilter.append(new Option('すべての依頼','all'),new Option('未完了の依頼','unfinished'));
+historyPrevious.type=historyMore.type='button';historyPrevious.textContent='新しい100件';historyMore.textContent='以前の100件';
+$('runs').before(historyFilter);$('runs').after(historyPrevious,historyMore);
+historyFilter.onchange=()=>{historyStack=[];loadRunHistory(null).catch(showError);};
+historyPrevious.onclick=()=>{if(historyStack.length)loadRunHistory(historyStack.pop()).catch(showError);};
+historyMore.onclick=()=>{if(historyNext){historyStack.push(historyCursor);loadRunHistory(historyNext).catch(showError);}};
+async function loadRunHistory(cursor=null){
+ const generation=++historyGeneration;
+ historyPrevious.disabled=historyMore.disabled=true;
+ const query=new URLSearchParams({unfinished:String(historyFilter.value==='unfinished'),...(cursor||{})});
+ try{
+  const page=await api('run-history?'+query);
+  if(generation!==historyGeneration)return;
+  historyCursor=cursor;historyNext=page.next;
+  if(!initialOpened){initialOpened=true;const pending=page.items.filter(run=>!['completed','stopped','rolled_back','failed'].includes(run.status));if(!adminView&&pending.length===1)selected=pending[0].id;}
+  $('historyCount').textContent=page.items.length+'件'+(page.next?'（続きあり）':'');
+  $('runs').replaceChildren();
+  if(!page.items.length)$('runs').textContent='該当する依頼はありません。';
+  for(const run of page.items){
+   const li=document.createElement('li'),button=document.createElement('button'),info=document.createElement('span'),title=document.createElement('strong'),domain=document.createElement('small'),status=document.createElement('span');
+   button.className='history-row';title.textContent=run.instruction;domain.textContent=run.domains.map(key=>labels[key]).join(' ／ ');
+   status.className='status-tag';status.textContent=(states[run.status]||run.status)+(adminView?' · '+money(run.spent):'');
+   info.append(title,domain);button.append(info,status);button.onclick=()=>{selected=run.id;action(()=>detail(run.id));};
+   li.append(button);$('runs').append(li);
+  }
+ }finally{if(generation===historyGeneration){historyPrevious.disabled=!historyStack.length;historyMore.disabled=!historyNext;}}
+}
+async function load(){
+ settings=await api('config');const budget=settings.budget;renderProviders();
+ $('spent').textContent=money(budget.spent_cents);$('reserved').textContent=money(budget.reserved_cents);$('limit').textContent=money(budget.monthly_cents);
+ const requested=currentRun?.domains||(choosingTask?Object.keys(settings.domains).filter(key=>settings.domains[key].baseline_ready):[task()?.domain]);
+ $('setup').hidden=adminView||!settings.missing.length&&requested.length>0&&requested.every(key=>settings.domains[key]?.baseline_ready);
+ $('setup').replaceChildren();
+ if(!$('setup').hidden){
+  const title=document.createElement('strong'),p=document.createElement('p');title.textContent='試用の準備中です';p.textContent='管理者の接続・試用データ設定が完了すると、選んだ作業を開始できます。';$('setup').append(title,p);
+  const details=document.createElement('details'),summary=document.createElement('summary'),text=document.createElement('p');summary.textContent='設定状況';
+  text.textContent=(settings.missing.length?'接続先が未設定です。':'接続先は設定済みです。')+Object.entries(settings.domains).map(([key,value])=>labels[key]+'：'+(value.baseline_ready?(value.data==='empty_schema_no_real_order_test'?'業務データの準備が必要':'準備済み'):'未設定')).join(' ／ ');
+  details.append(summary,text);$('setup').append(details);
+ }
+ if(!tasks.length){tasks=await api('tasks');taskOptions();}
+ ready();historyStack=[];await loadRunHistory(null);
+}
 async function fetchTargets(){let t=task(),inputs={};resetTargets();const request=targetRequest;loadingTargets=true;$('targetLoading').hidden=false;ready();if(t.month)inputs.month=$('month').value;if(t.date&&$('serviceDate').value)inputs.service_date=$('serviceDate').value;if(t.id==='shift_absence')inputs.absence_date=$('absence').value;if(t.target_kind==='menu'&&$('school').value)inputs.facility_id=Number($('school').value);try{const received=await api('tasks/'+t.id+'/targets','POST',{inputs});if(request!==targetRequest)return;selection=received;targetKeys=t.date?selection.choices.map(x=>x.key):[];$('choices').replaceChildren();$('targets').hidden=!!t.date;
 if(t.target_kind==='menu'){$('schoolLabel').hidden=false;radioChoices('schoolChoices',selection.schools,$('school').value,value=>{$('school').value=value;scheduleTargets();});}
 $('dailyTargets').hidden=!t.date||!$('school').value||!$('serviceDate').value;if(t.date)$('dailyTargets').textContent=selection.choices.length?'この日の献立をまとめて処理します：'+selection.choices.map(x=>x.label).join(' ／ ')+'。作業工程表・動線図・実施価格を一度に確認できます。':'この日の献立は未登録です。月次の「献立・調理手配書を取り込む」を先に行ってください。';if(!selection.choices.length)$('choices').textContent=t.target_kind==='menu'&&!$('school').value?'学校を選ぶと、登録済みの献立が表示されます。':'対象がありません。登録内容・対象月を確認してください。';for(let x of selection.choices){let label=document.createElement('label'),input=document.createElement('input'),text=document.createElement('span');label.className='target-choice';input.type=['school','month'].includes(t.target_kind)?'radio':'checkbox';input.name='target';input.onchange=()=>{targetKeys=input.type==='radio'?[x.key]:input.checked?[...targetKeys,x.key]:targetKeys.filter(k=>k!==x.key);key=null;ready();};text.textContent=x.label;label.append(input,text);$('choices').append(label);}$('layoutLabel').hidden=!!t.date||t.target_kind!=='menu'||!selection.choices.length;$('layout').value='';radioChoices('layoutChoices',selection.layouts.map(x=>({...x,name:x.name+'（版 '+x.version+'）'})),'',value=>{$('layout').value=value;key=null;ready();});}finally{if(request===targetRequest){loadingTargets=false;$('targetLoading').hidden=true;ready();}}}
@@ -86,5 +163,15 @@ $('stop').onclick=()=>action(()=>api('runs/'+selected+'/stop','POST'));$('rollba
 $('replyForm').onsubmit=e=>{e.preventDefault();action(async()=>{await api('runs/'+selected+'/reply','POST',{message:$('reply').value,question_id:currentRun.pending_question?.question_id});$('reply').value='';});};
 $('sourceFile').onchange=()=>{$('sourceChecked').checked=false;};
 $('sourceForm').onsubmit=e=>{e.preventDefault();action(async()=>{let file=$('sourceFile').files[0];if(!file||!$('sourceChecked').checked)throw Error('原本の学校・対象月を確認してください');let form=new FormData();form.append('file',file);form.append('domain','school-lunch');form.append('binding',JSON.stringify({facility_id:String(currentRun.task_inputs.inputs.facility_id),month:currentRun.task_inputs.inputs.month}));let response=await fetch('/runs/'+selected+'/sources',{method:'POST',body:form});let result=await response.json();if(!response.ok)throw Error(result.detail||'添付に失敗しました');await api('runs/'+selected+'/reply','POST',{message:'選択した学校・対象月と原本を照合しました。',question_id:currentRun.pending_question?.question_id});});};
-progress(0);$('progress').hidden=adminView;$('historyPanel').open=adminView;$('backTasks').onclick=backTasks;$('newTask').onclick=()=>{selected=null;currentRun=null;$('detail').hidden=true;$('requestPanel').hidden=false;backTasks();};action(async()=>{});setInterval(async()=>{if(!selected||busy||refreshing)return;refreshing=true;try{const id=selected;await detail(id);if(adminView)await load();$('pollNotice').hidden=true;}catch(e){$('pollNotice').textContent='進捗を取得できませんでした。再確認しています。作業は再送していません。';$('pollNotice').hidden=false;}finally{refreshing=false;}},2500);
+progress(0);$('progress').hidden=adminView;$('historyPanel').open=adminView;$('backTasks').onclick=backTasks;$('newTask').onclick=()=>{selected=null;currentRun=null;progressHistory=null;$('detail').hidden=true;$('requestPanel').hidden=false;backTasks();};action(async()=>{});
+async function refreshProgress(){
+ if(document.hidden||!selected||busy||refreshing)return;
+ if(['completed','stopped','rolled_back','failed'].includes(currentRun?.status))return;
+ refreshing=true;
+ try{const id=selected;await detail(id);$('pollNotice').hidden=true;}
+ catch(e){$('pollNotice').textContent='進捗を取得できませんでした。再確認しています。作業は再送していません。';$('pollNotice').hidden=false;}
+ finally{refreshing=false;}
+}
+setInterval(refreshProgress,2500);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshProgress();});
 </script></html>

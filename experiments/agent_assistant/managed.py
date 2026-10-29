@@ -9,7 +9,7 @@ from .mcp_server import call_local
 from .store import Conflict, billing_month
 from .sandbox import run_blocking
 from .tasks import TASKS
-from .conversation import check_answer, record_question_receipt
+from .conversation import check_pending_answer, record_question_receipt
 
 SYSTEM = """あなたはSAWAの業務アシスタントです。応答は短い日本語にします。
 病院注文・シフト・学校給食の既存業務APIだけを、許可されたMCPツールから使います。
@@ -58,6 +58,8 @@ class Managed:
         await self.sandbox.start(run)
         from .business_contracts import model_definitions
         definitions = [{"type": "custom", **definition} for definition in model_definitions(self.tools, run)]
+        from .execution_binding import record
+        await run_blocking(record, self.store, self.tools, run, SYSTEM, starting=True)
         await run_blocking(self.store.update, run["id"], expected_generation=run['generation'], status="dispatching")
         # Never give the model bash, filesystem, web, other MCPs or another account's tools.
         session = await session_api.create(
@@ -93,6 +95,8 @@ class Managed:
             raise Conflict("既にイベントを処理中です")
         # The provider streams only future events. Open before sending work.
         run = await run_blocking(self.store.get, run_id)
+        from .execution_binding import record
+        await run_blocking(record, self.store, self.tools, run, SYSTEM)
         stream = await self.api().events.stream(run["session_id"])
         try:
             current = await run_blocking(self.store.get, run_id)
@@ -315,14 +319,14 @@ class Managed:
                 raise Conflict("回答を送れる状態ではありません。月をまたぐ処理は新しい依頼で開始してください")
             if run["spent"] >= run["cap"]:
                 raise Conflict("依頼予算へ到達しています")
-            check_answer(await run_blocking(self.store.events, run_id), message, question_id, option)
+            check_pending_answer(await run_blocking(self.store.pending_question, run_id), message, question_id, option)
             process_selection = await self.tools.flow.questions.validate_reply(run, message, question_id)
             await self.sandbox.start(run)
             current = await run_blocking(self.store.get, run_id)
             if current["generation"] != run["generation"] or current["status"] != "waiting_input":
                 raise Conflict("依頼は停止または変更されました。回答を再開しません")
             await run_blocking(self.store.update, run_id, expected_generation=run['generation'], status="running")
-            events = await run_blocking(self.store.events, run_id)
+            events = await run_blocking(self.store.events, run_id, kinds=('operator_reply', 'operator_wait'))
             last_reply = max((event["id"] for event in events if event["kind"] == "operator_reply"), default=0)
             questions = [event for event in events if event["id"] > last_reply and event["kind"] == "operator_wait"]
             content = [{"type": "text", "text": message}]

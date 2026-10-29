@@ -9,11 +9,17 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
+import shutil
 
 from local_receipt_signing import canonical, sign, verify_signed
 
 
 PG_COMMAND = 'python3 scripts/run_local_pg_batch.py'
+STATIC_COMMANDS = {
+    'cd backend && python3 -m ruff check --no-cache --select F821 src',
+    'cd frontend && npm run lint',
+    'cd frontend && ./node_modules/.bin/tsc --noEmit',
+}
 
 
 def file_digest(path):
@@ -47,13 +53,13 @@ class FileHashes:
 
 
 def command_context(root, command, environment, hashes):
-    if command != PG_COMMAND or not os.environ.get('SAWA_LOCAL_TEST_PUBLIC_KEY'):
+    if command not in {PG_COMMAND, *STATIC_COMMANDS} or not os.environ.get('SAWA_LOCAL_TEST_PUBLIC_KEY'):
         return None
     pg_bin = Path(environment.get('PG_BIN', '/usr/lib/postgresql/16/bin'))
-    if not all((pg_bin / name).is_file() for name in ('postgres', 'pg_ctl', 'initdb', 'createdb', 'psql', 'pg_config')):
+    if command == PG_COMMAND and not all((pg_bin / name).is_file() for name in ('postgres', 'pg_ctl', 'initdb', 'createdb', 'psql', 'pg_config')):
         return None
     digest = sha256()
-    digest.update(canonical({'version': 1, 'command': command, 'python': sys.version,
+    digest.update(canonical({'version': 2, 'command': command, 'python': sys.version,
         'executable': str(Path(sys.executable).resolve()), 'platform': platform.platform(),
         'environment': {key: value for key, value in environment.items() if key not in {
             'SAWA_LOCAL_RUN_ID', 'SAWA_LOCAL_EVIDENCE_DIR', 'PWD', 'OLDPWD', 'SHLVL', '_'}},
@@ -61,18 +67,27 @@ def command_context(root, command, environment, hashes):
     try:
         digest.update(canonical(['source-root-entries', sorted(path.name for path in root.iterdir())]))
         files = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
-        for name in sorted(name for name in files if name and not name.startswith('frontend/')):
+        frontend = command.startswith('cd frontend && ')
+        for name in sorted(name for name in files if name and (frontend or not name.startswith('frontend/'))):
             path = root / name
             if not path.is_file():
                 return None
             digest.update(canonical([name, path.lstat().st_mode, str(path.resolve()), hashes.digest(path)]))
-        runtime_roots = [Path(sys.executable).resolve(), pg_bin]
+        runtime_roots = [Path(sys.executable).resolve()]
+        if command == PG_COMMAND:
+            runtime_roots.append(pg_bin)
+        if frontend:
+            node = shutil.which('node', path=environment.get('PATH'))
+            if not node or not (root / 'frontend/node_modules').is_dir():
+                return None
+            runtime_roots.extend([Path(node), root / 'frontend'])
         # Include ignored inputs too; a private fixture cannot silently escape the key.
-        runtime_roots.extend(root / name for name in ('backend', 'scripts', 'infra', 'ocr_pipeline', 'agent_runtime')
+        runtime_roots.extend(root / name for name in ('backend', 'scripts', 'infra', 'ocr_pipeline', 'agent_runtime', 'experiments')
                              if (root / name).is_dir())
-        for option in ('--libdir', '--pkglibdir', '--sharedir'):
-            location = subprocess.check_output([str(pg_bin / 'pg_config'), option], text=True).strip()
-            runtime_roots.append(Path(location))
+        if command == PG_COMMAND:
+            for option in ('--libdir', '--pkglibdir', '--sharedir'):
+                location = subprocess.check_output([str(pg_bin / 'pg_config'), option], text=True).strip()
+                runtime_roots.append(Path(location))
         runtime_roots.extend(Path(sysconfig.get_path(kind)) for kind in ('stdlib', 'platstdlib', 'purelib', 'platlib'))
         for entry in sys.path:
             path = Path(entry or os.getcwd()).resolve()
@@ -163,19 +178,28 @@ class CommandEvidence:
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
-    def save(self, command, source_sha, log):
+    def save(self, command, source_sha, log, *, exit_code=None):
+        if type(exit_code) is not int or exit_code != 0:
+            return
         dependency = self.context(command)
         if dependency is None:
             return
         report_path = Path(self.environment['SAWA_LOCAL_EVIDENCE_DIR']) / 'pg-command-inputs.json'
+        if command in STATIC_COMMANDS:
+            report_path = log.with_suffix('.inputs.json')
+            report_path.write_bytes(canonical({'schema': 1, 'source_sha': source_sha,
+                'command_sha256': sha256(command.encode()).hexdigest(),
+                'dependency_sha256': dependency, 'kind': 'executed-static-check'}))
+        elif command != PG_COMMAND:
+            return
         try:
             observation = json.loads(report_path.read_text())
-            suites = observation['suites']
-            reports = observation['reports']
+            suites = observation.get('suites')
+            reports = observation.get('reports')
             expected = ['readonly', 'c1', 'c1-guards', 'menu-identity', 'output']
             if self.environment['SAWA_LOCAL_TEST_MODE'] != 'focused':
                 expected.append('formal')
-            if (observation.get('schema') != 1 or observation.get('source_sha') != source_sha
+            if command == PG_COMMAND and (observation.get('schema') != 1 or observation.get('source_sha') != source_sha
                     or suites != expected or set(reports) != set(expected)
                     or any(report.get('schema') != 1 or type(report.get('collected')) is not int
                         or report['collected'] <= 0 or report.get('passed') != report['collected']

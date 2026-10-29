@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
+import { isolatedPage as fixture } from './browser-fixture.mjs';
 import { verifyUploadList, verifyUploadListPage } from '../../scripts/upload-list-readonly.mjs';
-const { webkit, expect: baseExpect } = createRequire(import.meta.url)('@playwright/test');
+const { expect: baseExpect } = createRequire(import.meta.url)('@playwright/test');
 const expect = baseExpect.configure({ timeout: 150 });
 test('independent list check is wired immediately after unchanged entry checks and retains screenshots', async () => {
   const events = [];
@@ -18,11 +19,6 @@ test('independent list check is wired immediately after unchanged entry checks a
   assert.ok(source.includes('`readonly-${name}.png`'));
   assert.ok(source.includes('safeBusinessScreenshot(page, origin, resolve(output, filename))'));
 });
-async function fixture(run) {
-  const browser = await webkit.launch();
-  try { const page = await browser.newPage(); await page.route('**/*', route => route.abort()); await run(page); }
-  finally { await browser.close(); }
-}
 test('actual click follows receipt registration; loaded file/status/error match API and mismatches reject', async () => fixture(async page => {
   await page.setContent('<button id="load">取込済みPDFを表示</button><article class="history-card"><p class="history-card-id">u1</p><h3 class="history-card-title">fax.pdf</h3><span class="history-badge">要介入</span><span class="history-badge">取込処理中</span><p class="history-error">エラー: fixture failure</p></article>');
   await page.evaluate(() => document.querySelector('#load').addEventListener('click', event => { event.target.textContent = '最新に更新'; }));

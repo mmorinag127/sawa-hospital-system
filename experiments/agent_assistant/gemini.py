@@ -55,8 +55,8 @@ class Gemini(Managed):
         return missing
 
     def pin(self, ident):
-        previous = [e['payload'] for e in self.store.events(ident) if e['kind'] == 'gemini_binding']
-        if previous: return previous[-1]
+        previous = self.store.latest_event(ident, 'gemini_binding')
+        if previous: return previous['payload']
         if self.missing(): raise Conflict('Gemini接続設定が未完了です：' + ', '.join(self.missing()))
         model = os.environ['GEMINI_AGENT_MODEL']
         if not re.fullmatch(r'gemini-[a-zA-Z0-9._-]+', model): raise ValueError('Geminiモデル名が不正です')
@@ -82,7 +82,8 @@ class Gemini(Managed):
         self.store.event(ident, 'gemini_state', state)
 
     def state(self, ident):
-        return next((e['payload'] for e in reversed(self.store.events(ident)) if e['kind'] == 'gemini_state'), None)
+        event = self.store.latest_event(ident, 'gemini_state')
+        return event['payload'] if event else None
 
     def current(self, ident, generation):
         run = self.store.get(ident)
@@ -92,6 +93,8 @@ class Gemini(Managed):
     async def _start(self, run):
         await run_blocking(self.pin, run['id'])
         await self.sandbox.start(run)
+        from .execution_binding import record
+        await run_blocking(record, self.store, self.tools, run, SYSTEM, starting=True)
         await run_blocking(self.store.update, run['id'], expected_generation=run['generation'], status='running')
         from .business_contracts import preparation_instruction
         text = preparation_instruction(self.tools, run)
@@ -121,14 +124,8 @@ class Gemini(Managed):
         keys = ('total_input_tokens', 'total_output_tokens', 'total_thought_tokens')
         if not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0 for k in keys):
             raise Conflict('Geminiのトークン利用量が未確定です。予約額を保持します')
-        self.store.event(ident, 'gemini_usage', {'id': interaction['id'], 'usage': usage})
-        by_id = {}
-        for event in self.store.events(ident):
-            if event['kind'] == 'gemini_usage':
-                value = event['payload']; old = by_id.get(value['id'], {})
-                by_id[value['id']] = {k: max(old.get(k, 0), value['usage'][k]) for k in keys}
+        totals = self.store.gemini_usage_totals(ident, interaction['id'], usage)
         pin = self.pin(ident)
-        totals = {k: sum(row[k] for row in by_id.values()) for k in keys}
         amount = (Decimal(totals[keys[0]]) * Decimal(pin['input_rate']) +
                   Decimal(totals[keys[1]] + totals[keys[2]]) * Decimal(pin['output_rate'])) / 10000
         self.store.usage(ident, {**totals, 'provider': 'gemini', 'basis': 'configured_token_rates', 'estimated': True,
@@ -136,7 +133,7 @@ class Gemini(Managed):
 
     def unsettled(self, ident):
         dispatches, responses = set(), set()
-        for e in self.store.events(ident):
+        for e in self.store.events(ident, kinds=('gemini_dispatch', 'gemini_response', 'gemini_rejected')):
             if e['kind'] == 'gemini_dispatch': dispatches.add(e['payload']['id'])
             if e['kind'] == 'gemini_response': responses.add(e['payload']['dispatch'])
             if e['kind'] == 'gemini_rejected': responses.add(e['payload']['dispatch'])
@@ -145,7 +142,7 @@ class Gemini(Managed):
     async def refresh_usage(self, ident, release=False, *, terminal_generation=None):
         if terminal_generation is None:
             terminal_generation = (await run_blocking(self.store.get, ident))['generation']
-        ids = list(dict.fromkeys(e['payload']['id'] for e in await run_blocking(self.store.events, ident) if e['kind'] == 'gemini_response'))
+        ids = list(dict.fromkeys(e['payload']['id'] for e in await run_blocking(self.store.events, ident, kinds=('gemini_response',))))
         if not ids: raise Conflict('Geminiの実行結果が未確定です。予約額を保持します')
         for interaction_id in ids:
             value = await self.request('GET', '/' + quote(interaction_id, safe=''))
@@ -215,8 +212,18 @@ class Gemini(Managed):
                     return
                 pin = await run_blocking(self.pin, ident)
                 from .business_contracts import model_definitions
+                from .execution_binding import record
+                await run_blocking(record, self.store, self.tools, run, SYSTEM)
+                # Output alone must fit the remaining estimate. Input and
+                # provider billing uncertainty are still reported separately.
+                remaining = run['cap'] - run['spent']
+                output_limit = min(pin['max_output_tokens'],
+                                   int(Decimal(remaining) * 10000 / Decimal(pin['output_rate'])))
+                if output_limit < 1:
+                    await run_blocking(self.store.update, ident, expected_generation=generation, status='budget_reached')
+                    return
                 body = {'model': pin['model'], 'input': inputs, 'system_instruction': SYSTEM,
-                    'store': True, 'background': False, 'generation_config': {'max_output_tokens': pin['max_output_tokens']},
+                    'store': True, 'background': False, 'generation_config': {'max_output_tokens': output_limit},
                     'tools': [{'type': 'function', 'name': d['name'], 'description': d['description'], 'parameters': d['input_schema']} for d in model_definitions(self.tools, run)]}
                 if run['session_id']: body['previous_interaction_id'] = run['session_id']
                 dispatch = uuid4().hex
@@ -280,7 +287,7 @@ class Gemini(Managed):
         if (await run_blocking(self.store.get, ident))['generation'] != generation:
             return
         restored = previous['status'] == 'rollback_stop_pending'
-        dispatches = {e['payload']['id'] for e in await run_blocking(self.store.events, ident) if e['kind'] == 'gemini_dispatch'}
+        dispatches = {e['payload']['id'] for e in await run_blocking(self.store.events, ident, kinds=('gemini_dispatch',))}
         for task in (self.starting.get(ident), self.tasks.get(ident)):
             if (await run_blocking(self.store.get, ident))['generation'] != generation:
                 return
@@ -288,7 +295,7 @@ class Gemini(Managed):
                 task.cancel(); await asyncio.gather(task, return_exceptions=True)
         if (await run_blocking(self.store.get, ident))['generation'] != generation:
             return
-        ids = list(dict.fromkeys(e['payload']['id'] for e in await run_blocking(self.store.events, ident)
+        ids = list(dict.fromkeys(e['payload']['id'] for e in await run_blocking(self.store.events, ident, kinds=('gemini_response',))
                                 if e['kind'] == 'gemini_response' and e['payload']['dispatch'] in dispatches))
         pending_status = 'rollback_stop_pending' if restored else 'stop_pending'
         native_stopped = await self.stop_native(ident, pending_status, generation)

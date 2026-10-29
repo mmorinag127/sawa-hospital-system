@@ -45,9 +45,18 @@ def pending_question(events):
     return next((m for m in reversed(conversation(events)) if m.get('question_id') and int(m['id'])>last_reply),None)
 
 
+def business_conversation(events, fax_labels=None):
+    return conversation([event for event in events
+        if event['kind'] in ('operator_reply', 'task_decision', 'fax_decision', 'task_review', 'fax_review')
+        or event['kind'] == 'tool_result' and event['payload'].get('result', {}).get('waiting_input')], fax_labels)
+
+
 def check_answer(events, message, question_id=None, option=None):
+    return check_pending_answer(pending_question(events), message, question_id, option)
+
+
+def check_pending_answer(pending, message, question_id=None, option=None):
     if not message.strip(): raise ValueError("回答を入力してください")
-    pending = pending_question(events)
     if question_id is not None or option is not None:
         if not pending or pending["question_id"] != question_id:
             raise Conflict("質問が更新済みです。最新の質問に回答してください")
@@ -63,7 +72,7 @@ def record_question_receipt(store, ident, name, result):
     if not command or not result.get('question'):
         return
     if any(e['kind'] == 'tool_result' and e['payload'].get('result', {}).get('command_id') == command
-           for e in store.events(ident)):
+           for e in store.events(ident, kinds=('tool_result',))):
         return
     store.event(ident, 'tool_result', {'tool': name, 'result': {k: v for k, v in result.items() if k != '_content'}},
                 'recovery-question:' + command)

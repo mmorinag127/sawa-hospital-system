@@ -2,21 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
+import { isolatedPage as withPage } from './browser-fixture.mjs';
 import { verifyOperatorEntryPages, orderRows, initialWeekDates, historyChips } from '../../scripts/operator-entry-readonly-pages.mjs';
 import { businessPath, readonlyPageStatus, assertNoVisibleReadMessages } from '../../scripts/hospital-readonly-pages.mjs';
 const require = createRequire(import.meta.url);
-const { webkit, expect: baseExpect } = require('@playwright/test');
+const { expect: baseExpect } = require('@playwright/test');
 const expect = baseExpect.configure({ timeout: 150 });
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
 
-async function withPage(run) {
-  const browser = await webkit.launch();
-  try {
-    const page = await browser.newPage();
-    await page.route('**/*', route => route.abort());
-    await run(page);
-  } finally { await browser.close(); }
-}
 async function one(page, name, options = {}) {
   return verifyOperatorEntryPages({ page, expect, mark() {},
     check: async (key, action) => { if (key === name) await action(); },

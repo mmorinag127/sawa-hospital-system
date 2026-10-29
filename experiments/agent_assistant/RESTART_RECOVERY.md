@@ -1,5 +1,11 @@
 # Restart recovery: local verification, 2026-10-22
 
+> Historical snapshot, not the current integration/deployment status. The native
+> comparison below describes the named 2026-10-22 revisions only. Do not use its
+> differences as proof of a current incompatibility. For the 2026-10-29 proposed
+> ledger/contract changes see `docs/database_growth_operations.md` and
+> `docs/agent_evaluation.md`; those changes are not verified/deployed by this note.
+
 Base: `cbc4ca7c0d531b82876b6c9ba487ec737ce71fd4`.
 Branch: `codex/assistant-restart-recovery-20261022`.
 

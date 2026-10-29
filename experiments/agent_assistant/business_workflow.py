@@ -55,13 +55,13 @@ class BusinessWorkflow:
             self.store.event(run['id'], 'business_support', {'message': '保存済みの業務データの復元を管理者が確認します。過去の回答・承認は保持しています。'})
             return
         review = self.tools.flow.review(run['id'])
-        phase = 'saving' if review and review['state'] == 'approved' else 'approval' if review and review['state'] == 'awaiting_approval' else 'question' if pending_question(self.store.events(run['id'])) else 'checking'
-        if run['task_id'] == 'lunch_import' and not run['session_id'] and not any(event['kind'] == 'source' for event in self.store.events(run['id'])):
+        phase = 'saving' if review and review['state'] == 'approved' else 'approval' if review and review['state'] == 'awaiting_approval' else 'question' if self.store.pending_question(run['id']) else 'checking'
+        if run['task_id'] == 'lunch_import' and not run['session_id'] and self.store.latest_event(run['id'], 'source') is None:
             phase = 'source'
         self.checkpoint(run['id'], version=1, phase=phase, epoch=0, attempts=0)
 
     async def continue_idle_model(self, run):
-        events = await run_blocking(self.store.events, run['id'])
+        events = await run_blocking(self.store.events, run['id'], kinds=('business_model_idle', 'business_idle_continuation'))
         idle = [event['payload'] for event in events if event['kind'] == 'business_model_idle']
         if not idle or idle[-1] != {'session_id': run['session_id'], 'generation': run['generation']}:
             raise Conflict('接続先の応答の確定を確認できません')
@@ -101,7 +101,7 @@ class BusinessWorkflow:
     async def kick_many(self, identities, authorization=None):
         def read_current():
             with self.store.snapshot(view='identities', identities=identities):
-                return [self.store.get(ident) for ident in identities]
+                return self.store.get_many(identities)
 
         if not identities:
             return
@@ -189,7 +189,7 @@ class BusinessWorkflow:
         from .conversation import check_answer
         with self.store.tx() as db:
             events = [{**dict(row), 'payload': json.loads(row['payload'])} for row in
-                      db.execute('SELECT * FROM events WHERE run_id=? ORDER BY id', (run['id'],))]
+                      db.execute("SELECT * FROM events WHERE run_id=? AND kind IN ('business_layout_question','operator_reply','tool_result') ORDER BY id", (run['id'],))]
             questions = [event['payload'] for event in events if event['kind'] == 'business_layout_question'
                          and event['payload']['command_id'] == question_id]
             if not questions:
@@ -231,7 +231,7 @@ class BusinessWorkflow:
         return True
 
     async def continue_model(self, run, message):
-        waits = [event for event in await run_blocking(self.store.events, run['id']) if event['kind'] == 'business_model_wait']
+        waits = [event for event in await run_blocking(self.store.events, run['id'], kinds=('business_model_wait',))]
         if not waits:
             raise Conflict('内容確認の再開位置を照合できません')
         wait = waits[-1]['payload']
@@ -303,7 +303,7 @@ class BusinessWorkflow:
             await self.complete(await run_blocking(self.store.get, ident), review)
             await run_blocking(self.checkpoint, ident, phase='completed')
             try:
-                if not (await run_blocking(self.store.get, ident))['session_id'] and not any(event['kind'] in ('gemini_dispatch', 'agent.custom_tool_use') for event in await run_blocking(self.store.events, ident)):
+                if not (await run_blocking(self.store.get, ident))['session_id'] and not await run_blocking(self.store.events, ident, kinds=('gemini_dispatch', 'agent.custom_tool_use')):
                     await run_blocking(self.store.release_unstarted_model, ident, run['generation'])
                     await run_blocking(self.store.event, ident, 'business_no_model_usage', {'reason': 'モデル接続を開始せず正規APIだけで業務完了'})
                 else:
@@ -311,7 +311,7 @@ class BusinessWorkflow:
             except Exception:
                 await run_blocking(self.store.event, ident, 'business_accounting_pending', {'message': '業務は完了。モデル料金の照合は管理画面で継続します。'})
             return False
-        recovered = {event['payload']['review_id'] for event in await run_blocking(self.store.events, ident) if event['kind'] == 'business_recognition_applied'}
+        recovered = {event['payload']['review_id'] for event in await run_blocking(self.store.events, ident, kinds=('business_recognition_applied',))}
         if review and review['state'] == 'approved' and run['task_id'] == 'hospital_review_faxes' and review['id'] not in recovered:
             if model_busy:
                 return True
@@ -322,7 +322,7 @@ class BusinessWorkflow:
             await run_blocking(self.activate, run)
             await run_blocking(self.checkpoint, ident, phase='approval')
             return False
-        if run['status'] == 'waiting_input' and pending_question(await run_blocking(self.store.events, ident)):
+        if run['status'] == 'waiting_input' and await run_blocking(self.store.pending_question, ident):
             await run_blocking(self.checkpoint, ident, phase='question')
             return False
         if model_busy:
@@ -440,7 +440,7 @@ class BusinessWorkflow:
             self.kick(ident)
         return True
 
-    def projection(self, run, review=None, faxes=()):
+    def projection(self, run, review=None, faxes=(), *, question=...):
         if not owned(run):
             return {'state': 'completed' if run['status'] == 'completed' else 'archived', 'title': '作業が完了しました' if run['status'] == 'completed' else '以前の試用記録', 'message': '過去の作業記録です。実行状況の確認は管理者が対応します。', 'next_action': 'none'}
         state = run['task_inputs']['business_workflow']
@@ -455,7 +455,7 @@ class BusinessWorkflow:
             status, title, message, action = 'checking', '保存した内容を確認しています', '回答・承認した内容は保存されています。システム側で確認しており、操作は必要ありません。解決できない場合は管理者が対応します。', 'none'
         elif review and review['state'] == 'awaiting_approval' or any(item['state'] == 'awaiting_approval' for item in faxes):
             status, title, message, action = 'review', '内容を確認してください', '内容がよければ承認してください。その後は保存・帳票作成まで自動で進みます。', 'approve'
-        elif run['status'] == 'waiting_input' and pending_question(self.store.events(run['id'])):
+        elif run['status'] == 'waiting_input' and (self.store.pending_question(run['id']) if question is ... else question):
             status, title, message, action = 'question', 'この質問にお答えください', '表示された選択肢または入力欄で回答すると、続きの作業へ進みます。', 'answer'
         else:
             status, title, message, action = 'working', '保存・帳票作成を進めています' if phase == 'saving' else '訂正内容を反映しています' if phase == 'correction' or review and review['state']=='needs_correction' else '作業を進めています', '確認が必要になったら、ここに質問や確認する内容が表示されます。', 'none'

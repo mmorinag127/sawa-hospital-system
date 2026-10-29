@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "source_branch": "codex/maintainability-20261029",
+  "base_sha": "15613213b7cedc43e097054e83273e53bfa7705c",
+  "implementation_status": "in_progress",
+  "verification_status": "fixtures_updated_final_review_pending",
+  "integration_sha": null,
+  "test_receipt": null,
+  "staging_revision": null,
+  "live_evidence": [],
+  "items": [
+    {"id": "D1", "status": "unverified_diff", "source": "experiments/agent_assistant/postgres_ledger.py"},
+    {"id": "D2", "status": "unverified_diff", "source": "experiments/agent_assistant/store.py"},
+    {"id": "D3-D4", "status": "readonly_tool_and_runbook_only", "source": "scripts/inspect_database_capacity.py", "limits": "No deletion schedule, backup setting or restoration executed"},
+    {"id": "D5", "status": "measurement_required_before_additional_change", "limits": "Streaming manifest already implemented in base; do not reintroduce whole-memory claims"},
+    {"id": "D6", "status": "unverified_diff", "source": "backend/src/db.py"},
+    {"id": "A1-A4", "status": "unverified_diff", "source": "docs/agent_evaluation.md", "limits": "No paid model evaluation; no invoice-cap guarantee"},
+    {"id": "T1-T5", "status": "unverified_diff", "source": "scripts/local_hospital_test_runner.py"},
+    {"id": "M1", "status": "partial_responsibility_extraction", "source": "frontend/src/features/orders/workflowContracts.ts", "limits": "Large stateful order/workflow modules remain; not claimed eliminated"},
+    {"id": "M2", "status": "existing_canonical_sync_preserved", "limits": "Do not replace native extensions wholesale"},
+    {"id": "M3-M5", "status": "unverified_diff", "source": "experiments/agent_assistant/preview.html"}
+  ]
+}

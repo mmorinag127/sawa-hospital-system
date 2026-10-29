@@ -11,7 +11,7 @@ from .sandbox import run_blocking
 
 def receipt_generation(store, run, receipt):
     generation = receipt['generation']
-    for event in store.events(run['id']):
+    for event in store.events(run['id'], kinds=('gateway_recovery_fence',)):
         if event['kind'] == 'gateway_recovery_fence' and event['payload']['previous_generation'] == generation:
             generation = event['payload']['generation']
     return generation == run['generation']
@@ -22,7 +22,7 @@ async def reconcile(engine, run):
     def read_pending():
         with store.read() as db:
             pending = [dict(row) for row in db.execute("SELECT * FROM commands WHERE run_id=? AND status NOT IN ('done','recoverable_wait','recoverable_read') ORDER BY rowid", (run['id'],))]
-        receipts = [event['payload'] for event in store.events(run['id']) if event['kind'] == 'native_response_receipt']
+        receipts = [event['payload'] for event in store.events(run['id'], kinds=('native_response_receipt',))]
         return pending, receipts
     pending, receipts = await run_blocking(read_pending)
     for row in pending:
@@ -52,7 +52,7 @@ async def reconcile(engine, run):
             draft_id = result.get('data', {}).get('draft_id')
             if not draft_id:
                 raise Conflict('保存した実施価格の応答が不完全です')
-            events = await run_blocking(store.events, run['id'])
+            events = await run_blocking(store.events, run['id'], kinds=('daily_price_binding',))
             bindings = [event['payload'] for event in events if event['kind'] == 'daily_price_binding']
             if not bindings or bindings[-1] != {'command_id': row['id'], 'draft_id': draft_id}:
                 await run_blocking(store.event, run['id'], 'daily_price_binding', {'command_id': row['id'], 'draft_id': draft_id})

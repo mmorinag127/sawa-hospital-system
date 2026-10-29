@@ -119,7 +119,7 @@ class ReceiptContractTest(unittest.TestCase):
         self.assertFalse(workflow['concurrency']['cancel-in-progress'])
 
     def test_native_selection_keeps_full_for_business_changes_and_unknown_base(self):
-        full_paths = ('experiments/agent_assistant/runtime.py', 'agent_runtime/native/shift/backend/app.py',
+        full_paths = ('experiments/agent_assistant/runtime.py', 'agent_runtime/native/hospital/backend/app.py',
                       'agent_runtime/baselines/shift.json', 'agent_runtime/Dockerfile',
                       'backend/requirements.txt', 'frontend/public/assistant-workflow.css', '')
         for path in full_paths:
@@ -133,6 +133,18 @@ class ReceiptContractTest(unittest.TestCase):
         with patch.object(AGENT_RUNNER, 'focused_staging', return_value=False), patch.object(AGENT_RUNNER, 'git') as git:
             self.assertEqual(AGENT_RUNNER.select_test_targets()['mode'], 'full')
             git.assert_not_called()
+
+    def test_native_domain_delta_includes_manifest_and_shared_recovery_not_other_domain(self):
+        paths = 'agent_runtime/native/shift/backend/shift_scheduler_backend/solver.py\0agent_runtime/manifests/shift.json\0'
+        with patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
+             patch.object(AGENT_RUNNER, 'staging_scope_base', return_value='a'*40), \
+             patch.object(AGENT_RUNNER, 'git', return_value=paths):
+            selected = AGENT_RUNNER.select_test_targets()
+        self.assertEqual(selected['mode'], 'native-domain-and-shared-recovery')
+        self.assertEqual(selected['domains'], ['shift'])
+        self.assertIn('experiments/agent_assistant/tests/test_durable_postgres.py', selected['targets'])
+        self.assertIn('experiments/agent_assistant/tests/test_shift_review.py', selected['targets'])
+        self.assertNotIn('experiments/agent_assistant/tests/test_lunch_review.py', selected['targets'])
 
     def test_native_read_selection_includes_auth_and_both_native_contracts(self):
         paths = 'backend/src/services/order_service.py\0agent_runtime/native/shift/backend/shift_scheduler_backend/schema_contract.py\0'
@@ -334,8 +346,8 @@ class ReceiptContractTest(unittest.TestCase):
                 'incomplete': ['tests/contract/test_current_sheet_source_parity.py::interrupted'],
                 'not_started': ['tests/unit/test_unused.py::unstarted']}))
             self.assertEqual(BACKEND_RUNNER.retained_failure_modules(state), [
-                'backend/tests/contract/test_current_sheet_source_parity.py',
-                'backend/tests/unit/test_order_workflow_revision_contract.py'])
+                'backend/tests/contract/test_current_sheet_source_parity.py::interrupted',
+                'backend/tests/unit/test_order_workflow_revision_contract.py::failed'])
             (state / 'failed-tests.json').write_text(json.dumps(['../../outside.py::test']))
             with self.assertRaisesRegex(ValueError, 'explicit current test mapping'):
                 BACKEND_RUNNER.retained_failure_modules(state)
@@ -366,6 +378,30 @@ class ReceiptContractTest(unittest.TestCase):
                 select_modules(root, ['backend/src/unmapped.py'])
             with self.assertRaisesRegex(ValueError, 'removed test coverage'):
                 select_modules(root, ['backend/tests/test_removed.py'])
+
+    def test_source_specific_scope_keeps_auth_and_exact_failed_parameters(self):
+        from backend_test_scope import select_modules
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            modules = ['backend/tests/test_auth.py', 'backend/tests/test_read.py']
+            for name in modules:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            config = {'version': 2, 'always': ['auth'],
+                'groups': {'auth': [modules[0]], 'reads': [modules[1]]},
+                'sources': {'backend/src/read.py': ['reads']},
+                'targets_by_source': {'backend/src/read.py': [modules[1] + '::test_read[zero]']}}
+            definition = root / 'infra/ci/staging_backend_scope.json'
+            definition.parent.mkdir(parents=True)
+            definition.write_text(json.dumps(config))
+            selected = select_modules(root, ['backend/src/read.py'], [modules[1] + '::test_read[failed]'])
+            self.assertEqual(selected['modules'], [modules[0], modules[1] + '::test_read[failed]', modules[1] + '::test_read[zero]'])
+            self.assertEqual(select_modules(root, ['backend/src/read.py', modules[1]])['modules'], modules)
+            config['sources']['backend/src/read.py'] = ['*']
+            definition.write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, 'Invalid reviewed'):
+                select_modules(root, ['backend/src/read.py'])
 
     def test_scoped_backend_does_not_load_testmon_or_claim_reuse(self):
         with tempfile.TemporaryDirectory() as directory:

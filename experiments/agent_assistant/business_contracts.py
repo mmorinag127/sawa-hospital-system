@@ -62,7 +62,7 @@ def preparation_instruction(tools, run):
     import json
     text = TASKS[run['task_id']]['instruction'] if run.get('task_id') in TASKS else run['instruction']
     text += '\n利用者の選択：' + json.dumps(run.get('task_inputs', {}), ensure_ascii=False)
-    text += '\n添付原本：' + json.dumps([event['payload'] for event in tools.store.events(run['id']) if event['kind'] == 'source'], ensure_ascii=False)
+    text += '\n添付原本：' + json.dumps([event['payload'] for event in tools.store.events(run['id'], kinds=('source',))], ensure_ascii=False)
     if owned(run):
         text += '\nこの実行は内容確認の準備だけを担当する。確定・帳票出力・finish_work・complete各操作は業務サーバーが実行するため呼ばない。確認結果を提出すると業務サーバーが人の承認を受け取り進行する。接続・予算・ID・版・停止・再開などの内部操作を人に質問しない。不足する業務情報だけを具体的な選択肢で質問する。'
         review = tools.flow.review(run['id'])

@@ -5,7 +5,9 @@ const ast=ts.createSourceFile('workflow.tsx',source,ts.ScriptTarget.Latest,true,
 function actual(name,context){
   let expression;
   function visit(node){if(ts.isVariableDeclaration(node)&&node.name.getText(ast)===name)expression=node.initializer?.getText(ast);ts.forEachChild(node,visit);}
-  visit(ast);assert.ok(expression,name);
+  visit(ast);
+  expression ??= require('./helpers/workflow-declaration-source.cjs').importedExpression(ast,name);
+  assert.ok(expression,name);
   const code=ts.transpileModule(`exports.fn=${expression}`,{compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS}}).outputText;
   const exports={},bindings={process:undefined,fetch:undefined,require:undefined,global:undefined,module:undefined,Buffer:undefined,globalThis:undefined,...context,exports};
   vm.compileFunction(code,Object.keys(bindings))(...Object.values(bindings));return exports.fn;

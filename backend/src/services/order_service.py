@@ -55,6 +55,17 @@ from src.models.uploaded_pdf import UploadedPdf, UploadedPdfAttempt  # noqa: F40
 from src.models.user import AuditLog
 from src.models.facility import FacilityConfig
 from src.services.notification_service import record_event
+from src.services.order_list_contract import (
+    normalize_limit as _normalize_order_list_limit,
+    parse_cursor_received_at as _parse_order_list_cursor_received_at,
+    normalize_cursor_id as _normalize_order_list_cursor_id,
+)
+from src.services.ocr_audit_contract import (
+    parse_audit_int as _parse_audit_int,
+    parse_audit_confidence as _parse_audit_confidence,
+    normalize_issue_code as _normalize_audit_issue_code,
+    parse_issues as _parse_llm_reparse_audit_issues,
+)
 from src.services import (
     config_service,
     menu_service,
@@ -4797,35 +4808,6 @@ def _invalidate_current_sheet_state_after_order_lines_write(order_id: str) -> No
     if not normalized_order_id:
         return
     order_current_state_service.delete_current_state(normalized_order_id)
-
-
-def _normalize_order_list_limit(limit: int | None) -> int:
-    if limit is None:
-        return 100
-    try:
-        normalized = int(limit)
-    except (TypeError, ValueError):
-        raise ValueError("order_list_limit_invalid") from None
-    if normalized <= 0:
-        raise ValueError("order_list_limit_invalid")
-    return min(normalized, 1000)
-
-
-def _parse_order_list_cursor_received_at(value: str | None) -> datetime | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is not None:
-        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
-    return parsed
-
-
-def _normalize_order_list_cursor_id(value: str | None) -> str:
-    return str(value or "").strip()
 
 
 def get_order_dashboard() -> dict[str, Any]:
@@ -26313,122 +26295,6 @@ def _build_quantity_only_repair_prompts(
     )
 
     return "\n\n".join(system_sections), "\n\n".join(user_sections)
-
-
-def _parse_audit_int(value: object) -> int | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if not re.fullmatch(r"-?\d+", text):
-        return None
-    try:
-        return int(text)
-    except Exception:
-        return None
-
-
-def _parse_audit_confidence(value: object) -> float:
-    if value is None:
-        return 0.0
-    text = str(value).strip()
-    if not text:
-        return 0.0
-    try:
-        parsed = float(text)
-    except Exception:
-        return 0.0
-    if parsed < 0.0:
-        return 0.0
-    if parsed > 1.0:
-        return 1.0
-    return parsed
-
-
-def _normalize_audit_issue_code(value: object) -> str:
-    normalized = str(value or "").strip().lower()
-    normalized = normalized.replace("-", "_").replace(" ", "_")
-    normalized = re.sub(r"[^a-z0-9_]+", "", normalized)
-    return normalized
-
-
-def _parse_llm_reparse_audit_issues(
-    *,
-    rows: list[list[str]],
-    fields: list[str],
-) -> list[dict[str, Any]]:
-    if not rows or not fields:
-        return []
-    field_index = {field: idx for idx, field in enumerate(fields)}
-    allowed_issue_codes = {
-        "row_count_shortfall",
-        "week_scope_mismatch",
-        "date_anchor_drift",
-        "mirrored_sibling_columns",
-        "column_swap",
-        "invalid_numeric_spike",
-        "all_quantity_blank",
-        "unexpected_dense_fill",
-        "overextended_span",
-        "missing_blank_anchor_rows",
-    }
-    issues: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, list):
-            continue
-        issue_code = _normalize_audit_issue_code(
-            row[field_index["issue_code"]]
-            if "issue_code" in field_index and field_index["issue_code"] < len(row)
-            else ""
-        )
-        severity = str(
-            row[field_index["severity"]]
-            if "severity" in field_index and field_index["severity"] < len(row)
-            else ""
-        ).strip().lower()
-        evidence = str(
-            row[field_index["evidence"]]
-            if "evidence" in field_index and field_index["evidence"] < len(row)
-            else ""
-        ).strip()
-        reason = str(
-            row[field_index["reason"]]
-            if "reason" in field_index and field_index["reason"] < len(row)
-            else ""
-        ).strip()
-        row_index = _parse_audit_int(
-            row[field_index["row_index"]]
-            if "row_index" in field_index and field_index["row_index"] < len(row)
-            else None
-        )
-        column_index = _parse_audit_int(
-            row[field_index["column_index"]]
-            if "column_index" in field_index and field_index["column_index"] < len(row)
-            else None
-        )
-        confidence = _parse_audit_confidence(
-            row[field_index["confidence"]]
-            if "confidence" in field_index and field_index["confidence"] < len(row)
-            else None
-        )
-        if issue_code and issue_code not in allowed_issue_codes and not reason and not evidence:
-            continue
-        if not issue_code and not reason:
-            continue
-        issue: dict[str, Any] = {
-            "issue_code": issue_code or "unknown_issue",
-            "severity": severity or "medium",
-            "confidence": round(confidence, 4),
-            "evidence": evidence,
-            "reason": reason,
-        }
-        if row_index is not None:
-            issue["row_index"] = int(row_index)
-        if column_index is not None:
-            issue["column_index"] = int(column_index)
-        issues.append(issue)
-    return issues
 
 
 def _resolve_llm_audit_provider(

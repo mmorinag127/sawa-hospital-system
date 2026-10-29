@@ -6,9 +6,12 @@ import DrawingQuestion, {QuestionMap} from "../components/assistant/DrawingQuest
 import ResultView from "../components/assistant/ResultView";
 import {businessProgress, businessLabels, type BusinessProgress} from "../components/assistant/BusinessProgress";
 import ShiftReview, {ShiftReviewData} from "../components/assistant/ShiftReview";
+import {mergeAssistantHistory,type AssistantEventPage} from "../services/assistantProgress";
+import useAssistantHistory, {type AssistantRunSummary} from "../features/assistant/useAssistantHistory";
+import RunEventHistory from "../components/assistant/RunEventHistory";
 
 const BUSINESS_TIMEOUT = 300000;
-const terminalRun = (status: string) => ["completed", "rolled_back", "stopped"].includes(status);
+const terminalRun = (status: string) => ["completed", "rolled_back", "stopped", "failed"].includes(status);
 const assistantApi = {
   post<T=any>(url:string,data?:unknown,options?:AxiosRequestConfig) {
     const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage)|faxes\/[^/]+\/decision)$/.test(url);
@@ -23,6 +26,8 @@ type TaskReview = {id:string;state:string;summary:string;evidence:{operation:str
 type ChatMessage = {question_map?:QuestionMap;id:string;role:"assistant"|"user";text:string;question_id?:string;options?:string[];process_context?:{answered:number;total:number;kind?:string}};
 type Run = { business?:BusinessProgress; business_messages?:ChatMessage[]; request_key?:string; provider?:string; usage?:{estimated?:boolean}; lunch_review?:Record<string,string>[]; shift_review?:ShiftReviewData; conversation?:ChatMessage[]; pending_question?:ChatMessage; task_review?:TaskReview; task_inputs?:{inputs?:Record<string,any>;targets?:{label:string;data:Record<string,any>}[]}; task_id?: string; fax_items?: Fax[]; id: string; instruction: string; domains: string[]; status: string; cap: number; spent: number;
   events?: { id: number; kind: string; payload: Record<string, any> }[];
+  source_attached?:boolean;
+  event_page?:AssistantEventPage;
   artifacts?: { id: string; name: string; size: number }[] };
 type Budget = { monthly_cents: number; spent_cents: number; reserved_cents: number; available_cents: number; notice: string };
 type Configuration = { provider_id?:string; provider?:string; providers?:{id:string;label:string;missing:string[]}[]; missing: string[]; domains: Record<string, { configured: boolean; baseline_ready: boolean; data?: string }>; budget: Budget };
@@ -41,10 +46,13 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const selectedId=useRef<string|undefined>(undefined);
   const pendingRequests=useRef(0);
   const reconcilingCreate=useRef(false);
+  const progressRequest=useRef(0);
+  const progressRecord=useRef<Run|null>(null);
   const [choosingTask,setChoosingTask]=useState(true);
   const [loadingTargets,setLoadingTargets]=useState(false);
   const [config, setConfig] = useState<Configuration | null>(null);
-  const [runs, setRuns] = useState<Run[]>([]);
+  const history=useAssistantHistory();
+  const runs=history.items;
   const [selected, setSelected] = useState<Run | null>(null);
   const [domain, setDomain] = useState("hospital");
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -75,7 +83,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
 
   function receiveRun(run: Run) {
     setSelected(run);
-    setRuns(rows => rows.map(row => row.id === run.id ? run : row));
+    history.patch(run);
     setPendingReply(pending=>pending?.runId===run.id && (run.status!=="waiting_input" || run.pending_question?.question_id!==pending.questionId) ? null : pending);
     setPendingDecision(pending=>{
       if(!pending || pending.runId!==run.id)return pending;
@@ -87,26 +95,36 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     });
   }
 
+  async function readRun(id:string) {
+    const ticket=++progressRequest.current;
+    const previous=progressRecord.current?.id===id?progressRecord.current:null;
+    const {data}=await apiClient.get<Run>(`/assistant-trial/runs/${id}`,{
+      params:{events_after:previous?.event_page?.next_event ?? 0},
+    });
+    if(selectedId.current!==id || ticket!==progressRequest.current)return;
+    const merged={...data,events:mergeAssistantHistory(previous?.events,data.events),
+      conversation:mergeAssistantHistory(previous?.conversation,data.conversation),
+      business_messages:mergeAssistantHistory(previous?.business_messages,data.business_messages)};
+    progressRecord.current=merged;receiveRun(merged);
+  }
+
   async function load(id?: string) {
     const configuration = apiClient.get<Configuration>("/assistant-trial/config").then(response => setConfig(response.data));
     await Promise.all([
       configuration,
-      apiClient.get<Run[]>("/assistant-trial/runs").then(response => setRuns(response.data)),
+      history.refresh(),
       apiClient.get<Task[]>("/assistant-trial/tasks").then(async response => { await configuration; setTasks(response.data); }),
-      ...(id ? [apiClient.get<Run>(`/assistant-trial/runs/${id}`).then(response => {
-        if(selectedId.current===id)receiveRun(response.data);
-      })] : []),
+      ...(id ? [readRun(id)] : []),
     ]);
   }
   async function reconcileCreate(key:string) {
     if(reconcilingCreate.current)return;
     reconcilingCreate.current=true;
     try {
-    const response=await apiClient.get<Run[]>("/assistant-trial/runs");
-    setRuns(response.data);
-    const matches=response.data.filter(run=>run.request_key===key);
-    if(matches.length!==1)return;
-    const run=matches[0];
+    const response=await apiClient.get<{run:Run|null}>("/assistant-trial/run-lookup",{params:{request_key:key}});
+    const run=response.data.run;
+    if(!run)return;
+    history.patch(run);
     if(selectedId.current!==run.id){selectedId.current=run.id;setSelected(run);}
     setPendingCreate(null);setRequestKey("");
     await refreshAfterCommand(run.id);
@@ -116,7 +134,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     if(!pendingCreate)return;
     let active=true,polling=false;
     const timer=setInterval(async()=>{
-      if(!active || polling)return;
+      if(!active || polling || document.hidden)return;
       polling=true;
       try {await reconcileCreate(pendingCreate);}
       catch {if(active)setPollNotice("受付状況を再確認しています。同じ依頼は再送していません。");}
@@ -146,14 +164,14 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     if(adminView || selected || !runs.some(run => !terminalRun(run.status)))return;
     let active=true,polling=false;
     const timer=setInterval(async()=>{
-      if(polling)return;
+      if(polling || document.hidden || history.loading)return;
       polling=true;
-      try{const response=await apiClient.get<Run[]>("/assistant-trial/runs");if(active)setRuns(response.data);}
+      try{if(active)await history.refresh();}
       catch{if(active)setPollNotice("作業の進み具合を確認しています。回答した内容は保持されています。");}
       finally{polling=false;}
     },2500);
     return()=>{active=false;clearInterval(timer);};
-  },[selected?.id,adminView,runs.some(run => !terminalRun(run.status))]);
+  },[selected?.id,adminView,runs.some(run => !terminalRun(run.status)),history.refresh,history.loading]);
   useEffect(() => {
     setPollNotice("");
     if (!selected) return;
@@ -167,11 +185,11 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     }
     let polling = false;
     const timer = setInterval(async () => {
-      if (polling) return;
+      if (polling || document.hidden || pendingRequests.current>0) return;
       polling = true;
       try {
-        const r = await apiClient.get<Run>(`/assistant-trial/runs/${id}`);
-        if (active && selectedId.current===id) { receiveRun(r.data); setPollNotice(""); }
+        await readRun(id);
+        if (active && selectedId.current===id) setPollNotice("");
         if (adminView) {
           try {
             const b = await apiClient.get<Budget>("/assistant-trial/budget");
@@ -307,7 +325,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   }
   const view=selected ? businessProgress(selected) : null;
   const terminal=!!selected && (adminView ? ["completed","stopped","rolled_back","failed"].includes(selected.status) : ["completed","archived"].includes(view!.state));
-  const awaitingSource=selected?.status==="waiting_input" && (adminView || view?.next_action==="source") && selected.task_id==="lunch_import" && !selected.events?.some(event=>event.kind==="source");
+  const awaitingSource=selected?.status==="waiting_input" && (adminView || view?.next_action==="source") && selected.task_id==="lunch_import" && !(selected.source_attached ?? selected.events?.some(event=>event.kind==="source"));
   const awaitingReview=selected?.status==="running" && (adminView || view?.next_action==="approve") && selected.task_review?.state==="awaiting_approval";
   const faxReviews=selected?.fax_items?.filter(fax=>fax.state==="awaiting_approval") || [];
   const question=selected?.status==="waiting_input" ? selected.pending_question : undefined;
@@ -388,8 +406,17 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {adminView && <div className="work-controls"><button disabled={controlling || terminal || selected.status==="stopping"} onClick={()=>control("stop")}>{controlling ? "操作結果を確認中…" : ["stop_pending","rollback_stop_pending"].includes(selected.status) ? "停止を再確認する" : "作業を停止する"}</button><button className="quiet" disabled={controlling || ["rolled_back","rollback_stop_pending"].includes(selected.status)} onClick={()=>setConfirmRollback(true)}>開始前に戻す</button>{adminView && <button onClick={()=>control("refresh-usage")} disabled={busy}>料金を再取得</button>}</div>}
       {adminView && confirmRollback && <div className="rollback-confirmation" role="alert"><h3>この依頼の変更を、開始前へ戻しますか？</h3><p>処理を停止し、この依頼で保存した内容を戻します。履歴と利用料金は残ります。</p><div className="answer-options"><button className="danger" disabled={controlling} onClick={()=>control("rollback")}>開始前へ戻す</button><button disabled={controlling} onClick={()=>setConfirmRollback(false)}>キャンセル</button></div></div>}
       {adminView && <details className="technical-details"><summary>処理の詳細</summary><ol>{selected.events?.map(event=><li key={event.id}>{event.kind==="agent.message" ? event.payload.content?.filter((c:any)=>c.type==="text").map((c:any,i:number)=><p key={i}>{c.text}</p>) : event.kind==="tool_result" ? <p>{event.payload.tool}：{event.payload.result?.error || event.payload.result?.question || (event.payload.result?.ok===false ? "APIが処理を拒否しました" : "実行結果を記録しました")}</p> : event.kind==="completion_evidence" ? <p>{event.payload.summary}</p> : ["notice","error","operator_reply","rollback"].includes(event.kind) ? <p>{event.payload.message || event.payload.notice}</p> : null}</li>)}</ol></details>}
+      <RunEventHistory key={selected.id} runId={selected.id} admin={adminView} />
     </section>}
-    <details className="assistant-panel history-panel" open={adminView}><summary>作業の履歴 <span>{runs.length}件</span></summary>{!runs.length && <p className="muted">まだ依頼した作業はありません。</p>}<ul>{runs.map(run=><li key={run.id}><button className="history-row" disabled={busy} onClick={()=>openRun(run.id)}><span><strong>{run.instruction}</strong><small>{run.domains.map(id=>labels[id]).join(" ／ ")}</small></span><span className="status-tag">{adminView ? states[run.status] || run.status : businessLabels[businessProgress(run).state]}{adminView ? ` · ${run.provider==="gemini"?"Gemini・概算":"Claude・定価換算"} ${dollars(run.spent)}` : ""}</span></button></li>)}</ul></details>
+    <details className="assistant-panel history-panel" open={adminView}><summary>作業の履歴 <span>{runs.length}件{history.hasNext?"（続きあり）":""}</span></summary>
+      <label>表示する依頼<select value={history.unfinished?"unfinished":"all"} disabled={history.loading}
+        onChange={event=>void history.filter(event.target.value==="unfinished").catch(showError)}><option value="all">すべて</option><option value="unfinished">未完了のみ</option></select></label>
+      {!runs.length && <p className="muted">該当する依頼はありません。</p>}
+      <ul>{runs.map((run:AssistantRunSummary)=><li key={run.id}><button className="history-row" disabled={busy} onClick={()=>openRun(run.id)}><span><strong>{run.instruction}</strong><small>{run.domains.map(id=>labels[id]).join(" ／ ")}</small></span><span className="status-tag">{adminView ? states[run.status] || run.status : businessLabels[businessProgress(run).state]}{adminView ? ` · ${run.provider==="gemini"?"Gemini・概算":"Claude・定価換算"} ${dollars(run.spent)}` : ""}</span></button></li>)}</ul>
+      <button disabled={history.loading||!history.hasPrevious} onClick={()=>void history.previous().catch(showError)}>新しい100件</button>
+      <button disabled={history.loading||!history.hasNext} onClick={()=>void history.next().catch(showError)}>以前の100件</button>
+      <button disabled={history.loading} onClick={()=>void history.refresh(true).catch(showError)}>最新の依頼へ</button>
+    </details>
     <p className="trial-footnote">試用中の変更は、この依頼専用のコピーに保存されます。</p>
   </main>;
 }

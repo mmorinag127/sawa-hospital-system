@@ -56,7 +56,16 @@ _replay_engine_lock = RLock()
 
 
 def _create_replay_engine(uri):
-    selected = create_engine(uri, **engine_kwargs)
+    options = dict(engine_kwargs)
+    if not uri.startswith("sqlite"):
+        # Replay targets must not each retain the control database's larger
+        # worker pool. The default covers the two concurrent HTTP requests.
+        size = int(os.getenv("DB_REPLAY_POOL_SIZE", "2"))
+        overflow = int(os.getenv("DB_REPLAY_MAX_OVERFLOW", "0"))
+        if size < 1 or overflow < 0:
+            raise ValueError("DB_REPLAY_POOL_SIZE must be positive and DB_REPLAY_MAX_OVERFLOW nonnegative")
+        options.update(pool_size=size, max_overflow=overflow)
+    selected = create_engine(uri, **options)
     from src.maintenance.formal_migration_schema import require_formal_head
     try:
         with selected.connect() as connection:

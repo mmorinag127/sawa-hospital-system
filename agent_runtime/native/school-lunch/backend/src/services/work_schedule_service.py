@@ -72,6 +72,7 @@ def _serialize_schedule(schedule: DailyWorkSchedule) -> dict[str, Any]:
         "time_profile": schedule.time_profile,
         "source_menu_versions": schedule.source_menu_versions,
         "source_process_revisions": schedule.source_process_revisions,
+        "current_process_revisions": process_revisions,
         "pattern_missing": missing_execution(patterns,session),
         "current_menu_versions": current,
         "stale": schedule.source_menu_versions != current or (schedule.source_process_revisions or {}) != process_revisions,

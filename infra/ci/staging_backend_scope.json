@@ -2,6 +2,16 @@
   "version": 2,
   "scope": "staging-core-and-page-repair",
   "always": ["authentication-and-session", "ocr-original-targets-artifacts-and-operator-values"],
+  "targets_by_source": {
+    "backend/src/services/order_list_contract.py": [
+      "backend/tests/unit/test_order_list_contract.py",
+      "backend/tests/unit/test_order_list_response_ownership.py"
+    ],
+    "backend/src/services/ocr_audit_contract.py": [
+      "backend/tests/unit/test_ocr_audit_contract.py",
+      "backend/tests/integration/test_ocr_pipeline.py::test_parse_llm_reparse_audit_issues_normalizes_payload"
+    ]
+  },
   "sources": {
     "backend/pyproject.toml": ["*"],
     "backend/requirements.txt": ["*"],
@@ -34,6 +44,8 @@
     "backend/src/api/output_history.py": ["revision-history-and-output-isolation", "scaling-storage-and-history"],
     "backend/src/api/output_history_contract.py": ["revision-history-and-output-isolation"],
     "backend/src/services/order_service.py": ["page-read-results-and-response-ownership", "revision-history-and-output-isolation"],
+    "backend/src/services/order_list_contract.py": ["page-read-results-and-response-ownership"],
+    "backend/src/services/ocr_audit_contract.py": ["ocr-original-targets-artifacts-and-operator-values"],
     "backend/src/services/order_overview_read.py": ["page-read-results-and-response-ownership"],
     "backend/src/services/order_serialization_service.py": ["page-read-results-and-response-ownership"],
     "backend/src/services/workflow_display_read_service.py": ["page-read-results-and-response-ownership"],

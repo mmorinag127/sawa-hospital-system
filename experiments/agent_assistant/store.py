@@ -22,6 +22,11 @@ def billing_month():
 
 
 class Store:
+    question_condition = ("COALESCE(json_extract(payload,'$.result.question'),'')<>'' AND "
+                          "COALESCE(json_extract(payload,'$.result.command_id'),'')<>''")
+    review_state_expression = "json_extract(payload,'$.state')"
+    workflow_phase_expression = "json_extract(task_inputs,'$.business_workflow.phase')"
+    workflow_version_expression = "json_extract(task_inputs,'$.business_workflow.version')"
     def __init__(self, root: Path):
         self._read_snapshot = ContextVar("agent_read_snapshot", default=None)
         self.root = root.resolve()
@@ -48,6 +53,8 @@ class Store:
                 id TEXT PRIMARY KEY, run_id TEXT NOT NULL, path TEXT NOT NULL,
                 name TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL);
             """)
+            db.execute('CREATE INDEX IF NOT EXISTS events_run_id ON events(run_id,id)')
+            db.execute('CREATE INDEX IF NOT EXISTS events_run_kind ON events(run_id,kind,id)')
             if "task_id" not in {row[1] for row in db.execute("PRAGMA table_info(runs)")}:
                 db.execute("ALTER TABLE runs ADD COLUMN task_id TEXT")
             if "task_inputs" not in {row[1] for row in db.execute("PRAGMA table_info(runs)")}:
@@ -64,6 +71,11 @@ class Store:
                 run_id TEXT NOT NULL, fax_id TEXT NOT NULL, snapshot TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'processing', review TEXT, decision TEXT,
                 PRIMARY KEY(run_id,fax_id))""")
+            db.execute('''CREATE TABLE IF NOT EXISTS provider_usage(
+                run_id TEXT NOT NULL,interaction_id TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,output_tokens INTEGER NOT NULL,thought_tokens INTEGER NOT NULL,
+                PRIMARY KEY(run_id,interaction_id))''')
+            db.execute('CREATE TABLE IF NOT EXISTS provider_usage_migrations(run_id TEXT PRIMARY KEY)')
 
     @contextmanager
     def tx(self):
@@ -182,6 +194,21 @@ class Store:
                 raise KeyError("依頼が見つかりません")
             return self.decode(row)
 
+    def get_many(self, identities):
+        if not identities:
+            return []
+        with self.read() as db:
+            records = {row['id']: self.decode(row) for row in db.execute(
+                'SELECT * FROM runs WHERE id IN (' + ','.join('?' for _ in identities) + ')', identities)}
+        if any(ident not in records for ident in identities):
+            raise KeyError('依頼が見つかりません')
+        return [records[ident] for ident in identities]
+
+    def find_request(self, owner, key):
+        with self.read() as db:
+            row = db.execute('SELECT * FROM runs WHERE owner=? AND request_key=?', (owner, key)).fetchone()
+            return self.decode(row) if row else None
+
     def target_lookup(self, ident, owner):
         with self.snapshot(view='lookup', owner=owner, identities=[ident]):
             with self.read() as db:
@@ -193,7 +220,44 @@ class Store:
 
     def listing(self, owner):
         with self.read() as db:
-            return [self.decode(row) for row in db.execute("SELECT * FROM runs WHERE owner=? ORDER BY created DESC LIMIT 100", (owner,))]
+            return [self.decode(row) for row in db.execute("SELECT * FROM runs WHERE owner=? ORDER BY created DESC,id DESC LIMIT 100", (owner,))]
+
+    def run_history(self, owner, *, before_created=None, before_id=None, unfinished=False):
+        if bool(before_created) != bool(before_id):
+            raise ValueError('依頼履歴cursorの日時とIDを両方指定してください')
+        condition, values = 'owner=?', [owner]
+        if before_created is not None:
+            datetime.fromisoformat(before_created)
+            condition += ' AND (created<? OR (created=? AND id<?))'
+            values.extend((before_created, before_created, before_id))
+        if unfinished:
+            condition += " AND status NOT IN ('completed','stopped','rolled_back','failed')"
+        with self.read() as db:
+            records = db.execute('SELECT id,instruction,domains,status,spent,created,updated,task_id,provider,cap,'
+                + self.workflow_phase_expression + ' AS _workflow_phase,'
+                + self.workflow_version_expression + ' AS _workflow_version '
+                'FROM runs WHERE ' + condition + ' ORDER BY created DESC,id DESC LIMIT 101', values).fetchall()
+        items = [{**dict(row), 'domains': json.loads(row['domains'])} for row in records[:100]]
+        last = items[-1] if items and len(records) > 100 else None
+        return {'items': items, 'next': {'before_created': last['created'], 'before_id': last['id']} if last else None}
+
+    def listing_business_inputs(self, runs):
+        identities = [run['id'] for run in runs]
+        if not identities:
+            return {}, set(), set()
+        placeholders = ','.join('?' for _ in identities)
+        with self.read() as db:
+            reviews = {row['run_id']: {'state': row['state']} for row in db.execute(
+                'SELECT run_id,' + self.review_state_expression + ' AS state FROM task_reviews '
+                'WHERE run_id IN (' + placeholders + ')', identities)}
+            faxes = {row[0] for row in db.execute('SELECT DISTINCT run_id FROM fax_items '
+                "WHERE state='awaiting_approval' AND run_id IN (" + placeholders + ')', identities)}
+            questions = {row[0] for row in db.execute('SELECT r.id FROM runs r WHERE r.id IN ('
+                + placeholders + ") AND r.status='waiting_input' AND EXISTS (SELECT 1 FROM events e "
+                "WHERE e.run_id=r.id AND e.kind='tool_result' AND " + self.question_condition
+                + " AND e.id>COALESCE((SELECT MAX(reply.id) FROM events reply "
+                "WHERE reply.run_id=r.id AND reply.kind='operator_reply'),0))", identities)}
+        return reviews, faxes, questions
 
     def update(self, ident, *, expected_generation=None, expected_stop_generation=None, **values):
         if expected_generation is not None and expected_stop_generation is not None:
@@ -231,9 +295,91 @@ class Store:
                              (ident, provider_id, kind, json.dumps(payload, ensure_ascii=False), now()))
             return cur.rowcount == 1
 
-    def events(self, ident):
+    def events(self, ident, *, kinds=None):
+        if kinds is not None and (not isinstance(kinds, (tuple, list))
+                                  or any(not isinstance(kind, str) for kind in kinds)):
+            raise ValueError('履歴種別が不正です')
+        if kinds is not None and not kinds:
+            return []
+        condition = ' AND kind IN (' + ','.join('?' for _ in kinds) + ')' if kinds is not None else ''
         with self.read() as db:
-            return [{**dict(row), "payload": json.loads(row["payload"])} for row in db.execute("SELECT * FROM events WHERE run_id=? ORDER BY id", (ident,))]
+            return [{**dict(row), "payload": json.loads(row["payload"])} for row in db.execute(
+                'SELECT * FROM events WHERE run_id=?' + condition + ' ORDER BY id', (ident, *(kinds or ())))]
+
+    def latest_event(self, ident, kind, *, first=False):
+        with self.read() as db:
+            row = db.execute('SELECT * FROM events WHERE run_id=? AND kind=? ORDER BY id '
+                             + ('ASC' if first else 'DESC') + ' LIMIT 1',
+                             (ident, kind)).fetchone()
+            return {**dict(row), 'payload': json.loads(row['payload'])} if row else None
+
+    def pending_question(self, ident):
+        from .conversation import pending_question
+        with self.read() as db:
+            reply = db.execute("SELECT COALESCE(MAX(id),0) FROM events WHERE run_id=? AND kind='operator_reply'",
+                               (ident,)).fetchone()[0]
+            row = db.execute("SELECT * FROM events WHERE run_id=? AND kind='tool_result' AND id>? AND "
+                             + self.question_condition + ' ORDER BY id DESC LIMIT 1', (ident, reply)).fetchone()
+            events = [{**dict(row), 'payload': json.loads(row['payload'])}] if row else []
+            return pending_question(events)
+
+    def event_page(self, ident, *, after=0, before=None, limit=200):
+        if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError('履歴取得範囲が不正です')
+        if before is not None and (type(before) is not int or before < 1 or after):
+            raise ValueError('履歴cursorが不正です')
+        with self.read() as db:
+            condition = ' AND id<?' if before is not None else ' AND id>?'
+            reverse = before is not None or not after
+            records = db.execute('SELECT * FROM events WHERE run_id=?' + condition
+                                 + (' ORDER BY id DESC' if reverse else ' ORDER BY id') + ' LIMIT ?',
+                                 (ident, before if before is not None else after, limit + 1)).fetchall()
+            more = len(records) > limit
+            records = records[:limit]
+            if reverse:
+                records.reverse()
+            events = [{**dict(row), 'payload': json.loads(row['payload'])} for row in records]
+            return {'events': events, 'next_event': events[-1]['id'] if events else after,
+                    'previous_event': events[0]['id'] if events else before,
+                    'has_previous': more if reverse else False,
+                    'has_more': more if not reverse else False}
+
+    def gemini_usage_totals(self, ident, interaction, usage):
+        keys = ('total_input_tokens', 'total_output_tokens', 'total_thought_tokens')
+
+        def values(raw):
+            if not isinstance(raw, dict) or any(type(raw.get(key)) is not int or raw[key] < 0 for key in keys):
+                raise Conflict('Geminiの保存済み利用量が未確定です。予約額を保持します')
+            return tuple(raw[key] for key in keys)
+
+        with self.tx() as db:
+            def upsert(interaction_id, tokens):
+                if not isinstance(interaction_id, str) or not interaction_id:
+                    raise Conflict('Geminiの利用量と実行IDを照合できません')
+                db.execute('''INSERT INTO provider_usage VALUES(?,?,?,?,?)
+                    ON CONFLICT(run_id,interaction_id) DO UPDATE SET
+                    input_tokens=CASE WHEN provider_usage.input_tokens<excluded.input_tokens THEN excluded.input_tokens ELSE provider_usage.input_tokens END,
+                    output_tokens=CASE WHEN provider_usage.output_tokens<excluded.output_tokens THEN excluded.output_tokens ELSE provider_usage.output_tokens END,
+                    thought_tokens=CASE WHEN provider_usage.thought_tokens<excluded.thought_tokens THEN excluded.thought_tokens ELSE provider_usage.thought_tokens END''',
+                    (ident, interaction_id, *tokens))
+
+            if not db.execute('SELECT 1 FROM runs WHERE id=?', (ident,)).fetchone():
+                raise KeyError('依頼が見つかりません')
+            if not db.execute('SELECT 1 FROM provider_usage_migrations WHERE run_id=?', (ident,)).fetchone():
+                for row in db.execute("SELECT payload FROM events WHERE run_id=? AND kind='gemini_usage' ORDER BY id", (ident,)):
+                    previous = json.loads(row['payload'])
+                    upsert(previous['id'], values(previous['usage']))
+                db.execute('INSERT INTO provider_usage_migrations VALUES(?)', (ident,))
+            tokens = values(usage)
+            previous = db.execute('SELECT input_tokens,output_tokens,thought_tokens FROM provider_usage '
+                                  'WHERE run_id=? AND interaction_id=?', (ident, interaction)).fetchone()
+            if previous is None or any(value > previous[index] for index, value in enumerate(tokens)):
+                upsert(interaction, tokens)
+                db.execute('INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)',
+                           (ident, 'gemini_usage', json.dumps({'id': interaction, 'usage': usage}), now()))
+            totals = db.execute('SELECT COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),'
+                                'COALESCE(SUM(thought_tokens),0) FROM provider_usage WHERE run_id=?', (ident,)).fetchone()
+            return dict(zip(keys, totals))
 
     def command(self, ident, command_id, request):
         encoded = json.dumps(request, sort_keys=True, ensure_ascii=False)

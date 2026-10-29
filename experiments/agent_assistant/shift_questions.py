@@ -59,7 +59,7 @@ class ShiftQuestions:
         return await self.ask(run, command+':infeasible', '今の条件をすべて満たす勤務案を作れませんでした。' + ('\n'+'\n'.join(messages) if messages else '\n登録済みの希望休・勤務条件と必要人数を確認して調整してください。') + '\nどう調整しますか？ 選んだ変更は次の質問で確認してから反映します。', choices)
 
     def answer(self, run, message, question_id, option, *, schedule=True):
-        matches = [event['payload'] for event in self.store.events(run['id']) if event['kind']=='business_shift_question' and event['payload']['command_id']==question_id]
+        matches = [event['payload'] for event in self.store.events(run['id'], kinds=('business_shift_question',)) if event['payload']['command_id']==question_id]
         if not matches:
             return False
         if run['status'] != 'waiting_input':
@@ -77,7 +77,7 @@ class ShiftQuestions:
             if current['generation']!=run['generation'] or current['status']!='waiting_input':
                 raise Conflict('この質問は回答済み、または依頼が変更されています')
             events = [{**dict(row), 'payload': json.loads(row['payload'])} for row in
-                      db.execute('SELECT * FROM events WHERE run_id=? ORDER BY id', (run['id'],))]
+                      db.execute("SELECT * FROM events WHERE run_id=? AND kind IN ('operator_reply','tool_result') ORDER BY id", (run['id'],))]
             check_answer(events, message, question_id, option)
             context = json.loads(current['task_inputs'])
             state = context['business_workflow']
@@ -224,6 +224,6 @@ def authorized(tools, run, name, args):
     if not SERVER_EXECUTION.get() or run.get('task_id') not in SHIFT_TASKS:
         return False
     if name=='shift_propose_rules':
-        return any(event['kind']=='business_shift_answer' and event['payload']['choice'].get('action')=='parse' and rule_request_text(event['payload']['choice'])==args.body.get('text') for event in tools.store.events(run['id']))
+        return any(event['payload']['choice'].get('action')=='parse' and rule_request_text(event['payload']['choice'])==args.body.get('text') for event in tools.store.events(run['id'], kinds=('business_shift_answer',)))
     parameters = args.model_dump(mode='json')
-    return any(event['kind']=='business_shift_authorization' and event['payload']['name']==name and all(parameters[key]==event['payload']['parameters'].get(key, {} if key in ('ids','query','body') else '') for key in ('ids','query','body')) for event in tools.store.events(run['id']))
+    return any(event['payload']['name']==name and all(parameters[key]==event['payload']['parameters'].get(key, {} if key in ('ids','query','body') else '') for key in ('ids','query','body')) for event in tools.store.events(run['id'], kinds=('business_shift_authorization',)))

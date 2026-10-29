@@ -256,7 +256,7 @@ def run(output: Path, *, full: bool = False) -> int:
             and receipt['clean_after'] and len(records) == len(commands)):
         try:
             for command, log in new_baselines:
-                evidence.save(command, source_sha_start, log)
+                evidence.save(command, source_sha_start, log, exit_code=0)
             evidence.persist()
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             (output / 'command-cache-unavailable.json').write_text(json.dumps({'type': type(error).__name__}) + '\n')
