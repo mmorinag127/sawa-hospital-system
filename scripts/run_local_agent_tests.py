@@ -7,7 +7,7 @@ import subprocess
 import time
 from uuid import uuid4
 
-from local_hospital_test_runner import ROOT, clean_tree, focused_staging, git, reject_hosted_runner
+from local_hospital_test_runner import ROOT, clean_tree, focused_staging, git, reject_hosted_runner, staging_scope_base
 
 
 def select_test_targets():
@@ -15,7 +15,7 @@ def select_test_targets():
     if not focused_staging():
         return full
     try:
-        base = git("merge-base", "HEAD", "origin/develop")
+        base = staging_scope_base()
         paths = [path for path in git("diff", "--name-only", "-z", base, "HEAD").split("\0") if path]
     except subprocess.CalledProcessError:
         return full

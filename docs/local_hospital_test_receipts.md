@@ -106,6 +106,17 @@ entire general suite. The first explicit impact run does execute every collected
 general case. A reported all-test run is not evidence of a speed improvement:
 selection counts, omissions and actual timing must be reported separately.
 
+For staging only, `SAWA_LOCAL_TEST_BASELINE_RECEIPT=/absolute/receipt.json`
+can select changes since an already successful local ancestor instead of repeating
+the whole pending branch diff. Its signature, complete receipt, unchanged command
+definition and Git ancestry must validate before selection. Invalid explicit
+baselines stop the run. `scope-baseline.json` records the original receipt hash
+and both source SHAs. This is change selection, not a claim that omitted tests
+passed on the new source. Authentication/quantity checks, changed and unresolved
+failure modules remain required. Native business changes still select the full
+native suite; the existing read/startup selection is unchanged. Full/production
+mode does not use this baseline.
+
 Focused frontend discovery includes all standard config and browser test names,
 in addition to the explicit boundary modules in
 `infra/ci/staging_frontend_scope.json`. Fixed lists cannot hide new tests. The

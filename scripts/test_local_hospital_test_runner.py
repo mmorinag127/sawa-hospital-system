@@ -41,10 +41,11 @@ class ReceiptContractTest(unittest.TestCase):
                       'backend/requirements.txt', 'frontend/public/assistant-workflow.css', '')
         for path in full_paths:
             with self.subTest(path=path), patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
-                 patch.object(AGENT_RUNNER, 'git', side_effect=['a' * 40, path + '\0' if path else '']):
+                 patch.object(AGENT_RUNNER, 'staging_scope_base', return_value='a' * 40), \
+                 patch.object(AGENT_RUNNER, 'git', return_value=path + '\0' if path else ''):
                 self.assertEqual(AGENT_RUNNER.select_test_targets()['mode'], 'full')
         with patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
-             patch.object(AGENT_RUNNER, 'git', side_effect=subprocess.CalledProcessError(1, 'git')):
+             patch.object(AGENT_RUNNER, 'staging_scope_base', side_effect=subprocess.CalledProcessError(1, 'git')):
             self.assertEqual(AGENT_RUNNER.select_test_targets()['mode'], 'full')
         with patch.object(AGENT_RUNNER, 'focused_staging', return_value=False), patch.object(AGENT_RUNNER, 'git') as git:
             self.assertEqual(AGENT_RUNNER.select_test_targets()['mode'], 'full')
@@ -53,7 +54,8 @@ class ReceiptContractTest(unittest.TestCase):
     def test_native_read_selection_includes_auth_and_both_native_contracts(self):
         paths = 'backend/src/services/order_service.py\0agent_runtime/native/shift/backend/shift_scheduler_backend/schema_contract.py\0'
         with patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
-             patch.object(AGENT_RUNNER, 'git', side_effect=['a' * 40, paths]):
+             patch.object(AGENT_RUNNER, 'staging_scope_base', return_value='a' * 40), \
+             patch.object(AGENT_RUNNER, 'git', return_value=paths):
             selected = AGENT_RUNNER.select_test_targets()
         self.assertEqual(selected['mode'], 'focused-read-and-startup')
         self.assertEqual(selected['base_sha'], 'a' * 40)
@@ -63,8 +65,61 @@ class ReceiptContractTest(unittest.TestCase):
         self.assertIn('experiments/agent_assistant/tests/test_native_workflows.py::test_packaged_api_auth_and_extensions_with_latest_contracts', selected['targets'])
         with tempfile.TemporaryDirectory() as directory, patch.object(AGENT_RUNNER, 'ROOT', Path(directory)), \
              patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
-             patch.object(AGENT_RUNNER, 'git', side_effect=['a' * 40, paths]):
+             patch.object(AGENT_RUNNER, 'staging_scope_base', return_value='a' * 40), \
+             patch.object(AGENT_RUNNER, 'git', return_value=paths):
             with self.assertRaisesRegex(ValueError, 'target is missing'):
+                AGENT_RUNNER.select_test_targets()
+
+    def test_staging_scope_base_preserves_default_and_full_mode(self):
+        for path, focused in (('', True), ('/unread/in/full', False)):
+            with self.subTest(path=path), patch.dict(os.environ, {'SAWA_LOCAL_TEST_BASELINE_RECEIPT': path}), \
+                 patch.object(RUNNER, 'focused_staging', return_value=focused), \
+                 patch.object(RUNNER, 'git', return_value='a' * 40) as git, \
+                 patch.object(RUNNER, 'verify_signed') as verify:
+                self.assertEqual(RUNNER.staging_scope_base(), 'a' * 40)
+                git.assert_called_once_with('merge-base', 'HEAD', 'origin/develop')
+                verify.assert_not_called()
+
+    def test_staging_scope_base_verifies_signed_receipt_and_records_selection_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / 'receipt.json'
+            receipt.write_text('{"signed":"fixture"}')
+            payload = {'source_sha_end': 'a' * 40, 'definition_sha256': 'b' * 64}
+            with patch.dict(os.environ, {'SAWA_LOCAL_TEST_BASELINE_RECEIPT': str(receipt), 'SAWA_LOCAL_EVIDENCE_DIR': directory}), \
+                 patch.object(RUNNER, 'focused_staging', return_value=True), \
+                 patch.object(RUNNER, 'verify_signed', return_value=payload) as signature, \
+                 patch.object(RUNNER, 'validate_receipt') as validate, \
+                 patch.object(RUNNER, 'digest', return_value='b' * 64), \
+                 patch.object(RUNNER, 'git', side_effect=['', 'c' * 40]) as git:
+                self.assertEqual(RUNNER.staging_scope_base(), 'a' * 40)
+                signature.assert_called_once_with({'signed': 'fixture'})
+                validate.assert_called_once_with(payload, 'a' * 40, 'b' * 64)
+                self.assertEqual(git.call_args_list[0].args, ('merge-base', '--is-ancestor', 'a' * 40, 'HEAD'))
+            evidence = json.loads((Path(directory) / 'scope-baseline.json').read_text())
+            self.assertEqual(evidence['base_sha'], 'a' * 40)
+            self.assertEqual(evidence['source_sha'], 'c' * 40)
+            self.assertEqual(evidence['receipt_sha256'], hashlib.sha256(receipt.read_bytes()).hexdigest())
+            self.assertIn('omitted tests are not claimed as passed', evidence['purpose'])
+
+    def test_explicit_baseline_errors_stop_before_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / 'receipt.json'
+            receipt.write_text('{}')
+            for failure in ('signature', 'shape', 'definition', 'ancestor'):
+                with self.subTest(failure=failure), \
+                     patch.dict(os.environ, {'SAWA_LOCAL_TEST_BASELINE_RECEIPT': str(receipt)}), \
+                     patch.object(RUNNER, 'focused_staging', return_value=True), \
+                     patch.object(RUNNER, 'verify_signed', return_value={} if failure == 'shape' else {'source_sha_end': 'a' * 40},
+                                  side_effect=ValueError('signature') if failure == 'signature' else None), \
+                     patch.object(RUNNER, 'validate_receipt', side_effect=ValueError('definition') if failure == 'definition' else None), \
+                     patch.object(RUNNER, 'git', side_effect=subprocess.CalledProcessError(1, 'git')) as git:
+                    with self.assertRaises(ValueError):
+                        RUNNER.staging_scope_base()
+                    if failure != 'ancestor':
+                        git.assert_not_called()
+        with patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
+             patch.object(AGENT_RUNNER, 'staging_scope_base', side_effect=ValueError('invalid signed baseline')):
+            with self.assertRaisesRegex(ValueError, 'invalid signed baseline'):
                 AGENT_RUNNER.select_test_targets()
 
     def test_missing_or_unknown_tracker_version_stops_before_backend_execution(self):
@@ -261,6 +316,7 @@ class ReceiptContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': directory, 'CI': '', 'GITHUB_ACTIONS': ''}), \
              patch.object(BACKEND_RUNNER, 'clean_tree', return_value=True), \
+             patch.object(BACKEND_RUNNER, 'staging_scope_base', return_value='a' * 40), \
              patch.object(BACKEND_RUNNER, 'git', side_effect=lambda *args:
                  str(Path(directory) / 'git') if '--git-common-dir' in args else
                  'codex/owned' if args == ('branch', '--show-current') else

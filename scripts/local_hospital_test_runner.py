@@ -25,6 +25,31 @@ def focused_staging():
     return mode == 'focused' and bool(branch) and not branch.startswith('release/prod-')
 
 
+def staging_scope_base():
+    receipt_path = os.environ.get('SAWA_LOCAL_TEST_BASELINE_RECEIPT')
+    if not receipt_path or not focused_staging():
+        return git('merge-base', 'HEAD', 'origin/develop')
+    raw = Path(receipt_path).read_bytes()
+    receipt = verify_signed(json.loads(raw))
+    source = receipt.get('source_sha_end') if isinstance(receipt, dict) else None
+    if not isinstance(source, str) or len(source) != 40 or any(ch not in '0123456789abcdef' for ch in source):
+        raise ValueError('Verified local baseline has no exact source SHA')
+    validate_receipt(receipt, source, digest(MANIFEST))
+    try:
+        git('merge-base', '--is-ancestor', source, 'HEAD')
+    except subprocess.CalledProcessError as exc:
+        raise ValueError('Verified local baseline is not an ancestor of this source') from exc
+    evidence = os.environ.get('SAWA_LOCAL_EVIDENCE_DIR')
+    if evidence:
+        (Path(evidence) / 'scope-baseline.json').write_text(json.dumps({
+            'source_sha': git('rev-parse', 'HEAD'), 'base_sha': source,
+            'receipt_sha256': hashlib.sha256(raw).hexdigest(),
+            'definition_sha256': receipt['definition_sha256'],
+            'purpose': 'change selection only; omitted tests are not claimed as passed',
+        }, indent=2) + '\n')
+    return source
+
+
 def frontend_scope(group):
     if group not in ('config', 'e2e'):
         raise ValueError('Unknown frontend verification group')

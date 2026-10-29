@@ -14,7 +14,7 @@ import sqlite3
 import tempfile
 from types import SimpleNamespace
 
-from local_hospital_test_runner import ROOT, clean_tree, git, reject_hosted_runner
+from local_hospital_test_runner import ROOT, clean_tree, git, reject_hosted_runner, staging_scope_base
 from run_readonly_pg_tests import MODULES
 
 
@@ -337,9 +337,10 @@ def main():
         if any(name in excluded for name in retained):
             raise ValueError('Retained dedicated PostgreSQL failure must use its owned runner')
         from backend_test_scope import select_modules
-        base = git('merge-base', 'HEAD', 'origin/develop')
+        base = staging_scope_base()
         changed = git('diff', '--name-only', base, 'HEAD', '--', 'backend').splitlines()
         scope = select_modules(ROOT, changed, retained)
+        scope['base_sha'] = base
         return run_scoped_backend(scope, evidence, env, source, legacy_state, excluded, arguments)
     # A new worktree must not discard the same repository's verified inputs.
     # The existing exclusive lock and per-case dependency checks still apply.
