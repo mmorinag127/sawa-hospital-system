@@ -27,3 +27,11 @@ def test_positional_insert_names_canonical_columns_and_keeps_values_bound():
     connection.execute('INSERT INTO commands VALUES(?,?,?,?,?)', values)
     assert calls == [('INSERT INTO commands("run_id","id","request","status","result") VALUES(%s,%s,%s,%s,%s)', values)]
     connection.close()
+
+
+def test_distinct_aggregates_with_identical_driver_names_keep_both_positions():
+    cursor = SimpleNamespace(description=[SimpleNamespace(name='coalesce'), SimpleNamespace(name='coalesce')], rowcount=1)
+    row = Result(cursor, include_rowid=False)._row((Decimal(17), Decimal(83)))
+    spent, reserved = row
+    assert (spent, reserved) == (17, 83)
+    assert row[1] == 83

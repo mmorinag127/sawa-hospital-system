@@ -20,7 +20,7 @@ QUERY={'facility_id':1,'month':MONTH}
 
 class Native:
     def __init__(self, root):
-        self.root=root; self.data={}; self.writes=[]; self.reads=[]; self.after_export=None
+        self.root=root; self.data={}; self.writes=[]; self.reads=[]; self.after_export=None; self.configs={}
     def path(self, ident):
         folder=self.root/ident; folder.mkdir(parents=True,exist_ok=True); return folder
     def local_jobs(self, run): return []

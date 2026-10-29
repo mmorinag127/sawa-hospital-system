@@ -48,7 +48,7 @@ class Result:
         seen = set()
         for index, column in enumerate(cursor.description or ()):
             name = column.name
-            if name in seen or (name == 'rowid' and not include_rowid):
+            if name == 'rowid' and (not include_rowid or name in seen):
                 continue
             seen.add(name)
             self.columns.append((index, name))
