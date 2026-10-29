@@ -73,7 +73,9 @@ def test_monitor_keeps_visible_fields_pagination_without_unused_review(monkeypat
     else:
         assert calls == before_calls == []
     expected = {**full.json(), 'orders': [
-        {key: row[key] for key in fields if key in row} for row in full.json()['orders']
+        {**{key: row[key] for key in fields if key in row},
+         **({'ocr_validation_state': 'references_only'} if runtime else {})}
+        for row in full.json()['orders']
     ]}
     assert compact.json() == expected
     assert len(compact.content) < len(full.content) / 20
@@ -109,6 +111,7 @@ def test_monitor_current_job_values_match_full_list(monkeypatch, state):
     full = client.get('/orders?include_ocr=true')
     assert full.status_code == 200
     expected = api._order_list_response(full.json(), 'ocr_monitor')
+    expected['orders'][0]['ocr_validation_state'] = 'references_only'
     def displays(ids):
         assert ids == ['O1', 'O2', 'O3']
         job = {key: value for key, value in deepcopy(jobs['J1']).items() if key != 'metrics'}

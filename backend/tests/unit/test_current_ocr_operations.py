@@ -156,7 +156,7 @@ def test_many_missing_generations_are_batched_and_history_metrics_not_loaded(nat
             historical = [row for row in loaded
                           if isinstance(row, OcrJob) and row.id.startswith("unowned-history-")]
             assert len(historical) == 4
-            assert all("metrics" in inspect(row).unloaded for row in historical)
+            assert all({"evidence_metrics", "progress_metrics"} <= inspect(row).unloaded for row in historical)
     finally:
         event.remove(engine, "before_cursor_execute", observe)
     missing = [row for row in result["items"] if isinstance(row.get("order_id"), str)
