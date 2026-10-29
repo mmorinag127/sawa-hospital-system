@@ -212,16 +212,24 @@ def test_list_paging_search_stable_ties_and_clamp(client):
         session.add_all([MenuMaster(id="b", name="Same Fish", normalized_name="fish-b"),
                          MenuMaster(id="a", name="Same Fish", normalized_name="fish-a"),
                          MenuMaster(id="z", name="Zeta", normalized_name="zeta")])
-    page = client.get("/menu-masters", params={"q": " FISH ", "limit": 1, "offset": 1}).json()
-    assert (page["total"], page["limit"], page["offset"]) == (2, 1, 1)
+    first = client.get("/menu-masters", params={"q": " FISH ", "limit": 1}).json()
+    assert [item['id'] for item in first['items']] == ['a']
+    assert first['next_after_id'] == 'a'
+    page = client.get("/menu-masters", params={"q": " FISH ", "limit": 1, "after_id": first['next_after_id']}).json()
+    assert (page["total"], page["limit"], page["offset"]) == (2, 1, 0)
     assert [item["id"] for item in page["items"]] == ["b"]
+    assert page['next_after_id'] is None
+    previous = client.get('/menu-masters', params={'q': ' FISH ', 'limit': 1, 'before_id': page['previous_before_id']}).json()
+    assert [item['id'] for item in previous['items']] == ['a']
     assert [item["id"] for item in client.get("/menu-masters", params={"order": "desc"}).json()["items"]] == ["z", "a", "b", "existing"]
-    assert client.get("/menu-masters", params={"offset": 99}).json() == {"items": [], "total": 4, "offset": 99, "limit": 1000}
-    for supplied, expected in [(-1, 1), (0, 1000), (10000, 5000)]:
+    assert client.get("/menu-masters", params={"offset": 99}).status_code == 422
+    assert client.get('/menu-masters').json()['limit'] == 100
+    for supplied, expected in [(1, 1), (1000, 1000)]:
         response = client.get("/menu-masters", params={"limit": supplied})
         assert response.status_code == 200 and response.json()["limit"] == expected
     for params in ({"sort": "name; DROP TABLE menu_masters"}, {"sort": "condiments"},
-                   {"order": "ASC"}, {"offset": -1}):
+                   {"order": "ASC"}, {"offset": -1}, {'limit': -1}, {'limit': 0},
+                   {'limit': 10000}, {'after_id': 'missing'}, {'after_id': 'a', 'before_id': 'b'}):
         assert client.get("/menu-masters", params=params).status_code == 422
     for field in service._MENU_MASTER_SORT_COLUMNS:
         assert client.get("/menu-masters", params={"sort": field}).status_code == 200

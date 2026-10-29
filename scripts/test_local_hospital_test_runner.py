@@ -854,6 +854,7 @@ class ReceiptContractTest(unittest.TestCase):
                  patch.object(RUNNER, 'clean_tree', return_value=True), \
                  patch.object(RUNNER, 'git', return_value='a' * 40), \
                  patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)) as execute:
+                os.environ.pop('REFRESH_TEST_PG_BIN', None)
                 self.assertEqual(RUNNER.run(Path(directory) / 'evidence', full=True), 1)
                 environment = execute.call_args.kwargs['env']
                 self.assertNotIn('PYTEST_ADDOPTS', environment)
