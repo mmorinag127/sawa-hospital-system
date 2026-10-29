@@ -7,6 +7,13 @@ from experiments.agent_assistant.postgres_ledger import Connection, Result, stat
 def test_bound_parameters_never_replace_question_marks_inside_quoted_values():
     assert statement("SELECT '?' AS literal, \"question?\" FROM events WHERE run_id=?") == "SELECT '?' AS literal, \"question?\" FROM events WHERE run_id=%s"
     assert statement('INSERT OR IGNORE INTO events(run_id,payload) VALUES(?,?);') == 'INSERT INTO events(run_id,payload) VALUES(%s,%s) ON CONFLICT DO NOTHING'
+    assert statement("SELECT 'IS ?' WHERE review IS ? AND decision IS NOT ?") == "SELECT 'IS ?' WHERE review IS NOT DISTINCT FROM %s AND decision IS DISTINCT FROM %s"
+
+
+def test_invalid_quoting_is_rejected_instead_of_silently_rewriting_the_query():
+    import pytest
+    with pytest.raises(ValueError, match='quoting'):
+        statement("SELECT 'unterminated")
 
 
 def test_native_row_keeps_sqlite_mapping_and_integer_sum_contract():

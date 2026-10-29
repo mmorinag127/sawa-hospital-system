@@ -38,6 +38,31 @@ def seed_legacy(database, payload):
         cursor.execute('INSERT INTO sawa_agent_trial.ledger VALUES(1,0,%s)', (payload,))
 
 
+def test_fax_paging_and_null_safe_observation_preserve_newer_decisions(tmp_path, database):
+    from types import SimpleNamespace
+    from experiments.agent_assistant.fax_workflow import FaxWorkflow
+    from experiments.agent_assistant.tests.test_resource_paging import seed
+    store = PostgresStore(tmp_path, database)
+    store.set_budget(1000)
+    run, _ = store.create('operator', 'fax-cas', 'synthetic', ['hospital'], 100)
+    seed(store, run['id'])
+    workflow = FaxWorkflow(SimpleNamespace(store=store))
+    first = workflow.page(run['id'])
+    second = workflow.page(run['id'], after=first['next_after'])
+    assert [len(first['items']), len(second['items'])] == [5, 5]
+    assert workflow.for_order(run['id'], 'order-11')['fax_id'] == '11'
+    assert first['summary']['states']['awaiting_approval'] == 2
+    observed = workflow.item(run['id'], '0')
+    assert observed['decision'] is None
+    workflow.set_observed(run['id'], observed, state='awaiting_approval')
+    assert workflow.item(run['id'], '0')['state'] == 'awaiting_approval'
+    current = workflow.item(run['id'], '0')
+    workflow.set(run['id'], '0', decision={'approved': True}, state='completed')
+    workflow.set_observed(run['id'], current, state='blocked', decision={'approved': False})
+    saved = workflow.item(run['id'], '0')
+    assert saved['state'] == 'completed' and saved['decision'] == {'approved': True}
+
+
 @pytest.mark.parametrize('compressed', [False, True])
 def test_native_migration_preserves_sequence_budget_question_and_raw_archive(tmp_path, database, compressed):
     from experiments.agent_assistant.store import Store

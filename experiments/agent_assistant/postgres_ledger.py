@@ -19,8 +19,20 @@ _TOKENS = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\?|[^'\"?]+")
 
 
 def statement(sql):
-    sql = ''.join('%s' if token == '?' else token
-                  for token in _TOKENS.findall(sql))
+    tokens = _TOKENS.findall(sql)
+    if ''.join(tokens) != sql:
+        raise ValueError('Unsupported ledger SQL quoting')
+    parts = []
+    for token in tokens:
+        if token == '?':
+            if parts and re.search(r'\bIS\s+(?:NOT\s+)?$', parts[-1], re.I):
+                parts[-1] = re.sub(r'\bIS\s+(NOT\s+)?$',
+                    lambda match: 'IS DISTINCT FROM ' if match.group(1) else 'IS NOT DISTINCT FROM ',
+                    parts[-1], flags=re.I)
+            parts.append('%s')
+        else:
+            parts.append(token)
+    sql = ''.join(parts)
     if re.match(r'\s*INSERT OR IGNORE\b', sql, re.I):
         sql = re.sub(r'\bINSERT OR IGNORE\b', 'INSERT', sql, count=1, flags=re.I)
         sql = sql.rstrip().rstrip(';') + ' ON CONFLICT DO NOTHING'
@@ -187,6 +199,10 @@ def initialize(cursor, *, decode_ledger):
     cursor.execute('CREATE INDEX IF NOT EXISTS ledger_events_parent ON events(run_id,id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS ledger_events_kind ON events(run_id,kind,id DESC)')
     cursor.execute('CREATE INDEX IF NOT EXISTS ledger_artifacts_parent ON artifacts(run_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS ledger_artifacts_cursor ON artifacts(run_id,rowid)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS ledger_faxes_cursor ON fax_items(run_id,rowid)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS ledger_faxes_state ON fax_items(run_id,state)')
+    cursor.execute("CREATE INDEX IF NOT EXISTS ledger_faxes_order ON fax_items(run_id,(snapshot::jsonb->>'order_id'),rowid)")
     cursor.execute('CREATE INDEX IF NOT EXISTS ledger_files_prefix ON sawa_agent_trial.files(path COLLATE "C")')
     cursor.execute('''CREATE OR REPLACE FUNCTION sawa_agent_trial.track_run_change() RETURNS trigger
         LANGUAGE plpgsql AS $$ DECLARE changed text; BEGIN

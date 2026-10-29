@@ -84,6 +84,7 @@ class PostgresStore(Store):
     review_state_expression = "payload::jsonb->>'state'"
     workflow_phase_expression = "task_inputs::jsonb->'business_workflow'->>'phase'"
     workflow_version_expression = "task_inputs::jsonb->'business_workflow'->'version'"
+    fax_order_expression = "snapshot::jsonb->>'order_id'"
     def __init__(self, root, connect):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)

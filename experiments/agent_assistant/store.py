@@ -27,6 +27,7 @@ class Store:
     review_state_expression = "json_extract(payload,'$.state')"
     workflow_phase_expression = "json_extract(task_inputs,'$.business_workflow.phase')"
     workflow_version_expression = "json_extract(task_inputs,'$.business_workflow.version')"
+    fax_order_expression = "CAST(json_extract(snapshot,'$.order_id') AS TEXT)"
     def __init__(self, root: Path):
         self._read_snapshot = ContextVar("agent_read_snapshot", default=None)
         self.root = root.resolve()
@@ -76,6 +77,8 @@ class Store:
                 input_tokens INTEGER NOT NULL,output_tokens INTEGER NOT NULL,thought_tokens INTEGER NOT NULL,
                 PRIMARY KEY(run_id,interaction_id))''')
             db.execute('CREATE TABLE IF NOT EXISTS provider_usage_migrations(run_id TEXT PRIMARY KEY)')
+            db.execute('CREATE INDEX IF NOT EXISTS fax_items_run_state ON fax_items(run_id,state)')
+            db.execute('CREATE INDEX IF NOT EXISTS fax_items_order ON fax_items(run_id,' + self.fax_order_expression + ')')
 
     @contextmanager
     def tx(self):

@@ -24,7 +24,7 @@ async function mount({initial=null,targets,adminView=false,beforeGet,beforePost,
  for(const key of ['window','document','navigator','HTMLElement','Element','Node','Event','MouseEvent','HTMLInputElement','HTMLSelectElement','HTMLTextAreaElement','FormData']){saved.set(key,Object.getOwnPropertyDescriptor(global,key));Object.defineProperty(global,key,{configurable:true,writable:true,value:dom.window[key]});}
  saved.set('IS_REACT_ACT_ENVIRONMENT',Object.getOwnPropertyDescriptor(global,'IS_REACT_ACT_ENVIRONMENT'));global.IS_REACT_ACT_ENVIRONMENT=true;
  const React=require('react'),{createRoot}=require('react-dom/client');const intervals=[],timeouts=[],calls=[],cache=new Map();let run=initial;
- const api={async get(url,options){calls.push({method:'get',url,options});if(beforeGet)await beforeGet(url);if(url.includes('/artifacts/'))return {data:new Blob(['synthetic artifact'])};if(url.includes('/question-drawings/'))return {data:new Blob(['<svg/>'],{type:'image/svg+xml'})};if(url===base+'/config')return {data:config};if(url===base+'/tasks')return {data:tasks};if(url===base+'/budget')return {data:config.budget};if(url===base+'/runs')return {data:run?[run]:[]};if(url===base+'/run-history')return {data:{items:run?[run]:[],next:null}};if(url===base+'/run-lookup')return {data:{run:run&&run.request_key===options?.params?.request_key?run:null}};if(url===base+'/runs/r1')return {data:structuredClone(run)};throw Error(url);},async post(url,body,options){calls.push({method:'post',url,options,body:JSON.parse(JSON.stringify(body||{}))});if(beforePost){const result=await beforePost(url,body,options);if(result)return result;}if(url.endsWith('/target-lookups')){const result=await(targets?targets(url,body):{selection_id:'s1',choices:[{key:'2026-11',label:'11月の勤務計画',data:{}}],schools:[],layouts:[]});return {data:{lookup_id:body.request_key,state:'completed',result:{inputs:{month:'2026-11',...body.inputs},month_choices:[{month:'2026-11',label:'2026年11月',reason:'登録済みの条件で作成します'}],...result}}};};if(url===base+'/runs'){run=makeRun();return {data:structuredClone(run)};}if(url.endsWith('/reply')){run={...run,status:'running',pending_question:null,task_review:{id:'review-1',state:'awaiting_approval',summary:'作成した勤務表を確認してください',evidence:[{operation:'shift_get_run',data:{assignments:[{staff_name:'合成人員',work_date:'2026-11-02',position:'担当',quantity:0}]}},{operation:'shift_get_constraints',data:{rows:[{reason:'全件表示の確認'}]}}],actions:[]}};return {data:run};}if(url.endsWith('/decision')){run={...run,status:body.approve?'completed':'running',task_review:{...run.task_review,state:body.approve?'approved':'needs_correction'},artifacts:body.approve?[{id:'a1',name:'勤務表.xlsx',size:1000}]:[]};return {data:run};}if(url.endsWith('/stop')){run={...run,status:'stopped'};return {data:run};}if(url.endsWith('/rollback')){run={...run,status:'rolled_back',task_review:null};return {data:run};}throw Error(url);}};
+ const api={async get(url,options){calls.push({method:'get',url,options});if(beforeGet){const override=await beforeGet(url,options);if(override)return override;}if(url.includes('/artifacts/'))return {data:new Blob(['synthetic artifact'])};if(url.includes('/question-drawings/'))return {data:new Blob(['<svg/>'],{type:'image/svg+xml'})};if(url===base+'/config')return {data:config};if(url===base+'/tasks')return {data:tasks};if(url===base+'/budget')return {data:config.budget};if(url===base+'/runs')return {data:run?[run]:[]};if(url===base+'/run-history')return {data:{items:run?[run]:[],next:null}};if(url===base+'/run-lookup')return {data:{run:run&&run.request_key===options?.params?.request_key?run:null}};if(url===base+'/runs/r1')return {data:structuredClone(run)};throw Error(url);},async post(url,body,options){calls.push({method:'post',url,options,body:JSON.parse(JSON.stringify(body||{}))});if(beforePost){const result=await beforePost(url,body,options);if(result)return result;}if(url.endsWith('/target-lookups')){const result=await(targets?targets(url,body):{selection_id:'s1',choices:[{key:'2026-11',label:'11月の勤務計画',data:{}}],schools:[],layouts:[]});return {data:{lookup_id:body.request_key,state:'completed',result:{inputs:{month:'2026-11',...body.inputs},month_choices:[{month:'2026-11',label:'2026年11月',reason:'登録済みの条件で作成します'}],...result}}};};if(url===base+'/runs'){run=makeRun();return {data:structuredClone(run)};}if(url.endsWith('/reply')){run={...run,status:'running',pending_question:null,task_review:{id:'review-1',state:'awaiting_approval',summary:'作成した勤務表を確認してください',evidence:[{operation:'shift_get_run',data:{assignments:[{staff_name:'合成人員',work_date:'2026-11-02',position:'担当',quantity:0}]}},{operation:'shift_get_constraints',data:{rows:[{reason:'全件表示の確認'}]}}],actions:[]}};return {data:run};}if(url.endsWith('/decision')){run={...run,status:body.approve?'completed':'running',task_review:{...run.task_review,state:body.approve?'approved':'needs_correction'},artifacts:body.approve?[{id:'a1',name:'勤務表.xlsx',size:1000}]:[]};return {data:run};}if(url.endsWith('/stop')){run={...run,status:'stopped'};return {data:run};}if(url.endsWith('/rollback')){run={...run,status:'rolled_back',task_review:null};return {data:run};}throw Error(url);}};
  function businessResponse(value){
   if(!value?.id || !value.status)return value;
   if(value.business)return value;
@@ -47,6 +47,46 @@ async function mount({initial=null,targets,adminView=false,beforeGet,beforePost,
  }
  return h;
 }
+test('resource pages use independent cursors and keep off-page waiting counts visible',async()=>{
+ const initial={...makeRun('running'),task_id:'hospital_pending_faxes',domains:['hospital'],pending_question:null};
+ const h=await mount({initial,adminView:true,beforeGet:async(url,options)=>{
+  if(url!==base+'/runs/r1')return;
+  const p=options.params;
+  return {data:{...initial,fax_items:[],fax_page:{state:p.fax_state,summary:{total:12,states:{awaiting_approval:2}},next_after:p.faxes_after?null:5},
+   artifacts:[{id:'a'+p.artifacts_after,name:'output-'+p.artifacts_after,size:1}],artifact_page:{next_after:p.artifacts_after?null:50}}};
+ }});
+ try{
+  const nav=kind=>h.document.querySelector(`nav[aria-label="${kind}"]`);
+  assert.match(nav('FAXのページ').textContent,/全12件・確認待ち2件/);
+  assert.match(h.document.querySelector('.next-action').textContent,/内容を確認/);
+  await h.click(nav('FAXのページ').querySelector('[aria-label="次のページ"]'));
+  assert.equal(h.calls.findLast(c=>c.url===base+'/runs/r1').options.params.faxes_after,5);
+  await h.click(nav('ファイルのページ').querySelector('[aria-label="次のページ"]'));
+  const params=h.calls.findLast(c=>c.url===base+'/runs/r1').options.params;
+  assert.equal(params.artifacts_after,50);assert.equal(params.faxes_after,5);
+  await h.change(nav('FAXのページ').querySelector('select'),'awaiting_approval');
+  const filtered=h.calls.findLast(c=>c.url===base+'/runs/r1').options.params;
+  assert.equal(filtered.faxes_after,0);assert.equal(filtered.fax_state,'awaiting_approval');assert.equal(filtered.artifacts_after,50);
+  assert.equal(h.calls.filter(c=>c.method==='post').length,0);
+ }finally{await h.close();}
+});
+test('late progress success or failure cannot reopen a dismissed request',async()=>{
+ for(const fail of [false,true]){
+  let release,reads=0;
+  const h=await mount({initial:makeRun('running'),beforeGet:async url=>{
+   if(url===base+'/runs/r1'&&++reads>1){await new Promise(r=>release=r);if(fail)throw Error('stale transport failure');return {data:makeRun('failed')};}
+  }});
+  try{
+   await h.settle(()=>{h.tick();});
+   assert.equal(typeof release,'function');
+   await h.click(h.button('作業一覧に戻る'));
+   release();await h.settle();
+   assert.equal(h.document.querySelector('.active-work'),null);
+   assert.ok(h.document.querySelector('.request-panel'));
+   assert.doesNotMatch(h.document.body.textContent,/stale transport failure/);
+  }finally{release?.();await h.close();}
+ }
+});
 test('entry never selects a single old request, regardless of its unfinished state',async()=>{
  for(const status of ['waiting_input','running','reconciliation_required','stop_pending','rollback_stop_pending']){
   const initial={...makeRun(status),domains:['school-lunch'],instruction:'以前の給食作業'};

@@ -270,8 +270,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 listing = store.listing(owner)
                 reviews, faxes, questions = store.listing_business_inputs(listing)
                 return listing, [{**run, 'business': business.projection(run, reviews.get(run['id']),
-                    [{'state': 'awaiting_approval'}] if run['id'] in faxes else [],
-                    question=run['id'] in questions)} for run in listing]
+                    awaiting_fax=run['id'] in faxes, question=run['id'] in questions)} for run in listing]
 
         listing, response = await asyncio.to_thread(read_response)
         await business.kick_many([run['id'] for run in listing if owned(run)], request.headers.get('authorization', ''))
@@ -291,7 +290,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                         raise Conflict('業務の保存状態を確認できません。履歴を完了扱いにしません')
                     context = {**run, 'task_inputs': {'business_workflow': {'version': version, 'phase': phase}}}
                     run['business'] = business.projection(context, reviews.get(run['id']),
-                        [{'state': 'awaiting_approval'}] if run['id'] in faxes else [], question=run['id'] in questions)
+                        awaiting_fax=run['id'] in faxes, question=run['id'] in questions)
                 return page
         result = await asyncio.to_thread(read_response)
         await business.kick_many([run['id'] for run in result['items']
@@ -361,7 +360,11 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         return await asyncio.to_thread(store.get, run["id"], owner)
 
     @app.get("/runs/{ident}")
-    async def run_detail(ident: str, request: Request, events_after: int = Query(default=0, ge=0)):
+    async def run_detail(ident: str, request: Request, events_after: int = Query(default=0, ge=0),
+                         faxes_after: int = Query(default=0, ge=0), fax_state: str = '',
+                         artifacts_after: int = Query(default=0, ge=0)):
+        if fax_state not in ('', 'awaiting_approval'):
+            raise ValueError('FAXの取得範囲が不正です')
         run = await asyncio.to_thread(store.get, ident, owner)
         if not owned(run) and run.get('task_id') in CONTRACTS and run['status'] in ('running', 'waiting_input', 'reconciliation_required'):
             await authorize(request.headers.get('authorization', ''), run['domains'])
@@ -374,7 +377,9 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             with store.snapshot(view='run', owner=owner, identities=[ident]):
                 current = store.get(ident, owner)
                 with store.read() as db:
-                    artifacts = [dict(row) for row in db.execute("SELECT id,name,sha256,size FROM artifacts WHERE run_id=?", (ident,))]
+                    artifact_rows = db.execute('SELECT rowid,id,name,sha256,size FROM artifacts '
+                        'WHERE run_id=? AND rowid>? ORDER BY rowid LIMIT 51', (ident, artifacts_after)).fetchall()
+                    artifacts = [{key: row[key] for key in ('id', 'name', 'sha256', 'size')} for row in artifact_rows[:50]]
                 page = store.event_page(ident, after=events_after)
                 events = page['events']
                 from .shift_review import build_shift_review
@@ -384,13 +389,17 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 reference = reference_event['payload'] if reference_event else None
                 shift_review = build_shift_review(review,reference) if review and (current.get('task_id') or '').startswith('shift_') else None
                 lunch_review = build_lunch_review(review,current.get('task_inputs',{}).get('process_questions')) if current.get('task_id')=='lunch_daily_bundle' else None
-                faxes = tools.faxes.items(ident) if tools.faxes.active(current) and current["status"] not in ("rolled_back", "rollback_stop_pending") else []
-                fax_labels = {str(item['fax_id']): item['snapshot'].get('name') or '対象のFAX' for item in faxes}
+                fax_page = tools.faxes.page(ident, after=faxes_after, state=fax_state) if tools.faxes.active(current) and current["status"] not in ("rolled_back", "rollback_stop_pending") else {
+                    'items': [], 'summary': {'total': 0, 'states': {}}, 'next_after': None, 'state': fax_state}
+                faxes = fax_page['items']
+                fax_labels = tools.faxes.labels(ident, events)
                 source_event = store.latest_event(ident, 'source')
                 # Old clients also use this immutable binding to distinguish a
                 # source-upload question from an ordinary operator question.
                 context = [source_event] if source_event and all(event['id'] != source_event['id'] for event in events) else []
-                return {**current, 'business': business.projection(current, review, faxes), 'business_messages': business_conversation(events, fax_labels) if owned(current) else [], "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": store.pending_question(ident) if current["status"] == "waiting_input" else None, "events": context + events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(current), "task_review": review, "fax_items": faxes,
+                return {**current, 'business': business.projection(current, review, awaiting_fax=fax_page['summary']['states'].get('awaiting_approval', 0) > 0), 'business_messages': business_conversation(events, fax_labels) if owned(current) else [], "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": store.pending_question(ident) if current["status"] == "waiting_input" else None, "events": context + events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(current), "task_review": review, "fax_items": faxes,
+                        'fax_page': {key: value for key, value in fax_page.items() if key != 'items'},
+                        'artifact_page': {'next_after': artifact_rows[49]['rowid'] if len(artifact_rows) > 50 else None},
                         'source_attached': source_event is not None, 'source_event': source_event,
                         'event_page': {key: value for key, value in page.items() if key != 'events'}}
 
@@ -402,9 +411,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             with store.snapshot():
                 run = store.get(ident, owner)
                 page = store.event_page(ident, before=before)
-                with store.read() as db:
-                    labels = {str(row['fax_id']): json.loads(row['snapshot']).get('name') or '対象のFAX'
-                              for row in db.execute('SELECT fax_id,snapshot FROM fax_items WHERE run_id=?', (ident,))}
+                labels = tools.faxes.labels(ident, page['events'])
                 return {**page, 'conversation': conversation(page['events']),
                         'business_messages': business_conversation(page['events'], labels) if owned(run) else []}
         return await asyncio.to_thread(read_response)
@@ -416,8 +423,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await authorize(request.headers.get("authorization", ""), run["domains"])
         tools.authorizations[ident] = request.headers.get("authorization", "")
         async with tools.lock(ident):
-            items = await asyncio.to_thread(tools.faxes.items, ident)
-            item = next((item for item in items if item['fax_id'] == fax_id), None)
+            item = await asyncio.to_thread(tools.faxes.item, ident, fax_id)
             decision = {'review_id': payload.review_id, 'approve': payload.approve, 'message': payload.message}
             if owned(run) and item and item.get('decision') and all(item['decision'].get(key) == value for key, value in decision.items()):
                 result = {'ok': True, 'replayed': True}

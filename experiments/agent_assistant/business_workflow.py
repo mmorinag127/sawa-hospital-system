@@ -440,7 +440,7 @@ class BusinessWorkflow:
             self.kick(ident)
         return True
 
-    def projection(self, run, review=None, faxes=(), *, question=...):
+    def projection(self, run, review=None, faxes=(), *, question=..., awaiting_fax=None):
         if not owned(run):
             return {'state': 'completed' if run['status'] == 'completed' else 'archived', 'title': '作業が完了しました' if run['status'] == 'completed' else '以前の試用記録', 'message': '過去の作業記録です。実行状況の確認は管理者が対応します。', 'next_action': 'none'}
         state = run['task_inputs']['business_workflow']
@@ -453,7 +453,7 @@ class BusinessWorkflow:
             status, title, message, action = 'source', '原本を添付してください', '選択した学校・対象月の献立・調理手配書を添付してください。', 'source'
         elif phase == 'support' or run['status'] in ('reconciliation_required', 'budget_reached', 'failed'):
             status, title, message, action = 'checking', '保存した内容を確認しています', '回答・承認した内容は保存されています。システム側で確認しており、操作は必要ありません。解決できない場合は管理者が対応します。', 'none'
-        elif review and review['state'] == 'awaiting_approval' or any(item['state'] == 'awaiting_approval' for item in faxes):
+        elif review and review['state'] == 'awaiting_approval' or (any(item['state'] == 'awaiting_approval' for item in faxes) if awaiting_fax is None else awaiting_fax):
             status, title, message, action = 'review', '内容を確認してください', '内容がよければ承認してください。その後は保存・帳票作成まで自動で進みます。', 'approve'
         elif run['status'] == 'waiting_input' and (self.store.pending_question(run['id']) if question is ... else question):
             status, title, message, action = 'question', 'この質問にお答えください', '表示された選択肢または入力欄で回答すると、続きの作業へ進みます。', 'answer'

@@ -12,6 +12,8 @@ def digest(value):
 
 
 class FaxWorkflow:
+    PAGE_SIZE = 5
+
     def __init__(self, tools):
         self.tools, self.store = tools, tools.store
 
@@ -26,12 +28,58 @@ class FaxWorkflow:
             raise Conflict(f"FAXの最新状態を取得できません（HTTP {response.status_code}）")
         return response
 
+    @staticmethod
+    def _decode_item(row):
+        item = dict(row)
+        item.pop('rowid', None)
+        item['snapshot'] = json.loads(item['snapshot'])
+        for key in ('review', 'decision'):
+            item[key] = json.loads(item[key]) if item[key] else None
+        return item
+
     def items(self, run_id):
         with self.store.read() as db:
             rows = db.execute("SELECT * FROM fax_items WHERE run_id=? ORDER BY rowid", (run_id,)).fetchall()
-        return [{**dict(row), "snapshot": json.loads(row["snapshot"]),
-                 "review": json.loads(row["review"]) if row["review"] else None,
-                 "decision": json.loads(row["decision"]) if row["decision"] else None} for row in rows]
+        return [self._decode_item(row) for row in rows]
+
+    def page(self, run_id, *, after=0, state=''):
+        if type(after) is not int or after < 0 or state not in ('', 'awaiting_approval'):
+            raise ValueError('FAXの取得範囲が不正です')
+        with self.store.read() as db:
+            states = {row[0]: row[1] for row in db.execute(
+                'SELECT state,COUNT(*) FROM fax_items WHERE run_id=? GROUP BY state', (run_id,))}
+            condition = ' AND state=?' if state else ''
+            parameters = (run_id, after, state) if state else (run_id, after)
+            rows = db.execute('SELECT rowid,* FROM fax_items WHERE run_id=? AND rowid>?'
+                + condition + ' ORDER BY rowid LIMIT ?', (*parameters, self.PAGE_SIZE + 1)).fetchall()
+        items = [self._decode_item(row) for row in rows[:self.PAGE_SIZE]]
+        return {'items': items, 'summary': {'total': sum(states.values()), 'states': states},
+                'next_after': rows[self.PAGE_SIZE - 1]['rowid'] if len(rows) > self.PAGE_SIZE else None, 'state': state}
+
+    def item(self, run_id, fax_id):
+        with self.store.read() as db:
+            row = db.execute('SELECT * FROM fax_items WHERE run_id=? AND fax_id=?', (run_id, fax_id)).fetchone()
+        if row is None:
+            return None
+        return self._decode_item(row)
+
+    def for_order(self, run_id, order_id):
+        if not isinstance(order_id, str) or not order_id:
+            raise Conflict('注文の識別情報がありません')
+        with self.store.read() as db:
+            row = db.execute('SELECT * FROM fax_items WHERE run_id=? AND '
+                + self.store.fax_order_expression + '=? ORDER BY rowid LIMIT 1', (run_id, order_id)).fetchone()
+        return self._decode_item(row) if row else None
+
+    def labels(self, run_id, events):
+        identities = sorted({str(event['payload']['fax_id']) for event in events
+            if event['kind'] in ('fax_review', 'fax_decision') and 'fax_id' in event['payload']})
+        if not identities:
+            return {}
+        with self.store.read() as db:
+            return {str(row['fax_id']): json.loads(row['snapshot']).get('name') or '対象のFAX'
+                for row in db.execute('SELECT fax_id,snapshot FROM fax_items WHERE run_id=? AND fax_id IN ('
+                    + ','.join('?' for _ in identities) + ')', (run_id, *identities))}
 
     def set(self, run_id, fax_id, **fields):
         with self.store.tx() as db:
@@ -161,7 +209,7 @@ class FaxWorkflow:
         return {"ok": True, "items": await run_blocking(self.items, run["id"])}
 
     async def submit(self, run, fax_id, summary, sheet=None):
-        item = next((x for x in await run_blocking(self.items, run["id"]) if x["fax_id"] == fax_id), None)
+        item = await run_blocking(self.item, run["id"], fax_id)
         if not item or not summary.strip() or len(summary) > 4000:
             raise ValueError("対象FAXと照合結果が必要です")
         captured = await self.capture(run, item, proposed_sheet=sheet)
@@ -186,7 +234,7 @@ class FaxWorkflow:
     async def decide(self, run, fax_id, review_id, approve, message):
         if run["status"] != "running" or not self.active(run):
             raise Conflict("この依頼は回答を受け付けていません")
-        item = next((x for x in await run_blocking(self.items, run["id"]) if x["fax_id"] == fax_id), None)
+        item = await run_blocking(self.item, run["id"], fax_id)
         if not item or not item["review"] or item["review"]["id"] != review_id:
             raise Conflict("確認画面が古くなっています。最新の内容を開いてください")
         decision = {"review_id": review_id, "approve": approve, "message": message}
@@ -253,14 +301,14 @@ class FaxWorkflow:
 
     async def after_write(self, run, name, args, receipt):
         if self.active(run) and name=="hospital_retry_fax":
-            item=next((x for x in await run_blocking(self.items, run["id"]) if x["fax_id"]==str(args.ids["uploaded_pdf_id"])),None)
+            item=await run_blocking(self.item, run["id"], str(args.ids["uploaded_pdf_id"]))
             if item:
                 snap={**item["snapshot"],"order_id":None,"document_id":None}
                 await run_blocking(self.set, run["id"],item["fax_id"],snapshot=snap,state="processing",review=None,decision=None)
             return
         if not self.active(run) or "order_id" not in args.ids:
             return
-        item = next((x for x in await run_blocking(self.items, run["id"]) if str(x["snapshot"].get("order_id")) == str(args.ids["order_id"])), None)
+        item = await run_blocking(self.for_order, run["id"], args.ids["order_id"])
         if not item or item["state"] != "approved":
             return
         from .catalog import OPERATIONS
