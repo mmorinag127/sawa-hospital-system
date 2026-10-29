@@ -92,6 +92,16 @@ def _equipment_bounds(element, parents):
     return min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)
 
 
+def inactive_area_equipment(root, used):
+    """Area-only handles are not newly installed solid machine footprints.
+
+    They provide ports/bounds when a route uses that named location; otherwise
+    registration must not introduce an obstacle into unrelated legacy routes.
+    """
+    return {element.get('id') for element in root.iter()
+            if element.get('data-area-equipment') and element.get('id') not in used}
+
+
 def validate_pair(svg_bytes, manifest):
     """Validate exact SVG/manifest version pairing and all anchor geometry."""
     if type(manifest.get('schema_version')) is not int or type(manifest.get('version')) is not int or manifest.get('schema_version') != 1 or manifest.get('version') < 1:

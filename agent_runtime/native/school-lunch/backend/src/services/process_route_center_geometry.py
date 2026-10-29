@@ -3,7 +3,7 @@ from collections import defaultdict
 import math
 import xml.etree.ElementTree as E
 
-from .named_svg_route_service import render, _tag
+from .named_svg_route_service import render, _tag, inactive_area_equipment
 
 
 def canvas(svg, manifest, prepared):
@@ -32,8 +32,10 @@ def canvas(svg, manifest, prepared):
             inactive |= ids
     used = {p.get('equipment_id') for points in prepared.stages.values() for p in points}
     used |= {p.get('equipment_id') for pairs in prepared.transits.values() for pair in pairs for p in pair}
+    used |= {p.get('equipment_id') for p in prepared.exit_points.values()}
     if used & inactive:
         raise ValueError('参照する追加設備を図面設定で明示選択してください')
+    inactive |= inactive_area_equipment(root, used)
     moved = set()
     for move in prepared.layout.get('text_positions', []):
         matches = [el for el in root.iter(_tag('text')) if visible_text(el) == move['text'] and ('element_id' not in move or el.get('id') == move['element_id'])]

@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints,
 
 Identifier = Annotated[str, StringConstraints(pattern=r'^[A-Za-z0-9_-]{1,80}$')]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
-EQUIPMENT = ('シンク', '作業台', 'スライサー', 'ミキサー', '炊飯器', '回転釜',
+EQUIPMENT = ('シンク', '作業台', 'スライサー', 'ミキサー', '皮剥機', '炊飯器', '回転釜',
              'フライヤー', 'スチコン', 'ゼットオーブン', 'コンロ', '冷却器', '脱水機', '冷蔵庫', '冷凍庫')
 
 

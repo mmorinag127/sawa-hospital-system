@@ -59,6 +59,22 @@
     <path id="zone-contaminated" d="M1142 269 H1447 V374 H1564 V214 H1801 V1122 H1142 Z" class="zone" stroke="#ec4c9c" />
   </g>
   <g id="equipment" data-layer="equipment" inkscape:groupmode="layer" inkscape:label="設備">
+    <g id="stove" data-name="コンロ" data-area-equipment="stove" display="none">
+      <rect x="635" y="378" width="105" height="47" fill="none" stroke="none" />
+    </g>
+    <g id="cooler-d" data-name="真空冷却器" data-area-equipment="cooler-d" display="none">
+      <rect x="635" y="792" width="60" height="88" fill="none" stroke="none" />
+    </g>
+    <g id="mail-equipment-anchors" display="none">
+      <circle id="anchor-stove-west" cx="635" cy="401.5" r="0" />
+      <circle id="anchor-stove-east" cx="740" cy="401.5" r="0" />
+      <circle id="anchor-stove-north" cx="687.5" cy="378" r="0" />
+      <circle id="anchor-stove-south" cx="687.5" cy="425" r="0" />
+      <circle id="anchor-cooler-d-west" cx="635" cy="836" r="0" />
+      <circle id="anchor-cooler-d-east" cx="695" cy="836" r="0" />
+      <circle id="anchor-cooler-d-north" cx="665" cy="792" r="0" />
+      <circle id="anchor-cooler-d-south" cx="665" cy="880" r="0" />
+    </g>
     <g id="storage-fridge-d2" data-name="冷蔵庫D-2" data-storage-area="fridge-d2" display="none">
       <rect x="652" y="1010" width="43" height="75" fill="none" stroke="none" />
     </g>

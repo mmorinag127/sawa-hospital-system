@@ -1,6 +1,6 @@
 {
-  "source_revision": "e3d19d321e8dd6184fb068065edc8a4d285964f5",
-  "working_diff_sha256": "bbd8da011d7b8079fdaac278ba94485fa2e9615cdea3f93c535120141927ae32",
+  "source_revision": "76ab923e6da2cb2e65ca59b3ff0bbaf5fb83a462",
+  "working_diff_sha256": "4d6ccbb89b0a62de1216abd60e06f0b9ad705f80d5abf3db7e15adc2e38d2510",
   "files": {
     "backend/Dockerfile": "8003085340a146430874bca700a031bad039a329213e9246f0b93975cfcb2eee",
     "backend/alembic.ini": "a19975a026a14db3e2df558cf079c07a6725f2aa66d9ad94c460115c09c40925",
@@ -66,10 +66,10 @@
     "backend/src/data/july_2026_pattern_review.json": "422139820ac90ffae798042abd6cfe9eb7c46bf38e5e8bce971294b25d5ee62f",
     "backend/src/data/july_2026_pattern_review_overrides.json": "0d6692fac0ade907993ac9c36fa2122054a4ef3202112c5127e8edf1a6906800",
     "backend/src/data/kitchen_svg/equipment-observations.json": "e0dc3709e100462950b0afa90636f92e16420b58bc1394e2da1fc5f0aa57aabb",
-    "backend/src/data/kitchen_svg/kitchen-base-bread.json": "dc1eba96d1790401867da7daf4873ab3c314bfb7da86359f4fae3e7fa5d89595",
-    "backend/src/data/kitchen_svg/kitchen-base-bread.svg": "501e803ea567668ed8ef9b940afad79b294e568bfb0260432360367512b1a7b9",
-    "backend/src/data/kitchen_svg/kitchen-base-rice.json": "b5ec968530a6523555a2a294ad02302231f9babd7d2da4eb4c7cadd45a940d9e",
-    "backend/src/data/kitchen_svg/kitchen-base-rice.svg": "d0cc8da1cdffc79bf7a9bcad037313bdfce4fa203ffcb6b11894f07fbf285a80",
+    "backend/src/data/kitchen_svg/kitchen-base-bread.json": "4aa8624e9fffffaa491f1e28843f2699e64c32abfc5f2cb60c492175badd7901",
+    "backend/src/data/kitchen_svg/kitchen-base-bread.svg": "5bf039bdc0391250821f156d0570beedeec74af2538349e53bf215b0f0421ef5",
+    "backend/src/data/kitchen_svg/kitchen-base-rice.json": "cfa944b70115d9def34ce61ad46a577b03e4a4a5632ac273eed9b1604bfe93ec",
+    "backend/src/data/kitchen_svg/kitchen-base-rice.svg": "fcba3ef15271dff68b72bdc2f6005d7811cafb28d3223ea560ee527cd08a6ab2",
     "backend/src/data/kitchen_svg/kitchen-flow-network.json": "5cb1c6d6872687bd92a71c04af625d59785711ccc2154751198786f4d5fbc35d",
     "backend/src/data/kitchen_svg/process-correction-policy.json": "233a7825fd85a40a8f0c3ecee06d6fcb08aa2cbf81bbe7f8b3b58952d76b9748",
     "backend/src/data/kitchen_svg/supply-observations.json": "451e6bf2cb9bb72f547131f61190f7d14a73c9190ae3e4b115d3b19195ec9dec",
@@ -96,7 +96,7 @@
     "backend/src/schemas/implementation_price_contract.py": "3400f9fc859469fbb85e3353dbadfd0df36c532b945625e1c7623c1557ad12a5",
     "backend/src/schemas/intake_contract.py": "c19769cf3ac4485c8e6725370a88a7a2e1fc334896df5a68a9959ba1ff1607a9",
     "backend/src/schemas/job_status.py": "b62cecea745dd4cfbc3ecb471a8d39c8b7a47d13b9f578497708ba0f53f27de1",
-    "backend/src/schemas/menu_process.py": "a06b43528100cac37cafdda5d0885ccf95e1bcf0e863b02c30551a82264e05a9",
+    "backend/src/schemas/menu_process.py": "c90d347630ebe24e9f931461bd94bcfabf7da4b216a1483de8c22353f9804abb",
     "backend/src/schemas/process_patterns.py": "2b4a47b5705e62717d38bfbd079e79dcc4a1d3fe6f3e06e639df44645e8a9336",
     "backend/src/schemas/school_work_inbox.py": "369333b2662215e764e51142fd9121154949863eae8ffdc5da0e42a53fa7ffb9",
     "backend/src/schemas/shared_menus.py": "02b51e03c19595882f6d10b485606372dd8b56d01d57479771e8018859c7cfb8",
@@ -125,13 +125,13 @@
     "backend/src/services/menu_process_planner.py": "84e2a1495d70e7c48a23fade6f0ee0cfd2dc832a8612c439a0ca43d10eca7d50",
     "backend/src/services/menu_process_preview_geometry.py": "faad7f5b88c48601869d4082ec083c9e819d88b0c4c1625b424ed5d09c41cd7b",
     "backend/src/services/menu_process_route_persistence_service.py": "bb00f17d733d2308d72345372a54c2b31cc387cadef26c6bbb6b9d604becedae",
-    "backend/src/services/menu_process_route_service.py": "722d9da95845adac81ae4e9f620156540e59300a2253b70edc53d35e2929822e",
+    "backend/src/services/menu_process_route_service.py": "7a0697b1154ffc998b0c715055ee3c71fbe5755a69dbc9495496031937c8dd14",
     "backend/src/services/menu_process_rule_compiler.py": "7077b1a59858d6f0e247f8a5d060f2c0bb8690767baeed4c417349dc89d74997",
     "backend/src/services/menu_process_service.py": "33ba353a78700129f518bea6d3025f696b89837af83630cabc4ae8e47c829135",
     "backend/src/services/menu_process_source_rules.py": "214c5b6b3d9e0baaa02f715f74911d201617c923db1dc73d79e1afe4fd019099",
     "backend/src/services/menu_route_reuse.py": "226c710d5a3d1da0ecb1cf02d4e1ab9fa87e2807667dbd971d079a7a6cf30264",
     "backend/src/services/monthly_procurement_service.py": "03d166cb4b03454cc367a44ff378e14519ac9194c2a00abad4d2de6b46238ccd",
-    "backend/src/services/named_svg_route_service.py": "d0989eaea3e4109bd03d66d103452e6ad8dc30ab72792dbb8549702fb9498202",
+    "backend/src/services/named_svg_route_service.py": "a6d894f2783222a58f4c677e4635f580b32f6024ed0177c31a60d12a53e2a3ad",
     "backend/src/services/operation_equipment_assignment.py": "cc761df3f7ca17b994c66a2258682e7d9aff3ab8d4cc7f3114ea558000a6fd39",
     "backend/src/services/process_dispatch_projection.py": "2304cb57318915f58d3a8591683f388f3c546a304a0b20a26c667cffa54c4708",
     "backend/src/services/process_facility_examples.py": "4724a73fc7c8a06bc4bf8f686a35af41a4f9b0242178b82e03f8e677bf7b0cc6",
@@ -145,9 +145,9 @@
     "backend/src/services/process_question_drawing.py": "70335d44a68a55cb980b042a9ab494980ca3e3a9130a057a679e5841a552a4cb",
     "backend/src/services/process_receipt_legend.py": "0ca2a214666618382cc3e207b6c977a54e55ec8878afaf0cbc3d4a533180199e",
     "backend/src/services/process_route_center_flow_service.py": "c63cde042294ad04f5fa74c41a7cc91f60a616dbecad036c716168253adcac72",
-    "backend/src/services/process_route_center_geometry.py": "b299e22c7698acfda6587ea24acbf9d9c33de8a430cfd516625d665b3b67ba85",
+    "backend/src/services/process_route_center_geometry.py": "452806d9a8d406191a8d4ada59f22860e2cd3d58a547803c9de83057ffac5670",
     "backend/src/services/process_route_defaults.py": "a07616bd9e4b33a616eb2b832bc0b598672d2b8cba75ef38c2d771a018203a19",
-    "backend/src/services/process_route_layout_service.py": "242fe1d58449de7ab948815fb26ccfd39d637576eb702780fd77e8cb7b3b7071",
+    "backend/src/services/process_route_layout_service.py": "dd8cef17b0e073cc35640e7d9719b91f3ae1833085d847306d6e4102a76fdef3",
     "backend/src/services/process_route_network_service.py": "0804c8c81781bccfb43026eaa90309cb7587d98435ef70ef9b9115ec94bbc360",
     "backend/src/services/process_route_rules_service.py": "780e28d93b9a441cf337d4a8f5bbaa21a893b18a11895438c5f32c878413e9c8",
     "backend/src/services/process_shared_preparation.py": "9a23c03b7121474437bbb93081cf0930040e6c4170cfed94c5a2c3730ef0e27e",
@@ -204,8 +204,8 @@
       ]
     }
   ],
-  "upstream_base_revision": "2cbc309cfde1f37e189a9fe9a8dca7f4a72437da",
-  "upstream_delta_sha256": "90bca988d3d66f3d5ac5cfdbf82c52d665424f52b25390bec08c2193ba668907",
+  "upstream_base_revision": "e3d19d321e8dd6184fb068065edc8a4d285964f5",
+  "upstream_delta_sha256": "f0a577b0337ff9c57ff15ccb59610417fd4d9d10ccc92f8605637113b9b96b6e",
   "retained_extensions": [
     {
       "path": "backend/src/api/implementation_price_tables.py",
@@ -234,8 +234,8 @@
     },
     {
       "path": "backend/src/schemas/menu_process.py",
-      "upstream_sha256": "3f150d0801ff667b7ff6caf0bda4ec9006dba41976f31eef3e24eaf157a828f5",
-      "bundled_sha256": "a06b43528100cac37cafdda5d0885ccf95e1bcf0e863b02c30551a82264e05a9"
+      "upstream_sha256": "253a99ac7f126335833bf9b669e97ce993b8b89b5f2c3f9e0985de50a08f5da8",
+      "bundled_sha256": "c90d347630ebe24e9f931461bd94bcfabf7da4b216a1483de8c22353f9804abb"
     },
     {
       "path": "backend/src/services/agent_daily_process.py",

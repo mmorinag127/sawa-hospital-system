@@ -2,7 +2,7 @@
   "schema_version": 1,
   "supply_area_ids": ["inspection", "rice-store", "fridge-b2", "freezer-b1", "freezer-a", "fridge-c1", "fridge-c2", "fridge-d1", "fridge-d2", "ingredient-store"],
   "template_id": "kitchen-bread",
-  "version": 9,
+  "version": 10,
   "view_box": [
     0,
     0,
@@ -16,6 +16,14 @@
     1260
   ],
   "points": [
+    {"id":"stove-west","name":"コンロ・西接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-stove-west","x":635,"y":401.5,"equipment_id":"stove","side":"西接続"},
+    {"id":"stove-east","name":"コンロ・東接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-stove-east","x":740,"y":401.5,"equipment_id":"stove","side":"東接続"},
+    {"id":"stove-north","name":"コンロ・北接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-stove-north","x":687.5,"y":378,"equipment_id":"stove","side":"北接続"},
+    {"id":"stove-south","name":"コンロ・南接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-stove-south","x":687.5,"y":425,"equipment_id":"stove","side":"南接続"},
+    {"id":"cooler-d-west","name":"真空冷却器・西接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-cooler-d-west","x":635,"y":836,"equipment_id":"cooler-d","side":"西接続"},
+    {"id":"cooler-d-east","name":"真空冷却器・東接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-cooler-d-east","x":695,"y":836,"equipment_id":"cooler-d","side":"東接続"},
+    {"id":"cooler-d-north","name":"真空冷却器・北接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-cooler-d-north","x":665,"y":792,"equipment_id":"cooler-d","side":"北接続"},
+    {"id":"cooler-d-south","name":"真空冷却器・南接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-cooler-d-south","x":665,"y":880,"equipment_id":"cooler-d","side":"南接続"},
     {"id":"storage-fridge-d2-west","name":"冷蔵庫D-2・西接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-storage-fridge-d2-west","x":652,"y":1047.5,"equipment_id":"storage-fridge-d2","side":"西接続"},
     {"id":"storage-fridge-d2-east","name":"冷蔵庫D-2・東接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-storage-fridge-d2-east","x":695,"y":1047.5,"equipment_id":"storage-fridge-d2","side":"東接続"},
     {"id":"storage-fridge-d2-north","name":"冷蔵庫D-2・北接続","aliases":[],"kind":"equipment_port","svg_element_id":"anchor-storage-fridge-d2-north","x":673.5,"y":1010,"equipment_id":"storage-fridge-d2","side":"北接続"},
@@ -6742,5 +6750,5 @@
     "max_lines": 9
   },
   "svg_file": "kitchen-base-bread.svg",
-  "svg_sha256": "501e803ea567668ed8ef9b940afad79b294e568bfb0260432360367512b1a7b9"
+  "svg_sha256": "5bf039bdc0391250821f156d0570beedeec74af2538349e53bf215b0f0421ef5"
 }

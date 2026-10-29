@@ -12,7 +12,7 @@ import math
 import re
 import xml.etree.ElementTree as E
 
-from .named_svg_route_service import render, validate_pair, resolve_line_styles, _equipment_bounds, _tag, _number
+from .named_svg_route_service import render, validate_pair, resolve_line_styles, _equipment_bounds, _tag, _number, inactive_area_equipment
 from .process_route_rules_service import prepare_process_route_rules
 
 GAP = 8.0
@@ -304,6 +304,7 @@ def _plan_once(svg_bytes,manifest,request):
                 element.set('style',re.sub(r'(?:^|;)\s*display\s*:\s*none(?:\s*!important)?\s*(?=;|$)','',element.get('style','')))
             else:inactive_equipment.update(e.get('id') for e in element.iter() if e.get('id'))
     if referenced_equipment & inactive_equipment:raise ValueError('参照する追加設備を図面設定で明示選択してください')
+    inactive_equipment |= inactive_area_equipment(root, referenced_equipment)
     moves=layout.get('text_positions',[])
     if not isinstance(moves,list):raise ValueError('見出し位置指定の形式が不正です')
     moved=set();moved_elements=[]
