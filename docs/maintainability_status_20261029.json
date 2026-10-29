@@ -3,7 +3,15 @@
   "source_branch": "codex/maintainability-20261029",
   "base_sha": "15613213b7cedc43e097054e83273e53bfa7705c",
   "implementation_status": "in_progress",
-  "verification_status": "fixtures_updated_final_review_pending",
+  "verification_status": "targeted_local_checks_passed_formal_linux_and_live_pending",
+  "local_evidence": [
+    "/private/tmp/sawa-maintainability-final-20261029/results.json",
+    "/private/tmp/sawa-maintainability-related-20261029/results.json",
+    "/private/tmp/sawa-maintainability-related-20261029-round2/results.json",
+    "/private/tmp/sawa-maintainability-related-20261029-round3/results.json",
+    "/private/tmp/sawa-maintainability-build-20261029/results.json",
+    "/private/tmp/sawa-school-quality-final-20261029/results.json"
+  ],
   "integration_sha": null,
   "test_receipt": null,
   "staging_revision": null,

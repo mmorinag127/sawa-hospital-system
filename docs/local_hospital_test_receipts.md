@@ -113,9 +113,12 @@ definition and Git ancestry must validate before selection. Invalid explicit
 baselines stop the run. `scope-baseline.json` records the original receipt hash
 and both source SHAs. This is change selection, not a claim that omitted tests
 passed on the new source. Authentication/quantity checks, changed and unresolved
-failure modules remain required. Native business changes still select the full
-native suite; the existing read/startup selection is unchanged. Full/production
-mode does not use this baseline.
+failure modules remain required. Shared assistant/runtime changes still select
+the full native suite. A delta limited to the packaged school or shift code and
+its matching source manifest selects that domain plus shared authentication,
+receipt, recovery and restart contracts. Unknown or shared inputs cannot enter
+that narrower branch. The existing read/startup selection is unchanged.
+Full/production mode does not use this baseline.
 
 For frontend contracts, `--use-openssl-ca` and `--max-old-space-size=2048`
 remain in the tracked environment hash without forcing all tests to execute.
@@ -140,6 +143,22 @@ batch can reuse an earlier real success only with its signature, ancestor source
 unchanged source/runtime/environment and intact input-observation proof. Unknown
 inputs, subprocesses, skips or failures prohibit reuse. Full/production runs
 never reuse that command. No hosted CI execution is introduced.
+
+## Current Preparation And Command Boundaries
+
+Agent images use the backend dependency base verified by its complete fingerprint,
+Linux/amd64 platform and registry digest, not a deployed backend application image.
+All application sources are copied from the current checkout. Missing or
+unverified dependency bases block preparation; old images are not relabelled.
+
+Successful static lint/type commands can retain signed command evidence when
+their complete source, environment and runtime closure is unchanged. The caller
+must report integer exit code zero, and inputs are hashed again after execution.
+Failed, incomplete, changed-input and unknown-context commands cannot establish
+a reusable success. This does not enable reuse of an unobserved backend command.
+Source-specific targets may name exact pytest nodes; authentication and original/
+quantity-preservation groups remain mandatory. Unknown sources block selection.
+Retained failures preserve their exact node/parameter identity.
 
 ## Cold-run preparation reduction
 
