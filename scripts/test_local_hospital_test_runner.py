@@ -998,7 +998,7 @@ class ReceiptContractTest(unittest.TestCase):
             self.assertEqual([item['exit_code'] for item in failed['commands']], [2, 0, 3])
             self.assertFalse((output / 'receipt.json').exists())
             self.command_evidence.save.assert_called_once_with(commands[1]['command'], 'a' * 40,
-                                                               output / '01-group-1.log')
+                                                               output / '01-group-1.log', exit_code=0)
             self.command_evidence.persist.assert_called_once()
 
     def test_identical_commands_execute_once_without_hiding_alias_failures(self):

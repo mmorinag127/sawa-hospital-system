@@ -1,5 +1,5 @@
 {
-  "source_revision": "801c187a3217976237901238e67b3a2ef305076c",
+  "source_revision": "e7598f1c2e7490da792aa04e467fd1ce3380de30",
   "working_diff_sha256": "4d6ccbb89b0a62de1216abd60e06f0b9ad705f80d5abf3db7e15adc2e38d2510",
   "files": {
     "backend/Dockerfile": "8003085340a146430874bca700a031bad039a329213e9246f0b93975cfcb2eee",
@@ -173,7 +173,7 @@
     "backend/src/services/shared_menu_review.py": "28a35c46504932c8fb2022997c5c8b5e8cb8ed76a6feb35edef7dbef3f59c518",
     "backend/src/services/shared_menu_service.py": "a9fac4ad2c241de63cfe1bfae5ada39c4eda48ed3751850945d5943c0224fef6",
     "backend/src/services/work_schedule_import.py": "00fce97e5a41e6b3957e54deffc8a5f15fb8db4cbb98ef9e2b9a58cda105a0d9",
-    "backend/src/services/work_schedule_service.py": "ad48f64c4c6052a2c0af87d9bd7da3e9448fdd3e519947bbf9a1d51e98f35374",
+    "backend/src/services/work_schedule_service.py": "c2f16fc44d7b92cedde68f2bacc8aa7f694447b0b749c3cb289db4afc1ac24ea",
     "backend/src/services/work_schedule_template_export.py": "4d9b583256048b3888b0c11447b4299a186d82a477bcc3efe64ad5a6e3057b25",
     "backend/src/services/workbook_pdf_service.py": "2ad51a1cee55560a6a7e54a44a75342cb5a4d91538e894ae692f3d458b34db5a",
     "backend/src/shared_menu_catalog_keys.py": "69569f171faedd7b919e1ed5b842621de25079a0a73d424b0185cfeb035346b1",
@@ -204,8 +204,8 @@
       ]
     }
   ],
-  "upstream_base_revision": "611bef0e535a8c14539f39a629f9ccfc87637b7b",
-  "upstream_delta_sha256": "1dc201ca94b3bc9d6ae9aa4a4f247f502cd89aac41ecd4e93b67e29f0a656e6a",
+  "upstream_base_revision": "801c187a3217976237901238e67b3a2ef305076c",
+  "upstream_delta_sha256": "6896857d47d190f3227858183cf5fe228eb63e6aa656662bb0e43e4a61d913b0",
   "retained_extensions": [
     {
       "path": "backend/src/api/implementation_price_tables.py",

@@ -241,6 +241,7 @@ def build_work_schedule_draft(session: Session, facility_name: str, service_date
         "time_profile": previous.get("time_profile"),
         "source_menu_versions": _menu_versions(session, facility.id, service_date),
         "source_process_revisions": revision_map(patterns) if not source_import else None,
+        "current_process_revisions": revision_map(patterns),
         "pattern_missing": missing_execution(patterns,session),
         "current_menu_versions": _menu_versions(session, facility.id, service_date),
         "stale": False,

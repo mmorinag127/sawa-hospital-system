@@ -8,7 +8,8 @@ const require = createRequire(import.meta.url);
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 const { NativeSelect } = require('@mui/material');
-const { expect } = require('@playwright/test');
+const { expect: baseExpect } = require('@playwright/test');
+const expect = baseExpect.configure({ timeout: 150 });
 
 async function browserTest(action) {
   return isolatedPage(async page => {

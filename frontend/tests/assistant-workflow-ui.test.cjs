@@ -520,7 +520,7 @@ test('known creation rejection is displayed and does not enter unknown-outcome p
 
 test('creation reconciliation never overlaps a slow initial history lookup with polling',async()=>{
  let created=false,release,reads=0;
- const h=await mount({beforeGet:async url=>{if(created&&url===base+'/runs'){reads++;await new Promise(r=>release=r);}},beforePost:async(url,body)=>{if(url===base+'/runs'){created=true;h.setRun({...makeRun(),request_key:body.request_key});throw new Error('timeout');}}});
+ const h=await mount({beforeGet:async url=>{if(created&&url===base+'/run-lookup'){reads++;await new Promise(r=>release=r);}},beforePost:async(url,body)=>{if(url===base+'/runs'){created=true;h.setRun({...makeRun(),request_key:body.request_key});throw new Error('timeout');}}});
  try{
   await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('未処理FAX')));
   await h.wait(()=>!h.button('この内容で始める').disabled);await h.click(h.button('この内容で始める'));
