@@ -5,8 +5,20 @@ import os
 from pathlib import Path
 import subprocess
 import fcntl
+import shlex
 
 from local_hospital_test_runner import ROOT, clean_tree, focused_staging, frontend_scope, git, reject_hosted_runner
+
+
+def requires_full_environment(environment):
+    try:
+        options = shlex.split(environment.get('NODE_OPTIONS', ''))
+    except ValueError:
+        return True
+    # These options remain part of the dependency tracker's environment hash.
+    return bool(environment.get('NODE_PATH')) or bool(set(options) - {
+        '--use-openssl-ca', '--max-old-space-size=2048',
+    })
 
 
 def main():
@@ -29,7 +41,7 @@ def main():
         if state.is_symlink():
             raise ValueError('Frontend dependency state must not be a symlink')
         environment.update(SAWA_IMPACT_ROOT=str(ROOT), SAWA_NODE_IMPACT_STATE=str(state),
-                           SAWA_IMPACT_FULL='1' if environment.get('NODE_OPTIONS') or environment.get('NODE_PATH') else '0')
+                           SAWA_IMPACT_FULL='1' if requires_full_environment(environment) else '0')
     else:
         environment['SAWA_IMPACT_FULL'] = '1'
         environment.pop('SAWA_IMPACT_ROOT', None)

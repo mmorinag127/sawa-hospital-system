@@ -662,6 +662,23 @@ class ReceiptContractTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         RUNNER.frontend_scope('config')
 
+    def test_frontend_context_preserves_safe_runtime_flags_without_forcing_full_selection(self):
+        for options, node_path, expected in (
+            ('', '', False),
+            ('--use-openssl-ca', '', False),
+            ('--use-openssl-ca --max-old-space-size=2048', '', False),
+            ('--use-openssl-ca --max-old-space-size=2048', '/custom/modules', True),
+            ('--require=./preload.cjs', '', True),
+            ('--use-openssl-ca --import=./preload.mjs', '', True),
+            ('--max-old-space-size=4096', '', True),
+            ('"unterminated', '', True),
+        ):
+            environment = {'NODE_OPTIONS': options, 'NODE_PATH': node_path}
+            preserved = dict(environment)
+            with self.subTest(options=options, node_path=node_path):
+                self.assertEqual(FRONTEND_RUNNER.requires_full_environment(environment), expected)
+                self.assertEqual(environment, preserved)
+
     def test_frontend_contract_command_reports_scope_and_retains_the_full_entry(self):
         for modules in (None, ['tests/portal-auth-gate.test.cjs']):
             def execute(*args, **kwargs):

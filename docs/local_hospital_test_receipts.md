@@ -120,6 +120,10 @@ five existing many-to-one display relationships. Filters, limits, return values,
 other functions/imports, different loaders and inner joins still select full
 coverage. Full/production mode does not use this baseline or this selection.
 
+For frontend contracts, `--use-openssl-ca` and `--max-old-space-size=2048`
+remain in the tracked environment hash without forcing all tests to execute.
+Unknown Node options, preloads and `NODE_PATH` still force full selection.
+
 Focused frontend discovery includes all standard config and browser test names,
 in addition to the explicit boundary modules in
 `infra/ci/staging_frontend_scope.json`. Fixed lists cannot hide new tests. The
