@@ -181,10 +181,14 @@ def test_history_uses_only_sql_revisions_and_preserves_diagnostics(read_history,
 
 
 @pytest.mark.parametrize("endpoint", ["ocr-history", "history"])
-def test_history_order_identity_and_auth_do_not_materialize_or_write(read_history, endpoint):
-    # An orphaned cache must not make a missing order appear to exist.
-    with session_scope() as session:
-        session.add(OrderOcrCache(order_id="missing-order", payload=CACHED, updated_at=STAMP))
+def test_history_order_identity_and_auth_do_not_materialize_or_write(read_history, endpoint, monkeypatch):
+    # Missing orders must be rejected before consulting legacy diagnostic data.
+    from src.services import order_service
+    original = order_service._load_ocr_history_diagnostics
+    def diagnostics(order_id):
+        assert order_id != "missing-order", "orphan diagnostics cannot establish order identity"
+        return original(order_id)
+    monkeypatch.setattr(order_service, "_load_ocr_history_diagnostics", diagnostics)
     assert read_history(endpoint, authenticated=False).status_code == 401
     missing = read_history(endpoint, order_id="missing-order")
     assert missing.status_code == 404

@@ -393,14 +393,14 @@ def test_monthly_menus_upload_history_allows_operator(monkeypatch, hospital_oper
     monkeypatch.setattr(
         menus_api.menu_service,
         "list_menu_uploads",
-        lambda month_id: [
+        lambda month_id, *, before_id=None: {"items": [
             {
                 "id": "AUD1",
                 "month_id": month_id,
                 "filename": "menu.xlsx",
                 "download_available": True,
             }
-        ],
+        ], "next_before_id": None},
     )
 
     client = TestClient(app)

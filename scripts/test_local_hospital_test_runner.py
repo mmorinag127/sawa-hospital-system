@@ -149,9 +149,9 @@ class ReceiptContractTest(unittest.TestCase):
                 'exitstatus': 0, 'source_sha': 'a' * 40, 'baseline': None}))
             return subprocess.CompletedProcess(argv, 0)
 
-        for mode, full_flag in (('full', '1'), ('impact', '0'), ('focused', '0')):
+        for mode, full_flag in (('full', '1'), ('impact', '0')):
             self.check_backend_partition(mode, full_flag, seen, execute_backend)
-        for branch, full_flag in (('codex/owned', '0'), ('release/prod-owned', '1'), ('', '1')):
+        for branch, full_flag in (('release/prod-owned', '1'), ('', '1')):
             self.check_backend_partition(None, full_flag, seen, execute_backend, branch=branch)
         self.check_backend_partition('impact', '1', seen, execute_backend, branch='release/prod-owned')
         self.check_backend_partition('focused', '1', seen, execute_backend, branch='release/prod-owned')
@@ -201,6 +201,110 @@ class ReceiptContractTest(unittest.TestCase):
             (state / 'failed-tests.json').write_text(json.dumps(['../../outside.py::test']))
             with self.assertRaisesRegex(ValueError, 'explicit current test mapping'):
                 BACKEND_RUNNER.retained_failure_modules(state)
+
+    def test_staging_scope_is_cold_safe_and_includes_changed_and_failed_modules(self):
+        from backend_test_scope import select_modules
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            definition = root / 'infra/ci/staging_backend_scope.json'
+            definition.parent.mkdir(parents=True)
+            modules = ['backend/tests/test_auth.py', 'backend/tests/test_read.py',
+                       'backend/tests/test_new.py', 'backend/tests/test_failed.py']
+            for module in modules:
+                path = root / module
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            definition.write_text(json.dumps({'version': 2, 'always': ['auth'],
+                'groups': {'auth': [modules[0]], 'reads': [modules[1]]},
+                'sources': {'backend/src/read.py': ['reads']}}))
+            selected = select_modules(root, ['backend/src/read.py', modules[2]], [modules[3]])
+            self.assertEqual(selected['modules'], sorted(modules))
+            self.assertEqual(selected['changed_tests'], [modules[2]])
+            self.assertEqual(select_modules(root, [])['modules'], [modules[0]])
+            shared = root / 'backend/tests/conftest.py'
+            shared.touch()
+            self.assertEqual(select_modules(root, ['backend/tests/conftest.py'])['modules'], sorted(modules[:2]))
+            with self.assertRaisesRegex(ValueError, 'Map backend changes'):
+                select_modules(root, ['backend/src/unmapped.py'])
+            with self.assertRaisesRegex(ValueError, 'removed test coverage'):
+                select_modules(root, ['backend/tests/test_removed.py'])
+
+    def test_scoped_backend_does_not_load_testmon_or_claim_reuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / 'evidence'
+            evidence.mkdir()
+            module = 'backend/tests/test_owned.py'
+            node = module + '::test_owned'
+            source = 'a' * 40
+            scope = {'kind': 'reviewed-staging-behaviors', 'modules': [module],
+                     'outside_scope': 'not executed'}
+            def execute(argv, env):
+                self.assertIn(module, argv)
+                self.assertNotIn('backend/tests', argv)
+                self.assertNotIn('--testmon', argv)
+                self.assertNotIn('SAWA_IMPACT_FULL', env)
+                self.assertIn('scoped_backend_results', argv)
+                (evidence / 'selection.json').write_text(json.dumps({
+                    'source_sha': source, 'selected': [node], 'executed': [node],
+                    'completed': [node], 'passed': [node], 'failed': [], 'incomplete': [],
+                    'not_started': [], 'reused': [], 'normal_completion': True, 'exitstatus': 0}))
+                return subprocess.CompletedProcess(argv, 0)
+            with patch.object(BACKEND_RUNNER, 'clean_tree', return_value=True), \
+                 patch.object(BACKEND_RUNNER, 'git', return_value=source), \
+                 patch.object(BACKEND_RUNNER, 'run_pytest', side_effect=execute):
+                self.assertEqual(BACKEND_RUNNER.run_scoped_backend(scope, evidence,
+                    {'SAWA_IMPACT_FULL': '1'}, source, root / 'legacy/backend', [], []), 0)
+            self.assertEqual(json.loads((root / 'legacy/backend-scoped/failed-tests.json').read_text()), [])
+
+    def test_default_staging_uses_scoped_selection_before_pytest_collection(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {'SAWA_LOCAL_EVIDENCE_DIR': directory, 'CI': '', 'GITHUB_ACTIONS': ''}), \
+             patch.object(BACKEND_RUNNER, 'clean_tree', return_value=True), \
+             patch.object(BACKEND_RUNNER, 'git', side_effect=lambda *args:
+                 str(Path(directory) / 'git') if '--git-common-dir' in args else
+                 'codex/owned' if args == ('branch', '--show-current') else
+                 'backend/src/api/orders.py' if args[0] == 'diff' else 'a' * 40), \
+             patch.object(BACKEND_RUNNER.sys, 'argv', ['runner']), \
+             patch.object(BACKEND_RUNNER, 'require_impact_dependencies') as impact, \
+             patch.object(BACKEND_RUNNER, 'run_scoped_backend', return_value=0) as scoped, \
+             patch.object(BACKEND_RUNNER, 'run_pytest') as collect:
+            os.environ.pop('SAWA_LOCAL_TEST_MODE', None)
+            self.assertEqual(BACKEND_RUNNER.main(), 0)
+            self.assertIn('page-read-results-and-response-ownership', scoped.call_args.args[0]['groups'])
+            self.assertIn('authentication-and-session', scoped.call_args.args[0]['groups'])
+            impact.assert_not_called()
+            collect.assert_not_called()
+
+    def test_scoped_results_distinguish_failure_skip_and_interrupted_cases(self):
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location('owned_scoped_results',
+            RUNNER.ROOT / 'infra/ci/scoped_backend_results.py')
+        plugin = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(plugin)
+        plugin.pytest_collection_finish(SimpleNamespace(items=[
+            SimpleNamespace(nodeid=node) for node in ('pass', 'fail', 'skip', 'interrupted', 'unstarted')]))
+        for node in ('pass', 'fail', 'skip', 'interrupted'):
+            plugin.pytest_runtest_logstart(node, None)
+            phases = [('setup', 'skipped')] if node == 'skip' else [('setup', 'passed')]
+            if node in ('pass', 'fail'):
+                phases.append(('call', 'passed' if node == 'pass' else 'failed'))
+            if node != 'interrupted':
+                phases.append(('teardown', 'passed'))
+            for when, outcome in phases:
+                plugin.pytest_runtest_logreport(SimpleNamespace(nodeid=node, when=when, outcome=outcome))
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                'SAWA_LOCAL_SOURCE_SHA': 'a' * 40,
+                'SAWA_SCOPED_BACKEND_REPORT': str(Path(directory) / 'results.json')}):
+            plugin.pytest_sessionfinish(None, 2)
+            report = json.loads((Path(directory) / 'results.json').read_text())
+        self.assertEqual(report['passed'], ['pass'])
+        self.assertEqual(report['failed'], ['fail'])
+        self.assertEqual(report['skipped'], ['skip'])
+        self.assertEqual(report['incomplete'], ['interrupted'])
+        self.assertEqual(report['not_started'], ['unstarted'])
+        self.assertFalse(report['normal_completion'])
+        self.assertEqual(report['reused'], [])
 
     def test_failed_attempt_restores_consistent_database_and_metadata(self):
         import sqlite3

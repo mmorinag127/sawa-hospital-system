@@ -6,13 +6,15 @@ from fastapi.testclient import TestClient
 
 from src.api import orders as api
 from src.main import app
+from src.services import ocr_operations_display_service as display_service
 
 
 def stub_page_reader(monkeypatch, page):
     def read(*, job_bindings_out, **kwargs):
         result = deepcopy(page)
-        job_bindings_out.update(api.order_service.get_recorded_order_job_bindings(
-            [row['id'] for row in result['orders']]))
+        if kwargs.get('include_job_bindings', True):
+            job_bindings_out.update(api.order_service.get_recorded_order_job_bindings(
+                [row['id'] for row in result['orders']]))
         return result
     monkeypatch.setattr(api.order_service, 'list_orders_page', read)
 
@@ -28,6 +30,11 @@ def test_monitor_keeps_visible_fields_pagination_without_unused_review(monkeypat
         for i, state in enumerate(('pending', 'running', 'done', 'failed', 'stalled'))
     ], 'has_more': True, 'next_cursor': {'id': 'O4', 'received_at': '2026-10-20T00:00:00'}}
     calls = []
+    def displays(ids):
+        calls.append(('display', tuple(ids)))
+        return {row['id']: {'job': {'status': row['status'], 'error_message': row['ocr_error']},
+                'error': None, 'validation_state': 'references_only'} for row in original['orders']}
+    monkeypatch.setattr(display_service, 'get_order_job_displays', displays)
     stub_page_reader(monkeypatch, original)
     monkeypatch.setattr(api.order_service, '_load_order_ocr_cache_map', lambda ids: {})
     monkeypatch.setattr(api.workflow_state_service, 'list_workflow_states', lambda ids: {})
@@ -62,7 +69,7 @@ def test_monitor_keeps_visible_fields_pagination_without_unused_review(monkeypat
     assert compact.status_code == 200
     if runtime:
         assert {name for name, _ in before_calls} == {'status', 'cached', 'stale', 'summary'}
-        assert {name for name, _ in calls} == {'status', 'stale'}
+        assert calls == [('display', tuple(row['id'] for row in original['orders']))]
     else:
         assert calls == before_calls == []
     expected = {**full.json(), 'orders': [
@@ -102,11 +109,18 @@ def test_monitor_current_job_values_match_full_list(monkeypatch, state):
     full = client.get('/orders?include_ocr=true')
     assert full.status_code == 200
     expected = api._order_list_response(full.json(), 'ocr_monitor')
+    def displays(ids):
+        assert ids == ['O1', 'O2', 'O3']
+        job = {key: value for key, value in deepcopy(jobs['J1']).items() if key != 'metrics'}
+        job['error'] = jobs['J1']['metrics']['error']
+        return {'O1': {'job': job, 'error': None, 'validation_state': 'references_only'}}
+    monkeypatch.setattr(display_service, 'get_order_job_displays', displays)
     def unrelated(*a, **kw):
         raise AssertionError('monitor must not load unused detailed review sources')
     monkeypatch.setattr(api.order_service, '_load_order_ocr_cache_map', unrelated)
     monkeypatch.setattr(api.workflow_state_service, 'list_workflow_states', unrelated)
     monkeypatch.setattr(api, '_attach_order_review_summary', unrelated)
+    monkeypatch.setattr(api.order_service, 'get_recorded_order_job_bindings', unrelated)
     compact = client.get('/orders?include_ocr=true&response_view=ocr_monitor')
     assert compact.status_code == 200
     assert compact.json() == expected
@@ -122,10 +136,11 @@ def test_monitor_source_failure_stops_and_full_review_still_validates(monkeypatc
     def failed(*a, **kw):
         raise RuntimeError('source unavailable')
     monkeypatch.setattr(api, '_attach_order_review_summary', failed)
+    monkeypatch.setattr(display_service, 'get_order_job_displays', lambda ids: {})
     client = TestClient(app, raise_server_exceptions=False)
     assert client.get('/orders?include_ocr=true').status_code == 500
     assert client.get('/orders?include_ocr=true&response_view=ocr_monitor').status_code == 200
-    monkeypatch.setattr(api.order_service, 'get_recorded_order_job_bindings', failed)
+    monkeypatch.setattr(display_service, 'get_order_job_displays', failed)
     assert client.get('/orders?include_ocr=true&response_view=ocr_monitor').status_code == 500
     monkeypatch.setattr(api.order_service, 'list_orders_page', failed)
     assert client.get('/orders?include_ocr=false&response_view=ocr_monitor').status_code == 500

@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
-from src.api import outputs as outputs_api  # noqa: E402
+from src.services import output_builder  # noqa: E402
 from src.main import app  # noqa: E402
 
 
@@ -17,7 +17,7 @@ def test_daily_bundle_headers_keep_empty_orders_separate(monkeypatch, tmp_path, 
     output_path = tmp_path / "daily-output.xlsx"
     output_path.write_bytes(b"output")
     monkeypatch.setattr(
-        outputs_api,
+        output_builder,
         "build_daily_output_bundle",
         lambda *_args, **_kwargs: (
             output_path,

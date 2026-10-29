@@ -56,6 +56,58 @@ def retained_failure_modules(state):
     return sorted(modules)
 
 
+def run_scoped_backend(scope, evidence, env, source, legacy_state, excluded, arguments):
+    state = legacy_state.parent / 'backend-scoped'
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    modules = sorted(set(scope['modules']) - set(excluded))
+    if not modules:
+        raise ValueError('Scoped staging verification has no general tests')
+    env = {key: value for key, value in env.items()
+           if not key.startswith('SAWA_IMPACT_') and key != 'TESTMON_DATAFILE'}
+    env.update(SAWA_LOCAL_SOURCE_SHA=source,
+               SAWA_SCOPED_BACKEND_REPORT=str(evidence / 'selection.json'),
+               DB_URI='sqlite:///' + str(evidence / 'runtime.sqlite'), APP_ENV='test',
+               PYTHONPATH=os.pathsep.join(str(ROOT / path) for path in
+                   ('backend', 'backend/tests/unit', 'infra/ci', 'scripts', '.')))
+    argv = [sys.executable, '-m', 'pytest', *modules, '-p', 'scoped_backend_results', '-q',
+            '--basetemp=' + str(evidence / 'pytest-temp'),
+            '--junitxml=' + str(evidence / 'results.xml'), *arguments]
+    (evidence / 'partition.json').write_text(json.dumps({
+        'source_sha': source, 'scope': scope, 'general_argv': argv,
+        'dedicated_modules': DEDICATED_MODULES,
+        'outside_scope': scope['outside_scope'],
+    }, indent=2))
+    with (state / 'run.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            result = run_pytest(argv, env)
+        finally:
+            report_path = evidence / 'selection.json'
+            if report_path.is_file():
+                report = json.loads(report_path.read_text())
+                unresolved = report['failed'] + report['incomplete'] + report['not_started']
+                retain_failures(state, evidence, unresolved,
+                                successful=report['exitstatus'] == 0)
+        selection = json.loads((evidence / 'selection.json').read_text())
+        if (selection['source_sha'] != source or selection['exitstatus'] != result.returncode
+                or selection['reused'] or not selection['selected']
+                or (result.returncode == 0 and (not selection['normal_completion']
+                    or selection['selected'] != selection['executed']
+                    or set(selection['completed']) != set(selection['selected'])))
+                or not clean_tree() or git('rev-parse', 'HEAD') != source):
+            raise ValueError('Invalid fixed-source staging behavior evidence')
+        if result.returncode == 0 and legacy_state.is_dir():
+            resolved = [identity for node in selection['passed']
+                        for identity in (node, node.removeprefix('backend/'))]
+            retain_failures(legacy_state, evidence, [], resolved=resolved)
+        from local_hospital_test_runner import digest
+        print(json.dumps({'backend_selection': {'source_sha': source, 'mode': 'focused',
+            'executed': len(selection['executed']), 'reused': 0,
+            'report_sha256': digest(evidence / 'selection.json')},
+            'scope': scope['kind'], 'outside_scope': scope['outside_scope']}), flush=True)
+    return result.returncode
+
+
 def require_impact_dependencies():
     try:
         matches = all(version(name) == expected for name, expected in (
@@ -240,7 +292,6 @@ def main():
     reject_hosted_runner()
     if not clean_tree():
         raise ValueError("Backend tests require a fixed clean source")
-    require_impact_dependencies()
     source = git("rev-parse", "HEAD")
     contracts = '--contracts' in sys.argv[1:]
     arguments = [argument for argument in sys.argv[1:] if argument != '--contracts']
@@ -262,6 +313,8 @@ def main():
         raise ValueError("Local backend test mode must be full, impact or focused")
     if not branch or branch.startswith("release/prod-"):
         mode = "full"
+    if mode != 'focused' or contracts:
+        require_impact_dependencies()
     scope = None
     if contracts:
         from local_hospital_test_runner import MANIFEST
@@ -278,11 +331,16 @@ def main():
         common = ROOT / common
     retained = []
     if mode == 'focused' and not contracts:
-        retained = retained_failure_modules(common.resolve() / 'sawa-local-impact/backend')
+        legacy_state = common.resolve() / 'sawa-local-impact/backend'
+        retained = sorted(set(retained_failure_modules(legacy_state))
+                          | set(retained_failure_modules(legacy_state.parent / 'backend-scoped')))
         if any(name in excluded for name in retained):
             raise ValueError('Retained dedicated PostgreSQL failure must use its owned runner')
-        # Every general module is collected; the dependency selector decides
-        # execution. A fixed allowlist must not hide new or changed tests.
+        from backend_test_scope import select_modules
+        base = git('merge-base', 'HEAD', 'origin/develop')
+        changed = git('diff', '--name-only', base, 'HEAD', '--', 'backend').splitlines()
+        scope = select_modules(ROOT, changed, retained)
+        return run_scoped_backend(scope, evidence, env, source, legacy_state, excluded, arguments)
     # A new worktree must not discard the same repository's verified inputs.
     # The existing exclusive lock and per-case dependency checks still apply.
     state = common.resolve() / "sawa-local-impact" / ('python-contracts' if contracts else 'backend')

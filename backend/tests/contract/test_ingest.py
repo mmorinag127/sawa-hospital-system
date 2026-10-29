@@ -792,14 +792,14 @@ def test_recover_ready_bulk_runs_ingest_uploaded_and_ocr_recovery(upload_case, m
         if original["id"] in provider_calls:
             current = next(row for row in after[OcrJob.__tablename__] if row["id"] == original["id"])
             assert started <= current["updated_at"] <= finished
-            assert started <= datetime.fromisoformat(current["metrics"]["stage_updated_at"]) <= finished
+            assert started <= datetime.fromisoformat(current["progress_json"]["stage_updated_at"]) <= finished
             interval = ingest_worker.get_auto_recovery_interval_seconds()
-            assert started + timedelta(seconds=interval) <= datetime.fromisoformat(current["metrics"]["next_recovery_at"]) <= finished + timedelta(seconds=interval)
+            assert started + timedelta(seconds=interval) <= datetime.fromisoformat(current["progress_json"]["next_recovery_at"]) <= finished + timedelta(seconds=interval)
             original["updated_at"] = current["updated_at"]
-            original["metrics"].update(
-                auto_recovery_count=original["metrics"].get("auto_recovery_count", 0) + 1,
-                next_recovery_at=current["metrics"]["next_recovery_at"],
-                stage_updated_at=current["metrics"]["stage_updated_at"],
+            original["progress_json"].update(
+                auto_recovery_count=original["progress_json"].get("auto_recovery_count", 0) + 1,
+                next_recovery_at=current["progress_json"]["next_recovery_at"],
+                stage_updated_at=current["progress_json"]["stage_updated_at"],
             )
     assert after == expected
     with session_scope() as session:

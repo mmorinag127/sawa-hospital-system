@@ -410,19 +410,22 @@ def _apply_order_workflow_context(order: dict, workflow: dict | None) -> None:
         order["apply_gate"] = workflow["apply_gate"]
 
 
+def _job_error_for_display(status, error_message, metrics_error):
+    metrics_error = str(metrics_error or "").strip() or None
+    return metrics_error if metrics_error and _is_running_status(status) else error_message
+
+
 def _apply_job_status_to_order(order: dict, job: dict | None, *, include_metrics: bool = True) -> None:
     if not isinstance(job, dict):
         return
     error_message = job.get("error_message")
     metrics = job.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
-    metrics_error = str(metrics.get("error") or "").strip() or None
     order["ocr_status"] = job.get("status")
     order.pop("ocr_error", None)
-    if metrics_error and _is_running_status(job.get("status")):
-        order["ocr_error"] = metrics_error
-    elif error_message:
-        order["ocr_error"] = error_message
+    error = _job_error_for_display(job.get("status"), error_message, metrics.get("error"))
+    if error:
+        order["ocr_error"] = error
     if metrics and include_metrics:
         order["ocr_metrics"] = metrics
     order["ocr_updated_at"] = job.get("updated_at")
@@ -721,7 +724,8 @@ def list_orders(
             job = display["job"]
             order["ocr_validation_state"] = display["validation_state"]
             order["ocr_status"] = "blocked" if display["error"] else job["status"] if job else None
-            order["ocr_error"] = display["error"] or (job.get("error_message") or job.get("error") if job else None)
+            order["ocr_error"] = display["error"] or (_job_error_for_display(
+                job.get("status"), job.get("error_message"), job.get("error")) if job else None)
         return _order_list_response(page, response_view)
     jobs = {}
     for order in orders:
