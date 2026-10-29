@@ -1,5 +1,5 @@
 {
-  "source_revision": "034dc628faf2092cbf9f131609fd4fa1d2f3d349",
+  "source_revision": "5b86958ca1e5d74415eb646d3abbcbeca6b8ea58",
   "working_diff_sha256": "4d6ccbb89b0a62de1216abd60e06f0b9ad705f80d5abf3db7e15adc2e38d2510",
   "files": {
     "backend/Dockerfile": "8003085340a146430874bca700a031bad039a329213e9246f0b93975cfcb2eee",
@@ -76,7 +76,7 @@
     "backend/src/data/work_schedule_original.xlsx": "20b8b0e58fc9aee7cae0ed0f6d8730028abc8da9f4e0c0513039bccaefc0976a",
     "backend/src/db.py": "3acd1c5d16b1c4168d6006f384f868b9997f96659f8da0b82c7c06b52abdbbc0",
     "backend/src/main.py": "09e99af1ea42adf8892b0c8efb121145afdcd5324eb194aed1354094cc605b2b",
-    "backend/src/migration_catalog.py": "9695db4f305134b3cf7005f2079471e5eb36f6042ef0f4290a56b169404e4b77",
+    "backend/src/migration_catalog.py": "bb6d60c5389a035e13fdfd487e52e6341e7980330127d6faf9151e14eae71907",
     "backend/src/migration_catalog_contracts.json": "5e7b8d18b07ed9545ef7c480798be9269e6c34a1fbdfc85dbe77752144a3741c",
     "backend/src/models/__init__.py": "893f14d6120d74ea3aa4e3948704c1d65b9d8981576b3f54dd03854c13262be4",
     "backend/src/models/implementation_price_draft.py": "235a585be084748f28a7e03b0a060352ff4272d6883a60a0eaef805a3a4f1d43",
@@ -204,8 +204,8 @@
       ]
     }
   ],
-  "upstream_base_revision": "f21bfefbee4dbd29831340df7bcdd083cb947ee0",
-  "upstream_delta_sha256": "4fe97f98bb70dc6edfee33bacda5b2cb7d85652e520d6ef1497548e8d04706fe",
+  "upstream_base_revision": "2132f4e1c9507b82ef95403965c0e867476d7400",
+  "upstream_delta_sha256": "803e3f09d98bfdbce5364c3d47a0dab437ce304a1dab19053ed2503174048d79",
   "retained_extensions": [
     {
       "path": "backend/src/api/implementation_price_tables.py",

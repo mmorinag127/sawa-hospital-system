@@ -11,6 +11,7 @@ from sqlalchemy.engine import URL, make_url
 CATALOG_HEAD = "0032_route_source_references"
 HEAD = "0032_route_source_references"
 AUTH_TABLES = ("users", "audit_logs", "notifications")
+AUTH_TABLE_REVISION = "0026_auth_support_tables"
 CONTRACT_PATH = Path(__file__).with_name("migration_catalog_contracts.json")
 
 
@@ -304,10 +305,10 @@ def require_revision_catalog(connection, revision):
     actual = _comparison_catalog(read_catalog(connection))
     expected = _comparison_catalog(expected)
     if revision == "0025_school_lunch_documents":
-        head = contracts["revisions"][connection.dialect.name][CATALOG_HEAD]["tables"]
+        auth_tables = contracts["revisions"][connection.dialect.name][AUTH_TABLE_REVISION]["tables"]
         for name in AUTH_TABLES:
             if name in actual["tables"]:
-                shape = _comparison_catalog({"tables": {name: contracts["shapes"][head[name]]}, "views": {}})
+                shape = _comparison_catalog({"tables": {name: contracts["shapes"][auth_tables[name]]}, "views": {}})
                 expected["tables"][name] = shape["tables"][name]
     if actual != expected:
         changed = sorted(set(actual["tables"]) | set(expected["tables"]))
@@ -324,10 +325,11 @@ def require_auth_table_definitions(connection):
     if not any(name in actual["tables"] for name in AUTH_TABLES):
         return
     contracts = json.loads(CONTRACT_PATH.read_text())
-    head = contracts["revisions"][connection.dialect.name][CATALOG_HEAD]["tables"]
+    # Adoption belongs to 0026; later migrations add their own columns and indexes.
+    auth_tables = contracts["revisions"][connection.dialect.name][AUTH_TABLE_REVISION]["tables"]
     for name in AUTH_TABLES:
         if name in actual["tables"]:
-            expected = _comparison_catalog({"tables": {name: contracts["shapes"][head[name]]}, "views": {}})
+            expected = _comparison_catalog({"tables": {name: contracts["shapes"][auth_tables[name]]}, "views": {}})
             if actual["tables"][name] != expected["tables"][name]:
                 raise RuntimeError("Unrecognized authentication support table: " + name)
 
