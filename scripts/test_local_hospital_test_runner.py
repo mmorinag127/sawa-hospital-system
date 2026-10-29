@@ -101,6 +101,21 @@ class ReceiptContractTest(unittest.TestCase):
                     self.assertIn(['git', 'merge-base', '--is-ancestor', 'a' * 40, 'b' * 40],
                                   [call.args[0] for call in commands.call_args_list])
 
+    def test_staging_cache_keeps_immutable_source_output_and_readonly_selection_gate(self):
+        workflow = yaml.safe_load((RUNNER.ROOT / '.github/workflows/deploy-stg.yml').read_text())
+        gate = workflow['jobs']['source-gate']
+        self.assertEqual(gate['permissions'], {'contents': 'read', 'actions': 'read'})
+        selection = next(step for step in gate['steps'] if step.get('id') == 'changes')
+        self.assertIn('python3 scripts/detect_stg_surfaces.py', selection['run'])
+        self.assertNotIn('echo "backend_changed=true"', selection['run'].split('before=')[0])
+        build = next(step for step in workflow['jobs']['build-agent']['steps'] if step.get('id') == 'image')['run']
+        self.assertIn('agent-runtime:stg-$GITHUB_SHA', build)
+        self.assertIn('--build-arg "SOURCE_REVISION=$GITHUB_SHA"', build)
+        self.assertIn('--cache-from "type=registry,ref=$cache_image" --cache-to type=inline', build)
+        self.assertIn('--tag "$image" --tag "$cache_image"', build)
+        self.assertIn('echo "image=${image%:*}@$digest"', build)
+        self.assertFalse(workflow['concurrency']['cancel-in-progress'])
+
     def test_native_selection_keeps_full_for_business_changes_and_unknown_base(self):
         full_paths = ('experiments/agent_assistant/runtime.py', 'agent_runtime/native/shift/backend/app.py',
                       'agent_runtime/baselines/shift.json', 'agent_runtime/Dockerfile',
