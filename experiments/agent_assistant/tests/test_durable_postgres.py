@@ -387,7 +387,8 @@ def test_readers_do_not_wait_for_writer_or_rewrite_ledger(tmp_path,database):
             assert version()==before
         assert a.budget()['monthly_cents']==2000
     after=version()
-    with pytest.raises(sqlite3.OperationalError,match='readonly'):
+    from psycopg2.errors import ReadOnlySqlTransaction
+    with pytest.raises(ReadOnlySqlTransaction,match='read-only'):
         with a.read() as db:db.execute('UPDATE settings SET monthly_cents=9999 WHERE id=1')
     assert a.budget()['monthly_cents']==2000 and version()==after
     b=PostgresStore(tmp_path,database)
