@@ -102,6 +102,14 @@ def test_failed_formal_migration_does_not_publish_a_release_hash(bundle, monkeyp
 def test_build_prepares_baseline_before_native_startup_smoke():
     dockerfile = (ROOT / "agent_runtime/Dockerfile").read_text()
     assert dockerfile.index("-m experiments.agent_assistant.prepare_packaged") < dockerfile.index("-m experiments.agent_assistant.check_packaged")
+    for domain in ('shift', 'school-lunch'):
+        source_copy = f'COPY agent_runtime/native/{domain} /opt/sawa-agent/native/{domain}\n'
+        assert dockerfile.count(source_copy) == 1
+        requirements = f'COPY agent_runtime/native/{domain}/backend/requirements.txt '
+        install = f'RUN /opt/agent/{domain}/bin/pip install --no-cache-dir -r '
+        assert dockerfile.index(requirements) < dockerfile.index(install) < dockerfile.index(source_copy)
+    school_worker = 'COPY agent_runtime/native/school-lunch/worker/requirements.txt '
+    assert dockerfile.index(school_worker) < dockerfile.index('RUN /opt/agent/school-lunch/bin/pip install')
 
 
 def test_migration_cannot_reseal_changes_to_original_documents(bundle, monkeypatch):
