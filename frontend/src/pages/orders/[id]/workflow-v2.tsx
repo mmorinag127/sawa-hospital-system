@@ -2787,10 +2787,6 @@ export default function OrderWorkflowV2Page() {
         ? true : await refreshAll(current, null, (publish) => publish(), scope, controller.signal);
       if (!adopted || !current()) return;
       if (initialDisplayReadRef.current === initialRead) initialDisplayReadRef.current = null;
-      if (scope === "sheet" && workflow.selected_ocr_result_id) {
-        await loadOcrResultDetail(workflow.selected_ocr_result_id, current);
-        if (!current()) return;
-      }
       displayReadyRef.current = scope;
     })().catch((err) => {
       if (current() && !controller.signal.aborted) setError(formatApiError(err, "表示データの取得に失敗しました"));

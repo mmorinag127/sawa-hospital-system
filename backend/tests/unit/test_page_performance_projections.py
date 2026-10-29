@@ -165,7 +165,8 @@ def test_display_summary_never_rebuilds_or_verifies_ocr_on_read(history_case, mo
         assert common["sourceState"] == job["status"]
 
 
-def test_inspection_preview_does_not_validate_or_deserialize_full_evidence(history_case, monkeypatch):
+@pytest.mark.parametrize("scope", ["sheet", "inspection"])
+def test_inspection_preview_does_not_validate_or_deserialize_full_evidence(history_case, monkeypatch, scope):
     from src.services import workflow_display_read_service as display
     from src.services import order_workflow_v2_service as workflow
     from src.db import session_scope
@@ -179,18 +180,20 @@ def test_inspection_preview_does_not_validate_or_deserialize_full_evidence(histo
         evidence_id = state.evidence_run_id
         evidence = session.get(OrderOcrEvidenceRun, evidence_id)
         payload = dict(evidence.payload_json)
-        payload["hakodate_overlay"] = {"url": "https://synthetic.invalid/selected.png"}
+        payload["hakodate_overlay"] = {"url": "https://synthetic.invalid/selected.png",
+            "sheet_review_base_url": "https://synthetic.invalid/base.png"}
         evidence.payload_json = payload
 
     def forbidden(*args, **kwargs):
         raise AssertionError("initial inspection requested strict evidence detail")
     monkeypatch.setattr(workflow, "_serialize_ocr_result", forbidden)
     with case.readonly():
-        result, error = display.get_display(case.id, scope="inspection")
+        result, error = display.get_display(case.id, scope=scope)
     assert error is None
     selected = next(row for row in result["ocr_results"] if row["selected"])
     assert selected["ocr_result_id"] == evidence_id
     assert selected["overlay_url"] == "https://synthetic.invalid/selected.png"
+    assert selected["sheet_review_base_url"] == "https://synthetic.invalid/base.png"
     assert selected["detail_state"] == "not_loaded"
     assert "selectable" not in selected
     assert "recognition_review" not in selected

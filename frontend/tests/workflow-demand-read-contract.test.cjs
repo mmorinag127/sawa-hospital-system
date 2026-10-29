@@ -35,6 +35,18 @@ async function setup(running = false, overrides = {}) {
   await h.settle();
   return {h,t,state,probe,payload,timers};
 }
+test('saved sheet display does not fetch strict OCR details',async()=>{
+  const f=await setup(false,{state:'sheet_saved',saved_sheet_id:'saved',selected_ocr_result_id:'evidence'});
+  try {
+    f.state.results[0].overlay_url='https://synthetic.invalid/selected.png';
+    f.state.results[0].sheet_review_base_url='https://synthetic.invalid/base.png';
+    await f.h.settle(()=>f.probe.current.setVisibleStep(3));
+    await f.h.settle();
+    assert.equal(f.t.calls.filter(c=>c.url===DETAIL).length,0);
+    assert.equal(f.probe.current.ocrResults[0].overlay_url,'https://synthetic.invalid/selected.png');
+    assert.equal(f.probe.current.ocrResults[0].detail_state,'not_loaded');
+  } finally {await f.h.close();}
+});
 test('summary detail button restores exact warning and blocked selection',async()=>{
   const f=await setup();
   try {

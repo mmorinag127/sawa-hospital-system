@@ -337,7 +337,7 @@ def get_display(order_id, *, scope="summary", history_before_id=None, selected_d
             if not workflow._workflow_meta_has_confirmed_context(meta) and not serialized.get("context_suggestion"):
                 serialized["context_suggestion"] = workflow._order_context_suggestion(order)
             error = workflow._inspection_call("display_references", _reference_error, session, order, state, meta,
-                                              reads=reads, include_overlay=scope == "inspection")
+                                              reads=reads, include_overlay=scope in {"sheet", "inspection"})
             serialized = (workflow._workflow_blocker_projection(serialized, error) if error else
                           workflow._apply_canonical_workflow_state_projection(serialized, row=state, meta=meta,
                             state=workflow._canonical_workflow_v2_state(state, meta)))
@@ -413,7 +413,7 @@ def get_display(order_id, *, scope="summary", history_before_id=None, selected_d
                     return None, "output_bundle_artifact_missing"
             result["anomaly_review"] = deepcopy(meta.get("anomaly_review"))
             result["loaded_sections"].append("output")
-        if scope == "inspection" and state and state.evidence_run_id:
+        if scope in {"sheet", "inspection"} and state and state.evidence_run_id:
             workflow._inspection_next("display_overlay")
             evidence = reads.get("selected_evidence") if "selected_evidence" in reads else _saved_reference(
                 session, OrderOcrEvidenceRun, state.evidence_run_id, order.id,
@@ -423,15 +423,22 @@ def get_display(order_id, *, scope="summary", history_before_id=None, selected_d
             overlay = evidence.overlay if isinstance(evidence.overlay, dict) else {}
             uri = workflow._normalize_id(overlay.get("uri") or overlay.get("overlay_uri"))
             url = workflow._normalize_id(overlay.get("url") or overlay.get("overlay_url"))
-            overlay_reference = (evidence.id, uri, url)
+            overlay_reference = (evidence.id, uri, url,
+                workflow._normalize_id(overlay.get("sheet_review_base_uri")),
+                workflow._normalize_id(overlay.get("sheet_review_base_url")))
         workflow._inspection_next("display_session_exit")
     if overlay_reference is not None:
-        evidence_id, uri, url = overlay_reference
+        evidence_id, uri, url, base_uri, base_url = overlay_reference
         if uri and not url:
             url = workflow._normalize_id(workflow._inspection_call(
                 "sign_url", getattr(workflow._get_order_service_module(), "_signed_url_from_uri", lambda _uri: None), uri,
             ))
+        if base_uri and not base_url:
+            base_url = workflow._normalize_id(workflow._inspection_call(
+                "sign_url", getattr(workflow._get_order_service_module(), "_signed_url_from_uri", lambda _uri: None), base_uri,
+            ))
         preview = {"overlay_url": url or None, "overlay_uri": uri or None,
+                   "sheet_review_base_uri": base_uri or None, "sheet_review_base_url": base_url or None,
                    "overlay_status": "ready" if url else "missing",
                    "overlay_message": None if url else "このOCR結果には表示可能なoverlay成果物がありません。"}
         # Preview signing is outside the transaction; it does not validate commands.
