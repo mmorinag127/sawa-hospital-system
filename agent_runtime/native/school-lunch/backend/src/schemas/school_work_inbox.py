@@ -60,3 +60,10 @@ class RegisteredWork(BaseModel):
 
 class RegisteredWorkResponse(BaseModel):
     items: list[RegisteredWork]
+    next_after_id: str | None = None
+
+
+class RegisteredWorkIndex(BaseModel):
+    first_dates: dict[str, str]
+    months: list[str]
+    unassigned_count: int

@@ -1,5 +1,5 @@
 {
-  "source_revision": "76ab923e6da2cb2e65ca59b3ff0bbaf5fb83a462",
+  "source_revision": "9494b045bc7dd7e4929cfde6fdf0ab50070d1d90",
   "working_diff_sha256": "4d6ccbb89b0a62de1216abd60e06f0b9ad705f80d5abf3db7e15adc2e38d2510",
   "files": {
     "backend/Dockerfile": "8003085340a146430874bca700a031bad039a329213e9246f0b93975cfcb2eee",
@@ -59,8 +59,8 @@
     "backend/src/api/school_lunch_timing.py": "7dd1443544aa161036d3237b7d28a556b54a9fb61c62d185e28ae3e273f7e6f9",
     "backend/src/api/school_lunch_timing_contract.py": "ed93abfd0fdf9a170381775aa2e743faf049cd3fbd573d99371578715172044c",
     "backend/src/api/school_lunch_variants.py": "c4a41b890621feddb314527530f0c428141ff684715a19795ec6357aadbe8b2b",
-    "backend/src/api/school_scope.py": "d8e5461ac524d9246ac8dbdf0d59d17d3fa7da54015757827fbfd625fd45a9a3",
-    "backend/src/api/school_work_inbox.py": "1aef795c69ef80aa3e743b5334e4a7758711d9ed6036d1797a35f997d2a7a9d7",
+    "backend/src/api/school_scope.py": "6e79e813c394ca8e4d374cc9789b993a270c85c563e4b6e091e97e4401534ac3",
+    "backend/src/api/school_work_inbox.py": "55d3d44de10f71f73d4217fd6a3b91fcf4022f048c6dc9427926f6d6b4f64915",
     "backend/src/api/shared_menus.py": "aaaa506de53dd223dbb1e0ed0d91e489dca7a059a98854ea797fea96b422214e",
     "backend/src/data/july_2026_pattern_assembly.json": "6b429c34bd07458d3bd22e704ed52e2838930d3e270b2eba4d48392e6913d1c7",
     "backend/src/data/july_2026_pattern_review.json": "422139820ac90ffae798042abd6cfe9eb7c46bf38e5e8bce971294b25d5ee62f",
@@ -98,7 +98,7 @@
     "backend/src/schemas/job_status.py": "b62cecea745dd4cfbc3ecb471a8d39c8b7a47d13b9f578497708ba0f53f27de1",
     "backend/src/schemas/menu_process.py": "c90d347630ebe24e9f931461bd94bcfabf7da4b216a1483de8c22353f9804abb",
     "backend/src/schemas/process_patterns.py": "2b4a47b5705e62717d38bfbd079e79dcc4a1d3fe6f3e06e639df44645e8a9336",
-    "backend/src/schemas/school_work_inbox.py": "369333b2662215e764e51142fd9121154949863eae8ffdc5da0e42a53fa7ffb9",
+    "backend/src/schemas/school_work_inbox.py": "11ae58eefed4827476ae2c33672b6f540788894e23f57e819c5d533021cf5597",
     "backend/src/schemas/shared_menus.py": "02b51e03c19595882f6d10b485606372dd8b56d01d57479771e8018859c7cfb8",
     "backend/src/security.py": "e1608e49258b40510a1b262286e7c73cf8ee8891e6bcce879baa662944360605",
     "backend/src/services/__init__.py": "803ba719433fa37fa238c2fe5f9bedb9d8e01bb184f0149e469661b9b44b9cc5",
@@ -168,7 +168,7 @@
     "backend/src/services/school_lunch_source_review.py": "13f0b0ca9f899ec593aa033b1f18d4163233ad51ed032772871958071f53f329",
     "backend/src/services/school_lunch_staff_service.py": "add42d7392ff86b95ac4d24210e488482816a6861e954295e1ccbff475344ec9",
     "backend/src/services/school_lunch_timing_service.py": "999475ed3d26b763f0e1c6d5f649d7cbbd4b5d169dcb29e7af40bf293c8c53b2",
-    "backend/src/services/school_work_inbox.py": "45bb3fb160ddc564ae19239a6d8ce30e41ba99d8621db97f24a72894fa82de6a",
+    "backend/src/services/school_work_inbox.py": "bb118316fcf62d81b3dd7684bae0a9c56ddf6363a7da5c7d6396a564306d8c99",
     "backend/src/services/shared_menu_candidates.py": "51d37daa5390185ff202da4e0dff6d314d2e68ba1d6906d183c1cfc0df0edb13",
     "backend/src/services/shared_menu_review.py": "28a35c46504932c8fb2022997c5c8b5e8cb8ed76a6feb35edef7dbef3f59c518",
     "backend/src/services/shared_menu_service.py": "a9fac4ad2c241de63cfe1bfae5ada39c4eda48ed3751850945d5943c0224fef6",
@@ -204,8 +204,8 @@
       ]
     }
   ],
-  "upstream_base_revision": "e3d19d321e8dd6184fb068065edc8a4d285964f5",
-  "upstream_delta_sha256": "f0a577b0337ff9c57ff15ccb59610417fd4d9d10ccc92f8605637113b9b96b6e",
+  "upstream_base_revision": "76ab923e6da2cb2e65ca59b3ff0bbaf5fb83a462",
+  "upstream_delta_sha256": "7a07e7c75b226e233a46e4921d7a4d52c8e0551bcea4de913b826392ad7c5d89",
   "retained_extensions": [
     {
       "path": "backend/src/api/implementation_price_tables.py",

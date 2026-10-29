@@ -49,7 +49,7 @@ def scope_session_factory():
 
 async def require_school_scope(request: Request, session_factory=Depends(scope_session_factory)):
     path = request.url.path.removeprefix("/api/school-lunch")
-    if request.method == "GET" and path == "/registered-work":
+    if request.method == "GET" and path in {"/registered-work", "/registered-work-index"}:
         return
     if path == "/monthly-overview" or path == "/facilities" or path.startswith("/staff"):
         return
@@ -72,7 +72,7 @@ async def require_school_scope(request: Request, session_factory=Depends(scope_s
 
 def _check_school_scope(request, session, values):
     path = request.url.path.removeprefix("/api/school-lunch")
-    if request.method == "GET" and path == "/registered-work":
+    if request.method == "GET" and path in {"/registered-work", "/registered-work-index"}:
         return
     if path == "/monthly-overview" or path == "/facilities" or path.startswith("/staff"):
         return

@@ -1,7 +1,9 @@
 """Read registered work, never manufacture calendar dates or source associations."""
 from datetime import date
+import re
 
-from sqlalchemy import String, cast, select
+from fastapi import HTTPException
+from sqlalchemy import String, cast, select, union, literal, case, func, or_, and_, tuple_
 from sqlalchemy.orm import load_only
 
 from src.models.school_lunch import Facility, MenuExecution, DailyWorkSchedule
@@ -13,27 +15,124 @@ from src.services.route_diagram_service import blockers_for_diagrams
 from src.services.implementation_price_scope_service import menu_source_ids
 
 
-def registered_work(session, *, facility_id=None, month=None):
+def _scoped(model, day_column, facility_id, month):
     try:
         month_start = date.fromisoformat(month + "-01") if month is not None else None
     except ValueError:
         month_start = None
     month_end = date(month_start.year + (month_start.month == 12), month_start.month % 12 + 1, 1) if month_start else None
 
+    statement = select(model).order_by(model.id)
+    if facility_id is not None:
+        statement = statement.where(model.facility_id == facility_id)
+    if month_start is not None:
+        statement = statement.where(day_column >= month_start, day_column < month_end)
+    elif month is not None:
+        statement = statement.where(cast(day_column, String).startswith(month + '-', autoescape=True))
+    return statement
+
+
+def _work_keys(*, facility_id=None, month=None, exact_day=None, price_id=None):
+    queries = []
+    for model, day in ((MenuExecution, MenuExecution.service_date),
+                       (DailyWorkSchedule, DailyWorkSchedule.service_date),
+                       (RouteDiagram, RouteDiagram.service_date)):
+        statement = _scoped(model, day, facility_id, month)
+        if exact_day is not None:
+            statement = statement.where(day == exact_day)
+        if price_id is not None:
+            statement = statement.where(False)
+        queries.append(statement.order_by(None).with_only_columns(
+            model.facility_id.label('facility_id'), day.label('service_date'),
+            literal(None, type_=String).label('orphan_id')))
+    price = ImplementationPriceDraft
+    assigned = select(Facility.id).where(Facility.id == price.facility_id).exists()
+    orphaned = or_(price.facility_id.is_(None), price.implementation_date.is_(None), ~assigned)
+    statement = _scoped(price, price.implementation_date, facility_id, month)
+    if exact_day is not None:
+        statement = statement.where(price.implementation_date == exact_day)
+    if price_id is not None:
+        statement = statement.where(price.id == price_id)
+    queries.append(statement.order_by(None).with_only_columns(
+        price.facility_id.label('facility_id'), price.implementation_date.label('service_date'),
+        case((orphaned, price.id), else_=None).label('orphan_id')))
+    return union(*queries).subquery()
+
+
+def registered_work_index(session):
+    keys = _work_keys()
+    first_dates = session.execute(select(keys.c.facility_id, func.min(keys.c.service_date))
+        .where(keys.c.orphan_id.is_(None)).group_by(keys.c.facility_id)).all()
+    months = session.scalars(select(func.substr(cast(keys.c.service_date, String), 1, 7))
+        .where(keys.c.service_date.is_not(None)).distinct().order_by(
+            func.substr(cast(keys.c.service_date, String), 1, 7).desc())).all()
+    orphan_count = session.scalar(select(func.count()).select_from(keys).where(keys.c.orphan_id.is_not(None)))
+    return {'first_dates': {str(school): day.isoformat() for school, day in first_dates if school is not None and day is not None},
+            'months': months, 'unassigned_count': orphan_count}
+
+
+def registered_work_page(session, *, facility_id=None, month=None, work_item=None,
+                         unassigned_only=False, after_id=None, limit=100):
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError('registered work limit must be between 1 and 100')
+    exact_day = price_id = None
+    if work_item is not None:
+        school = re.fullmatch(r'school:([1-9][0-9]*):day:(\d{4}-\d{2}-\d{2})', work_item)
+        if school:
+            if facility_id is not None and facility_id != int(school[1]):
+                return {'items': [], 'next_after_id': None}
+            facility_id = int(school[1])
+            try:
+                exact_day = date.fromisoformat(school[2])
+            except ValueError:
+                return {'items': [], 'next_after_id': None}
+        elif work_item.startswith('price:') and work_item[6:]:
+            price_id = work_item[6:]
+        else:
+            return {'items': [], 'next_after_id': None}
+    keys = _work_keys(facility_id=facility_id, month=month, exact_day=exact_day, price_id=price_id)
+    identity = case((keys.c.orphan_id.is_not(None), literal('price:') + keys.c.orphan_id),
+                    else_=literal('school:') + cast(keys.c.facility_id, String)
+                        + ':day:' + cast(keys.c.service_date, String))
+    statement = select(identity.label('id'), keys.c.facility_id, keys.c.service_date, keys.c.orphan_id)
+    if work_item is not None:
+        statement = statement.where(identity == work_item)
+    if unassigned_only:
+        statement = statement.where(keys.c.orphan_id.is_not(None))
+    if after_id is not None:
+        statement = statement.where(identity > after_id)
+    rows = session.execute(statement.order_by(identity).limit(limit + 1)).all()
+    page = rows[:limit]
+    if not page:
+        return {'items': [], 'next_after_id': None}
+    selected = ([(row.facility_id, row.service_date) for row in page if row.orphan_id is None],
+                [row.orphan_id for row in page if row.orphan_id is not None],
+                [row.facility_id for row in page if row.facility_id is not None])
+    values = registered_work(session, facility_id=facility_id, month=month, selected=selected)['items']
+    by_id = {value['id']: value for value in values}
+    if set(by_id) != {row.id for row in page}:
+        raise HTTPException(409, '登録案件が更新されました。再読み込みしてください。')
+    return {'items': [by_id[row.id] for row in page],
+            'next_after_id': page[-1].id if len(rows) > limit else None}
+
+
+def registered_work(session, *, facility_id=None, month=None, selected=None):
     def scoped(model, day_column):
-        statement = select(model).order_by(model.id)
-        if facility_id is not None:
-            statement = statement.where(model.facility_id == facility_id)
-        if month_start is not None:
-            statement = statement.where(day_column >= month_start, day_column < month_end)
-        elif month is not None:
-            # The service also supports literal date-prefix searches, not guessed months.
-            statement = statement.where(cast(day_column, String).startswith(month + '-', autoescape=True))
+        statement = _scoped(model, day_column, facility_id, month)
+        if selected is not None:
+            days, orphan_ids, _schools = selected
+            predicate = tuple_(model.facility_id, day_column).in_(days)
+            if model is ImplementationPriceDraft:
+                assigned = select(Facility.id).where(Facility.id == model.facility_id).exists()
+                predicate = or_(and_(predicate, assigned), model.id.in_(orphan_ids))
+            statement = statement.where(predicate)
         return statement
 
     facility_query = select(Facility)
     if facility_id is not None:
         facility_query = facility_query.where(Facility.id == facility_id)
+    if selected is not None:
+        facility_query = facility_query.where(Facility.id.in_(selected[2]))
     facilities = {row.id: row.name for row in session.scalars(facility_query)}
     menu_query = scoped(MenuExecution, MenuExecution.service_date).options(load_only(
         MenuExecution.id, MenuExecution.facility_id, MenuExecution.service_date,
@@ -74,7 +173,8 @@ def registered_work(session, *, facility_id=None, month=None):
     # Explicit JSON references can span scopes; bound each query's parameters.
     for start in range(0, len(outside_ids), 500):
         sources.update((row.id, row) for row in session.scalars(
-            select(MenuExecution).where(MenuExecution.id.in_(outside_ids[start:start + 500]))))
+            select(MenuExecution).options(load_only(MenuExecution.id, MenuExecution.facility_id,
+                MenuExecution.service_date)).where(MenuExecution.id.in_(outside_ids[start:start + 500]))))
     items = {}
 
     def item(school, day, orphan=None):
