@@ -462,7 +462,8 @@ for(const edit of ['manual','sheet'])for(const outcome of ['success','error'])te
     if(workflow){workflow.revision=9;workflow.ocr_job.status='running';workflow.ocr_job.progress_step=2;}
     return response;
   };
-  h.timer.tick();await settle();assert.equal(calls,2);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);
+  // The changed workflow revision requires one authoritative summary read.
+  h.timer.tick();await settle();assert.equal(calls,3);assert.equal(h.state.workflow.ocr_job.ocr_job_id,'recorded-job');assert.equal(h.state.workflow.ocr_job.progress_step,2);
   assert.equal(h.state.discard,0);assert.equal(h.context.pendingSheetCellEditsRef.current.get('own-cell').quantity,0);
   assert.equal(h.context.editorVersion(editor).dirty,true);assert.equal(h.context.editorVersion(editor).baseRevision,base);
   assert.equal(h.context.captureWorkflowInputVersion(editor).revision,base);assert.equal(h.context.workflowRevisionRef.current.revision,9);
