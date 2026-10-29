@@ -19,9 +19,12 @@ with tempfile.TemporaryDirectory(prefix="sawa-refresh-native-") as owned:
     try:
         subprocess.run([str(pg / "pg_ctl"), "-D", str(data), "-l", str(directory / "postgres.log"), "-o", f"-h 127.0.0.1 -k {directory} -p {port}", "-w", "start"], check=True, capture_output=True)
         started = True
-        environment = {**os.environ, "PATH": str(pg) + os.pathsep + os.environ["PATH"], "PYTHONPATH": str(root / "backend"),
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ("DB_USER", "DB_PASSWORD", "DB_NAME", "DB_HOST", "DB_PORT", "DB_DRIVER")}
+        environment.update({"PATH": str(pg) + os.pathsep + os.environ["PATH"], "PYTHONPATH": str(root / "backend"),
                        "STAGING_REFRESH_NATIVE_URI": f"host=127.0.0.1 port={port} user=refresh_native_test dbname=postgres",
-                       "DB_URI": "sqlite:///" + str(directory / "bootstrap.sqlite")}
+                       **{key: "sqlite:///" + str(directory / "bootstrap.sqlite")
+                          for key in ("DB_URI", "DATABASE_URL", "ALEMBIC_DB_URI")}})
         result = subprocess.run([sys.executable, "-m", "pytest", "backend/tests/unit/test_staging_copy_refresh_native.py", "-q"], cwd=root, env=environment)
     finally:
         if started:
