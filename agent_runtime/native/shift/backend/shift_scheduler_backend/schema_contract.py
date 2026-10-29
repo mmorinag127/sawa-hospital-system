@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
 import json
 import re
@@ -381,8 +381,18 @@ def claim_fresh_owned_sqlite_database(database_url: str) -> None:
 def migration_transaction(connection: Connection) -> Iterator[None]:
     """Acquire dialect-specific migration exclusion for the supplied connection."""
     started_here = False
+    sqlite_connection = None
+    foreign_keys = None
     try:
         if connection.dialect.name == "sqlite":
+            sqlite_connection = connection.connection.driver_connection
+            if sqlite_connection.in_transaction:
+                raise SchemaContractError("SQLite migration requires an idle connection")
+            with closing(sqlite_connection.execute("PRAGMA foreign_keys")) as cursor:
+                foreign_keys = cursor.fetchone()[0]
+            # Parent-table rebuilds must retain their referencing rows until commit.
+            with closing(sqlite_connection.execute("PRAGMA foreign_keys = OFF")):
+                pass
             try:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
             except OperationalError as error:
@@ -401,9 +411,20 @@ def migration_transaction(connection: Connection) -> Iterator[None]:
                 if not locked:
                     raise ConcurrentMigrationError("PostgreSQL migration lock is already held")
         yield
+        if sqlite_connection is not None:
+            with closing(sqlite_connection.execute("PRAGMA foreign_key_check")) as cursor:
+                if cursor.fetchone() is not None:
+                    raise SchemaContractError("SQLite migration violates foreign key integrity")
         if started_here:
             connection.commit()
     except BaseException:
         if started_here and connection.in_transaction():
             connection.rollback()
         raise
+    finally:
+        if sqlite_connection is not None and foreign_keys is not None:
+            with closing(sqlite_connection.execute(f"PRAGMA foreign_keys = {foreign_keys}")):
+                pass
+            with closing(sqlite_connection.execute("PRAGMA foreign_keys")) as cursor:
+                if cursor.fetchone()[0] != foreign_keys:
+                    raise SchemaContractError("SQLite foreign key enforcement was not restored")
