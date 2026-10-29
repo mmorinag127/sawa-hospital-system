@@ -79,7 +79,9 @@ def test_real_snapshot_preserves_raw_values_extra_schema_sequence_and_test_and_p
             before[database] = engine.fingerprints(conn, tmp_path)[0]
     tables, refs, local_receipts = engine.clone_database(source, destination, "sawa_replay_abc123", tmp_path, ["refresh_fixture_head"])
     assert "auxiliary.preserved" in tables and "public.quantities" in tables
-    assert refs == {"gs://fixture-prod/original.pdf?generation=3"}
+    # The disk-backed references must remain repeatable after cloning.
+    for _ in range(2):
+        assert list(refs) == ["gs://fixture-prod/original.pdf?generation=3"]
     with psycopg2.connect(**{**parsed, "dbname": "sawa_replay_abc123"}) as conn, conn.cursor() as cursor:
         cursor.execute("SELECT value FROM quantity_view ORDER BY value COLLATE \"C\"")
         assert cursor.fetchall() == [("",), ("--",)]
