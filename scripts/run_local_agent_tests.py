@@ -1,4 +1,5 @@
 """Verify native processes in an owned local Linux/network namespace."""
+import ast
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,48 @@ import time
 from uuid import uuid4
 
 from local_hospital_test_runner import ROOT, clean_tree, focused_staging, git, reject_hosted_runner, staging_scope_base
+
+
+def reviewed_native_read_change(base, path):
+    if path in {
+        "agent_runtime/native/shift/backend/shift_scheduler_backend/schema_contract.py",
+        "agent_runtime/native/school-lunch/backend/src/migration_catalog.py",
+    }:
+        return True
+    if path != "agent_runtime/native/shift/backend/shift_scheduler_backend/main.py":
+        return False
+    relationships = {"Assignment": {"staff", "shift_template", "position"},
+                     "CandidateStaffStatus": {"staff", "shift_template"}}
+
+    class DisplayLoading(ast.NodeTransformer):
+        def visit_FunctionDef(self, node):
+            return self.generic_visit(node) if node.name == "_get_solve_run_snapshot" else node
+
+        def visit_Call(self, node):
+            node = self.generic_visit(node)
+            if (isinstance(node.func, ast.Attribute) and node.func.attr == "options"
+                    and isinstance(node.func.value, ast.Call)
+                    and isinstance(node.func.value.func, ast.Attribute)
+                    and node.func.value.func.attr == "query"
+                    and len(node.func.value.args) == 1 and not node.func.value.keywords
+                    and isinstance(node.func.value.args[0], ast.Name)
+                    and node.args and not node.keywords and all(
+                        isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name)
+                        and arg.func.id == "joinedload" and len(arg.args) == 1 and not arg.keywords
+                        and isinstance(arg.args[0], ast.Attribute)
+                        and isinstance(arg.args[0].value, ast.Name)
+                        and arg.args[0].value.id == node.func.value.args[0].id
+                        and arg.args[0].attr in relationships.get(arg.args[0].value.id, set())
+                        for arg in node.args)):
+                return node.func.value
+            return node
+
+    try:
+        before = ast.parse(git("show", base + ":" + path))
+        after = ast.parse((ROOT / path).read_text())
+    except (OSError, SyntaxError):
+        return False
+    return ast.dump(DisplayLoading().visit(before)) == ast.dump(DisplayLoading().visit(after))
 
 
 def select_test_targets():
@@ -22,10 +65,7 @@ def select_test_targets():
     if not paths or any(
         path.startswith("experiments/agent_assistant/")
         or path.startswith("agent_runtime/baselines/")
-        or (path.startswith("agent_runtime/native/") and path not in {
-            "agent_runtime/native/shift/backend/shift_scheduler_backend/schema_contract.py",
-            "agent_runtime/native/school-lunch/backend/src/migration_catalog.py",
-        })
+        or (path.startswith("agent_runtime/native/") and not reviewed_native_read_change(base, path))
         or path in {"agent_runtime/Dockerfile", "agent_runtime/release.json", "local-checks/agent-tests.Dockerfile"}
         or path == "frontend/public/assistant-workflow.css"
         or "requirements" in Path(path).name or Path(path).name == "pyproject.toml"

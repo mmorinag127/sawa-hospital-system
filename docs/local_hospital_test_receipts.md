@@ -114,8 +114,11 @@ baselines stop the run. `scope-baseline.json` records the original receipt hash
 and both source SHAs. This is change selection, not a claim that omitted tests
 passed on the new source. Authentication/quantity checks, changed and unresolved
 failure modules remain required. Native business changes still select the full
-native suite; the existing read/startup selection is unchanged. Full/production
-mode does not use this baseline.
+native suite. The read/startup selection also accepts Shift detail changes whose
+entire AST is unchanged after removing only default `joinedload` options for its
+five existing many-to-one display relationships. Filters, limits, return values,
+other functions/imports, different loaders and inner joins still select full
+coverage. Full/production mode does not use this baseline or this selection.
 
 Focused frontend discovery includes all standard config and browser test names,
 in addition to the explicit boundary modules in

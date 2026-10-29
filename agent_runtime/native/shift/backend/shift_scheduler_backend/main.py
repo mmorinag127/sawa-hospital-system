@@ -2037,12 +2037,15 @@ def _get_solve_run_snapshot(solve_run_id, session, candidate_id, prior_for_start
         selected_candidate = None
     assignments = (
         session.query(Assignment)
+        .options(joinedload(Assignment.staff), joinedload(Assignment.shift_template),
+                 joinedload(Assignment.position))
         .filter(Assignment.candidate_id == selected_candidate.id)
         .order_by(Assignment.work_date, Assignment.staff_id)
         .all()
     ) if selected_candidate else []
     statuses = (
         session.query(CandidateStaffStatus)
+        .options(joinedload(CandidateStaffStatus.staff), joinedload(CandidateStaffStatus.shift_template))
         .filter(CandidateStaffStatus.candidate_id == selected_candidate.id)
         .order_by(CandidateStaffStatus.work_date, CandidateStaffStatus.staff_id)
         .all()

@@ -1,6 +1,6 @@
 {
-  "source_revision": "7594894517159da871aa437526186fbc194b13ee",
-  "working_diff_sha256": "3f629d79565467ad620f2c6bb01bdb4ee8690400eb0ebbdc50152800a1325629",
+  "source_revision": "2dc336c2ec09d5a57918ae27a9da34adfa44130c",
+  "working_diff_sha256": "3d9b18ca012ab5670ed8f0dc9c47f1385319aebea3a84287ca0fce7516463c97",
   "files": {
     "backend/.dockerignore": "eac1f6c03c0f0a4720853b53e1ab37c7b633c31820aa05cbda28a0f5304c964d",
     "backend/Dockerfile": "b9c3d76f8dc68ae1ae31c09e0710e72315a9e985fb6886f3d603917d5698c2ce",
@@ -31,7 +31,7 @@
     "backend/shift_scheduler_backend/editor_revision_service.py": "e31a4d94c489a539d9454cc7206610a1406f450fc4698503b37cb0e77d8c55cc",
     "backend/shift_scheduler_backend/holiday_calendar.py": "fb4ad13d07c481ee281cbb15b4f2604b8a5cfe0a62b1a7c6a23f12a0143ffbe3",
     "backend/shift_scheduler_backend/jobs.py": "b34352bd7d2a987d4b7c2094db17660e2a7ff3ef240f01dc03e61912ccbef06d",
-    "backend/shift_scheduler_backend/main.py": "ce6cf10161c28ce7d51a652cfec8ba57de26b72a3f44e16587c44e9fa26e5437",
+    "backend/shift_scheduler_backend/main.py": "b13a13aafdb901ed23939e272d6ebcf289463c27ef5553eeea054929efb615bf",
     "backend/shift_scheduler_backend/models.py": "410a4110f70ef72ad6ba8b178ab8bdf2613bae7cdb265c70d08a899587a01558",
     "backend/shift_scheduler_backend/operational_constraints.py": "12ebfd39aafeaf8f2c64cf06164b9b555a6863363478e0616d355c637e7e3f82",
     "backend/shift_scheduler_backend/pdf_parity.py": "2f1d77a11c78009ca21f1400374f828066e2f290c9db30224e0853f865af7e2d",
@@ -79,8 +79,8 @@
       ]
     }
   ],
-  "upstream_base_revision": "6d47c8cc15a7f1172eeb51f04549277b35ae13e3",
-  "upstream_delta_sha256": "cc3e8fc47132b124a805c112210bb81cced1834822fb18c47f762882b0e45982",
+  "upstream_base_revision": "7594894517159da871aa437526186fbc194b13ee",
+  "upstream_delta_sha256": "c507359e27d001cdb2042d6126968ba8a370d2b4813e7792c1e8464b955edfa6",
   "retained_extensions": [
     {
       "path": "backend/shift_scheduler_backend/agent_trial_transport.py",
@@ -89,8 +89,8 @@
     },
     {
       "path": "backend/shift_scheduler_backend/main.py",
-      "upstream_sha256": "c212249fee745a2ac38277076ee8f7b7003ebcb0412a799457c7c98c35ef1f90",
-      "bundled_sha256": "ce6cf10161c28ce7d51a652cfec8ba57de26b72a3f44e16587c44e9fa26e5437"
+      "upstream_sha256": "5778cb73e30a5cbc3aa4e515559214f610584ffe9e6cecaaed9b96f3921a7e99",
+      "bundled_sha256": "b13a13aafdb901ed23939e272d6ebcf289463c27ef5553eeea054929efb615bf"
     },
     {
       "path": "backend/shift_scheduler_backend/planning_api.py",

@@ -70,6 +70,36 @@ class ReceiptContractTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'target is missing'):
                 AGENT_RUNNER.select_test_targets()
 
+    def test_native_display_loading_selection_rejects_business_and_join_semantics_changes(self):
+        path = 'agent_runtime/native/shift/backend/shift_scheduler_backend/main.py'
+        before = 'def _get_solve_run_snapshot():\n    return session.query(Assignment).all()\n'
+        after = before.replace('.all()', '.options(joinedload(Assignment.staff)).all()')
+        cases = [
+            (after, True),
+            (after.replace('Assignment.staff', 'Assignment.position'), True),
+            (after.replace('.all()', '.filter(Assignment.id == 1).all()'), False),
+            (after.replace('.all()', '.limit(1).all()'), False),
+            (after.replace('joinedload(Assignment.staff)', 'joinedload(Assignment.staff, innerjoin=True)'), False),
+            (after.replace('joinedload', 'selectinload'), False),
+            (after.replace('Assignment.staff', 'CandidateStaffStatus.staff'), False),
+            (after.replace('Assignment.staff', 'Assignment.candidate'), False),
+            (after + 'def unrelated():\n    return 1\n', False),
+            ('import os\n' + after, False),
+        ]
+        with tempfile.TemporaryDirectory() as directory, patch.object(AGENT_RUNNER, 'ROOT', Path(directory)):
+            target = Path(directory) / path
+            target.parent.mkdir(parents=True)
+            for source, expected in cases:
+                target.write_text(source)
+                with self.subTest(source=source), patch.object(AGENT_RUNNER, 'git', return_value=before):
+                    self.assertEqual(AGENT_RUNNER.reviewed_native_read_change('a' * 40, path), expected)
+            target.write_text(after)
+            with patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
+                 patch.object(AGENT_RUNNER, 'staging_scope_base', return_value='a' * 40), \
+                 patch.object(AGENT_RUNNER, 'git', side_effect=[path + '\0', before]), \
+                 patch.object(Path, 'is_file', return_value=True):
+                self.assertEqual(AGENT_RUNNER.select_test_targets()['mode'], 'focused-read-and-startup')
+
     def test_staging_scope_base_preserves_default_and_full_mode(self):
         for path, focused in (('', True), ('/unread/in/full', False)):
             with self.subTest(path=path), patch.dict(os.environ, {'SAWA_LOCAL_TEST_BASELINE_RECEIPT': path}), \
