@@ -84,15 +84,16 @@ cloud credentials are excluded; Next-generated source stays in that workspace.
 
 ## Backend impact selection
 
-The local batch collects every general backend module, then uses recorded per-case
-dependencies to select execution. The historical
-`infra/ci/staging_backend_scope.json` is no longer an execution allowlist; new or
-changed tests cannot disappear outside it. Known failed or interrupted cases
-are retained. Dedicated PostgreSQL modules are excluded only because the same
-receipt maps them to their owned PostgreSQL command. `--full` and
-`release/prod-*` execute every case. Unknown inputs, missing or corrupt tracking,
-and failed tracking runs do not authorize reuse. Only the runner's built-in
-testmon/input tracker may select cases; inherited pytest selectors are removed.
+The staging default selects reviewed behavior groups from
+`infra/ci/staging_backend_scope.json` before collection. It always includes the
+authentication and quantity-preservation groups, changed test modules and retained
+failed or interrupted modules. Changed backend inputs without a reviewed mapping
+stop the run rather than silently omitting coverage. Dedicated PostgreSQL modules
+are excluded only because the same receipt maps them to their owned PostgreSQL
+command. Tests outside the selected staging groups are not executed or claimed
+as passed. `--full` and `release/prod-*` execute every general case; the explicit
+impact mode retains the testmon/input tracker. Inherited pytest selectors are
+removed.
 
 Each backend run retains `backend-tests/selection.json`, including executed and
 reused node IDs, reasons, context, baseline identity and tracking hashes. Its hash,
@@ -100,9 +101,10 @@ source SHA and counts are included in the signed receipt accepted by the staging
 source gate. Version 3 additionally records command reuse and its original signed
 execution proof. Version 1 full-run receipts remain readable.
 
-The first tracking run executes every collected general case. Explicit full
-mode still executes the whole backend suite. A reported all-test run is not evidence of a
-speed improvement: real backend reuse and timing must be measured separately.
+The staging default does not require a warm tracking database or collect the
+entire general suite. The first explicit impact run does execute every collected
+general case. A reported all-test run is not evidence of a speed improvement:
+selection counts, omissions and actual timing must be reported separately.
 
 Focused frontend discovery includes all standard config and browser test names,
 in addition to the explicit boundary modules in
