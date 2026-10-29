@@ -88,9 +88,9 @@ def test_bulk_catalog_preserves_every_field_and_detects_schema_drift(readonly_da
 
 
 @pytest.mark.parametrize("domain", ["shift", "school"])
+@pytest.mark.parametrize("readonly_database", ["postgresql"], indirect=True)
 def test_missing_bulk_table_is_not_substituted_with_empty_structure(readonly_database, native_catalog, domain, monkeypatch):
-    if readonly_database.dialect.name != "postgresql":
-        pytest.skip("bulk reflection is PostgreSQL-only")
+    assert readonly_database.dialect.name == "postgresql"
     module, reader = catalog_reader(domain)
     inspect = module.inspect
     def broken(connection):

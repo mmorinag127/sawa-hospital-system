@@ -768,6 +768,7 @@ class ReceiptContractTest(unittest.TestCase):
 
     def test_head_change_or_command_failure_never_creates_receipt(self):
         for changed, code in ((True, 0), (False, 2)):
+            self.command_evidence.reset_mock()
             with tempfile.TemporaryDirectory() as directory:
                 manifest = Path(directory) / 'manifest.json'
                 manifest.write_text(json.dumps({'version': 1, 'commands': [{'name': 'test', 'command': 'true'}]}))
@@ -780,6 +781,9 @@ class ReceiptContractTest(unittest.TestCase):
                     self.assertEqual(RUNNER.run(output), 1)
                 self.assertFalse((output / 'receipt.json').exists())
                 self.assertTrue((output / 'failed-run.json').exists())
+                self.command_evidence.save.assert_not_called()
+                if changed:
+                    self.command_evidence.persist.assert_not_called()
 
     def test_independent_failures_are_collected_in_one_serial_batch(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -801,6 +805,9 @@ class ReceiptContractTest(unittest.TestCase):
             failed = json.loads((output / 'failed-run.json').read_text())
             self.assertEqual([item['exit_code'] for item in failed['commands']], [2, 0, 3])
             self.assertFalse((output / 'receipt.json').exists())
+            self.command_evidence.save.assert_called_once_with(commands[1]['command'], 'a' * 40,
+                                                               output / '01-group-1.log')
+            self.command_evidence.persist.assert_called_once()
 
     def test_identical_commands_execute_once_without_hiding_alias_failures(self):
         actual_run = subprocess.run

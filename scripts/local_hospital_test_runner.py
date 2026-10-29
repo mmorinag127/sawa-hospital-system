@@ -227,6 +227,14 @@ def run(output: Path, *, full: bool = False) -> int:
                "source_sha_end": source_sha_end,
                "clean_before": True, "clean_after": clean_tree(), "definition_sha256": digest(MANIFEST),
                "commands": records}
+    if (source_stable and source_sha_start == source_sha_end and definition_start == receipt['definition_sha256']
+            and receipt['clean_after'] and len(records) == len(commands)):
+        try:
+            for command, log in new_baselines:
+                evidence.save(command, source_sha_start, log)
+            evidence.persist()
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            (output / 'command-cache-unavailable.json').write_text(json.dumps({'type': type(error).__name__}) + '\n')
     if (not source_stable or source_sha_start != source_sha_end or definition_start != digest(MANIFEST)
             or not receipt["clean_after"] or len(records) != len(commands)
             or any(record["exit_code"] != 0 for record in records)):
@@ -254,12 +262,6 @@ def run(output: Path, *, full: bool = False) -> int:
         receipt['command_reuse'] = reused_commands
         validate_receipt(receipt, source_sha_start, receipt['definition_sha256'])
     (output / "receipt.json").write_text(json.dumps(sign(receipt), indent=2) + "\n")
-    try:
-        for command, log in new_baselines:
-            evidence.save(command, source_sha_start, log)
-        evidence.persist()
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        (output / 'command-cache-unavailable.json').write_text(json.dumps({'type': type(error).__name__}) + '\n')
     return 0 if receipt["clean_after"] and len(records) == len(commands) and all(x["exit_code"] == 0 for x in records) else 1
 
 

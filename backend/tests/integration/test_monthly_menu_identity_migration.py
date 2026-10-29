@@ -642,9 +642,9 @@ def test_downgrade_three_key_collision_stops_and_preserves_canonical_rows(databa
         require_canonical_identity_schema(connection)
 
 
+@pytest.mark.parametrize("database", ["postgresql"], indirect=True)
 def test_runtime_guard_rejects_descending_same_name_identity_index(database):
-    if database.dialect.name != "postgresql":
-        pytest.skip("PostgreSQL pg_index.indoption proof")
+    assert database.dialect.name == "postgresql"
     create_orm_schema(database, strip_constraint=True)
     with database.begin() as connection:
         connection.execute(sa.text(
