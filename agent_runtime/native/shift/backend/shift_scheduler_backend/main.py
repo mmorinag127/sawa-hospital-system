@@ -2035,6 +2035,18 @@ def _get_solve_run_snapshot(solve_run_id, session, candidate_id, prior_for_start
         raise HTTPException(status_code=409, detail="solve run has no candidate")
     if solve_run.status in {"failed", "error"}:
         selected_candidate = None
+    precondition = None
+    precondition_error = None
+    if selected_candidate:
+        try:
+            precondition = candidate_precondition(session, selected_candidate, prior_for_start_date=prior_for_start_date)
+        except HTTPException as error:
+            if not isinstance(error.detail, dict) or error.detail.get("code") != "candidate_rule_source_unresolved":
+                raise
+            # Historical display/reprint remains available; no command token
+            # is minted from absent provenance or today's replacement rules.
+            precondition_error = error.detail
+    # Command-state refreshes expire relationships; load display rows afterwards.
     assignments = (
         session.query(Assignment)
         .options(joinedload(Assignment.staff), joinedload(Assignment.shift_template),
@@ -2066,17 +2078,6 @@ def _get_solve_run_snapshot(solve_run_id, session, candidate_id, prior_for_start
         .one_or_none()
     )
     run_period = _solve_run_period_payload(solve_run)
-    precondition = None
-    precondition_error = None
-    if selected_candidate:
-        try:
-            precondition = candidate_precondition(session, selected_candidate, prior_for_start_date=prior_for_start_date)
-        except HTTPException as error:
-            if not isinstance(error.detail, dict) or error.detail.get("code") != "candidate_rule_source_unresolved":
-                raise
-            # Historical display/reprint remains available; no command token
-            # is minted from absent provenance or today's replacement rules.
-            precondition_error = error.detail
     return {
         "id": solve_run.id,
         **run_period,

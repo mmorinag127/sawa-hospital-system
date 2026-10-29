@@ -171,6 +171,9 @@ jobs:
 
   source-gate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       backend_changed: ${{ steps.changes.outputs.backend_changed }}
       frontend_changed: ${{ steps.changes.outputs.frontend_changed }}
@@ -254,6 +257,7 @@ jobs:
         name: Detect changed deploy surfaces
         env:
           DEPLOY_MODE: ${{ inputs.mode }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_MODE}" = "recover-web-image" ]; then
@@ -262,8 +266,7 @@ jobs:
             exit 0
           fi
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            echo "backend_changed=true" >> "$GITHUB_OUTPUT"
-            echo "frontend_changed=true" >> "$GITHUB_OUTPUT"
+            python3 scripts/detect_stg_surfaces.py
             exit 0
           fi
           before="${{ github.event.before }}"

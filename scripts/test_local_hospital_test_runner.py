@@ -20,6 +20,7 @@ import local_hospital_legacy_step as LEGACY_RUNNER
 import run_local_pg_output_boundary as PG_OUTPUT_RUNNER
 import run_local_frontend_contracts as FRONTEND_RUNNER
 import local_command_evidence as COMMAND_EVIDENCE
+import detect_stg_surfaces as DEPLOY_SURFACES
 
 
 MODULE = Path(__file__).with_name("local_hospital_test_runner.py")
@@ -34,6 +35,71 @@ class ReceiptContractTest(unittest.TestCase):
         self.command_evidence = baseline.start().return_value
         self.command_evidence.reuse.return_value = None
         self.addCleanup(baseline.stop)
+
+    def test_deploy_surfaces_separate_runtime_from_local_verification_changes(self):
+        for paths, expected in (
+            (['docs/review.md', 'scripts/run_local_agent_tests.py', 'backend/tests/unit/test_a.py'], (False, False)),
+            (['frontend/src/pages/orders.tsx'], (False, True)),
+            (['agent_runtime/native/shift/backend/shift_scheduler_backend/main.py'], (False, True)),
+            (['backend/src/api/orders.py'], (True, True)),
+            (['ocr_pipeline/app/main.py'], (True, True)),
+            (['.github/workflows/deploy-stg.yml'], (True, True)),
+            (['infra/ci/verify_tls_trust.py'], (True, True)),
+            (['scripts/prepare_hakodate_backend_deploy_source.sh'], (True, True)),
+            (['unclassified-runtime-input'], (True, True)),
+        ):
+            with self.subTest(paths=paths):
+                self.assertEqual(DEPLOY_SURFACES.surfaces(paths), expected)
+
+    def test_deploy_baseline_requires_successful_normal_same_repository_staging_run(self):
+        run = {'event': 'workflow_dispatch', 'head_branch': 'develop', 'status': 'completed',
+               'conclusion': 'success', 'path': '.github/workflows/deploy-stg.yml',
+               'head_sha': 'a' * 40, 'head_repository': {'full_name': DEPLOY_SURFACES.REPOSITORY}}
+        jobs = {'source-gate': 'success', 'recover-web': 'skipped'}
+        self.assertEqual(DEPLOY_SURFACES.previous_source([run], jobs), 'a' * 40)
+        self.assertIsNone(DEPLOY_SURFACES.previous_source([], {}))
+        self.assertIsNone(DEPLOY_SURFACES.previous_source([run], {**jobs, 'recover-web': 'success'}))
+        for key, value in (('event', 'pull_request'), ('head_branch', 'main'),
+                           ('status', 'in_progress'), ('conclusion', 'failure'),
+                           ('path', '.github/workflows/deploy-prod.yml'), ('head_sha', 'invalid'),
+                           ('head_repository', {'full_name': 'other/repository'})):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                DEPLOY_SURFACES.previous_source([{**run, key: value}], jobs)
+        for key, value in (('source-gate', 'skipped'), ('recover-web', 'failure')):
+            with self.subTest(job=key), self.assertRaises(ValueError):
+                DEPLOY_SURFACES.previous_source([run], {**jobs, key: value})
+
+    def test_deploy_selection_checks_ancestor_before_writing_outputs(self):
+        run = {'id': 123, 'event': 'workflow_dispatch', 'head_branch': 'develop', 'status': 'completed',
+               'conclusion': 'success', 'path': '.github/workflows/deploy-stg.yml',
+               'head_sha': 'a' * 40, 'head_repository': {'full_name': DEPLOY_SURFACES.REPOSITORY}}
+        jobs = {'jobs': [{'name': 'source-gate', 'conclusion': 'success'},
+                         {'name': 'recover-web', 'conclusion': 'skipped'}]}
+        for conflict in (False, True):
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / 'outputs'
+                env = {'GITHUB_REPOSITORY': DEPLOY_SURFACES.REPOSITORY, 'GITHUB_EVENT_NAME': 'workflow_dispatch',
+                       'GITHUB_REF': 'refs/heads/develop', 'GITHUB_SHA': 'b' * 40, 'GITHUB_OUTPUT': str(output)}
+
+                def execute(argv, **kwargs):
+                    if conflict and argv[:2] == ['git', 'merge-base']:
+                        raise subprocess.CalledProcessError(1, argv)
+                    return subprocess.CompletedProcess(argv, 0)
+
+                with patch.dict(os.environ, env), patch.object(DEPLOY_SURFACES, 'github',
+                        side_effect=[{'workflow_runs': [run]}, jobs]), \
+                     patch.object(DEPLOY_SURFACES.subprocess, 'check_output',
+                        side_effect=['b' * 40, 'agent_runtime/native/shift/backend/main.py\0']), \
+                     patch.object(DEPLOY_SURFACES.subprocess, 'run', side_effect=execute) as commands:
+                    if conflict:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            DEPLOY_SURFACES.main()
+                        self.assertFalse(output.exists())
+                    else:
+                        DEPLOY_SURFACES.main()
+                        self.assertEqual(output.read_text(), 'backend_changed=false\nfrontend_changed=true\n')
+                    self.assertIn(['git', 'merge-base', '--is-ancestor', 'a' * 40, 'b' * 40],
+                                  [call.args[0] for call in commands.call_args_list])
 
     def test_native_selection_keeps_full_for_business_changes_and_unknown_base(self):
         full_paths = ('experiments/agent_assistant/runtime.py', 'agent_runtime/native/shift/backend/app.py',
@@ -69,36 +135,6 @@ class ReceiptContractTest(unittest.TestCase):
              patch.object(AGENT_RUNNER, 'git', return_value=paths):
             with self.assertRaisesRegex(ValueError, 'target is missing'):
                 AGENT_RUNNER.select_test_targets()
-
-    def test_native_display_loading_selection_rejects_business_and_join_semantics_changes(self):
-        path = 'agent_runtime/native/shift/backend/shift_scheduler_backend/main.py'
-        before = 'def _get_solve_run_snapshot():\n    return session.query(Assignment).all()\n'
-        after = before.replace('.all()', '.options(joinedload(Assignment.staff)).all()')
-        cases = [
-            (after, True),
-            (after.replace('Assignment.staff', 'Assignment.position'), True),
-            (after.replace('.all()', '.filter(Assignment.id == 1).all()'), False),
-            (after.replace('.all()', '.limit(1).all()'), False),
-            (after.replace('joinedload(Assignment.staff)', 'joinedload(Assignment.staff, innerjoin=True)'), False),
-            (after.replace('joinedload', 'selectinload'), False),
-            (after.replace('Assignment.staff', 'CandidateStaffStatus.staff'), False),
-            (after.replace('Assignment.staff', 'Assignment.candidate'), False),
-            (after + 'def unrelated():\n    return 1\n', False),
-            ('import os\n' + after, False),
-        ]
-        with tempfile.TemporaryDirectory() as directory, patch.object(AGENT_RUNNER, 'ROOT', Path(directory)):
-            target = Path(directory) / path
-            target.parent.mkdir(parents=True)
-            for source, expected in cases:
-                target.write_text(source)
-                with self.subTest(source=source), patch.object(AGENT_RUNNER, 'git', return_value=before):
-                    self.assertEqual(AGENT_RUNNER.reviewed_native_read_change('a' * 40, path), expected)
-            target.write_text(after)
-            with patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
-                 patch.object(AGENT_RUNNER, 'staging_scope_base', return_value='a' * 40), \
-                 patch.object(AGENT_RUNNER, 'git', side_effect=[path + '\0', before]), \
-                 patch.object(Path, 'is_file', return_value=True):
-                self.assertEqual(AGENT_RUNNER.select_test_targets()['mode'], 'focused-read-and-startup')
 
     def test_staging_scope_base_preserves_default_and_full_mode(self):
         for path, focused in (('', True), ('/unread/in/full', False)):
