@@ -1,5 +1,5 @@
 {
-  "source_revision": "9494b045bc7dd7e4929cfde6fdf0ab50070d1d90",
+  "source_revision": "034dc628faf2092cbf9f131609fd4fa1d2f3d349",
   "working_diff_sha256": "4d6ccbb89b0a62de1216abd60e06f0b9ad705f80d5abf3db7e15adc2e38d2510",
   "files": {
     "backend/Dockerfile": "8003085340a146430874bca700a031bad039a329213e9246f0b93975cfcb2eee",
@@ -204,8 +204,8 @@
       ]
     }
   ],
-  "upstream_base_revision": "76ab923e6da2cb2e65ca59b3ff0bbaf5fb83a462",
-  "upstream_delta_sha256": "7a07e7c75b226e233a46e4921d7a4d52c8e0551bcea4de913b826392ad7c5d89",
+  "upstream_base_revision": "f21bfefbee4dbd29831340df7bcdd083cb947ee0",
+  "upstream_delta_sha256": "4fe97f98bb70dc6edfee33bacda5b2cb7d85652e520d6ef1497548e8d04706fe",
   "retained_extensions": [
     {
       "path": "backend/src/api/implementation_price_tables.py",
