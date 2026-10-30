@@ -50,6 +50,7 @@ def test_owner_bound_fork_is_pinned_and_preserves_source(tmp_path,database):
     with sqlite3.connect(working) as db:
         db.execute('CREATE TABLE quantities(value INTEGER)');db.execute('INSERT INTO quantities VALUES(20)')
     pdf=working.parent/'original.pdf';pdf.write_bytes(b'synthetic exact source')
+    (working.parent/'trial-manifest.json').write_text('{"request_relative_storage":true}')
     store.persist_files(run['id']);store.update(run['id'],status='running')
     with pytest.raises(Conflict):store.capture_copy(run['id'],'other')
     frozen=store.capture_copy(run['id'],'operator')
@@ -83,6 +84,7 @@ def test_fork_rejects_unsettled_work(tmp_path,database):
     for folder in ('before','data'):
         path=root/folder/'hospital/database.sqlite3';path.parent.mkdir(parents=True)
         with sqlite3.connect(path) as db:db.execute('CREATE TABLE synthetic(value INTEGER)')
+    (root/'data/hospital/trial-manifest.json').write_text('{"request_relative_storage":true}')
     store.persist_files(run['id']);store.update(run['id'],status='running')
     with pytest.raises(Conflict):store.capture_copy(run['id'],'operator')
     store.update(run['id'],task_inputs={'business_workflow':{'phase':'approval'}})

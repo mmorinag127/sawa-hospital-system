@@ -22,6 +22,8 @@ def initialize(data):
         for table in ('uploaded_pdfs','ingest_jobs','ingest_deliveries','orders'):
             if db.execute('SELECT count(*) FROM '+table).fetchone()[0]:
                 raise ValueError('trial_initialization_requires_clean_fixture')
+    manifest['request_relative_storage'] = True
+    (data/'trial-manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
     import fitz
     from src.services.canonical_facility_store import read_snapshot
     from src.services.canonical_facility_lineage import resolve

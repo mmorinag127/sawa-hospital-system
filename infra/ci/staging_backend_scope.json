@@ -3,6 +3,8 @@
   "scope": "staging-core-and-page-repair",
   "always": ["authentication-and-session", "ocr-original-targets-artifacts-and-operator-values"],
   "targets_by_source": {
+    "backend/src/services/storage_service.py": ["backend/tests/integration/test_storage_service.py", "backend/tests/unit/test_agent_trial_transport.py", "backend/tests/unit/test_modernization_canonical_ocr_artifacts.py"],
+    "backend/src/services/agent_trial_transport.py": ["backend/tests/unit/test_agent_trial_transport.py"],
     "backend/src/services/order_list_contract.py": [
       "backend/tests/unit/test_order_list_contract.py",
       "backend/tests/unit/test_order_list_response_ownership.py"
@@ -45,6 +47,8 @@
     "backend/src/api/output_history.py": ["revision-history-and-output-isolation", "scaling-storage-and-history"],
     "backend/src/api/output_history_contract.py": ["revision-history-and-output-isolation"],
     "backend/src/services/order_service.py": ["page-read-results-and-response-ownership", "revision-history-and-output-isolation"],
+    "backend/src/services/storage_service.py": ["ocr-original-targets-artifacts-and-operator-values", "generated-display-storage-and-deferred-workbooks"],
+    "backend/src/services/agent_trial_transport.py": ["ocr-original-targets-artifacts-and-operator-values"],
     "backend/src/services/order_list_contract.py": ["page-read-results-and-response-ownership"],
     "backend/src/services/ocr_audit_contract.py": ["ocr-original-targets-artifacts-and-operator-values"],
     "backend/src/services/order_overview_read.py": ["page-read-results-and-response-ownership"],

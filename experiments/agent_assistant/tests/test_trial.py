@@ -61,6 +61,39 @@ def test_atomic_monthly_reservation_and_idempotency(tmp_path):
     assert store.budget()["reserved_cents"] == 60
 
 
+@pytest.mark.parametrize('mismatch',['owner','generation','phase','command','task'])
+def test_only_quiescent_owned_review_source_can_coexist(tmp_path,mismatch):
+    store=Store(tmp_path);store.set_budget(1000)
+    parent,_=store.create('user','review-parent-key','parent',['hospital'],100,
+                          task_id='hospital_pending_faxes',task_inputs={'business_workflow':{'phase':'approval'}})
+    store.update(parent['id'],status='running')
+    source={'owner':'user','run_id':parent['id'],'generation':parent['generation']}
+    context={'source_copy':source}
+    if mismatch=='owner':source['owner']='other'
+    if mismatch=='generation':source['generation']+=1
+    if mismatch=='phase':store.update(parent['id'],task_inputs={'business_workflow':{'phase':'analysing'}})
+    if mismatch=='command':store.command(parent['id'],'uncertain-write',{'name':'write'})
+    task='hospital_outputs' if mismatch=='task' else 'hospital_review_faxes'
+    with pytest.raises(Conflict,match='他の依頼'):
+        store.create('user','invalid-review-child','child',['hospital'],100,task_id=task,task_inputs=context)
+    assert store.budget()['reserved_cents']==100
+
+
+def test_frozen_review_child_does_not_allow_a_second_active_child(tmp_path):
+    store=Store(tmp_path);store.set_budget(1000)
+    parent,_=store.create('user','review-parent-key','parent',['hospital'],100,
+                          task_id='hospital_pending_faxes',task_inputs={'business_workflow':{'phase':'approval'}})
+    store.update(parent['id'],status='running')
+    context={'source_copy':{'owner':'user','run_id':parent['id'],'generation':parent['generation']}}
+    child,_=store.create('user','valid-review-child','child',['hospital'],100,
+                         task_id='hospital_review_faxes',task_inputs=context)
+    with pytest.raises(Conflict,match='他の依頼'):
+        store.create('user','second-review-child','child',['hospital'],100,task_id='hospital_review_faxes',task_inputs=context)
+    assert store.get(parent['id'])['status']=='running'
+    assert store.get(child['id'])['status']=='preparing'
+    assert store.budget()['reserved_cents']==200
+
+
 def test_usage_cumulative_cache_and_unknown_cost(tmp_path):
     store, _, _, run = prepared(tmp_path)
     usage = {"input_tokens": 30, "cache_read_input_tokens": 20, "list_cost": {"amount": "17", "currency": "USD"}}
@@ -95,7 +128,8 @@ def test_restore_is_per_request_and_preserves_original_and_audit(tmp_path, domai
 
 
 def test_source_copy_preparation_uses_frozen_copy_without_initializing_again(tmp_path):
-    store, sandbox, _, _ = prepared(tmp_path)
+    store, sandbox, _, initial = prepared(tmp_path)
+    store.update(initial['id'],status='completed',reserved=0)
     calls = []
     def materialize(source, target):
         calls.append(source)
@@ -122,7 +156,8 @@ def test_source_copy_preparation_uses_frozen_copy_without_initializing_again(tmp
     ('hospital_outputs','user',['shift']),
 ])
 def test_source_copy_rejects_wrong_owner_domain_or_task(tmp_path,task,owner,domains):
-    store, sandbox, _, _ = prepared(tmp_path,tuple(domains))
+    store, sandbox, _, initial = prepared(tmp_path,tuple(domains))
+    store.update(initial['id'],status='completed',reserved=0)
     sandbox.durable_store = SimpleNamespace(materialize_copy=lambda *args:pytest.fail('must reject before materialization'))
     run, _ = store.create('user','reject-source-copy','copy',domains,100,
                           task_id=task,task_inputs={'source_copy':{'owner':owner}})

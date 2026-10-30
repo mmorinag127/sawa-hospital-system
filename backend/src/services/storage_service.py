@@ -22,8 +22,18 @@ class StorageService:
 
     def save_bytes(self, relative_path: str, data: bytes) -> str:
         target = datasets.local_directory(self.base_path) / relative_path
+        from src.services import agent_trial_transport
+        trial_root = None
+        if agent_trial_transport.enabled():
+            configuration = agent_trial_transport.configuration()
+            if configuration['relative_storage']:
+                trial_root = Path(configuration['root'])
+                if not target.resolve().is_relative_to(trial_root):
+                    raise ValueError('request_local_storage_outside_copy')
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+        if trial_root is not None:
+            return target.resolve().relative_to(trial_root).as_posix()
         return str(target)
 
     def open(self, relative_path: str) -> bytes:

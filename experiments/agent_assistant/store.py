@@ -166,8 +166,15 @@ class Store:
             total = db.execute("SELECT COALESCE(SUM(spent+reserved),0) FROM runs WHERE month=?", (month,)).fetchone()[0]
             if total + cap > limit:
                 raise Conflict("月次予算の空きがありません。上限または実行中の依頼を確認してください")
-            # Sandbox ports are private to one active request; no concurrent writers.
-            for active in db.execute("SELECT id,status FROM runs WHERE status NOT IN ('rolled_back','stopped','failed','completed','waiting_input','budget_reached')"):
+            # A frozen review fork may coexist only with its quiescent source.
+            source = task_inputs.get('source_copy',{})
+            for active in db.execute("SELECT id,status,owner,generation,task_inputs FROM runs WHERE status NOT IN ('rolled_back','stopped','failed','completed','waiting_input','budget_reached')"):
+                if (task_id=='hospital_review_faxes' and domains==['hospital']
+                        and source.get('run_id')==active['id'] and source.get('owner')==owner==active['owner']
+                        and source.get('generation')==active['generation'] and active['status']=='running'
+                        and json.loads(active['task_inputs']).get('business_workflow',{}).get('phase')=='approval'
+                        and not db.execute("SELECT 1 FROM commands WHERE run_id=? AND status!='done' LIMIT 1",(active['id'],)).fetchone()):
+                    continue
                 if active['status'] == 'rollback_stop_pending':
                     receipt = db.execute("SELECT payload FROM events WHERE run_id=? AND kind='rollback' ORDER BY id DESC LIMIT 1", (active['id'],)).fetchone()
                     restored = json.loads(receipt['payload']) if receipt else {}

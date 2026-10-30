@@ -59,6 +59,34 @@ def test_local_mode_cannot_target_another_database(local_root, monkeypatch):
         local.configuration()
 
 
+def test_relative_artifact_reference_survives_independent_copy(local_root,monkeypatch,tmp_path):
+    import shutil
+    from src.services.storage_service import StorageService,load_bytes_from_uri
+    marker=local_root/'trial-manifest.json'
+    content=json.loads(marker.read_text());content['request_relative_storage']=True
+    marker.write_text(json.dumps(content))
+    monkeypatch.chdir(local_root)
+    uri=StorageService(local_root/'ocr-artifacts').save_bytes('job/raw.json',b'{"literal":"20"}')
+    assert uri=='ocr-artifacts/job/raw.json'
+    fork=tmp_path/'fork/data/hospital';shutil.copytree(local_root,fork)
+    (fork.parent.parent/'before/hospital').mkdir(parents=True)
+    monkeypatch.setenv('SAWA_TRIAL_DATA',str(fork));monkeypatch.setenv('DB_URI','sqlite:///'+str(fork/'database.sqlite3'))
+    monkeypatch.chdir(fork)
+    (local_root/uri).write_bytes(b'source changed after copy')
+    assert load_bytes_from_uri(uri)==b'{"literal":"20"}'
+    outside=tmp_path/'must-not-be-created'
+    with pytest.raises(ValueError,match='outside_copy'):
+        StorageService(fork).save_bytes(str(outside),b'forbidden')
+    assert not outside.exists()
+
+
+def test_normal_storage_keeps_absolute_reference(local_root,monkeypatch):
+    from src.services.storage_service import StorageService
+    monkeypatch.delenv('SAWA_AGENT_TRIAL_TRANSPORT')
+    path=StorageService(local_root).save_bytes('ordinary.json',b'unchanged')
+    assert path==str(local_root/'ordinary.json')
+
+
 @pytest.mark.parametrize('kind',['ingest','workflow'])
 def test_trial_copy_never_dispatches_a_copied_cloud_contract(local_root,monkeypatch,kind):
     from google.cloud import tasks_v2

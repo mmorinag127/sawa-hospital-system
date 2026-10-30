@@ -26,7 +26,7 @@ def configuration():
             or len(os.environ.get("SAWA_TRIAL_TOKEN", "")) < 32
             or not (root.parent.parent / "before" / "hospital").is_dir()):
         raise ValueError("request_local_trial_identity_required")
-    return {"mode": "request_local", "root": str(root),
+    return {"mode": "request_local", "root": str(root), "relative_storage": marker.get('request_relative_storage') is True,
             "credential_digest": hashlib.sha256(os.environ["SAWA_TRIAL_TOKEN"].encode()).hexdigest()}
 
 

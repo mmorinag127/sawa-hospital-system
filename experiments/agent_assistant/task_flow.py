@@ -148,8 +148,9 @@ class TaskFlow:
             inputs['absence_date'] = inputs.get('absence_date') or business_today().isoformat()
             absent = date.fromisoformat(inputs['absence_date'])
 
-        run = dict(id=uuid4().hex, domains=[spec['domain']], purpose='target_lookup', task_id=task_id,
-                   owner=owner,task_inputs={'source_copy':source_copy} if source_copy else {})
+        run = dict(id=uuid4().hex, domains=[spec['domain']], purpose='target_lookup')
+        if source_copy:
+            run.update(task_id=task_id,owner=owner,task_inputs={'source_copy':source_copy})
         self.tools.authorizations[run['id']] = authorization
         try:
             await run_blocking(self.tools.sandbox.prepare, run)

@@ -19,6 +19,8 @@ not changed. Deployment uses the owner-dispatched staging Actions only.
 | Review queue hides completed OCR awaiting operator confirmation | Include completed unconfirmed orders, retain failure states and exclude confirmed orders | Implemented, unverified |
 | Hospital has only a pending-FAX baseline | Select an owner-bound review/completed request; freeze its checkpoint in the selection and materialize a separate private copy | Implemented, unverified |
 | Default reservation prevents dependent review tasks within available budget | Optional per-request USD cap through the existing cap_cents API; monthly budget unchanged | Implemented, unverified |
+| An approval-waiting source blocks its private review fork | Admit only the same-owner/same-generation source at approval with no unsettled commands; other active requests still block | Implemented, unverified |
+| Copied OCR artifact references retain the source absolute directory | Newly initialized trial storage returns request-relative paths; production/legacy behavior unchanged; old nonportable sources rejected | Implemented, unverified |
 
 Product changes are complete for the known findings. Regression additions cover
 preparation visibility, immediate restart, immutable-file collision/digest
@@ -45,6 +47,14 @@ The second batch at 936f63d5d124 was interrupted without a receipt while this
 private copy design replaced packaged snapshots. Its initial backend command
 also found an unmapped ingest.py dependency; the scope mapping is now explicit.
 Neither interrupted attempt is a completed verification.
+
+Batch 7c55cea4557b finished in 852 seconds without a receipt: E2E found an
+external node_modules symlink; seven discovery checks found selected-day scope
+applied before selection; four new unit fixtures left their initial run active.
+Dependencies are now an independent APFS copy. Lookup metadata is restricted to
+actual hospital forks and fixtures explicitly finish their setup request. The
+same review also added the quiescent-parent admission and relative-storage
+boundaries above. No failing result is claimed as a pass or deployed.
 
 Live case oracle/results are maintained in the project-level
 `docs/reviews/agent-stg-validation-20261030/` directory. Every pending check must

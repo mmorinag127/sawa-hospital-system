@@ -318,6 +318,11 @@ class PostgresStore(Store):
             if db.execute("SELECT 1 FROM commands WHERE run_id=? AND status!='done' LIMIT 1", (ident,)).fetchone():
                 raise Conflict('結果未確定の処理がある依頼はコピーできません')
             manifest = json.loads(row['manifest'])
+            digest = manifest.get('hospital/trial-manifest.json')
+            marker = db.execute('SELECT payload FROM sawa_agent_trial.files WHERE path=? AND digest=?',
+                                ('runs/'+ident+'/checkpoints/'+str(digest),digest)).fetchone() if digest else None
+            if marker is None or json.loads(decode_blob(marker['payload'],expected=digest)).get('request_relative_storage') is not True:
+                raise Conflict('過去の依頼はファイル参照を独立コピーできません。新しい依頼で処理してください')
         return {'run_id':ident,'owner':owner,'generation':row['generation'],'status':row['status'],'manifest':manifest,
                 'sha256':hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest()}
 
