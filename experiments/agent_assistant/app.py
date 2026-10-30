@@ -212,7 +212,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             provider = store.provider()
             budget = store.budget()
         return {"trial": True, "provider_id": provider, "provider": LABELS[provider], "providers": managed.choices(), "missing": managed.missing(), "domains": domains,
-                "budget": budget, "notice": "専用コピーを使用。既存環境への反映はありません。"}
+                "budget": budget, "run_cap_cents": config.get("run_cap_cents",100), "notice": "専用コピーを使用。既存環境への反映はありません。"}
 
     @app.put('/provider')
     def select_provider(payload: ProviderChoice):

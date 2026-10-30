@@ -121,6 +121,17 @@ class TaskFlow:
     async def options(self, task_id, inputs, owner, authorization):
         spec = TASKS[task_id]
         inputs = dict(inputs)
+        source_id = inputs.pop('source_run_id',None)
+        source_copy = None
+        if source_id is not None:
+            durable = getattr(self.tools.sandbox,'durable_store',None)
+            if (task_id not in ('hospital_review_faxes','hospital_outputs') or durable is None
+                    or not isinstance(source_id,str) or len(source_id)!=32
+                    or any(c not in '0123456789abcdef' for c in source_id)):
+                raise ValueError('保存済みの病院依頼を一覧から選択してください')
+            source_copy = await run_blocking(durable.capture_copy,source_id,owner)
+            if (task_id=='hospital_outputs') != (source_copy['status']=='completed'):
+                raise Conflict('確認用には確認待ち、帳票出力には完了済みの依頼を選択してください')
         if inputs.get('month'):
             month_bounds(inputs['month'])
         if inputs.get('facility_id') is not None and (type(inputs['facility_id']) is not int or inputs['facility_id']<=0): raise ValueError('学校を一覧から選択してください')
@@ -137,7 +148,8 @@ class TaskFlow:
             inputs['absence_date'] = inputs.get('absence_date') or business_today().isoformat()
             absent = date.fromisoformat(inputs['absence_date'])
 
-        run = dict(id=uuid4().hex, domains=[spec['domain']], purpose='target_lookup', task_id=task_id)
+        run = dict(id=uuid4().hex, domains=[spec['domain']], purpose='target_lookup', task_id=task_id,
+                   owner=owner,task_inputs={'source_copy':source_copy} if source_copy else {})
         self.tools.authorizations[run['id']] = authorization
         try:
             await run_blocking(self.tools.sandbox.prepare, run)
@@ -285,6 +297,8 @@ class TaskFlow:
             payload = {'inputs':inputs,'choices':choices,'schools':schools,'layouts':layouts,'work_days':work_days,
                        'month_choices':month_choices,'batches':batches(choices, task_id),
                        'absence_days':absence_days() if task_id == 'shift_absence' else []}
+            if source_copy:
+                payload['source_copy'] = source_copy
             def save_selection():
                 with self.store.tx() as db:
                     db.execute('INSERT INTO selections VALUES(?,?,?,?)',(ident,owner,task_id,json.dumps(payload,ensure_ascii=False)))
@@ -332,7 +346,10 @@ class TaskFlow:
                 inputs['layout_id']=layout['id']; inputs['layout_version']=layout['version']
             if TASKS[task_id].get('date'):
                 inputs['layout_choices']=payload['layouts']
-        return {'inputs':inputs,'targets':selected}
+        context = {'inputs':inputs,'targets':selected}
+        if payload.get('source_copy'):
+            context['source_copy'] = payload['source_copy']
+        return context
 
     def choose_layout(self, run, layout_id):
         if run.get('task_id')!='lunch_daily_bundle': raise Conflict('日次の図面選択ではありません')

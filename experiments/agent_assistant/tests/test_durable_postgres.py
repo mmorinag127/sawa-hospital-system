@@ -38,6 +38,58 @@ def seed_legacy(database, payload):
         cursor.execute('INSERT INTO sawa_agent_trial.ledger VALUES(1,0,%s)', (payload,))
 
 
+def test_owner_bound_fork_is_pinned_and_preserves_source(tmp_path,database):
+    import copy
+    import json
+    store=PostgresStore(tmp_path,database);store.set_budget(1000)
+    run,_=store.create('operator','fork-source-request','source',['hospital'],100,
+                       task_id='hospital_pending_faxes',task_inputs={'business_workflow':{'phase':'approval'}})
+    root=tmp_path/'runs'/run['id']
+    original=root/'before/hospital/database.sqlite3';original.parent.mkdir(parents=True);original.write_bytes(b'original')
+    working=root/'data/hospital/database.sqlite3';working.parent.mkdir(parents=True)
+    with sqlite3.connect(working) as db:
+        db.execute('CREATE TABLE quantities(value INTEGER)');db.execute('INSERT INTO quantities VALUES(20)')
+    pdf=working.parent/'original.pdf';pdf.write_bytes(b'synthetic exact source')
+    store.persist_files(run['id']);store.update(run['id'],status='running')
+    with pytest.raises(Conflict):store.capture_copy(run['id'],'other')
+    frozen=store.capture_copy(run['id'],'operator')
+    with sqlite3.connect(working) as db:db.execute('UPDATE quantities SET value=21')
+    store.persist_files(run['id'])
+    target=tmp_path/'fork'
+    store.materialize_copy(frozen,target)
+    with sqlite3.connect(target/'database.sqlite3') as db:
+        assert db.execute('SELECT value FROM quantities').fetchone()[0]==20
+    with sqlite3.connect(working) as db:
+        assert db.execute('SELECT value FROM quantities').fetchone()[0]==21
+    assert (target/'original.pdf').read_bytes()==pdf.read_bytes()
+    assert original.read_bytes()==b'original'
+    for name,digest in [('../outside','a'*64),('shift/database.sqlite3','a'*64),('hospital/missing','a'*64)]:
+        invalid=copy.deepcopy(frozen);invalid['manifest']={name:digest}
+        invalid['sha256']=hashlib.sha256(json.dumps(invalid['manifest'],sort_keys=True).encode()).hexdigest()
+        with pytest.raises(Conflict):store.materialize_copy(invalid,tmp_path/'invalid')
+    invalid=copy.deepcopy(frozen);invalid['sha256']='0'*64
+    with pytest.raises(Conflict):store.materialize_copy(invalid,tmp_path/'invalid-hash')
+    store.update(run['id'],status='completed',reserved=0)
+    assert store.capture_copy(run['id'],'operator')['status']=='completed'
+    store.fence(run['id'])
+    with pytest.raises(Conflict):store.materialize_copy(frozen,tmp_path/'stale')
+
+
+def test_fork_rejects_unsettled_work(tmp_path,database):
+    store=PostgresStore(tmp_path,database);store.set_budget(1000)
+    run,_=store.create('operator','fork-inflight-request','source',['hospital'],100,
+                       task_id='hospital_pending_faxes',task_inputs={'business_workflow':{'phase':'analysing'}})
+    root=tmp_path/'runs'/run['id']
+    for folder in ('before','data'):
+        path=root/folder/'hospital/database.sqlite3';path.parent.mkdir(parents=True)
+        with sqlite3.connect(path) as db:db.execute('CREATE TABLE synthetic(value INTEGER)')
+    store.persist_files(run['id']);store.update(run['id'],status='running')
+    with pytest.raises(Conflict):store.capture_copy(run['id'],'operator')
+    store.update(run['id'],task_inputs={'business_workflow':{'phase':'approval'}})
+    assert store.command(run['id'],'unsettled-command',{'name':'write'}) is None
+    with pytest.raises(Conflict,match='未確定'):store.capture_copy(run['id'],'operator')
+
+
 def test_fax_paging_and_null_safe_observation_preserve_newer_decisions(tmp_path, database):
     from types import SimpleNamespace
     from experiments.agent_assistant.fax_workflow import FaxWorkflow

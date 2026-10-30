@@ -129,3 +129,33 @@ def test_absence_selection_never_silently_ignores_a_second_staff_member(tmp_path
         assert selected['targets'][0]['key']=='2'
         assert len(selected['targets'])==1 and not native.writes
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('task,status,key',[
+    ('hospital_outputs','completed','private-order-id'),
+    ('hospital_review_faxes','running','private-fax-id'),
+])
+def test_source_selection_is_owner_bound_and_propagates_frozen_copy(tmp_path,monkeypatch,task,status,key):
+    from types import SimpleNamespace
+    from experiments.agent_assistant.store import Conflict
+    async def scenario():
+        _,native,tools=discovery(tmp_path,monkeypatch)
+        source={'run_id':'a'*32,'owner':'operator','generation':0,'status':status,'manifest':{'hospital/database.sqlite3':'b'*64},'sha256':'c'*64}
+        calls=[]
+        def capture(ident,owner):
+            calls.append((ident,owner))
+            if owner!='operator':raise Conflict('owner mismatch')
+            return source
+        native.durable_store=SimpleNamespace(capture_copy=capture)
+        result=await tools.flow.options(task,{'source_run_id':'a'*32},'operator','')
+        selected=tools.flow.selection(task,'operator',result['selection_id'],[key])
+        assert calls==[('a'*32,'operator')]
+        assert selected['source_copy']==source and 'source_run_id' not in selected['inputs']
+        with pytest.raises((ValueError,Conflict)):
+            tools.flow.selection(task,'other',result['selection_id'],[key])
+        with pytest.raises(Conflict):
+            await tools.flow.options('hospital_review_faxes' if task=='hospital_outputs' else 'hospital_outputs',{'source_run_id':'a'*32},'operator','')
+        with pytest.raises(ValueError):
+            await tools.flow.options('shift_check',{'source_run_id':'a'*32},'operator','')
+        assert not native.writes
+    asyncio.run(scenario())

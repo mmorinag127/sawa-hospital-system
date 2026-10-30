@@ -24,30 +24,19 @@ def prepare(root, python):
             raise RuntimeError("An image-owned trial baseline is required")
     for domain, entry in release["domains"].items():
         baseline = root / "baselines" / domain
-        before = source_manifest(baseline)
         backend = root / "native" / domain / "backend"
         interpreter = python[domain] if isinstance(python, dict) else python
         env = {key: os.environ[key] for key in ("PATH", "LANG") if key in os.environ}
         env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(backend))
-        marker = json.loads((baseline / 'trial-manifest.json').read_text())
-        directories = [baseline]
-        for task, relative in marker.get('task_baselines', {}).items():
-            selected = (baseline / relative).resolve()
-            if (domain != 'hospital' or task not in {'hospital_review_faxes', 'hospital_outputs'}
-                    or not isinstance(relative, str) or Path(relative).name != relative
-                    or not selected.is_relative_to(baseline) or selected == baseline):
-                raise RuntimeError('Invalid packaged task baseline')
-            directories.append(selected)
-        for directory in directories:
-            env['DATABASE_URL' if domain == 'shift' else 'ALEMBIC_DB_URI'] = "sqlite:///" + str(directory / "database.sqlite3")
-            subprocess.run(
-                [str(interpreter), "-m", "alembic", "-c", str(backend / "alembic.ini"), "upgrade", "head"],
-                cwd=backend, env=env, check=True,
-            )
+        env['DATABASE_URL' if domain == 'shift' else 'ALEMBIC_DB_URI'] = "sqlite:///" + str(baseline / "database.sqlite3")
+        subprocess.run(
+            [str(interpreter), "-m", "alembic", "-c", str(backend / "alembic.ini"), "upgrade", "head"],
+            cwd=backend, env=env, check=True,
+        )
         migrated = source_manifest(baseline)
-        databases = {str((directory / 'database.sqlite3').relative_to(baseline)) for directory in directories}
-        if ({key: value for key, value in migrated.items() if key not in databases}
-                != {key: value for key, value in before.items() if key not in databases}):
+        original = entry["baseline_files"]
+        if ({key: value for key, value in migrated.items() if key != "database.sqlite3"}
+                != {key: value for key, value in original.items() if key != "database.sqlite3"}):
             raise RuntimeError("Formal migration changed non-database trial sources: " + domain)
         entry["baseline_files"] = migrated
     release_path.write_text(json.dumps(release, ensure_ascii=False, indent=2) + "\n")

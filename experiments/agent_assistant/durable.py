@@ -306,6 +306,59 @@ class PostgresStore(Store):
         with self.read() as db:
             return db.execute('SELECT 1 FROM working_copies WHERE run_id=?', (ident,)).fetchone() is not None
 
+    def capture_copy(self, ident, owner):
+        with self.read() as db:
+            row = db.execute('SELECT r.generation,r.status,r.task_id,r.task_inputs,w.manifest FROM runs r '
+                             'JOIN working_copies w ON w.run_id=r.id WHERE r.id=? AND r.owner=?', (ident, owner)).fetchone()
+            if row is None or row['task_id'] not in ('hospital_pending_faxes','hospital_review_faxes'):
+                raise Conflict('同じ利用者の保存済み病院依頼を選択してください')
+            phase = json.loads(row['task_inputs']).get('business_workflow',{}).get('phase')
+            if row['status'] != 'completed' and not (row['status'] in ('running','waiting_input') and phase == 'approval'):
+                raise Conflict('確認待ちまたは完了した病院依頼を選択してください')
+            if db.execute("SELECT 1 FROM commands WHERE run_id=? AND status!='done' LIMIT 1", (ident,)).fetchone():
+                raise Conflict('結果未確定の処理がある依頼はコピーできません')
+            manifest = json.loads(row['manifest'])
+        return {'run_id':ident,'owner':owner,'generation':row['generation'],'status':row['status'],'manifest':manifest,
+                'sha256':hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest()}
+
+    def materialize_copy(self, source, target):
+        ident, manifest = source['run_id'], source['manifest']
+        if (len(ident)!=32 or any(c not in '0123456789abcdef' for c in ident)
+                or not isinstance(manifest,dict) or not manifest
+                or hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest()!=source['sha256']):
+            raise Conflict('選択した作業コピーの出典を照合できません')
+        targets = {}
+        target = Path(target).resolve()
+        for name,digest in manifest.items():
+            relative = Path(name)
+            if (relative.is_absolute() or '..' in relative.parts or len(relative.parts)<2
+                    or relative.parts[0]!='hospital' or not isinstance(digest,str) or len(digest)!=64
+                    or any(c not in '0123456789abcdef' for c in digest)):
+                raise Conflict('病院の保存済み作業コピーだけを選択してください')
+            path = target.joinpath(*relative.parts[1:])
+            targets.setdefault(digest,[]).append(path)
+        with self.read() as db:
+            row = db.execute('SELECT generation,status FROM runs WHERE id=? AND owner=?', (ident,source['owner'])).fetchone()
+            if row is None or row['generation']!=source['generation'] or row['status'] in ('rolled_back','stopped','failed','reconciliation_required'):
+                raise Conflict('元の依頼が停止・復元・変更されています。選び直してください')
+            digests = list(targets)
+            for offset in range(0,len(digests),20):
+                batch = digests[offset:offset+20]
+                keys = ['runs/'+ident+'/checkpoints/'+digest for digest in batch]
+                found = set()
+                for item in db.execute('SELECT path,digest,payload FROM sawa_agent_trial.files WHERE path IN ('
+                                       + ','.join('?' for _ in keys)+')',keys):
+                    digest = item['digest']
+                    if digest not in batch or item['path']!='runs/'+ident+'/checkpoints/'+digest:
+                        raise Conflict('保存済み作業コピーの参照が一致しません')
+                    content = decode_blob(item['payload'],expected=digest)
+                    for path in targets[digest]:
+                        path.parent.mkdir(parents=True,exist_ok=True)
+                        path.write_bytes(content)
+                    found.add(digest)
+                if found != set(batch):
+                    raise Conflict('保存済み作業コピーの一部がありません')
+
     def hydrate(self):
         """Explicit full repair only; startup and normal reads restore one run."""
         with self.read() as db:

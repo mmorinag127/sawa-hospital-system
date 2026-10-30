@@ -37,6 +37,7 @@
     "backend/src/models/uploaded_pdf.py": ["page-read-results-and-response-ownership"],
     "backend/src/models/user.py": ["authentication-and-session"],
     "backend/src/api/orders.py": ["page-read-results-and-response-ownership", "revision-history-and-output-isolation"],
+    "backend/src/api/ingest.py": ["ocr-original-targets-artifacts-and-operator-values", "upload-route-contracts"],
     "backend/src/api/menu_import_contract.py": ["upload-route-contracts"],
     "backend/src/api/menu_master_schemas.py": ["scaling-storage-and-history"],
     "backend/src/api/menu_masters.py": ["scaling-storage-and-history"],

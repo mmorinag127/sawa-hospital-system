@@ -19,6 +19,26 @@ for(const [id,domain,label,target_kind,month] of [
 ])tasks.push({id,domain,label,target_kind,month,description:'登録済み対象から提案します',steps:[]});
 const config={missing:[],domains:Object.fromEntries(['hospital','shift','school-lunch'].map(k=>[k,{baseline_ready:true}])),budget:{spent_cents:0,reserved_cents:0,monthly_cents:1000,available_cents:1000,notice:'synthetic'}};
 const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',instruction:'翌月のシフト案を作る',domains:['shift'],status,spent:0,cap:100,events:[],artifacts:[],conversation:[],task_inputs:{inputs:{month:'2026-11'},targets:[{label:'11月の勤務計画',data:{}}]},pending_question:{id:'q1',role:'assistant',question_id:'question-1',text:'登録内容で作成しますか？',options:['登録内容で進める','確認したい']}});
+
+test('hospital source selector and per-request cap use normal discovery and create contracts',async()=>{
+ const source={...makeRun('completed'),id:'a'.repeat(32),task_id:'hospital_pending_faxes',domains:['hospital']};
+ const h=await mount({initial:source,openInitial:false});
+ try{
+  await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('確定済み注文')));
+  const selector=h.document.querySelector('.assistant-fields select');
+  assert.ok([...selector.options].some(option=>option.value===source.id));
+  await h.change(selector,source.id);
+  await h.wait(()=>h.calls.some(c=>c.url.endsWith('/target-lookups')&&c.body?.inputs?.source_run_id===source.id));
+  await h.wait(()=>h.document.querySelector('.target-choice input'));
+  await h.click(h.document.querySelector('.target-choice input'));
+  await h.change(h.document.querySelector('.assistant-fields input[type="number"]'),'1.00');
+  await h.click(h.button('この内容で始める'));
+  const create=h.calls.findLast(c=>c.url===base+'/runs'&&c.method==='post');
+  assert.equal(create.body.cap_cents,100);
+  assert.equal(create.body.selection_id,'s1');
+  assert.equal(create.body.source_copy,undefined);
+ }finally{await h.close();}
+});
 async function mount({initial=null,targets,adminView=false,beforeGet,beforePost,openInitial=true}={}){
  const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost/assistant',pretendToBeVisual:true});const saved=new Map();
  for(const key of ['window','document','navigator','HTMLElement','Element','Node','Event','MouseEvent','HTMLInputElement','HTMLSelectElement','HTMLTextAreaElement','FormData']){saved.set(key,Object.getOwnPropertyDescriptor(global,key));Object.defineProperty(global,key,{configurable:true,writable:true,value:dom.window[key]});}

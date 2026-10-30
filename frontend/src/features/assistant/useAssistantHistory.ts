@@ -4,7 +4,7 @@ import type { BusinessProgress } from "../../components/assistant/BusinessProgre
 
 export type AssistantRunSummary = {
   id: string; instruction: string; domains: string[]; status: string; spent: number;
-  provider?: string; business?: BusinessProgress;
+  provider?: string; business?: BusinessProgress; task_id?: string;
 };
 type Cursor = { before_created: string; before_id: string };
 type Page = { items: AssistantRunSummary[]; next: Cursor | null };
