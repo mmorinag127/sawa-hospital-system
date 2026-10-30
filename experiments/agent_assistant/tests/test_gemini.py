@@ -171,9 +171,13 @@ def test_mcp_image_blocks_convert_without_external_urls():
 def test_all_advertised_provider_tools_are_registered_with_local_mcp(tmp_path):
     store, sandbox, tools, run = prepared(tmp_path, ('school-lunch',))
     async def check():
-        registered = {tool.name for tool in await build_mcp(tools).list_tools()}
+        registered = {tool.name: tool.inputSchema for tool in await build_mcp(tools).list_tools()}
         for domain in ('school-lunch', 'hospital', 'shift'):
-            assert {definition['name'] for definition in tools.definitions([domain])} <= registered
+            for definition in tools.definitions([domain]):
+                name = definition['name']
+                assert name in registered
+                assert set(definition['input_schema'].get('properties', {})) == set(registered[name].get('properties', {})), name
+                assert set(definition['input_schema'].get('required', [])) == set(registered[name].get('required', [])), name
     asyncio.run(check())
 
 

@@ -132,9 +132,11 @@ def build_mcp(tools):
         return await invoke("fax_work_queue", {}, ctx)
 
     @server.tool()
-    async def request_fax_approval(fax_id: str, summary: str, ctx: Context, sheet: dict | None = None):
-        """一件の原本・保存シートを利用者確認へ提出する。他のFAXの処理は続行する。"""
-        return await invoke("request_fax_approval", {"fax_id": fax_id, "summary": summary, **({"sheet": sheet} if sheet is not None else {})}, ctx)
+    async def request_fax_approval(fax_id: str, summary: str, ctx: Context, sheet: dict | None = None, cell_edits: list[dict[str, str]] | None = None):
+        """原本・シートを利用者確認へ提出する。手動訂正はcell_editsにdate_mmdd・daypart・menu・field（qty.regular_x等）・value（文字列、空欄可）を指定する。全シートを転記せず、説明文だけで訂正済みとしない。変更なしならfax_id・summaryだけ渡す。"""
+        return await invoke("request_fax_approval", {"fax_id": fax_id, "summary": summary,
+            **({"sheet": sheet} if sheet is not None else {}),
+            **({"cell_edits": cell_edits} if cell_edits is not None else {})}, ctx)
 
     @server.tool()
     async def wait_for_fax_work(ctx: Context):

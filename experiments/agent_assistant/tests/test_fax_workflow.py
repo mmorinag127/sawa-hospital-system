@@ -291,6 +291,33 @@ def test_sparse_correction_is_grounded_preserved_and_requires_new_approval(setup
     asyncio.run(scenario())
 
 
+def test_mcp_sparse_correction_schema_and_wire_preserve_the_requested_cell(setup):
+    from experiments.agent_assistant.mcp_server import build_mcp, call_local
+    async def scenario():
+        _, native, tools, run = setup
+        native.sources['A']['status'] = 'completed'
+        native.sheets['OA'] = {'fields': ['date_mmdd', 'daypart', 'menu', 'qty.regular_x'],
+                               'rows': [['01/08', '昼', '白菜', '20'], ['01/09', '昼', '白菜', '']]}
+        original = deepcopy(native.sheets['OA'])
+        await tools.faxes.refresh(run)
+        first = (await tools.faxes.submit(run, 'A', '照合'))['review']
+        await tools.faxes.decide(run, 'A', first['id'], False, '白菜18食')
+        server = build_mcp(tools)
+        registered = next(tool for tool in await server.list_tools() if tool.name == 'request_fax_approval')
+        advertised = next(tool for tool in tools.definitions(['hospital']) if tool['name'] == registered.name)
+        assert set(registered.inputSchema['properties']) == set(advertised['input_schema']['properties'])
+        assert set(registered.inputSchema['required']) == set(advertised['input_schema']['required'])
+        edits = [{'date_mmdd': '01/08', 'daypart': '昼', 'menu': '白菜', 'field': 'qty.regular_x', 'value': '18'}]
+        result = await call_local(server, tools, run['id'], run['generation'], 'request_fax_approval',
+                                  {'fax_id': 'A', 'summary': '手動訂正', 'cell_edits': edits}, 'mcp-correction')
+        assert result['ok'], result
+        review = tools.faxes.item(run['id'], 'A')['review']
+        assert review['sheet']['rows'] == [['01/08', '昼', '白菜', '18'], ['01/09', '昼', '白菜', '']]
+        assert "'20' → '18'" in review['summary']
+        assert native.sheets['OA'] == original and not native.writes
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('change', ['flat', 'missing', 'identity', 'duplicate'])
 def test_correction_rejects_ambiguous_or_structurally_changed_rows(change):
     from experiments.agent_assistant.fax_workflow import apply_cell_edits, validate_review_sheet

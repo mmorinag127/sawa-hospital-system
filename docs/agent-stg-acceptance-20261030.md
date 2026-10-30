@@ -140,3 +140,21 @@ malformed matrices, source preservation and renewed human approval.
 Implementation and test updates are complete for the three known live defects.
 No tests/build/deploy have yet run against this dirty revision. The full12-task
 acceptance remains incomplete (4 previously verified positive cases).
+
+### MCP Boundary Found During the New Staging Attempt
+
+Run `48b227225f9646e387d6894fa6122d9b` received the same authored cabbage18
+correction. Its model submitted only a narrative again. The server correctly
+displayed "no quantity/remarks changes", and the unchanged20 was not approved.
+The independent FastMCP function had not exposed/forwarded `cell_edits`, despite
+the direct Tools schema and tests supporting it. Its signature, forwarding and
+task instructions are now updated. The test now executes the correction through
+the actual FastMCP boundary, and all advertised tools' top-level properties and
+required fields must agree with their registered MCP schemas.
+
+The original request's restored approval succeeded (HTTP200,115.866seconds) and
+its normal server-owned save/output sequence is still running. It is not retried.
+Before the next minimal deployment this sequence must reach a known result.
+New changes require a new signed local receipt; the prior79354753 success is
+preserved, never relabelled as coverage for this follow-up. The signed79354753
+receipt is used only as the verified ancestor for existing impact selection.
