@@ -21,6 +21,8 @@ not changed. Deployment uses the owner-dispatched staging Actions only.
 | Default reservation prevents dependent review tasks within available budget | Optional per-request USD cap through the existing cap_cents API; monthly budget unchanged | Implemented, unverified |
 | An approval-waiting source blocks its private review fork | Admit only the same-owner/same-generation source at approval with no unsettled commands; other active requests still block | Implemented, unverified |
 | Copied OCR artifact references retain the source absolute directory | Newly initialized trial storage returns request-relative paths; production/legacy behavior unchanged; old nonportable sources rejected | Implemented, unverified |
+| Live polling and controller commits conflict at SERIALIZABLE snapshots | Serialize this epoch-owning instance's ledger writers before opening transactions, including preparation persistence; reads remain concurrent, no business replay | Implemented, unverified |
+| Unchanged FAX polling writes the same row and checkpoints every native file | Null-safe value-difference guard alongside the existing observation CAS; changed data still checkpoints, stale observations cannot overwrite operator decisions | Implemented, unverified |
 
 Product changes are complete for the known findings. Regression additions cover
 preparation visibility, immediate restart, immutable-file collision/digest
@@ -59,3 +61,12 @@ boundaries above. No failing result is claimed as a pass or deployed.
 Live case oracle/results are maintained in the project-level
 `docs/reviews/agent-stg-validation-20261030/` directory. Every pending check must
 remain explicitly incomplete until its new live evidence is captured.
+
+Staging source cf43d742 passed the full local batch and deploy 40998488150.
+Live pending-FAX run 3f0a4b5c69104334b91a72b3831bbb99 completed OCR and prepared
+its review, then a concurrent ledger commit raised SerializationFailure. Its
+saved OCR/review must be preserved and resumed through the normal recovery UI,
+not rerun or repaired by editing the ledger. The new writer-boundary regression
+holds one real PostgreSQL transaction open, verifies another writer waits before
+its snapshot, and verifies a reader remains available. Injected external
+conflicts still roll back and propagate without executing a body twice.

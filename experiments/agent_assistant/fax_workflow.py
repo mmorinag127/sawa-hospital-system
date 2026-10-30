@@ -82,18 +82,22 @@ class FaxWorkflow:
                     + ','.join('?' for _ in identities) + ')', (run_id, *identities))}
 
     def set(self, run_id, fax_id, **fields):
+        values=[json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else v for v in fields.values()]
         with self.store.tx() as db:
-            db.execute("UPDATE fax_items SET " + ",".join(k+"=?" for k in fields) + " WHERE run_id=? AND fax_id=?",
-                (*[json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else v for v in fields.values()], run_id, fax_id))
+            db.execute("UPDATE fax_items SET " + ",".join(k+"=?" for k in fields)
+                + " WHERE run_id=? AND fax_id=? AND (" + ' OR '.join(k+' IS NOT ?' for k in fields) + ')',
+                (*values, run_id, fax_id, *values))
 
     def set_observed(self, run_id, item, **fields):
         """Background refresh may never overwrite a newer review or human answer."""
         encode = lambda value: json.dumps(value, ensure_ascii=False) if isinstance(value, dict) else value
+        values=[encode(value) for value in fields.values()]
         with self.store.tx() as db:
             db.execute('UPDATE fax_items SET '+','.join(key+'=?' for key in fields)
-                +' WHERE run_id=? AND fax_id=? AND state=? AND review IS ? AND decision IS ?',
-                (*[encode(value) for value in fields.values()], run_id, item['fax_id'], item['state'],
-                 encode(item['review']), encode(item['decision'])))
+                +' WHERE run_id=? AND fax_id=? AND state=? AND review IS ? AND decision IS ?'
+                +' AND ('+' OR '.join(key+' IS NOT ?' for key in fields)+')',
+                (*values, run_id, item['fax_id'], item['state'],
+                 encode(item['review']), encode(item['decision']), *values))
 
     async def initialize(self, run):
         def batch_exists():

@@ -38,6 +38,86 @@ def seed_legacy(database, payload):
         cursor.execute('INSERT INTO sawa_agent_trial.ledger VALUES(1,0,%s)', (payload,))
 
 
+@pytest.mark.parametrize('second_operation',['event','files'])
+def test_writers_take_fresh_serial_snapshots_without_blocking_readers(tmp_path,database,second_operation):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    store=PostgresStore(tmp_path,database);store.set_budget(1000)
+    run,_=store.create('operator','serialized-writers','synthetic',['hospital'],100)
+    entered,release,second_started,second_done=(threading.Event() for _ in range(4))
+    bodies=[]
+    def first():
+        with store.tx() as db:
+            bodies.append('first')
+            db.execute("UPDATE runs SET status='waiting_input' WHERE id=?",(run['id'],))
+            entered.set()
+            assert release.wait(10)
+    def second():
+        second_started.set()
+        if second_operation=='event':store.event(run['id'],'serialized',{'literal':'unchanged'})
+        else:store.persist_files(run['id'])
+        bodies.append('second');second_done.set()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a=pool.submit(first)
+        try:
+            assert entered.wait(10)
+            b=pool.submit(second)
+            assert second_started.wait(10)
+            assert not second_done.wait(.1)
+            assert store.get(run['id'])['status']=='preparing'
+        finally:
+            release.set()
+        a.result(timeout=10);b.result(timeout=10)
+    assert bodies==['first','second']
+    assert store.get(run['id'])['status']=='waiting_input'
+    if second_operation=='event':
+        assert store.latest_event(run['id'],'serialized')['payload']=={'literal':'unchanged'}
+
+
+def test_external_serialization_failure_never_replays_a_transaction_body(tmp_path,database):
+    from psycopg2.errors import SerializationFailure
+    store=PostgresStore(tmp_path,database);store.set_budget(1000)
+    run,_=store.create('operator','no-replay-on-conflict','synthetic',['hospital'],100)
+    calls=[]
+    with pytest.raises(Conflict,match='同時更新'):
+        with store.tx() as db:
+            calls.append('business-body-once')
+            db.execute("UPDATE runs SET status='completed' WHERE id=?",(run['id'],))
+            raise SerializationFailure('injected external conflict')
+    assert calls==['business-body-once']
+    assert store.get(run['id'])['status']=='preparing'
+
+
+def test_unchanged_fax_observation_does_not_checkpoint_or_overwrite_operator(tmp_path,database,monkeypatch):
+    from types import SimpleNamespace
+    from experiments.agent_assistant import working_copy
+    from experiments.agent_assistant.fax_workflow import FaxWorkflow
+    from experiments.agent_assistant.tests.test_resource_paging import seed
+    store=PostgresStore(tmp_path,database);store.set_budget(1000)
+    run,_=store.create('operator','observation-no-op','synthetic',['hospital'],100)
+    seed(store,run['id'],artifacts=False)
+    root=tmp_path/'runs'/run['id']
+    original=root/'before/hospital/original.pdf';original.parent.mkdir(parents=True);original.write_bytes(b'synthetic')
+    data=root/'data/hospital/database.sqlite3';data.parent.mkdir(parents=True)
+    with sqlite3.connect(data) as db:db.execute('CREATE TABLE synthetic(value INTEGER)')
+    store.persist_files(run['id'])
+    calls=[];checkpoint=working_copy.checkpoint
+    def observed(*args,**kwargs):
+        calls.append(args[1]);return checkpoint(*args,**kwargs)
+    monkeypatch.setattr(working_copy,'checkpoint',observed)
+    workflow=FaxWorkflow(SimpleNamespace(store=store))
+    item=workflow.item(run['id'],'0')
+    workflow.set(run['id'],'0',snapshot=item['snapshot'])
+    workflow.set_observed(run['id'],item,state=item['state'],review=item['review'],decision=item['decision'])
+    assert calls==[]
+    workflow.set_observed(run['id'],item,state='awaiting_approval')
+    assert calls==[run['id']]
+    workflow.set(run['id'],'0',decision={'approve':True})
+    workflow.set_observed(run['id'],item,state='blocked',decision={'approve':False})
+    saved=workflow.item(run['id'],'0')
+    assert len(calls)==2 and saved['state']=='awaiting_approval' and saved['decision']=={'approve':True}
+
+
 def test_owner_bound_fork_is_pinned_and_preserves_source(tmp_path,database):
     import copy
     import json

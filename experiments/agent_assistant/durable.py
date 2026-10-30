@@ -5,7 +5,7 @@ only for migration recovery, never reserialized on ordinary reads or writes.
 Working copies are checkpointed with the command receipts for the changed run.
 A replacement instance fences its predecessor and requires explicit recovery.
 """
-from contextlib import contextmanager, closing
+from contextlib import contextmanager, closing, nullcontext
 import hashlib
 import json
 from pathlib import Path
@@ -93,6 +93,7 @@ class PostgresStore(Store):
         self._hydrated = set()
         self._preparing = set()
         self._hydration_lock = threading.RLock()
+        self._write_lock = threading.RLock()
         self._read_snapshot = ContextVar('agent_read_snapshot', default=None)
         self.path = self.root / 'ledger.sqlite3'
         with closing(connect()) as pg, pg:
@@ -173,7 +174,10 @@ class PostgresStore(Store):
     @contextmanager
     def _transaction(self, *, readonly):
         from psycopg2.errors import SerializationFailure, DeadlockDetected
-        with closing(self.connect()) as pg, pg:
+        # Start each writer's snapshot after its predecessor commits. Epoch
+        # fencing permits only this instance to write; readers remain concurrent.
+        transaction_lock = nullcontext() if readonly else self._write_lock
+        with transaction_lock, closing(self.connect()) as pg, pg:
             pg.set_session(readonly=readonly, isolation_level='REPEATABLE READ' if readonly else 'SERIALIZABLE')
             with pg.cursor() as c:
                 c.execute('SET LOCAL search_path TO sawa_agent_trial,pg_catalog')
@@ -275,7 +279,7 @@ class PostgresStore(Store):
     def persist_files(self, ident):
         from .working_copy import checkpoint
         root = self.root / 'runs' / ident
-        with closing(self.connect()) as pg, pg:
+        with self._write_lock, closing(self.connect()) as pg, pg:
             with pg.cursor() as c:
                 c.execute('SELECT epoch FROM sawa_agent_trial.ledger WHERE id=1 FOR UPDATE')
                 if c.fetchone()[0] != self.epoch:
