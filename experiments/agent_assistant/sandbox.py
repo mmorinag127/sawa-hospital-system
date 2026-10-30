@@ -520,7 +520,14 @@ class Sandbox:
 
     async def request(self, run, domain, method, path, *, params=None, body=None, authorization=None, files=None, revision=None):
         key = (run["id"], domain)
-        if domain not in run["domains"] or key not in self.urls:
+        if domain not in run["domains"]:
+            raise Conflict("依頼対象の試用APIが起動していません")
+        process = self.children.get(key)
+        if key not in self.urls or (process is not None and process.returncode is not None):
+            # Restored approvals also call native reads without a model resume.
+            # Starting the owned copy does not retry the HTTP/business operation.
+            await self.start(run)
+        if key not in self.urls:
             raise Conflict("依頼対象の試用APIが起動していません")
         headers = {"X-Trial-Token": self.tokens[key], "X-Sawa-Service-Token": self.tokens[key]}
         if authorization:

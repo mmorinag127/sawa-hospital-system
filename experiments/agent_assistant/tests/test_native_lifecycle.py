@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import httpx
 
 from experiments.agent_assistant import sandbox as module
 from experiments.agent_assistant.store import Conflict
@@ -15,6 +16,85 @@ def owned(tmp_path):
     sandbox = module.Sandbox(tmp_path / 'native', {}, run_store=store)
     sandbox.path(run['id']).mkdir(parents=True)
     return store, sandbox, run
+
+
+@pytest.mark.parametrize('exited', [False, True])
+@pytest.mark.parametrize('method', ['GET', 'POST'])
+def test_native_request_starts_saved_copy_once_before_first_send(tmp_path, monkeypatch, exited, method):
+    async def scenario():
+        _, sandbox, run = owned(tmp_path)
+        key = (run['id'], 'shift')
+        if exited:
+            sandbox.urls[key] = 'http://expired-native'
+            sandbox.children[key] = SimpleNamespace(returncode=7)
+        starts, requests = [], []
+        async def start(current):
+            sandbox.require_active_run(current)
+            starts.append((current['id'], current['generation']))
+            sandbox.urls[key] = 'http://owned-native'
+            sandbox.tokens[key] = 'synthetic-native-token'
+            sandbox.children[key] = SimpleNamespace(returncode=None)
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(200, json={'ok': True})
+        client = httpx.AsyncClient
+        monkeypatch.setattr(sandbox, 'start', start)
+        monkeypatch.setattr(module.httpx, 'AsyncClient', lambda **kwargs: client(
+            transport=httpx.MockTransport(respond), **kwargs))
+        for _ in range(2):
+            response = await sandbox.request(run, 'shift', method, '/synthetic',
+                authorization='Bearer synthetic-operator', revision=7)
+            assert response.status_code == 200
+        assert starts == [(run['id'], run['generation'])]
+        assert len(requests) == 2
+        assert all(request.url.host == 'owned-native' and request.method == method for request in requests)
+        assert all(request.headers['If-Match'] == '7' for request in requests)
+        assert all(request.headers['Authorization'] == 'Bearer synthetic-operator' for request in requests)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('denied', ['domain', 'stopped', 'missing-checkpoint'])
+def test_native_request_recovery_never_bypasses_scope_stop_or_saved_copy(tmp_path, monkeypatch, denied):
+    async def scenario():
+        store, sandbox, run = owned(tmp_path)
+        starts = []
+        async def start(current):
+            starts.append(current['id'])
+            sandbox.require_active_run(current)
+            raise Conflict('保存済みcheckpointがありません')
+        if denied == 'stopped':
+            store.update(run['id'], status='stopped')
+        monkeypatch.setattr(sandbox, 'start', start)
+        def forbidden_client(**kwargs):
+            raise AssertionError('No HTTP request is allowed before owned startup succeeds')
+        monkeypatch.setattr(module.httpx, 'AsyncClient', forbidden_client)
+        with pytest.raises(Conflict):
+            await sandbox.request(run, 'hospital' if denied == 'domain' else 'shift', 'POST', '/synthetic')
+        assert starts == ([] if denied == 'domain' else [run['id']])
+    asyncio.run(scenario())
+
+
+def test_native_http_transport_failure_does_not_retry_business_request(tmp_path, monkeypatch):
+    async def scenario():
+        _, sandbox, run = owned(tmp_path)
+        key = (run['id'], 'shift')
+        sandbox.urls[key] = 'http://owned-native'
+        sandbox.tokens[key] = 'synthetic-native-token'
+        sandbox.children[key] = SimpleNamespace(returncode=None)
+        sent = []
+        async def forbidden_start(current):
+            raise AssertionError('A transport error cannot restart or replay an active request')
+        def fail(request):
+            sent.append(request)
+            raise httpx.ReadTimeout('synthetic response loss', request=request)
+        client = httpx.AsyncClient
+        monkeypatch.setattr(sandbox, 'start', forbidden_start)
+        monkeypatch.setattr(module.httpx, 'AsyncClient', lambda **kwargs: client(
+            transport=httpx.MockTransport(fail), **kwargs))
+        with pytest.raises(httpx.ReadTimeout):
+            await sandbox.request(run, 'shift', 'POST', '/synthetic-write')
+        assert len(sent) == 1
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize('marker_failure', [False, True])

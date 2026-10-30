@@ -65,7 +65,7 @@ class Tools:
             dict(name="wait_for_native_job", description="対象の非同期ジョブが完了するまでサーバーで待つ。モデルで反復ポーリングしない。", input_schema={"type":"object","properties":{"operation":{"type":"string","enum":["shift_get_run","lunch_get_import_job"]},"parameters":Arguments.model_json_schema()},"required":["operation","parameters"],"additionalProperties":False})
         ] + ([
             dict(name="fax_work_queue", description="選択した未処理FAX業務の対象・OCR進捗・利用者の回答を取得する。", input_schema={"type": "object", "properties": {}, "additionalProperties": False}),
-            dict(name="request_fax_approval", description="保存シートと原本を利用者の確認画面へ提出する。他のFAXを続けて処理できる。", input_schema={"type": "object", "properties": {"fax_id": {"type": "string"}, "summary": {"type": "string", "minLength": 1, "maxLength": 4000}, "sheet": {"type": "object"}}, "required": ["fax_id", "summary"], "additionalProperties": False}),
+            dict(name="request_fax_approval", description="保存シートと原本を確認画面へ提出する。変更なしならfax_id・summaryだけ渡す。手動訂正はcell_editsで日付・食事・献立・数量列名・訂正文字列を指定する。全行を転記せず、説明文だけで訂正済みとしない。", input_schema={"type": "object", "properties": {"fax_id": {"type": "string"}, "summary": {"type": "string", "minLength": 1, "maxLength": 4000}, "sheet": {"type": "object"}, "cell_edits": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {key: {"type": "string"} for key in ("date_mmdd", "daypart", "menu", "field", "value")}, "required": ["date_mmdd", "daypart", "menu", "field", "value"], "additionalProperties": False}}}, "required": ["fax_id", "summary"], "additionalProperties": False}),
             dict(name="wait_for_fax_work", description="OCR完了または利用者回答までサーバーで待つ。モデルの反復ポーリングを避ける。", input_schema={"type": "object", "properties": {}, "additionalProperties": False})
         ] if "hospital" in domains else []) + [
             dict(name="save_lunch_process_answers", description="全工程への回答後、検証済みの当日回答をサーバーからそのまま保存する。モデルが工程JSONを転記する必要はない。未回答・入力版変更・保存後不一致は拒否する。", input_schema={"type":"object","properties":{},"additionalProperties":False}),
@@ -227,9 +227,9 @@ class Tools:
                         raise ValueError("入力項目はありません")
                     result = await self.faxes.refresh(run)
                 elif name == "request_fax_approval":
-                    if set(raw) - {"fax_id", "summary", "sheet"} or not {"fax_id", "summary"}.issubset(raw) or not self.faxes.active(run):
+                    if set(raw) - {"fax_id", "summary", "sheet", "cell_edits"} or not {"fax_id", "summary"}.issubset(raw) or not self.faxes.active(run):
                         raise ValueError("対象FAXと確認結果が必要です")
-                    result = await self.faxes.submit(run, raw["fax_id"], raw["summary"], raw.get("sheet"))
+                    result = await self.faxes.submit(run, raw["fax_id"], raw["summary"], raw.get("sheet"), raw.get("cell_edits"))
                 elif name == "finish_work":
                     await self.flow.finish(run, raw.get("artifact_ids", []))
                     if self.faxes.active(run):

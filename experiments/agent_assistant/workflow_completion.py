@@ -152,9 +152,14 @@ class WorkflowCompletion:
         # The canonical sheet remains on the server. Every field and every row is
         # returned for model review, without OCR image/evidence transport metadata.
         sheet = captured['sheet']
+        if item.get('review') and item['state'] in ('needs_correction', 'awaiting_approval'):
+            review = item['review']
+            if review['native_signature'] != captured['signature'] or review['revision'] != captured['revision']:
+                raise Conflict('確認案の準備後に正本が変わりました。再確認してください')
+            sheet = review['sheet']
         return {'ok': True, 'fax_id': item['fax_id'], 'source': item['snapshot'], 'original': original['artifact'],
                 'sheet': {'fields': sheet['fields'], 'rows': sheet['rows']},
-                'next_step': 'read_artifact_pageで原本を読み、数量を照合して業務上の不明点を質問する。その後request_fax_approvalへfax_idと照合結果だけを渡す。未変更のsheetは転記しない。'}
+                'next_step': 'read_artifact_pageで原本を読み、数量を照合して業務上の不明点を質問する。変更なしはrequest_fax_approvalへfax_idとsummaryだけ渡す。利用者の手動訂正はcell_editsでdate_mmdd・daypart・menu・field（qty.regular_x等）・value（文字列）を指定する。未変更のsheetは転記しない。'}
 
     async def complete_faxes(self, ident, generation, raw, command):
         if raw:

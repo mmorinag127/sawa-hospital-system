@@ -86,3 +86,57 @@ once only for named transport exceptions. Both attempts stay in the receipt's
 hashed log. Findings, ordinary tests, changed commands and a second failure are
 not retried or converted to success. The source and manifest stability checks
 remain unchanged. Added coverage checks those boundaries before a fresh batch.
+
+## Live continuation findings after d2308406
+
+The signed 30-command batch passed in 1061.663 seconds; staging deployment
+41010093996 succeeded. Four completed shift workbooks were reopened and downloaded
+again from the normal UI, with exact SHA256 matches to the checked originals.
+The pending hospital run retained its 56 rows, three twenties and 333 blanks.
+Review copy 6d126ced5cd64d558d0810c5685fca64 retained the exact original PDF hash;
+the explicit copy-only cabbage correction was accepted, without another OCR.
+
+Live approval of the pre-deployment parent returned HTTP 409: native URLs are
+process-local and were absent after restart, while metadata recovery had already
+restored the approval phase. Native request dispatch now starts the owned saved
+copy when its API is missing or its owned process exited. Scope, stop/generation,
+working-copy and source checks stay in Sandbox.start; no HTTP request is retried.
+This covers both FAX and ordinary task approval reads without duplicating route
+specific startup logic or resuming a model under a changed execution contract.
+
+The UI also keyed correction drafts only by FAX ID, so a private copy sharing
+that identifier displayed its text in the parent. The rejected parent request
+did not change quantities. FAX drafts now include request and review identity;
+ordinary review and reply drafts include request and current form identity.
+Approvals never carry an unsent correction. Unknown responses keep the submitted
+text, pending inputs are disabled, and late source-upload cleanup cannot clear a
+different request's file selection. Tests cover copy/new-review separation,
+transport uncertainty, stopped/missing-copy rejection and no business replay.
+
+All these known implementation changes are complete before the next serial
+batch. Their tests and staging acceptance remain pending; d2308406 is still the
+live source. The correction request's observed 106.814-second HTTP duration is
+recorded separately, not attributed to an individually measured native endpoint.
+
+### Third Live Failure: Correction Narrative Without Corrected Cells
+
+Run `6d126ced5cd64d558d0810c5685fca64` claimed cabbage quantity18,
+but its actual approval sheet retained20. Durable model events show12 rejected
+full-sheet submissions: protected canonical metadata did not match. The final
+summary-only submission then used the unchanged native sheet. It was not approved.
+This is a failed acceptance attempt, not a positive result.
+
+The tool now accepts sparse `cell_edits` resolved against exact native
+date/daypart/menu identity, preserving all unrelated cells and metadata. Missing
+or ambiguous identities are rejected; blank/symbol/text quantities are retained.
+Legacy full-sheet proposals retain support but must preserve row count, column
+shape and protected business identities. Subsequent proposals preserve prior
+operator edits and reject stale native revisions. Approved proposals cannot be
+replaced. After correction, the visible summary is derived from actual cell
+differences; model narrative is retained separately for audit, never as evidence
+that a quantity changed. Tests cover actual18, blanks, symbols, ambiguity,
+malformed matrices, source preservation and renewed human approval.
+
+Implementation and test updates are complete for the three known live defects.
+No tests/build/deploy have yet run against this dirty revision. The full12-task
+acceptance remains incomplete (4 previously verified positive cases).

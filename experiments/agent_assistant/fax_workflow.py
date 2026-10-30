@@ -1,6 +1,7 @@
 """Per-FAX review queue. Human approval is bound to captured native business state."""
 import hashlib
 import json
+from copy import deepcopy
 from uuid import uuid4
 
 from .store import Conflict
@@ -9,6 +10,45 @@ from .sandbox import run_blocking
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def validate_review_sheet(canonical, proposed):
+    if not isinstance(proposed, dict) or {k: v for k, v in proposed.items() if k != "rows"} != {k: v for k, v in canonical.items() if k != "rows"}:
+        raise Conflict("確認案で施設・期間・列・セル対応などの正本情報を変更できません")
+    fields = canonical["fields"]
+    rows = proposed.get("rows")
+    if not isinstance(rows, list) or len(rows) != len(canonical["rows"]):
+        raise Conflict("確認案の行対応が正本と一致しません")
+    for original, changed in zip(canonical["rows"], rows):
+        if not isinstance(changed, list) or len(changed) != len(original):
+            raise Conflict("確認案の列対応が正本と一致しません")
+        for index, field in enumerate(fields):
+            if not (field.startswith("qty.") or field == "remarks") and changed[index] != original[index]:
+                raise Conflict("確認案で日付・食事・献立の対応を変更できません")
+
+
+def apply_cell_edits(sheet, edits):
+    if not isinstance(edits, list) or not edits:
+        raise ValueError("訂正セルの一覧が必要です")
+    proposed = deepcopy(sheet)
+    fields = sheet["fields"]
+    seen = set()
+    for edit in edits:
+        if not isinstance(edit, dict) or set(edit) != {"date_mmdd", "daypart", "menu", "field", "value"}:
+            raise ValueError("訂正は日付・食事・献立・列・値を指定してください")
+        field = edit["field"]
+        if field not in fields or not (field.startswith("qty.") or field == "remarks") or not isinstance(edit["value"], str):
+            raise ValueError("数量・備考列の文字列を指定してください。空欄もそのまま指定できます")
+        matches = [i for i, row in enumerate(sheet["rows"]) if all(row[fields.index(key)] == edit[key] for key in ("date_mmdd", "daypart", "menu"))]
+        if len(matches) != 1:
+            raise Conflict("訂正対象の行を一意に特定できません。日付・食事・献立を確認してください")
+        cell = (matches[0], fields.index(field))
+        if cell in seen:
+            raise ValueError("同じセルの訂正が重複しています")
+        seen.add(cell)
+        proposed["rows"][cell[0]][cell[1]] = edit["value"]
+    validate_review_sheet(sheet, proposed)
+    return proposed
 
 
 class FaxWorkflow:
@@ -176,8 +216,7 @@ class FaxWorkflow:
             if not isinstance(proposed_sheet, dict) or not isinstance(proposed_sheet.get("rows"), list):
                 raise ValueError("確認用シートの行が必要です")
             canonical = sheet["sheet"]
-            if {k: v for k, v in proposed_sheet.items() if k != "rows"} != {k: v for k, v in canonical.items() if k != "rows"}:
-                raise Conflict("確認案で施設・期間・列・セル対応などの正本情報を変更できません")
+            validate_review_sheet(canonical, proposed_sheet)
             sheet = {**sheet, "sheet": proposed_sheet}
         # Native revision guards the human click. This digest also survives later
         # legitimate review/bagging transitions without allowing quantity changes.
@@ -212,25 +251,52 @@ class FaxWorkflow:
                 await run_blocking(self.set_observed, run["id"], item, state="blocked", decision={"message": str(exc)})
         return {"ok": True, "items": await run_blocking(self.items, run["id"])}
 
-    async def submit(self, run, fax_id, summary, sheet=None):
+    async def submit(self, run, fax_id, summary, sheet=None, cell_edits=None):
         item = await run_blocking(self.item, run["id"], fax_id)
         if not item or not summary.strip() or len(summary) > 4000:
             raise ValueError("対象FAXと照合結果が必要です")
+        if sheet is not None and cell_edits is not None:
+            raise ValueError("シート全体とセル訂正は同時に指定できません")
+        old = item["review"]
+        if old and sheet is None and cell_edits is None and item["state"] in ("needs_correction", "awaiting_approval"):
+            native = await self.capture(run, item)
+            if old["native_signature"] != native["signature"] or old["revision"] != native["revision"]:
+                raise Conflict("確認案の準備後に正本が変わりました。再確認してください")
+            sheet = old["sheet"]
+        if cell_edits is not None:
+            native = await self.capture(run, item)
+            if old:
+                if old["native_signature"] != native["signature"] or old["revision"] != native["revision"]:
+                    raise Conflict("訂正準備中に正本が変わりました。再確認してください")
+                sheet = apply_cell_edits(old["sheet"], cell_edits)
+            else:
+                sheet = apply_cell_edits(native["sheet"], cell_edits)
         captured = await self.capture(run, item, proposed_sheet=sheet)
         basis = await self.capture(run, item)
         if basis["revision"] != captured["revision"]:
             raise Conflict("確認資料の取得中に版が変わりました")
         # An unchanged repeated request keeps the exact human review identity.
-        old = item["review"]
         if old and old["signature"] == captured["signature"] and old["revision"] == captured["revision"] and item["state"] in ("awaiting_approval", "approved"):
             return {"ok": True, "review": old, "state": item["state"]}
+        if item["state"] in ("approved", "completed"):
+            raise Conflict("回答済みの確認案は変更できません")
+        agent_summary = summary
+        if item["state"] == "needs_correction":
+            fields = captured["sheet"]["fields"]
+            changes = []
+            for before, after in zip(basis["sheet"]["rows"], captured["sheet"]["rows"]):
+                for index, field in enumerate(fields):
+                    if before[index] != after[index]:
+                        identity = " / ".join(str(after[fields.index(key)]) for key in ("date_mmdd", "daypart", "menu") if key in fields)
+                        changes.append(f"{identity} / {field}: {before[index]!r} → {after[index]!r}")
+            summary = "実データの訂正内容：\n" + ("\n".join(changes) if changes else "数量・備考の変更はありません。")
         order_id = item["snapshot"]["order_id"]
         original = await self.get(run, f"/orders/{order_id}/document")
         if hashlib.sha256(original.content).hexdigest() != item["snapshot"]["sha256"]:
             raise Conflict("取得した原本PDFが依頼対象のハッシュと一致しません")
         artifact = self.tools.artifact(run["id"], original.content, f"FAX-{fax_id}.pdf")
         review = {"id": uuid4().hex, "signature": captured["signature"], "native_signature": basis["signature"], "revision": captured["revision"],
-            "summary": summary, "sheet": captured["sheet"], "original": artifact, "order_id": order_id}
+            "summary": summary, "agent_summary": agent_summary, "sheet": captured["sheet"], "original": artifact, "order_id": order_id}
         await run_blocking(self.set, run["id"], fax_id, state="awaiting_approval", review=review, decision=None)
         await run_blocking(self.store.event, run["id"], "fax_review", {"fax_id": fax_id, "review_id": review["id"], "summary":summary})
         return {"ok": True, "queued_for_human": True, "review": review}

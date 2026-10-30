@@ -26,7 +26,7 @@ class Native:
                 week_hint='2026-10-19', status='processing', current_order_id=order_id, current_document_id='D'+fax_id, skip_ocr=False)
             self.wfs[order_id] = dict(order_id=order_id, revision=1, state='sheet_review', selected_ocr_result_id='E'+fax_id,
                 saved_sheet_id=None, confirmed_snapshot_id='synthetic-snapshot-'+order_id, facility_id='F'+fax_id, week_start='2026-10-19', template_version_id='T1')
-            self.sheets[order_id] = dict(header=['品名', '数量'], fields=['item', 'quantity'], rows=[['牛乳', 0]])
+            self.sheets[order_id] = dict(header=['品名', '数量'], fields=['menu', 'qty.regular_x'], rows=[['牛乳', 0]])
 
     def path(self, run_id):
         self.root.mkdir(exist_ok=True)
@@ -247,6 +247,65 @@ def test_rejected_fax_returns_for_correction_and_requires_new_approval(setup):
             await tools.faxes.decide(run, 'A', first['id'], True, '')
         assert (await tools.faxes.refresh(run))['items'][0]['state'] == 'awaiting_approval'
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('value', ['18', '', '要確認', '△'])
+def test_sparse_correction_preserves_other_cells_and_native_sheet(value):
+    from experiments.agent_assistant.fax_workflow import apply_cell_edits
+    sheet = {'fields': ['date_mmdd', 'daypart', 'menu', 'qty.regular_x', 'remarks'],
+             'rows': [['01/08', '昼', '白菜', '20', ''], ['01/09', '昼', '白菜', '', '保持']],
+             'target_cell_map': {'D1': 'quantity'}}
+    original = deepcopy(sheet)
+    proposed = apply_cell_edits(sheet, [{'date_mmdd': '01/08', 'daypart': '昼', 'menu': '白菜', 'field': 'qty.regular_x', 'value': value}])
+    assert sheet == original
+    expected = deepcopy(original); expected['rows'][0][3] = value
+    assert proposed == expected
+
+
+def test_sparse_correction_is_grounded_preserved_and_requires_new_approval(setup):
+    async def scenario():
+        _, native, tools, run = setup
+        native.sources['A']['status'] = 'completed'
+        native.sheets['OA'] = {'fields': ['date_mmdd', 'daypart', 'menu', 'qty.regular_x', 'qty.unknown_x'],
+                               'rows': [['01/08', '昼', '白菜', '20', ''], ['01/09', '昼', '白菜', '', '']],
+                               'source_metadata': {'keep': True}}
+        original = deepcopy(native.sheets['OA'])
+        await tools.faxes.refresh(run)
+        first = (await tools.faxes.submit(run, 'A', '原本確認'))['review']
+        await tools.faxes.decide(run, 'A', first['id'], False, '白菜18食')
+        edits = [{'date_mmdd': '01/08', 'daypart': '昼', 'menu': '白菜', 'field': 'qty.regular_x', 'value': '18'}]
+        result = await tools.execute(run['id'], run['generation'], 'request_fax_approval', {'fax_id': 'A', 'summary': '説明だけでは信用しない', 'cell_edits': edits}, 'correct-cell')
+        assert result['ok'], result
+        review = tools.faxes.item(run['id'], 'A')['review']
+        assert review['sheet']['rows'][0][3] == '18'
+        assert "'20' → '18'" in review['summary']
+        assert '説明だけでは信用しない' not in review['summary']
+        assert native.sheets['OA'] == original and not native.writes
+        assert (await tools.faxes.submit(run, 'A', '再提出'))['review']['id'] == review['id']
+        with pytest.raises(Conflict, match='古く'):
+            await tools.faxes.decide(run, 'A', first['id'], True, '')
+        await tools.faxes.decide(run, 'A', review['id'], True, '')
+        with pytest.raises(Conflict, match='回答済み'):
+            await tools.faxes.submit(run, 'A', '変更', cell_edits=[{**edits[0], 'value': '19'}])
+        assert native.sheets['OA'] == original
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('change', ['flat', 'missing', 'identity', 'duplicate'])
+def test_correction_rejects_ambiguous_or_structurally_changed_rows(change):
+    from experiments.agent_assistant.fax_workflow import apply_cell_edits, validate_review_sheet
+    sheet = {'fields': ['date_mmdd', 'daypart', 'menu', 'qty.regular_x'], 'rows': [['01/08', '昼', '白菜', '20']]}
+    proposed = deepcopy(sheet)
+    if change == 'duplicate':
+        sheet['rows'] *= 2
+        with pytest.raises(Conflict, match='一意'):
+            apply_cell_edits(sheet, [{'date_mmdd': '01/08', 'daypart': '昼', 'menu': '白菜', 'field': 'qty.regular_x', 'value': '18'}])
+        return
+    if change == 'flat': proposed['rows'] = proposed['rows'][0]
+    if change == 'missing': proposed['rows'] = []
+    if change == 'identity': proposed['rows'][0][2] = '別献立'
+    with pytest.raises(Conflict):
+        validate_review_sheet(sheet, proposed)
 
 
 def test_proposal_cannot_change_hidden_mapping_or_columns(setup):

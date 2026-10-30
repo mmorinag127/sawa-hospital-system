@@ -39,6 +39,88 @@ test('hospital source selector and per-request cap use normal discovery and crea
   assert.equal(create.body.source_copy,undefined);
  }finally{await h.close();}
 });
+test('copied FAX identifiers never share correction drafts and approval sends no unsent correction',async()=>{
+ const fax={fax_id:'shared-fax',state:'awaiting_approval',snapshot:{name:'synthetic.pdf',facility:'合成施設',week:'合成週'},review:{id:'shared-review',summary:'原本照合済み',sheet:{fields:['数量'],rows:[[20]]},original:{id:'original',name:'synthetic.pdf'}}};
+ const parent={...makeRun('running'),instruction:'元の依頼',task_id:'hospital_pending_faxes',domains:['hospital'],pending_question:null,fax_items:[structuredClone(fax)]};
+ const copy={...structuredClone(parent),id:'r2',instruction:'訂正用コピー',task_id:'hospital_review_faxes'};
+ const records=new Map([[parent.id,parent],[copy.id,copy]]);
+ const h=await mount({initial:parent,beforeGet:async url=>{
+  if(url===base+'/run-history')return {data:{items:[...records.values()],next:null}};
+  const value=records.get(url.slice((base+'/runs/').length));if(value)return {data:structuredClone(value)};
+ },beforePost:async(url,body)=>{
+  if(url.endsWith('/decision')){const saved={...records.get('r1'),status:'completed'};records.set('r1',saved);return {data:saved};}
+ }});
+ try{
+  const history=name=>[...h.document.querySelectorAll('.history-row')].find(button=>button.textContent.includes(name));
+  await h.change(h.document.querySelector('.fax-item textarea'),'元の依頼だけの下書き');
+  await h.click(history('訂正用コピー'));
+  assert.equal(h.document.querySelector('.fax-item textarea').value,'');
+  await h.change(h.document.querySelector('.fax-item textarea'),'コピーだけ18食');
+  await h.click(history('元の依頼'));
+  assert.equal(h.document.querySelector('.fax-item textarea').value,'元の依頼だけの下書き');
+  records.set('r1',{...parent,fax_items:[{...fax,review:{...fax.review,id:'new-review'}}]});await h.poll();
+  assert.equal(h.document.querySelector('.fax-item textarea').value,'');
+  await h.change(h.document.querySelector('.fax-item textarea'),'この未送信訂正は承認へ混ぜない');
+  await h.click(h.button('この内容で確定へ進む'));
+  const decision=h.calls.findLast(call=>call.url.endsWith('/decision'));
+  assert.equal(decision.url,base+'/runs/r1/faxes/shared-fax/decision');
+  assert.deepEqual(decision.body,{review_id:'new-review',approve:true,message:''});
+  assert.equal(copy.fax_items[0].review.sheet.rows[0][0],20);
+ }finally{await h.close();}
+});
+
+test('question and ordinary review drafts are scoped by both request and current form',async()=>{
+ for(const kind of ['question','review']){
+  const parent=kind==='question'?makeRun():{...makeRun('running'),pending_question:null,task_review:{id:'shared-review',state:'awaiting_approval',summary:'合成確認',evidence:[],actions:[]}};
+  parent.instruction='元の依頼';const copy={...structuredClone(parent),id:'r2',instruction:'別の依頼'};
+  const records=new Map([[parent.id,parent],[copy.id,copy]]);
+  const h=await mount({initial:parent,beforeGet:async url=>{
+   if(url===base+'/run-history')return {data:{items:[...records.values()],next:null}};
+   const value=records.get(url.slice((base+'/runs/').length));if(value)return {data:structuredClone(value)};
+  }});
+  try{
+   const selector=kind==='question'?'.answer-panel textarea':'.review-decisions textarea';
+   const history=name=>[...h.document.querySelectorAll('.history-row')].find(button=>button.textContent.includes(name));
+   await h.change(h.document.querySelector(selector),'元の入力');await h.click(history('別の依頼'));
+   assert.equal(h.document.querySelector(selector).value,'');
+   await h.change(h.document.querySelector(selector),'別の入力');await h.click(history('元の依頼'));
+   assert.equal(h.document.querySelector(selector).value,'元の入力');
+   records.set('r1',kind==='question'?{...parent,pending_question:{...parent.pending_question,question_id:'new-question'}}:{...parent,task_review:{...parent.task_review,id:'new-review'}});
+   await h.poll();assert.equal(h.document.querySelector(selector).value,'');
+   assert.equal(h.calls.filter(call=>call.method==='post').length,0);
+  }finally{await h.close();}
+ }
+});
+
+test('unknown text answers and corrections preserve their exact submitted draft without resending',async()=>{
+ for(const kind of ['question','review','fax']){
+  const fax={fax_id:'fax-text',state:'awaiting_approval',snapshot:{name:'synthetic.pdf',facility:'合成施設',week:'合成週'},review:{id:'fax-review-text',summary:'確認',sheet:{fields:['数量'],rows:[[20]]},original:{id:'original',name:'synthetic.pdf'}}};
+  const initial=kind==='question'?makeRun():kind==='fax'?{...makeRun('running'),task_id:'hospital_review_faxes',domains:['hospital'],pending_question:null,fax_items:[fax]}:{...makeRun('running'),pending_question:null,task_review:{id:'review-unknown-text',state:'awaiting_approval',summary:'確認',evidence:[],actions:[]}};
+  const h=await mount({initial,beforePost:async url=>{if(/\/(reply|decision)$/.test(url))throw {response:{status:503}};}});
+  try{
+   const selector=kind==='question'?'.answer-panel textarea':kind==='fax'?'.fax-item textarea':'.review-decisions textarea';
+   await h.change(h.document.querySelector(selector),'保存されるべき明示回答');
+   await h.click(h.button(kind==='question'?'回答して続ける':'訂正を依頼する'));
+   assert.equal(h.document.querySelector(selector).value,'保存されるべき明示回答');
+   assert.equal(h.document.querySelector(selector).disabled,true);
+   const request=h.calls.find(call=>call.method==='post');assert.equal(request.body.message,'保存されるべき明示回答');
+   if(kind!=='question')assert.equal(request.body.approve,false);
+   await h.poll();assert.equal(h.calls.filter(call=>call.method==='post').length,1);
+   assert.equal(h.document.querySelector(selector).value,'保存されるべき明示回答');
+  }finally{await h.close();}
+ }
+});
+
+test('ordinary approval never submits text entered for an unsubmitted correction',async()=>{
+ const initial={...makeRun('running'),pending_question:null,task_review:{id:'review-note',state:'awaiting_approval',summary:'確認',evidence:[],actions:[]}};
+ const h=await mount({initial});
+ try{
+  await h.change(h.document.querySelector('.review-decisions textarea'),'未送信の訂正');
+  await h.click(h.button('この内容で進める'));
+  assert.deepEqual(h.calls.find(call=>call.url.endsWith('/decision')).body,{review_id:'review-note',approve:true,message:''});
+ }finally{await h.close();}
+});
+
 async function mount({initial=null,targets,adminView=false,beforeGet,beforePost,openInitial=true}={}){
  const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost/assistant',pretendToBeVisual:true});const saved=new Map();
  for(const key of ['window','document','navigator','HTMLElement','Element','Node','Event','MouseEvent','HTMLInputElement','HTMLSelectElement','HTMLTextAreaElement','FormData']){saved.set(key,Object.getOwnPropertyDescriptor(global,key));Object.defineProperty(global,key,{configurable:true,writable:true,value:dom.window[key]});}
