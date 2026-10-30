@@ -38,12 +38,14 @@ def test_lookup_does_not_copy_models_or_persist_orphan_before_images(tmp_path):
 def test_stop_reclaims_only_models_and_retains_business_and_before_data(tmp_path):
     async def scenario():
         from experiments.agent_assistant.tests.test_trial import prepared
-        _, sandbox, _, run = prepared(tmp_path, ('shift',))
+        store, sandbox, _, run = prepared(tmp_path, ('shift',))
         directory = sandbox.path(run['id'])
         originals = {p.relative_to(directory): p.read_bytes() for p in directory.rglob('*') if p.is_file()}
         cache = directory / 'data/shift/home/model-cache'
         cache.mkdir(parents=True); (cache / 'weights').write_bytes(b'rebuildable-model')
-        await sandbox.stop(run['id'])
+        sandbox.run_store = store
+        store.update(run['id'], status='completed')
+        assert await sandbox.release_completed(run['id'], expected_generation=run['generation'])
         assert not cache.exists()
         assert {p.relative_to(directory): p.read_bytes() for p in directory.rglob('*') if p.is_file()} == originals
         await sandbox.stop(run['id'])
@@ -92,12 +94,22 @@ def test_sidecar_preserves_existing_identity_secret_refs_and_other_settings():
     worker={'spec':{'template':{'spec':{'containers':[{'env':values}]}}}}
     config={'operator_account':'existing@example.com','gemini_model':'gemini-test','input_usd_per_million':'1','output_usd_per_million':'2','max_output_tokens':'8192'}
     school={'spec':{'template':{'metadata':{'annotations':{'run.googleapis.com/cloudsql-instances':'sawahospitalsystem:asia-northeast2:school-lunch-stg'}},'spec':{'containers':[{'env':[{'name':'DATABASE_URL','valueFrom':{'secretKeyRef':{'name':'school-lunch-stg-database-url','key':'latest'}}}]}]}}}}
+    school_settings = school['spec']['template']['spec']['containers'][0]['env']
+    with pytest.raises(RuntimeError, match='process model'):
+        sidecar.configure(web,worker,config,'registry/web@sha256:abc','registry/agent@sha256:def','test-token',school=school)
+    school_settings.extend([{'name':'PROCESS_GEMINI_MODEL','value':'school-source-model'},
+                            {'name':'GEMINI_API_BASE','value':'https://school-model.example/v1beta'},
+                            {'name':'UNRELATED_SETTING','value':'must-not-copy'}])
     result=sidecar.configure(web,worker,config,'registry/web@sha256:abc','registry/agent@sha256:def','test-token',school=school)
     rs=result['spec']['template']['spec'];assert rs['serviceAccountName']=='existing-web'
     assert len(rs['containers'])==2
     assert rs['containers'][0]['env'][0]['valueFrom']['secretKeyRef']['name']=='operator'
     assert rs['containers'][1]['env'][:7]==values[:7]
     assert all(entry in rs['containers'][1]['env'] for entry in values)
+    agent_env = {item['name']:item for item in rs['containers'][1]['env']}
+    assert agent_env['PROCESS_GEMINI_MODEL']['value'] == 'school-source-model'
+    assert agent_env['GEMINI_API_BASE']['value'] == 'https://school-model.example/v1beta'
+    assert 'UNRELATED_SETTING' not in agent_env
     school_env=next(x for x in rs['containers'][1]['env'] if x['name']=='SAWA_TRIAL_SCHOOL_DATABASE_URL')
     assert school_env['valueFrom']['secretKeyRef']['name']=='school-lunch-stg-database-url'
     assert not any(x['name']=='SAWA_TRIAL_SCHOOL_DATABASE_URL' for x in rs['containers'][0]['env'])
@@ -120,6 +132,7 @@ def test_runtime_passes_existing_pipeline_settings_only_to_owned_hospital(tmp_pa
     (tmp_path/'release.json').write_text(json.dumps({'domains':domains}))
     settings={'SAWA_TRIAL_WEB_TOKEN':'x'*48,'SAWA_TRIAL_OPERATOR_ACCOUNT':'existing@example.com',
         'PORTAL_AUTH_ME_URL':'https://example.com/portal/auth/me','GEMINI_AGENT_MODEL':'synthetic-model',
+        'PROCESS_GEMINI_MODEL':'school-source-model', 'GEMINI_API_BASE':'https://school-model.example/v1beta',
         'OCR_PIPELINE_BUCKET':'existing-staging-bucket','OCR_PIPELINE_URL':'https://existing-pipeline.example.com',
         'OCR_PIPELINE_TARGET_AUDIENCE':'https://existing-pipeline.example.com'}
     for name,value in settings.items():monkeypatch.setenv(name,value)
@@ -128,3 +141,59 @@ def test_runtime_passes_existing_pipeline_settings_only_to_owned_hospital(tmp_pa
     assert all(config['domains']['hospital']['env'][k]==v for k,v in pipeline.items())
     for domain in ('shift','school-lunch'):
         assert not pipeline.keys() & config['domains'][domain]['env'].keys()
+    assert config['domains']['school-lunch']['env']['PROCESS_GEMINI_MODEL'] == 'school-source-model'
+    assert config['domains']['school-lunch']['env']['GEMINI_API_BASE'] == settings['GEMINI_API_BASE']
+    assert 'PROCESS_GEMINI_MODEL' not in config['domains']['shift']['env']
+    monkeypatch.delenv('PROCESS_GEMINI_MODEL')
+    with pytest.raises(RuntimeError, match='工程推測モデル'):
+        configuration(tmp_path)
+
+
+@pytest.mark.parametrize('task,domain,needed', [
+    ('hospital_pending_faxes','hospital',True), ('hospital_review_faxes','hospital',True),
+    ('hospital_outputs','hospital',False), ('lunch_import','school-lunch',True),
+    ('lunch_daily_bundle','school-lunch',False), ('lunch_month_exports','school-lunch',False),
+    ('lunch_procurement','school-lunch',False), ('shift_check','shift',False),
+    ('legacy','hospital',True), ('legacy','shift',False)])
+def test_model_cache_follows_ocr_capability(task, domain, needed):
+    from experiments.agent_assistant.sandbox import Sandbox
+    run = {'task_id':task}
+    assert Sandbox.needs_models(run, domain) is needed
+    assert not Sandbox.needs_models({**run,'purpose':'target_lookup'},domain)
+
+
+def test_completed_cleanup_preserves_active_unknown_and_generation(tmp_path):
+    from experiments.agent_assistant.tests.test_trial import prepared
+    from unittest.mock import AsyncMock
+    async def scenario():
+        store, sandbox, _, run = prepared(tmp_path, ('shift',))
+        sandbox.run_store = store
+        sandbox.stop = AsyncMock(return_value=True)
+        for status in ('running','reconciliation_required','waiting_input'):
+            store.update(run['id'],status=status)
+            assert not await sandbox.release_completed(run['id'],expected_generation=run['generation'])
+        sandbox.stop.assert_not_awaited()
+        store.update(run['id'],status='completed')
+        assert not await sandbox.release_completed(run['id'],expected_generation=run['generation']+1)
+        sandbox.stop.assert_not_awaited()
+        assert await sandbox.release_completed(run['id'],expected_generation=run['generation'])
+        sandbox.stop.assert_awaited_once_with(run['id'],expected_generation=run['generation'])
+    asyncio.run(scenario())
+
+
+def test_new_work_reaps_completed_markers_without_touching_business_files(tmp_path):
+    from experiments.agent_assistant.tests.test_trial import prepared
+    from unittest.mock import AsyncMock
+    async def scenario():
+        store, sandbox, _, run = prepared(tmp_path, ('shift',))
+        sandbox.run_store = store
+        sandbox._stop = AsyncMock()
+        marker = sandbox.path(run['id'])/'shift.process.json'
+        marker.write_text('{}')
+        store.update(run['id'],status='completed')
+        assert await sandbox.release_completed()
+        sandbox._stop.assert_awaited_once_with(run['id'])
+        event = store.events(run['id'],kinds=('native_completed_cleanup',))[-1]['payload']
+        assert event['processes_remaining'] == event['model_caches_remaining'] == 0
+        assert (sandbox.path(run['id'])/'data/shift/database.sqlite3').exists()
+    asyncio.run(scenario())

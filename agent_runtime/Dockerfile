@@ -51,5 +51,6 @@ RUN SAWA_TRIAL_WEB_TOKEN=synthetic-image-smoke-token-not-a-credential-20261021 \
     SAWA_TRIAL_OPERATOR_ACCOUNT=build-smoke@example.invalid \
     PORTAL_AUTH_ME_URL=https://worker-stg-avlnzjjrca-dt.a.run.app/portal/auth/me \
     GEMINI_AGENT_MODEL=gemini-3.8-flash \
+    PROCESS_GEMINI_MODEL=gemini-image-smoke \
     /opt/agent/gateway/bin/python -m experiments.agent_assistant.check_packaged
 CMD ["/opt/agent/gateway/bin/python","-m","experiments.agent_assistant.runtime"]

@@ -267,10 +267,16 @@ class BusinessWorkflow:
             return await self.call(run, 'complete_fax_work', {}, command)
         return await complete_review(self, run, review)
 
+    async def release_completed(self, run):
+        release = getattr(self.tools.sandbox, 'release_completed', None)
+        if release is not None and not await release(run['id'], expected_generation=run['generation']):
+            raise Conflict('完了した依頼の実行資源を解放できません')
+
     async def advance(self, ident):
         run = await run_blocking(self.store.get, ident)
         state = await run_blocking(self.state, ident)
         if run['status'] == 'completed':
+            await self.release_completed(run)
             await run_blocking(self.checkpoint, ident, phase='completed')
             return False
         if run['status'] in ('stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending', 'stopping'):
@@ -316,6 +322,7 @@ class BusinessWorkflow:
             await run_blocking(self.activate, run)
             await self.tools.sandbox.start(await run_blocking(self.store.get, ident))
             await self.complete(await run_blocking(self.store.get, ident), review)
+            await self.release_completed(await run_blocking(self.store.get, ident))
             await run_blocking(self.checkpoint, ident, phase='completed')
             try:
                 if not (await run_blocking(self.store.get, ident))['session_id'] and not await run_blocking(self.store.events, ident, kinds=('gemini_dispatch', 'agent.custom_tool_use')):
@@ -376,6 +383,7 @@ class BusinessWorkflow:
                 await self.tools.faxes.refresh(run)
                 if not (await run_blocking(self.tools.faxes.items, ident)):
                     await self.call(run, 'complete_fax_work', {}, 'business:empty-faxes')
+                    await self.release_completed(await run_blocking(self.store.get, ident))
                     await run_blocking(self.checkpoint, ident, phase='completed')
                     await run_blocking(self.store.release_unstarted_model, ident, run['generation'])
                     return False

@@ -7,6 +7,9 @@ import secrets
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from experiments.agent_assistant.runtime import SCHOOL_RUNTIME_SETTINGS
+
 
 def require_context(env):
     expected={'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':'mmorinag127/sawa-hospital-system',
@@ -62,6 +65,15 @@ def configure(web,worker,config,frontend_image,agent_image,token,*,school,portal
     if ref.get('name')!='school-lunch-stg-database-url' or set(school_database)!={'name','valueFrom'}:
         raise RuntimeError('registered school database secret source is unresolved')
     env.append({**school_database,'name':'SAWA_TRIAL_SCHOOL_DATABASE_URL'})
+    school_env = envmap(school_containers[0])
+    if not school_env.get('PROCESS_GEMINI_MODEL', {}).get('value', '').strip():
+        raise RuntimeError('registered school process model source is unresolved')
+    for name in SCHOOL_RUNTIME_SETTINGS:
+        if name in school_env:
+            setting = school_env[name]
+            if set(setting) != {'name', 'value'}:
+                raise RuntimeError('registered school runtime setting must be a public value: ' + name)
+            env.append(dict(setting))
     env.extend(backend_env[k] for k in ('OCR_PIPELINE_URL','OCR_PIPELINE_TARGET_AUDIENCE') if k in backend_env)
     env.extend(value(k,v) for k,v in {
         'SAWA_TRIAL_WEB_TOKEN':token,'SAWA_TRIAL_OPERATOR_ACCOUNT':config['operator_account'],

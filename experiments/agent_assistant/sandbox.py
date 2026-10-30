@@ -19,12 +19,13 @@ import psutil
 import httpx
 
 from .store import Conflict
+from .runtime import SCHOOL_RUNTIME_SETTINGS
 
 MODULES = {"hospital": "src.main:app", "shift": "shift_scheduler_backend.main:app", "school-lunch": "src.main:app"}
 # No inherited cloud/database credentials or queue destinations.
 ENV_ALLOW = {"GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_IDS", "AUTH_PROVIDER", "PORTAL_AUTH_ME_URL",
              "GEMINI_API_KEY", "GOOGLE_API_KEY", "PROCESS_GEMINI_MODEL", "WORKFLOW_V2_LLM_MODEL",
-             "GOOGLE_APPLICATION_CREDENTIALS", "OCR_PIPELINE_BUCKET", "OCR_PIPELINE_URL", "OCR_PIPELINE_TARGET_AUDIENCE"}
+             "GOOGLE_APPLICATION_CREDENTIALS", "OCR_PIPELINE_BUCKET", "OCR_PIPELINE_URL", "OCR_PIPELINE_TARGET_AUDIENCE"} | set(SCHOOL_RUNTIME_SETTINGS)
 
 
 def copy_tree(source, target):
@@ -275,6 +276,7 @@ class Sandbox:
 
     async def start(self, run):
         await run_blocking(self.require_active_run, run)
+        await self.release_completed()
         if self.durable_store is not None and run.get('purpose') != 'target_lookup':
             ensure_local = getattr(self.durable_store, 'ensure_local_run', None)
             if ensure_local is not None:
@@ -306,7 +308,7 @@ class Sandbox:
                 raise Conflict("業務APIには専用Git worktreeを指定してください")
             token = self.tokens.setdefault(key, secrets.token_urlsafe(32))
             env = await run_blocking(self.environment, run, domain, cfg, data, worktree, token,
-                                     include_models=run.get('purpose') != 'target_lookup')
+                                     include_models=self.needs_models(run, domain))
             if domain == "school-lunch":
                 worker_key = (run["id"], "school-lunch-worker")
                 if worker_key not in self.children or self.children[worker_key].returncode is not None:
@@ -391,6 +393,39 @@ class Sandbox:
         except BaseException:
             await self.stop(run["id"], expected_generation=run.get("generation"))
             raise
+
+    @staticmethod
+    def needs_models(run, domain):
+        if run.get('purpose') == 'target_lookup' or domain == 'shift':
+            return False
+        from .tasks import TASKS
+        task_id = run.get('task_id')
+        if task_id not in TASKS:
+            return True
+        return task_id in {'hospital_pending_faxes', 'hospital_review_faxes', 'lunch_import'}
+
+    async def release_completed(self, run_id=None, *, expected_generation=None):
+        if self.run_store is None:
+            return False
+        candidates = {run_id} if run_id else {key[0] for key in self.children}
+        if run_id is None:
+            candidates.update(marker.parent.name for marker in (self.root / 'runs').glob('*/*.process.json'))
+        for ident in candidates:
+            current = await run_blocking(self.run_store.get, ident)
+            if current['status'] != 'completed' or (expected_generation is not None and current['generation'] != expected_generation):
+                if run_id is not None:
+                    return False
+                continue
+            resources = any(key[0] == ident for key in self.children) or any(self.path(ident).glob('*.process.json'))
+            resources = resources or any((self.path(ident) / 'data' / domain / 'home' / 'model-cache').exists() for domain in self.configs)
+            if not await self.stop(ident, expected_generation=current['generation']):
+                return False
+            if resources and self.durable_store is not None:
+                await run_blocking(self.durable_store.persist_files, ident)
+            if resources:
+                await run_blocking(self.run_store.event, ident, 'native_completed_cleanup',
+                                   {'generation': current['generation'], 'processes_remaining': 0, 'model_caches_remaining': 0})
+        return True
 
     async def stop(self, run_id, *, expected_generation=None):
         stopped, cancelled = await settle_process_task(asyncio.create_task(self._locked_stop(run_id, expected_generation)))

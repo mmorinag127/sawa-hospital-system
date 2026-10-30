@@ -39,6 +39,12 @@ def attach(store, native, tools, run):
         async def start(run):
             pass
         native.start = start
+    async def release_completed(ident, *, expected_generation):
+        current = store.get(ident)
+        assert current['status'] == 'completed'
+        assert current['generation'] == expected_generation
+        return True
+    native.release_completed = AsyncMock(side_effect=release_completed)
     engine.initialize(store.get(run['id']))
     return engine, store.get(run['id'])
 
@@ -86,6 +92,7 @@ def test_selected_native_task_reaches_review_and_finishes_after_approval_without
         assert await engine.advance(run['id']) is False
         assert store.get(run['id'])['status'] == 'completed'
         assert len(native.writes) == before
+        native.release_completed.assert_awaited_once_with(run['id'], expected_generation=run['generation'])
         with store.read() as db:
             count = db.execute('SELECT COUNT(*) FROM artifacts WHERE run_id=?', (run['id'],)).fetchone()[0]
         assert count == len(CONTRACTS[task].deliverables) if task != 'shift_check' else count == 0

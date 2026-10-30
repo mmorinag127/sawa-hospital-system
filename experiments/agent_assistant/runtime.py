@@ -6,6 +6,9 @@ from pathlib import Path
 
 from .store import Conflict
 
+SCHOOL_RUNTIME_SETTINGS = ('PROCESS_GEMINI_MODEL', 'GEMINI_API_BASE',
+                          'IMPLEMENTATION_PRICE_OCR_DEVICE', 'IMPLEMENTATION_PRICE_OCR_DPI')
+
 
 def source_manifest(root):
     root = Path(root).resolve()
@@ -50,7 +53,9 @@ def configuration(root):
             domains[domain]['env']['WORKFLOW_V2_LLM_MODEL']=os.environ['GEMINI_AGENT_MODEL']
         elif domain == 'school-lunch':
             domains[domain]['registered_source'] = True
-            for key in ('GEMINI_API_KEY','GOOGLE_API_KEY'):
+            if not os.environ.get('PROCESS_GEMINI_MODEL', '').strip():
+                raise RuntimeError('学校給食の工程推測モデル設定が不足しています')
+            for key in ('GEMINI_API_KEY','GOOGLE_API_KEY') + SCHOOL_RUNTIME_SETTINGS:
                 if os.environ.get(key): domains[domain]['env'][key]=os.environ[key]
         if domain != 'hospital':
             domains[domain]['env'].update(AUTH_PROVIDER='portal',PORTAL_AUTH_ME_URL=os.environ['PORTAL_AUTH_ME_URL'])
