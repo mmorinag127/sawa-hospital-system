@@ -138,7 +138,12 @@ class Tools:
                 previous = await run_blocking(previous_command)
                 if previous:
                     if previous['request']!=encoded or previous['status']!='done': raise Conflict('命令IDの内容または結果が一致しません')
-                    return json.loads(previous['result'])
+                    prior_result = json.loads(previous['result'])
+                    from .business_contracts import SERVER_EXECUTION
+                    # A failed orchestration is not a failed native mutation.
+                    # Reconcile its children using their unchanged command IDs.
+                    if not (SERVER_EXECUTION.get() and prior_result.get('error')):
+                        return prior_result
                 try:
                     result=await method(run_id,generation,raw,command_id)
                 except OperatorWait as exc:
@@ -155,7 +160,13 @@ class Tools:
                 # sees its own still-running wrapper as an unresolved mutation.
                 def record_command():
                     with self.store.tx() as db:
-                        db.execute("INSERT INTO commands VALUES(?,?,?,'done',?)",(run_id,command_id,encoded,json.dumps(result,ensure_ascii=False)))
+                        if previous:
+                            updated = db.execute("UPDATE commands SET result=? WHERE run_id=? AND id=? AND request=? AND status='done' AND result=?",
+                                                 (json.dumps(result,ensure_ascii=False),run_id,command_id,encoded,previous['result']))
+                            if updated.rowcount != 1:
+                                raise Conflict('業務照合中に保存結果が変わりました')
+                        else:
+                            db.execute("INSERT INTO commands VALUES(?,?,?,'done',?)",(run_id,command_id,encoded,json.dumps(result,ensure_ascii=False)))
                 await run_blocking(record_command)
                 await run_blocking(self.store.event, run_id,'tool_result',{'tool':name,'result':result})
                 return result

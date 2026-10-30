@@ -73,6 +73,74 @@ def test_native_source_changes_never_change_server_mutation_ids(tmp_path):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('unknown_write', [False, True])
+def test_server_reconciles_failed_whole_fax_wrapper_without_replaying_writes(tmp_path, unknown_write):
+    from experiments.agent_assistant.business_contracts import SERVER_EXECUTION
+    from experiments.agent_assistant.tests.test_fax_workflow import Native
+    from experiments.agent_assistant.store import Store
+    from experiments.agent_assistant.tools import Tools
+
+    async def scenario():
+        store = Store(tmp_path / 'ledger'); store.set_budget(100)
+        run, _ = store.create('user', 'sealed-fax-error', 'FAX', ['hospital'], 100, task_id='hospital_pending_faxes')
+        store.update(run['id'], status='running'); run = store.get(run['id'])
+        native = Native(tmp_path / 'files'); del native.sources['B']
+        native.sources['A']['status'] = 'completed'
+        manifest = tmp_path / 'native-source.json'; manifest.write_text('original')
+        native.configs = {'hospital': {'source_manifest': str(manifest)}}
+        request = native.request; output_reads = []
+
+        async def exporting(run, domain, method, path, **kwargs):
+            if path.startswith('/outputs/') and method == 'GET':
+                output_reads.append(path)
+                if manifest.read_text() == 'original' and path == '/outputs/delivery-notes':
+                    return httpx.Response(500, text='synthetic template failure')
+                return httpx.Response(200, content=b'synthetic sealed output', headers={'content-type': 'text/csv'})
+            return await request(run, domain, method, path, **kwargs)
+
+        native.request = exporting; tools = Tools(store, native)
+        store.command(run['id'], 'start-A', {'name': 'hospital_start_fax', 'arguments': {'parameters': {'ids': {'uploaded_pdf_id': 'A'}}}})
+        store.finish_command(run['id'], 'start-A', {'ok': True, 'data': native.sources['A']})
+        await tools.execute(run['id'], 0, 'prepare_fax_review', {'fax_id': 'A'}, 'prepare-A')
+        review = (await tools.faxes.submit(run, 'A', '合成原本照合済み'))['review']
+        await tools.faxes.decide(run, 'A', review['id'], True, '承認')
+        store.update(run['id'], task_inputs={'business_workflow': {'version': 1, 'phase': 'saving'}})
+
+        async def complete():
+            token = SERVER_EXECUTION.set(True)
+            try:
+                return await tools.execute(run['id'], 0, 'complete_fax_work', {}, 'business:complete:faxes')
+            finally:
+                SERVER_EXECUTION.reset(token)
+
+        first = await complete()
+        assert first.get('error'), first
+        assert 'hospital_export_delivery_notes' in first['error']
+        assert len(native.writes) == 5
+        initial_reads = list(output_reads)
+        assert await complete() == first
+        assert output_reads == initial_reads and len(native.writes) == 5
+        if unknown_write:
+            store.command(run['id'], 'unknown-write', {'name': 'hospital_confirm_order', 'arguments': {'parameters': {'ids': {'order_id': 'OA'}}}})
+        manifest.write_text('fixed')
+        result = await complete()
+        assert len(native.writes) == 5
+        if unknown_write:
+            assert '結果未確定' in result['error']
+            assert store.get(run['id'])['status'] != 'completed'
+        else:
+            assert result.get('ok'), result
+            assert store.get(run['id'])['status'] == 'completed'
+            assert output_reads.count('/outputs/delivery-notes') == 2
+            evidence = next(e['payload'] for e in store.events(run['id']) if e['kind'] == 'completion_evidence')
+            assert len(evidence['artifact_ids']) == 3
+            with store.read() as db:
+                saved = db.execute('SELECT result FROM commands WHERE run_id=? AND id=?', (run['id'], 'business:complete:faxes')).fetchone()
+            assert json.loads(saved['result']) == result
+
+    asyncio.run(scenario())
+
+
 def test_malformed_mcp_arguments_return_repairable_error_without_execution(tmp_path):
     async def scenario():
         store, native, tools, run = shift(tmp_path)
