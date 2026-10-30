@@ -94,6 +94,47 @@ def test_restore_is_per_request_and_preserves_original_and_audit(tmp_path, domai
     assert store.get(run["id"])["status"] == "running"  # Restoration never rewrites history implicitly.
 
 
+def test_task_baseline_uses_declared_native_snapshot_without_changing_default(tmp_path):
+    import shutil
+    store, sandbox, _, _ = prepared(tmp_path)
+    baseline = Path(sandbox.configs['hospital']['baseline'])
+    case = baseline/'confirmed-case'
+    shutil.copytree(baseline, case, ignore=shutil.ignore_patterns('confirmed-case'))
+    declaration = {'purpose':'sawa-agent-isolated-trial','task_id':'hospital_outputs',
+                   'initialization':'sealed-native-workflow-copy-v1',
+                   'source_run_id':'a'*32,'source_checkpoint_sha256':'b'*64}
+    (case/'trial-manifest.json').write_text(json.dumps(declaration))
+    with sqlite3.connect(case/'database.sqlite3') as db:
+        db.execute('UPDATE quantities SET value=20')
+    (baseline/'trial-manifest.json').write_text(json.dumps({
+        'purpose':'sawa-agent-isolated-trial','task_baselines':{'hospital_outputs':'confirmed-case'}}))
+    for task, expected in [('hospital_outputs',20),('hospital_pending_faxes',7)]:
+        run, _ = store.create('user','task-baseline-'+task,task,['hospital'],100,task_id=task)
+        sandbox.prepare(run)
+        copied = sandbox.path(run['id'])/'data/hospital'
+        with sqlite3.connect(copied/'database.sqlite3') as db:
+            assert db.execute('SELECT value FROM quantities').fetchone()[0] == expected
+        assert not (copied/'confirmed-case').exists()
+    declaration['source_run_id'] = ''
+    (case/'trial-manifest.json').write_text(json.dumps(declaration))
+    run, _ = store.create('user','invalid-task-baseline','synthetic',['hospital'],100,task_id='hospital_outputs')
+    with pytest.raises(Conflict,match='出典'):
+        sandbox.prepare(run)
+
+
+def test_task_baseline_cannot_escape_root_or_change_unrelated_task(tmp_path):
+    store, sandbox, _, _ = prepared(tmp_path)
+    baseline = Path(sandbox.configs['hospital']['baseline'])
+    for index, scenarios in enumerate([
+        {'hospital_outputs':'../outside'}, {'shift_check':'confirmed-case'},
+        {'hospital_outputs':'/tmp/outside'},
+    ]):
+        (baseline/'trial-manifest.json').write_text(json.dumps({'purpose':'sawa-agent-isolated-trial','task_baselines':scenarios}))
+        run, _ = store.create('user','reject-scenario-'+str(index),'synthetic',['hospital'],100,task_id='hospital_outputs')
+        with pytest.raises(Conflict,match='定義'):
+            sandbox.prepare(run)
+
+
 def test_baseline_symlink_and_missing_manifest_fail_closed(tmp_path):
     store, sandbox, _, run = prepared(tmp_path)
     base = Path(sandbox.configs["hospital"]["baseline"])

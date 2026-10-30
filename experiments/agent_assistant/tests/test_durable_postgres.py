@@ -98,6 +98,7 @@ def test_metadata_reads_and_other_run_update_do_not_hydrate_completed_history(tm
     first, _ = store.create('operator', 'old-completed', 'old', ['hospital'], 100)
     store.update(first['id'], status='completed', reserved=0)
     second, _ = store.create('operator', 'current-working', 'current', ['hospital'], 100)
+    store.persist_files(second['id'])
     checkpointed = []
     from experiments.agent_assistant import working_copy
     original = working_copy.checkpoint
@@ -125,12 +126,12 @@ def test_restart_keeps_costs_before_images_outputs_and_fences_previous(tmp_path,
     ident=run['id'];root=tmp_path/'runs'/ident
     original=root/'before/hospital/database.sqlite3'
     original.parent.mkdir(parents=True);original.write_bytes(b'original-copy')
-    a.persist_files(ident)
     working=root/'data/hospital/database.sqlite3'
     working.parent.mkdir(parents=True)
     with sqlite3.connect(working) as db:
         db.execute('CREATE TABLE quantities(value INTEGER)')
         db.execute('INSERT INTO quantities VALUES(21)')
+    a.persist_files(ident)
     output=root/'artifacts/sealed';output.parent.mkdir();output.write_bytes(b'official-output')
     digest=hashlib.sha256(output.read_bytes()).hexdigest()
     with a.tx() as db:db.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?)',('sealed',ident,str(output),'label.xlsx',digest,output.stat().st_size))
@@ -214,6 +215,7 @@ def test_unchanged_checkpoints_skip_compression_but_changed_bytes_are_saved(tmp_
         return real_encode(content)
 
     monkeypatch.setattr(durable, 'encode_blob', encode)
+    store.persist_files(run['id'])
     store.event(run['id'], 'notice', {'step': 1})
     store.event(run['id'], 'notice', {'step': 2})
     assert encoded.count(b'owned working original') == 1
@@ -226,6 +228,54 @@ def test_unchanged_checkpoints_skip_compression_but_changed_bytes_are_saved(tmp_
         contents = {digest: durable.decode_blob(payload, expected=digest) for digest, payload in query}
     assert contents == {hashlib.sha256(content).hexdigest(): content
                         for content in (b'owned working original', b'owned working changed')}
+
+
+def test_preparation_does_not_publish_partial_originals_and_seals_working_copy_atomically(tmp_path, database):
+    store = PostgresStore(tmp_path, database)
+    store.set_budget(1000)
+    run, _ = store.create('operator', 'prepare-atomic-copy', 'synthetic', ['school-lunch'], 100)
+    original = tmp_path/'runs'/run['id']/'before/school-lunch/database.sqlite3'
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b'partial baseline before registered copy')
+    store.event(run['id'], 'notice', {'preparing':True})
+    assert store.working_copy_ready(run['id']) is False
+    with database() as pg, pg.cursor() as cursor:
+        cursor.execute('SELECT COUNT(*) FROM sawa_agent_trial.files')
+        assert cursor.fetchone()[0] == 0
+        cursor.execute('SELECT COUNT(*) FROM sawa_agent_trial.working_copies')
+        assert cursor.fetchone()[0] == 0
+    original.write_bytes(b'complete registered original')
+    working = original.parents[2]/'data/school-lunch/database.sqlite3'
+    working.parent.mkdir(parents=True)
+    with sqlite3.connect(working) as db:
+        db.execute('CREATE TABLE quantities(value INTEGER)')
+        db.execute('INSERT INTO quantities VALUES(20)')
+    store.persist_files(run['id'])
+    assert store.working_copy_ready(run['id']) is True
+    store.require_working_copy(run['id'])
+    shutil.rmtree(original.parents[2])
+    replacement = PostgresStore(tmp_path, database)
+    replacement.require_working_copy(run['id'])
+    assert original.read_bytes() == b'complete registered original'
+    with sqlite3.connect(working) as db:
+        assert db.execute('SELECT value FROM quantities').fetchone()[0] == 20
+
+
+def test_file_insert_accepts_identical_concurrent_receipt_but_never_overwrites(tmp_path, database):
+    store = PostgresStore(tmp_path, database)
+    path = tmp_path/'runs'/('a'*32)/'sources/original'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'original source')
+    with database() as pg, pg.cursor() as cursor:
+        store._file(cursor, path, known={})
+        store._file(cursor, path, known={})
+    path.write_bytes(b'different source')
+    with pytest.raises(Conflict, match='上書き'):
+        with database() as pg, pg.cursor() as cursor:
+            store._file(cursor, path, known={})
+    with database() as pg, pg.cursor() as cursor:
+        cursor.execute('SELECT digest FROM sawa_agent_trial.files WHERE path=%s', (path.relative_to(tmp_path).as_posix(),))
+        assert cursor.fetchone()[0] == hashlib.sha256(b'original source').hexdigest()
 
 
 def test_indexed_views_preserve_results_without_decoding_entire_ledger(tmp_path, database, monkeypatch):

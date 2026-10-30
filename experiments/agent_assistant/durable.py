@@ -91,6 +91,7 @@ class PostgresStore(Store):
         self.connect = connect
         self.working_ready = False
         self._hydrated = set()
+        self._preparing = set()
         self._hydration_lock = threading.RLock()
         self._read_snapshot = ContextVar('agent_read_snapshot', default=None)
         self.path = self.root / 'ledger.sqlite3'
@@ -126,6 +127,7 @@ class PostgresStore(Store):
             # older checkpoint over changes currently being prepared locally.
             with self._hydration_lock:
                 self._hydrated.add(run['id'])
+                self._preparing.add(run['id'])
         return run, fresh
 
     def budget(self):
@@ -218,7 +220,7 @@ class PostgresStore(Store):
                                 c.execute('SELECT path,digest FROM sawa_agent_trial.files WHERE path=ANY(%s)',
                                           (keys[offset:offset + 200],))
                                 known_files.update(c.fetchall())
-                        if self.working_ready and ident in self._hydrated:
+                        if self.working_ready and ident in self._hydrated and ident not in self._preparing:
                             manifest = checkpoint(self.root, ident, c, encode_blob, known=known_files)
                             if manifest is not None:
                                 db.execute('INSERT INTO working_copies VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET manifest=excluded.manifest', (ident, manifest))
@@ -261,11 +263,17 @@ class PostgresStore(Store):
             if old[0] != digest:
                 raise Conflict('保存済み原本・帳票の上書きは禁止されています')
             return
-        cursor.execute('INSERT INTO sawa_agent_trial.files VALUES (%s,%s,%s)', (relative,digest,encode_blob(content)))
+        cursor.execute('INSERT INTO sawa_agent_trial.files VALUES (%s,%s,%s) ON CONFLICT DO NOTHING',
+                       (relative,digest,encode_blob(content)))
+        cursor.execute('SELECT digest FROM sawa_agent_trial.files WHERE path=%s', (relative,))
+        saved = cursor.fetchone()
+        if saved is None or saved[0] != digest:
+            raise Conflict('保存済み原本・帳票の上書きは禁止されています')
         if known is not None:
             known[relative] = digest
 
     def persist_files(self, ident):
+        from .working_copy import checkpoint
         root = self.root / 'runs' / ident
         with closing(self.connect()) as pg, pg:
             with pg.cursor() as c:
@@ -286,6 +294,17 @@ class PostgresStore(Store):
                     known_files.update(c.fetchall())
                 for path in paths:
                     self._file(c, path, known=known_files)
+                manifest = checkpoint(self.root, ident, c, encode_blob, known=known_files)
+                if manifest is not None:
+                    c.execute('INSERT INTO sawa_agent_trial.working_copies(run_id,manifest) VALUES(%s,%s) '
+                              'ON CONFLICT(run_id) DO UPDATE SET manifest=excluded.manifest', (ident, manifest))
+        self._preparing.discard(ident)
+
+    def working_copy_ready(self, ident):
+        if ident in self._preparing:
+            return False
+        with self.read() as db:
+            return db.execute('SELECT 1 FROM working_copies WHERE run_id=?', (ident,)).fetchone() is not None
 
     def hydrate(self):
         """Explicit full repair only; startup and normal reads restore one run."""

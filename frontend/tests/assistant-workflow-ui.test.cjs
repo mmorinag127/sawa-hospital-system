@@ -308,6 +308,19 @@ test('shift review puts matrix, wish result and changes before approval without 
  }finally{await h.close()}
 });
 
+test('inspection and export approvals never claim they will confirm a schedule',async()=>{
+ for(const task of ['shift_check','shift_export']){
+  const initial={...makeRun('running'),task_id:task,pending_question:null,
+   task_review:{id:'review-readonly',state:'awaiting_approval',summary:'検査または出力',evidence:[],actions:[]},
+   shift_review:{period:'2026-08',days:[],matrix:[],constraints:[],shortages:[],issues:[],constraints_known:true,validation_known:true,blocking:false,demand_known:true,comparison_available:false,comparison:'なし',changes:[],reflected:0,unreflected:0}};
+  const h=await mount({initial});try{
+   const content=h.document.querySelector('.review-panel').textContent;
+   assert.doesNotMatch(content,/勤務表を確定して/);
+   assert.match(content,task==='shift_check'?/勤務表・条件は変更しません/:/確定済み勤務表を変更せずExcel/);
+  }finally{await h.close();}
+ }
+});
+
 test('admin switches future provider explicitly and labels Gemini costs as estimates',async()=>{
  config.provider_id='claude';config.providers=[{id:'claude',label:'Claude Managed Agents',missing:[]},{id:'gemini',label:'Gemini Interactions API',missing:['GEMINI_API_KEY']}];
  const h=await mount({adminView:true});try{

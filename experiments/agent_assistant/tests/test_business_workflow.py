@@ -73,6 +73,13 @@ def test_selected_native_task_reaches_review_and_finishes_after_approval_without
         assert await engine.advance(run['id']) is False
         review = tools.flow.review(run['id'])
         assert review['state'] == 'awaiting_approval'
+        if task == 'shift_check':
+            from experiments.agent_assistant.shift_review import build_shift_review
+            view = build_shift_review(review)
+            assert view['demand_known'] and view['constraints_known'] and view['validation_known']
+            assert {e['operation'] for e in review['evidence']} >= {'shift_get_demands','shift_get_constraints','shift_get_staff'}
+            assert review['actions'] == []
+            assert '変更しません' in review['summary']
         assert store.get(run['id'])['status'] != 'completed'
         before = len(native.writes)
         await tools.flow.decide(store.get(run['id']), review['id'], True, '')
@@ -88,6 +95,26 @@ def test_selected_native_task_reaches_review_and_finishes_after_approval_without
         assert await engine.advance(run['id']) is False
         with store.read() as db:
             assert db.execute('SELECT COUNT(*) FROM artifacts WHERE run_id=?', (run['id'],)).fetchone()[0] == count
+    asyncio.run(scenario())
+
+
+def test_preparing_durable_request_is_not_driven_before_initial_checkpoint(tmp_path):
+    from types import SimpleNamespace
+    async def scenario():
+        store, native, tools, run = shift(tmp_path, 'shift_check')
+        engine, run = attach(store, native, tools, run)
+        store.update(run['id'], status='preparing')
+        ready = False
+        native.durable_store = SimpleNamespace(working_copy_ready=lambda ident:ready)
+        engine.drive = AsyncMock()
+        await engine.kick_many([run['id']])
+        assert not engine.jobs
+        assert not engine.drive.called
+        ready = True
+        await engine.kick_many([run['id']])
+        await asyncio.sleep(0)
+        engine.drive.assert_awaited_once_with(run['id'])
+        await engine.close()
     asyncio.run(scenario())
 
 

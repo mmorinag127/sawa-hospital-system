@@ -113,6 +113,9 @@ class BusinessWorkflow:
         ident = run['id']
         if not owned(run) or self.closed or run['status'] == 'completed':
             return
+        durable = getattr(self.tools.sandbox, 'durable_store', None)
+        if run['status'] == 'preparing' and durable is not None and not durable.working_copy_ready(ident):
+            return
         if authorization:
             self.tools.authorizations[ident] = authorization
         old = self.jobs.get(ident)
@@ -147,6 +150,16 @@ class BusinessWorkflow:
             reads = [('hospital_get_workflow', {'ids': {'order_id': target['key']}}) for target in run['task_inputs']['targets']]
         elif contract.prepare == 'shift_selected':
             reads = []
+            if task == 'shift_check':
+                period = await self.call(run, 'shift_get_period',
+                    {'parameters': {'query': {'month': run['task_inputs']['inputs']['month']}}}, command + ':period')
+                evidence.append(period['command_id'])
+                start, end = period['data']['start_date'], period['data']['end_date_exclusive']
+                reads.extend([
+                    ('shift_get_staff', {}),
+                    ('shift_get_constraints', {'query': {'date_from': start, 'date_to': end}}),
+                    ('shift_get_demands', {'query': {'start': start, 'end': end}}),
+                ])
             for target in run['task_inputs']['targets']:
                 ids = target['data']
                 query = {'candidate_id': ids['candidate_id']} if ids['candidate_id'] is not None else {}
@@ -161,7 +174,9 @@ class BusinessWorkflow:
         for index, (name, parameters) in enumerate(reads):
             result = await self.call(run, name, {'parameters': parameters}, command + ':read:' + str(index))
             evidence.append(result['command_id'])
-        return await self.call(run, 'request_task_approval', {'summary': '選択した対象の内容を確認してください。承認後は必要な保存・帳票作成まで自動で進みます。', 'evidence_commands': evidence, 'actions': []}, command + ':review')
+        summary = ('人員不足・勤務制約の検査結果を確認してください。勤務表・条件・確定状態は変更しません。'
+                   if task == 'shift_check' else '選択した対象の内容を確認してください。承認後は必要な保存・帳票作成まで自動で進みます。')
+        return await self.call(run, 'request_task_approval', {'summary': summary, 'evidence_commands': evidence, 'actions': []}, command + ':review')
 
     async def choose_layout(self, run):
         inputs = run['task_inputs'].get('inputs', {})

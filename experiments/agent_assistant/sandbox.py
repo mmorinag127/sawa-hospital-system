@@ -27,11 +27,11 @@ ENV_ALLOW = {"GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_IDS", "AUTH_PROVIDER
              "GOOGLE_APPLICATION_CREDENTIALS", "OCR_PIPELINE_BUCKET", "OCR_PIPELINE_URL", "OCR_PIPELINE_TARGET_AUDIENCE"}
 
 
-def copy_tree(source, target):
+def copy_tree(source, target, *, exclude=()):
     source, target = Path(source).resolve(), Path(target)
     if any(p.is_symlink() for p in source.rglob("*")):
         raise Conflict("試用データ内のシンボリックリンクは使用できません")
-    shutil.copytree(source, target)
+    shutil.copytree(source, target, ignore=lambda directory, names: set(exclude) if Path(directory)==source else set())
 
 
 async def settle_process_task(task):
@@ -155,9 +155,32 @@ class Sandbox:
             marker = baseline / "trial-manifest.json"
             if not marker.is_file() or json.loads(marker.read_text()).get("purpose") != "sawa-agent-isolated-trial":
                 raise Conflict("試用専用と明示したbaselineが必要です")
+            scenarios = json.loads(marker.read_text()).get('task_baselines', {})
+            if (domain != 'hospital' and scenarios or any(task not in {'hospital_review_faxes', 'hospital_outputs'}
+                    or not isinstance(relative, str) or Path(relative).name != relative or relative in {'.','..'}
+                    for task, relative in scenarios.items())):
+                raise Conflict('業務別の試用データ定義が不正です')
+            excluded = set(scenarios.values())
+            if run.get('task_id') in scenarios:
+                selected = (baseline / scenarios[run['task_id']]).resolve()
+                if not selected.is_relative_to(baseline) or selected == baseline:
+                    raise Conflict('業務別の試用データが固定保存先の対象外です')
+                selected_marker = selected / 'trial-manifest.json'
+                if not selected_marker.is_file():
+                    raise Conflict('業務別の試用原本がありません')
+                declared = json.loads(selected_marker.read_text())
+                if (declared.get('purpose') != 'sawa-agent-isolated-trial'
+                        or declared.get('task_id') != run['task_id']
+                        or declared.get('initialization') != 'sealed-native-workflow-copy-v1'
+                        or any(not isinstance(declared.get(key), str) or len(declared[key]) != size
+                               or any(c not in '0123456789abcdef' for c in declared[key])
+                               for key, size in (('source_run_id',32), ('source_checkpoint_sha256',64)))):
+                    raise Conflict('業務別の試用データと出典を照合できません')
+                baseline = selected
+                excluded = set()
             if not (baseline / "database.sqlite3").is_file():
                 raise Conflict("試用DBがありません")
-            copy_tree(baseline, before / domain)
+            copy_tree(baseline, before / domain, exclude=excluded)
             # Online SQLite backup includes committed WAL contents, without copying locks.
             for suffix in ("-wal", "-shm"):
                 (before / domain / ("database.sqlite3"+suffix)).unlink(missing_ok=True)
@@ -174,6 +197,11 @@ class Sandbox:
         for domain in run["domains"]:
             cfg = self.configs[domain]
             if not cfg.get("initialize_pending_sources"):
+                continue
+            declaration = json.loads((directory / 'data' / domain / 'trial-manifest.json').read_text())
+            if declaration.get('initialization') == 'sealed-native-workflow-copy-v1':
+                if domain != 'hospital' or declaration.get('task_id') != run.get('task_id'):
+                    raise Conflict('保存済みの試用データは対応する病院業務だけで使用できます')
                 continue
             if domain != "hospital":
                 raise Conflict("この試用初期化は病院注文専用です")
