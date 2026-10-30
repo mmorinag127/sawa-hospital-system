@@ -70,3 +70,11 @@ not rerun or repaired by editing the ledger. The new writer-boundary regression
 holds one real PostgreSQL transaction open, verifies another writer waits before
 its snapshot, and verifies a reader remains available. Injected external
 conflicts still roll back and propagate without executing a body twice.
+
+Batch 3a876df0 finished in 1169.711 seconds. All four new PostgreSQL boundaries
+passed; the agent suite had 492 passes and one legacy conversation-fixture
+failure. Its future-only fake stream repeated answered call q2, so the real
+unknown-stream fence correctly rejected it depending on scheduling. The fixture
+now emits fresh q3 and also asserts q3 remains answerable, waiting_input is
+retained and no error is recorded. Stop/old-answer rejection assertions remain.
+No application answer fence was relaxed. This failed batch has no success receipt.

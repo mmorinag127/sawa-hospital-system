@@ -45,7 +45,8 @@ def test_answers_resume_exact_calls_and_ask_next_question(tmp_path):
             self.index+=1
             if self.index==1:
                 return FakeStream([Event(type='agent.custom_tool_use',id='q1',name='ask_operator',input={'question':'不足分はどうしますか','options':['条件を見直す','今回は中止']})])
-            return FakeStream([Event(type='agent.custom_tool_use',id='q2',name='ask_operator',input={'question':'見直す内容を教えてください'})])
+            # Future-only streams cannot repeat an already answered tool call.
+            return FakeStream([Event(type='agent.custom_tool_use',id=f'q{self.index}',name='ask_operator',input={'question':'見直す内容を教えてください'})])
         async def send(self,_,**kwargs):sent.extend(kwargs['events'])
     async def boot(_):pass
     sandbox.start=boot
@@ -62,6 +63,9 @@ def test_answers_resume_exact_calls_and_ask_next_question(tmp_path):
         await managed.tasks[run['id']]
         assert sent[-1]['custom_tool_use_id']=='q2'
         assert '午前の人数' in sent[-1]['content'][0]['text']
+        assert pending_question(store.events(run['id']))['question_id']=='q3'
+        assert store.get(run['id'])['status']=='waiting_input'
+        assert store.latest_event(run['id'],'error') is None
         store.update(run['id'],status='stopped')
         with pytest.raises(Conflict): await managed.reply(run['id'],'停止後の回答','q2')
     asyncio.run(scenario())
