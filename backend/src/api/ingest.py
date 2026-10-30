@@ -61,11 +61,16 @@ def pending_faxes():
 
 @router.get("/review-faxes", dependencies=[Depends(require_role("operator"))])
 def review_faxes():
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
     from src.db import session_scope
     from src.models.uploaded_pdf import UploadedPdf
+    from src.models.order_workflow_state import OrderWorkflowState
     with session_scope() as session:
-        rows = session.execute(select(UploadedPdf).where(UploadedPdf.status.in_(["failed", "manual_review", "retry_wait"])).order_by(UploadedPdf.received_at, UploadedPdf.id)).scalars().all()
+        rows = session.execute(select(UploadedPdf).outerjoin(OrderWorkflowState,
+            OrderWorkflowState.order_id == UploadedPdf.current_order_id).where(or_(
+                UploadedPdf.status.in_(["failed", "manual_review", "retry_wait"]),
+                (UploadedPdf.status == "completed") & or_(OrderWorkflowState.state != "confirmed", OrderWorkflowState.order_id.is_(None))
+            )).order_by(UploadedPdf.received_at, UploadedPdf.id)).scalars().all()
         items = [{"id": row.id, "name": row.original_filename, "facility": row.facility_name,
                   "facility_id": row.facility_hint, "week": row.week_hint, "status": row.status,
                   "sha256": row.content_sha256, "order_id": row.current_order_id,

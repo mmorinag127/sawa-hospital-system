@@ -16,12 +16,17 @@ not changed. Deployment uses the owner-dispatched staging Actions only.
 | Concurrent immutable file receipts raise raw unique errors | Compare digest after conflict-safe insert; reject every differing digest | Implemented, unverified |
 | Shift inspection omits shortages and wishes | Read period-bounded demands/constraints and staff before approval | Implemented, unverified |
 | Inspection/export UI promises a new confirmation | Task-specific read-only inspection and export descriptions in both UIs | Implemented, unverified |
+| Review queue hides completed OCR awaiting operator confirmation | Include completed unconfirmed orders, retain failure states and exclude confirmed orders | Implemented, unverified |
 | Hospital has only a pending-FAX baseline | Task-bound, provenance-declared native workflow snapshots, fixed by release hashes | Selection/migration support implemented; real snapshots still to capture |
 
 Product changes are complete for the known findings. Regression additions cover
 preparation visibility, immediate restart, immutable-file collision/digest
 mismatch, scheduling before readiness, read-only shortage checks, UI text and
 task-specific fixture confinement. Execute them together and serially.
+
+The first batch at source 05273c037083 was interrupted before receipt creation
+when the review-queue omission was found during source inspection. Its results
+are not a complete verification or deployment receipt.
 
 The hospital review/confirmed snapshots must come from a real run of the
 declared FAC00001 PDF (SHA256

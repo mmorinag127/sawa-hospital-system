@@ -69,6 +69,24 @@ def test_review_queue_preserves_failed_manual_and_retry_intents(isolated_formal_
             session.add(UploadedPdf(id='review-component-'+state,message_id='review-message-'+state,content_sha256='synthetic-hash',
                 original_filename='synthetic.pdf',storage_uri='synthetic-non-ocr-source',received_at=datetime(2026,10,19),status=state))
     response=ingest.review_faxes()
-    assert response['total']==3
-    assert {x['status'] for x in response['items']}=={'failed','manual_review','retry_wait'}
+    assert response['total']==4
+    assert {x['status'] for x in response['items']}=={'failed','manual_review','retry_wait','completed'}
     assert all('lease_token' not in x and 'storage_uri' not in x for x in response['items'])
+
+
+def test_review_queue_includes_unconfirmed_ocr_but_never_confirmed_orders(isolated_formal_schema):
+    from datetime import datetime
+    from src.db import session_scope
+    from src.models.order import Order
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.models.uploaded_pdf import UploadedPdf
+    with session_scope() as session:
+        for state in ('uploaded','ready_for_review','confirmed'):
+            ident = 'review-'+state
+            session.add(Order(id=ident,document_uri='synthetic.pdf',message_id=ident))
+            session.flush()
+            session.add(OrderWorkflowState(order_id=ident,state=state))
+            session.add(UploadedPdf(id=ident,message_id=ident,content_sha256='synthetic-hash',
+                original_filename='synthetic.pdf',storage_uri='synthetic-non-ocr-source',
+                received_at=datetime(2026,10,19),status='completed',current_order_id=ident))
+    assert {item['id'] for item in ingest.review_faxes()['items']} == {'review-uploaded','review-ready_for_review'}
