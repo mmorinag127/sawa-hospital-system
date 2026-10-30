@@ -29,6 +29,55 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
 
+class ReadOnlyAuditTransportTest(unittest.TestCase):
+    def execute(self, name, command, responses):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        log = Path(directory.name) / 'audit.log'
+        pending = iter(responses)
+
+        def run(argv, **kwargs):
+            code, output = next(pending)
+            kwargs['stdout'].write(output)
+            return subprocess.CompletedProcess(argv, code)
+
+        with patch.object(RUNNER.subprocess, 'run', side_effect=run) as calls, \
+                patch.object(RUNNER.time, 'sleep') as delay:
+            result = RUNNER.execute_command(name, command, log, {})
+        return result.returncode, log.read_bytes(), calls.call_count, delay.call_count
+
+    def test_transport_retries_exact_read_only_audit_once_and_keeps_both_logs(self):
+        for name, command in RUNNER.READ_ONLY_AUDITS.items():
+            for error in RUNNER.AUDIT_TRANSPORT_ERRORS:
+                with self.subTest(name=name, error=error):
+                    code, log, calls, delays = self.execute(name, command, [
+                        (1, error + b' first failure\n'), (0, b'No known vulnerabilities found\n')])
+                    self.assertEqual((code, calls, delays), (0, 2, 1))
+                    self.assertIn(error, log)
+                    self.assertIn(b'transport retry 2/2', log)
+                    self.assertTrue(log.endswith(b'No known vulnerabilities found\n'))
+
+    def test_second_transport_failure_remains_failure_without_more_retries(self):
+        command = RUNNER.READ_ONLY_AUDITS['backend-audit']
+        error = RUNNER.AUDIT_TRANSPORT_ERRORS[0]
+        code, log, calls, delays = self.execute('backend-audit', command, [(1, error), (7, error)])
+        self.assertEqual((code, calls, delays), (7, 2, 1))
+        self.assertEqual(log.count(error), 2)
+
+    def test_findings_success_tests_and_changed_commands_are_not_retried(self):
+        audit = RUNNER.READ_ONLY_AUDITS['backend-audit']
+        for name, command, code, output in (
+            ('backend-audit', audit, 1, b'Found 1 known vulnerability'),
+            ('backend-audit', audit, 0, b'No known vulnerabilities found'),
+            ('backend-tests', 'python3 -m pytest', 1, RUNNER.AUDIT_TRANSPORT_ERRORS[0]),
+            ('backend-audit', audit + ' && mutate', 1, RUNNER.AUDIT_TRANSPORT_ERRORS[0]),
+        ):
+            with self.subTest(name=name, command=command, code=code):
+                result, log, calls, delays = self.execute(name, command, [(code, output)])
+                self.assertEqual((result, calls, delays), (code, 1, 0))
+                self.assertEqual(log, output)
+
+
 class ReceiptContractTest(unittest.TestCase):
     def setUp(self):
         baseline = patch.object(RUNNER, 'CommandEvidence')

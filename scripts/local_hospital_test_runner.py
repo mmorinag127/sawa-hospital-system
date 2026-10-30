@@ -16,6 +16,35 @@ from local_command_evidence import CommandEvidence, validate_proof
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "scripts/local_hospital_test_manifest.json"
 
+READ_ONLY_AUDITS = {
+    'backend-audit': 'cd backend && python3 -m pip_audit --local --skip-editable',
+    'runtime-image-audits': 'python3 scripts/run_local_runtime_audits.py',
+}
+AUDIT_TRANSPORT_ERRORS = (
+    b'requests.exceptions.ReadTimeout:',
+    b'requests.exceptions.ConnectionError:',
+    b'docker.raw.sock: connect: connection refused',
+    b'unable to upgrade to h2c, received 500',
+)
+
+
+def execute_command(name, command, log, environment):
+    for attempt in range(2):
+        with log.open('wb' if attempt == 0 else 'ab') as stream:
+            if attempt:
+                stream.write(b'\n[read-only audit transport retry 2/2]\n')
+                stream.flush()
+            result = subprocess.run(['bash', '-euo', 'pipefail', '-c', command], cwd=ROOT,
+                                    env=environment, stdout=stream, stderr=subprocess.STDOUT)
+        if result.returncode == 0 or attempt or READ_ONLY_AUDITS.get(name) != command:
+            return result
+        with log.open('rb') as stream:
+            stream.seek(max(0, log.stat().st_size - 65536))
+            tail = stream.read()
+        if not any(error in tail for error in AUDIT_TRANSPORT_ERRORS):
+            return result
+        time.sleep(1)
+
 
 def focused_staging():
     mode = os.environ.get('SAWA_LOCAL_TEST_MODE')
@@ -227,9 +256,7 @@ def run(output: Path, *, full: bool = False) -> int:
             if reuse is not None:
                 result = subprocess.CompletedProcess(command, 0)
             else:
-                with log.open("wb") as stream:
-                    result = subprocess.run(["bash", "-euo", "pipefail", "-c", command], cwd=ROOT,
-                                            env=environment, stdout=stream, stderr=subprocess.STDOUT)
+                result = execute_command(name, command, log, environment)
                 if result.returncode == 0:
                     new_baselines.append((command, log))
             executed_commands[command] = (log, result, reuse)

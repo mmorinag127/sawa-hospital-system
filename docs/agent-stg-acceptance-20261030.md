@@ -78,3 +78,11 @@ unknown-stream fence correctly rejected it depending on scheduling. The fixture
 now emits fresh q3 and also asserts q3 remains answerable, waiting_input is
 retained and no error is recorded. Stop/old-answer rejection assertions remain.
 No application answer fence was relaxed. This failed batch has no success receipt.
+
+Two f6201291 batches finished without a success receipt: a Docker inventory
+connection refusal, then a PyPI read timeout. All application suites passed in
+both. The read-only dependency audits now retry the exact allowlisted command
+once only for named transport exceptions. Both attempts stay in the receipt's
+hashed log. Findings, ordinary tests, changed commands and a second failure are
+not retried or converted to success. The source and manifest stability checks
+remain unchanged. Added coverage checks those boundaries before a fresh batch.
