@@ -95,6 +95,16 @@ class Tools:
         return dict(id=ident, name=name, size=len(content), sha256=digest)
 
     async def execute(self, run_id, generation, name, raw, command_id):
+        from .business_contracts import SERVER_EXECUTION
+        operation = OPERATIONS.get(name)
+        if SERVER_EXECUTION.get() and operation and operation.method == 'GET':
+            config = getattr(self.sandbox, 'configs', {}).get(operation.domain, {})
+            manifest = config.get('source_manifest')
+            if manifest:
+                # Refresh server-owned read receipts after a verified native fix.
+                # Never change mutation IDs or blindly retry an unchanged source.
+                source = await run_blocking(lambda: hashlib.sha256(Path(manifest).read_bytes()).hexdigest())
+                command_id = 'native_read_' + hashlib.sha256((command_id + ':' + source).encode()).hexdigest()
         try:
             return await self._execute(run_id, generation, name, raw, command_id)
         finally:

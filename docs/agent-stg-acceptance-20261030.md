@@ -144,7 +144,8 @@ acceptance remains incomplete (4 previously verified positive cases).
 ### MCP Boundary Found During the New Staging Attempt
 
 Run `48b227225f9646e387d6894fa6122d9b` received the same authored cabbage18
-correction. Its model submitted only a narrative again. The server correctly
+correction. Raw Gemini events prove it sent the exact correct sparse edit, but
+the MCP wrapper omitted that argument and submitted only the narrative. The server correctly
 displayed "no quantity/remarks changes", and the unchanged20 was not approved.
 The independent FastMCP function had not exposed/forwarded `cell_edits`, despite
 the direct Tools schema and tests supporting it. Its signature, forwarding and
@@ -158,3 +159,44 @@ Before the next minimal deployment this sequence must reach a known result.
 New changes require a new signed local receipt; the prior79354753 success is
 preserved, never relabelled as coverage for this follow-up. The signed79354753
 receipt is used only as the verified ancestor for existing impact selection.
+
+### Delivery Template Number-Format IDs
+
+The original order reached confirmed state and generated labels, but the delivery
+workbook returned500. A READ ONLY export of its own saved working copy reproduces
+`template_style_prefix_changed:numFmts` using the same data and template. The
+authored custom date-format ID176 becomes164 on openpyxl loading, despite its
+unchanged `m/d;@` format code. Existing package XML/styles must remain intact.
+
+The package patch now maps generated format IDs back to authored IDs by exact
+format code, retaining each original style's own alias. New formats receive
+collision-free IDs after the authored set. All other style-prefix and package
+integrity checks remain. Tests include gapped IDs176/300/1000, appended formats,
+and both tracked real reference workbooks without changing their original bytes.
+The same real template also exposes identical font aliases0/1 and omitted versus
+explicitfalse pivot/quote flags. Only semantically identical aliases/defaults
+are restored to their authored representation. Different font content or true
+flag changes still fail the existing prefix guard. The owned real-data local
+reproduction now generates the delivery workbook successfully.
+
+Read-only workflow receipt IDs now include the verified native-source manifest
+digest. After a deployed fix, explicit normal reconciliation can obtain fresh
+read/export receipts rather than permanently replaying a cached500. Mutation
+IDs and unknown-write fences remain unchanged; confirmed writes are not replayed.
+Within an unchanged source, failed reads are not repeatedly sent to the API.
+
+The2fa420e0 formal batch was interrupted at316.254seconds when this live failure
+became known; no successful receipt exists for that batch. Docker was shut down
+before investigation. These new fixes are complete before the next batch.
+
+Read identity binding is implemented once at the shared server-owned Tools
+boundary, including hospital standalone exports and school daily outputs. Model
+commands and all mutations retain their original identities. The existing admin
+reconciliation request also uses the same control timeout as approval/resume.
+Related Python120 and UI49 checks passed. An initial related run had4 fixture
+failures: an unintended extra date format and a legacy rather than server-owned
+test request. Both fixtures were corrected to the explicitly tested scenarios;
+source-integrity, no repeated read on unchanged source, and mutation-ID assertions
+remain. The actual local delivery selected sheet has20 in D14/D16/D17; unrelated
+template sheets are retained. This is local reproduction evidence, not staging
+acceptance. A new exact-source formal receipt and deployment remain required.

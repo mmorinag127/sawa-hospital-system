@@ -25,6 +25,7 @@ from openpyxl.cell.cell import MergedCell
 from openpyxl.cell._writer import write_cell
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.styles.stylesheet import Stylesheet, write_stylesheet
+from openpyxl.styles.numbers import BUILTIN_FORMATS
 from openpyxl.utils import column_index_from_string, get_column_letter, range_boundaries
 from openpyxl.xml.functions import xmlfile, tostring as openpyxl_tostring
 
@@ -4606,6 +4607,52 @@ def _replace_xml_cell_values(sheet_xml: str, updates: dict[int, tuple[dict, list
     return apply_edits(0, len(content), sheet_edits).decode("utf-8")
 
 
+def _preserve_template_number_format_ids(source: ET.Element, generated: ET.Element) -> None:
+    # openpyxl renumbers custom formats from 164; existing package styles must
+    # retain their authored IDs, including gaps and equivalent aliases.
+    old_group = source.find(_xlsx_tag("numFmts"))
+    new_group = generated.find(_xlsx_tag("numFmts"))
+    old = list(old_group) if old_group is not None else []
+    new = list(new_group) if new_group is not None else []
+    old_codes = {int(node.attrib["numFmtId"]): node.attrib["formatCode"] for node in old}
+    new_codes = {int(node.attrib["numFmtId"]): node.attrib["formatCode"] for node in new}
+    if len(old_codes) != len(old) or len(new_codes) != len(new):
+        raise ValueError("template_number_formats_ambiguous")
+    code_ids = {}
+    for ident, code in old_codes.items():
+        code_ids.setdefault(code, ident)
+    next_id = max([163, *old_codes]) + 1
+    mapping, additions = {}, []
+    for ident, code in new_codes.items():
+        if code not in code_ids:
+            code_ids[code] = next_id
+            node = ET.Element(_xlsx_tag("numFmt"))
+            node.attrib.update(numFmtId=str(next_id), formatCode=code)
+            additions.append(node)
+            next_id += 1
+        mapping[ident] = code_ids[code]
+    for group_name in ("cellXfs", "cellStyleXfs"):
+        original_group = source.find(_xlsx_tag(group_name))
+        original_styles = list(original_group) if original_group is not None else []
+        generated_group = generated.find(_xlsx_tag(group_name))
+        for index, style in enumerate(generated_group if generated_group is not None else []):
+            ident = int(style.get("numFmtId", "0"))
+            mapped = mapping.get(ident, ident)
+            if index < len(original_styles):
+                original_id = int(original_styles[index].get("numFmtId", "0"))
+                original_code = old_codes.get(original_id, BUILTIN_FORMATS.get(original_id))
+                generated_code = new_codes.get(ident, BUILTIN_FORMATS.get(ident))
+                if original_code is not None and original_code == generated_code:
+                    mapped = original_id
+            style.set("numFmtId", str(mapped))
+    if old or additions:
+        if new_group is None:
+            new_group = ET.Element(_xlsx_tag("numFmts"))
+            generated.insert(0, new_group)
+        new_group[:] = [deepcopy(node) for node in old] + additions
+        new_group.set("count", str(len(new_group)))
+
+
 def _append_template_styles(parts: dict[str, bytes], workbook: Workbook) -> None:
     original = parts.get("xl/styles.xml")
     if original is None:
@@ -4615,10 +4662,37 @@ def _append_template_styles(parts: dict[str, bytes], workbook: Workbook) -> None
         if source_root.tag != _xlsx_tag("styleSheet"):
             raise ValueError("template_styles_namespace_invalid")
         generated = ET.fromstring(openpyxl_tostring(write_stylesheet(workbook)))
+        _preserve_template_number_format_ids(source_root, generated)
         source = Stylesheet.from_tree(source_root)
         target = Stylesheet.from_tree(deepcopy(generated))
     except (ET.ParseError, IndexError, TypeError, ValueError, AttributeError) as exc:
         raise ValueError("template_styles_invalid") from exc
+    # IndexedList can select a different, identical font/fill/border alias when
+    # loading named styles. Restore original references only for equal objects.
+    for group_name in ("cellStyleXfs", "cellXfs"):
+        old_styles = getattr(source, group_name).xf
+        new_styles = getattr(target, group_name).xf
+        generated_group = generated.find(_xlsx_tag(group_name))
+        for index, (old_style, new_style) in enumerate(zip(old_styles, new_styles)):
+            for flag in ("pivotButton", "quotePrefix"):
+                old_flag, new_flag = getattr(old_style, flag), getattr(new_style, flag)
+                if old_flag in (None, False) and new_flag in (None, False):
+                    setattr(new_style, flag, old_flag)
+                    if old_flag is None:
+                        generated_group[index].attrib.pop(flag, None)
+                    else:
+                        generated_group[index].set(flag, "0")
+            for reference, pool in (("fontId", "fonts"), ("fillId", "fills"),
+                                    ("borderId", "borders"), ("xfId", "cellStyleXfs")):
+                old_id, new_id = getattr(old_style, reference), getattr(new_style, reference)
+                old_pool, new_pool = getattr(source, pool), getattr(target, pool)
+                if pool == "cellStyleXfs":
+                    old_pool, new_pool = old_pool.xf, new_pool.xf
+                if (old_id is not None and new_id is not None and old_id != new_id
+                        and 0 <= old_id < len(old_pool) and 0 <= new_id < len(new_pool)
+                        and old_pool[old_id] == new_pool[new_id]):
+                    setattr(new_style, reference, old_id)
+                    generated_group[index].set(reference, str(old_id))
     custom_formats = [item.numFmtId for item in target.numFmts.numFmt]
     if len(custom_formats) != len(set(custom_formats)):
         raise ValueError("template_number_formats_ambiguous")

@@ -1,6 +1,7 @@
 import asyncio
 from copy import deepcopy
 import json
+import httpx
 import pytest
 
 from experiments.agent_assistant.mcp_server import build_mcp, call_local
@@ -8,6 +9,68 @@ from experiments.agent_assistant.store import Conflict
 from experiments.agent_assistant.tool_projection import project, read
 from experiments.agent_assistant.tools import Arguments
 from experiments.agent_assistant.tests.test_selected_tasks import shift, shift_evidence, record
+
+
+def test_failed_read_is_not_retried_until_verified_native_source_changes(tmp_path):
+    from experiments.agent_assistant.workflow_completion import WorkflowCompletion
+    from experiments.agent_assistant.business_contracts import SERVER_EXECUTION
+    async def scenario():
+        store, native, tools, run = shift(tmp_path)
+        store.update(run['id'], task_inputs={**run['task_inputs'], 'business_workflow': {'version': 1, 'phase': 'saving'}})
+        run = store.get(run['id'])
+        manifest = tmp_path / 'native-source.json'
+        manifest.write_text(json.dumps({'source_revision': 'original', 'files': {}}))
+        native.configs = {'shift': {'source_manifest': str(manifest)}}
+        original_request = native.request
+        reads = []
+        async def transport(*args, **kwargs):
+            if args[2] == 'GET' and args[3] == '/optimization-settings':
+                reads.append(args[3])
+                if len(reads) == 1:
+                    return httpx.Response(500, text='synthetic source failure')
+                return httpx.Response(200, json={'verified': True})
+            return await original_request(*args, **kwargs)
+        native.request = transport
+        workflow = WorkflowCompletion(tools)
+        async def call():
+            token = SERVER_EXECUTION.set(True)
+            try:
+                return await workflow.call(run, 'saved-completion', 'settings', 'shift_get_settings')
+            finally:
+                SERVER_EXECUTION.reset(token)
+        for _ in range(2):
+            with pytest.raises(Conflict, match='shift_get_settings'):
+                await call()
+        assert len(reads) == 1
+        manifest.write_text(json.dumps({'source_revision': 'fixed', 'files': {}}))
+        result = await call()
+        assert result['data'] == {'verified': True}
+        assert await call() == result
+        assert len(reads) == 2 and not native.writes
+    asyncio.run(scenario())
+
+
+def test_native_source_changes_never_change_server_mutation_ids(tmp_path):
+    from experiments.agent_assistant.business_contracts import SERVER_EXECUTION
+    async def scenario():
+        _, native, tools, run = shift(tmp_path)
+        manifest = tmp_path / 'native-source.json'
+        manifest.write_text('original')
+        native.configs = {'shift': {'source_manifest': str(manifest)}}
+        ids = []
+        async def inspect_id(run_id, generation, name, raw, command_id):
+            ids.append(command_id)
+            return {'ok': True}
+        tools._execute = inspect_id
+        token = SERVER_EXECUTION.set(True)
+        try:
+            await tools.execute(run['id'], run['generation'], 'shift_confirm', {}, 'saved-write')
+            manifest.write_text('fixed')
+            await tools.execute(run['id'], run['generation'], 'shift_confirm', {}, 'saved-write')
+        finally:
+            SERVER_EXECUTION.reset(token)
+        assert ids == ['saved-write', 'saved-write']
+    asyncio.run(scenario())
 
 
 def test_malformed_mcp_arguments_return_repairable_error_without_execution(tmp_path):

@@ -529,6 +529,18 @@ test('pending FAX runs without selection targets render and retain stop and roll
  }finally{await h.close();}
 });
 
+test('explicit business reconciliation uses the control deadline without replaying approval',async()=>{
+ const initial={...makeRun('running'),pending_question:undefined,business:{state:'checking'},events:[{id:'support',kind:'business_support',payload:{message:'保存済み結果を確認します'}}]};
+ const h=await mount({adminView:true,initial,beforePost:async url=>url.endsWith('/reconcile-business') ? {data:{...initial,business:{state:'working'}}} : undefined});try{
+  await h.click(h.button('業務結果を再照合する'));
+  const calls=h.calls.filter(c=>c.method==='post');
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].url,base+'/runs/r1/reconcile-business');
+  assert.equal(calls[0].options.timeout,300000);
+  assert.equal(calls.some(c=>/\/(decision|resume)$/.test(c.url)),false);
+ }finally{await h.close();}
+});
+
 test('stop uses a control deadline and stopping never promises business progress',async()=>{
  const h=await mount({adminView:true,initial:makeRun('running'),beforePost:async url=>url.endsWith('/stop') ? {data:makeRun('stopping')} : undefined});try{
   await h.click(h.button('作業を停止する'));

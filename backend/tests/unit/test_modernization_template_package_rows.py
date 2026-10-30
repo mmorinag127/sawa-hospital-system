@@ -161,6 +161,74 @@ def test_real_cell_writer_types_dates_zero_and_appended_styles(tmp_path, value, 
         workbook.close()
 
 
+@pytest.mark.parametrize('authored_id', [176, 300, 1000])
+def test_gapped_number_format_ids_preserve_original_styles_and_append_new_formats(tmp_path, authored_id):
+    source = Workbook()
+    source.active['A1'].number_format = 'm/d;@'
+    source.active['A1'] = datetime(2026, 1, 8)
+    stream = BytesIO(); source.save(stream); source.close()
+    source_parts = parts(stream.getvalue())
+    styles = ET.fromstring(source_parts['xl/styles.xml'])
+    formats = styles.find(NS + 'numFmts')
+    assert len(formats) == 1
+    original_id = formats[0].get('numFmtId')
+    formats[0].set('numFmtId', str(authored_id))
+    for group_name in ('cellXfs', 'cellStyleXfs'):
+        for node in styles.find(NS + group_name):
+            if node.get('numFmtId') == original_id:
+                node.set('numFmtId', str(authored_id))
+    source_parts['xl/styles.xml'] = ET.tostring(styles)
+    content = package(source_parts)
+    workbook = load_workbook(BytesIO(content))
+    try:
+        workbook.active['B2'] = 18
+        workbook.active['B2'].number_format = '0.0000'
+        output, result = patch(workbook, content, tmp_path)
+        new_styles = ET.fromstring(result['xl/styles.xml'])
+        for group in styles:
+            if group.tag in {NS + name for name in ('numFmts', 'cellXfs', 'cellStyleXfs')}:
+                assert [ET.tostring(node) for node in new_styles.find(group.tag)][:len(group)] == [ET.tostring(node) for node in group]
+        ids = [int(node.get('numFmtId')) for node in new_styles.find(NS + 'numFmts')]
+        assert authored_id in ids and len(ids) == len(set(ids)) == 2
+        reloaded = load_workbook(output)
+        try:
+            assert reloaded.active['A1'].value == datetime(2026, 1, 8)
+            assert reloaded.active['A1'].number_format == 'm/d;@'
+            assert reloaded.active['B2'].value == 18
+            assert reloaded.active['B2'].number_format == '0.0000'
+        finally:
+            reloaded.close()
+    finally:
+        workbook.close()
+
+
+@pytest.mark.parametrize('flag', ['pivotButton', 'quotePrefix'])
+def test_real_style_flag_changes_are_not_treated_as_default_aliases(tmp_path, flag):
+    source_parts = parts(original())
+    styles = ET.fromstring(source_parts['xl/styles.xml'])
+    styles.find(NS + 'cellXfs')[0].set(flag, '1')
+    source_parts['xl/styles.xml'] = ET.tostring(styles)
+    content = package(source_parts)
+    workbook = load_workbook(BytesIO(content))
+    try:
+        setattr(workbook._cell_styles[0], flag, False)
+        with pytest.raises(ValueError, match='template_style_prefix_changed:cellXfs'):
+            patch(workbook, content, tmp_path)
+    finally:
+        workbook.close()
+
+
+def test_different_named_style_font_cannot_be_accepted_as_an_alias(tmp_path):
+    content = original()
+    workbook = load_workbook(BytesIO(content))
+    try:
+        workbook._named_styles[0].font = Font(name='Different authored font')
+        with pytest.raises(ValueError, match='template_style_prefix_changed:cellStyleXfs'):
+            patch(workbook, content, tmp_path)
+    finally:
+        workbook.close()
+
+
 def test_raw_unknown_xml_graphic_parts_rename_and_existing_calc_chain_cleanup(tmp_path):
     content = original()
     workbook = load_workbook(BytesIO(content))
@@ -285,8 +353,10 @@ def test_invalid_structure_explicitly_stops_before_any_output(tmp_path, fault, e
         workbook.close()
 
 
-def test_tracked_reference_readonly_copy_preserves_all_unrelated_parts(tmp_path):
-    reference = Path(builder.DAILY_DELIVERY_REFERENCE_TEMPLATE)
+@pytest.mark.parametrize('reference_kind', ['daily', 'agent_hospital'])
+def test_tracked_reference_readonly_copy_preserves_all_unrelated_parts(tmp_path, reference_kind):
+    reference = (Path(builder.DAILY_DELIVERY_REFERENCE_TEMPLATE) if reference_kind == 'daily'
+                 else Path(__file__).resolve().parents[3] / 'agent_runtime/baselines/hospital/納品書2025.2.8.xlsx')
     content = reference.read_bytes()
     digest = sha256(content).hexdigest()
     copied = tmp_path / "reference-copy.xlsx"
