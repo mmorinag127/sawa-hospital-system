@@ -26,7 +26,8 @@ COPY experiments/agent_assistant/requirements.lock /tmp/agent-requirements.lock
 RUN /opt/agent/gateway/bin/pip install --no-cache-dir -r /tmp/agent-requirements.lock psycopg2-binary==2.9.11
 COPY agent_runtime/native/shift/backend/requirements.txt /opt/sawa-agent/native/shift/backend/requirements.txt
 RUN /opt/agent/shift/bin/pip install --no-cache-dir -r /opt/sawa-agent/native/shift/backend/requirements.txt
-RUN /opt/agent/shift/bin/pip install --no-cache-dir httpx==0.28.1 psutil==7.2.2
+RUN /opt/agent/shift/bin/pip install --no-cache-dir httpx==0.28.1 psutil==7.2.2 pyasn1==0.6.5 \
+ && /opt/agent/shift/bin/pip check
 COPY agent_runtime/native/school-lunch/backend/requirements.txt /opt/sawa-agent/native/school-lunch/backend/requirements.txt
 COPY agent_runtime/native/school-lunch/worker/requirements.txt /opt/sawa-agent/native/school-lunch/worker/requirements.txt
 RUN /opt/agent/school-lunch/bin/pip install --no-cache-dir -r /opt/sawa-agent/native/school-lunch/backend/requirements.txt -r /opt/sawa-agent/native/school-lunch/worker/requirements.txt psutil
