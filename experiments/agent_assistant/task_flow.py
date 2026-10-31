@@ -32,6 +32,25 @@ def rows(data):
     raise Conflict('対象一覧のAPI応答を確認できません')
 
 
+def school_export_query(run):
+    spec = TASKS.get(run.get('task_id'), {})
+    if spec.get('domain') != 'school-lunch':
+        raise Conflict('学校給食の出力対象ではありません')
+    context = run['task_inputs']; inputs = context['inputs']
+    targets = context.get('targets', [])
+    schools = [target['data'] if spec['target_kind'] == 'school'
+               else target['data'].get('facility', {}) for target in targets]
+    if (not schools or any(type(school.get('id')) is not int
+            or school['id'] != inputs['facility_id']
+            or not isinstance(school.get('name'), str) or not school['name'].strip() for school in schools)):
+        raise Conflict('選択した学校と出力先を一つに確定できません')
+    names = {school['name'] for school in schools}
+    if len(names) != 1:
+        raise Conflict('選択した学校名が一意ではありません')
+    name = next(iter(names))
+    return {'facility_id': inputs['facility_id'], 'month': inputs['month'], 'facility_name': name}
+
+
 def shift_confirmation_content(data, *, before=None):
     """Compare reviewed business data while permitting the native confirmation receipt.
 

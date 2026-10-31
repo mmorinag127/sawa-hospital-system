@@ -218,3 +218,19 @@ def test_completed_reaper_never_stops_an_unregistered_target_lookup(tmp_path):
             await sandbox.release_completed(ident)
         sandbox.stop.assert_not_awaited()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('task', ['lunch_month_exports','lunch_procurement','lunch_daily_bundle'])
+def test_school_export_identity_comes_only_from_frozen_selection(task):
+    from copy import deepcopy
+    from experiments.agent_assistant.task_flow import school_export_query
+    school = {'id':2,'name':'合成試験校'}
+    target = {'facility':school} if task == 'lunch_daily_bundle' else school
+    run = {'task_id':task,'task_inputs':{'inputs':{'facility_id':2,'month':'2027-01',
+             'facility_name':'モデルが記入した別名'},'targets':[{'data':target}]}}
+    assert school_export_query(run) == {'facility_id':2,'month':'2027-01','facility_name':'合成試験校'}
+    for replacement in ({'id':3,'name':'別校'}, {'id':2,'name':''}, {'id':True,'name':'合成試験校'}):
+        bad = deepcopy(run)
+        bad['task_inputs']['targets'][0]['data'] = {'facility':replacement} if task == 'lunch_daily_bundle' else replacement
+        with pytest.raises(Conflict):
+            school_export_query(bad)

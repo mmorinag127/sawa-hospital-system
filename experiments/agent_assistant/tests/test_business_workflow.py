@@ -72,6 +72,12 @@ def test_selected_native_task_reaches_review_and_finishes_after_approval_without
             store, native, tools, run = shift(tmp_path, task)
         elif task == 'lunch_month_exports':
             store, native, tools, run = lunch(tmp_path, task)
+            request = native.request
+            async def require_school_name(run, domain, method, path, **kwargs):
+                if path == '/api/school-lunch/work-schedules/monthly/export':
+                    assert kwargs['params']['facility_name'] == '合成試験校'
+                return await request(run, domain, method, path, **kwargs)
+            native.request = require_school_name
         else:
             store, native, tools, run = setup(tmp_path, task, [{'key': 'O1', 'label': '合成確定注文', 'data': {'id': 'O1'}}])
             native.data['/orders/O1/workflow-v2'] = {'order_id': 'O1', 'state': 'confirmed', 'revision': 1, 'facility_id': 'F1', 'week_start': '2026-11-02', 'confirmed_snapshot_id': 'synthetic-snapshot', 'blockers': []}

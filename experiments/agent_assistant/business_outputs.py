@@ -4,14 +4,13 @@ import json
 from .fax_workflow import digest
 from .store import Conflict
 from .sandbox import run_blocking
-from .task_flow import rows
+from .task_flow import rows, school_export_query
 from .tasks import TASKS
 
 
 def export_parameters(run, review):
     task_id = run['task_id']
     context = run['task_inputs']
-    inputs = context['inputs']
     if task_id == 'hospital_outputs':
         return [(operation, {'query': {'order_id': target['key']}})
                 for target in context['targets'] for operation in TASKS[task_id]['exports']]
@@ -20,7 +19,7 @@ def export_parameters(run, review):
                 for entry in review['evidence'] if entry['operation'] == 'shift_get_run']
     if not TASKS[task_id]['exports']:
         return []
-    query = {key: inputs[key] for key in ('facility_id', 'month')}
+    query = school_export_query(run)
     if task_id == 'lunch_procurement':
         evidence = [entry for entry in review['evidence'] if entry['operation'] == 'lunch_get_procurement']
         if len(evidence) != 1 or not evidence[0]['data'].get('fingerprint'):

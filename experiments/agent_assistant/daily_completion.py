@@ -2,6 +2,7 @@
 import json
 from .store import Conflict
 from .sandbox import run_blocking
+from .task_flow import school_export_query
 
 
 class DailyCompletion:
@@ -105,7 +106,7 @@ class DailyCompletion:
         run=await run_blocking(self.current, ident,generation);review=(await run_blocking(self.tools.flow.review, ident))
         if not review or review['state']!='approved': raise Conflict('三帳票の内容を利用者が承認していません')
         await self.tools.flow.recheck(run,review)
-        inputs=run['task_inputs']['inputs'];query={'facility_id':inputs['facility_id'],'month':inputs['month']}
+        inputs=run['task_inputs']['inputs'];query=school_export_query(run)
         artifacts=[]
         for index,(read,export,key) in enumerate([('lunch_get_schedules','lunch_export_schedule','schedule_id'),('lunch_get_routes','lunch_export_route','diagram_id')]):
             evidence=[e for e in review['evidence'] if e['operation']==read]

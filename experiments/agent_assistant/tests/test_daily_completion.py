@@ -29,6 +29,8 @@ def test_server_builds_evidence_and_export_versions_only_after_human_approval(tm
         commands=tools.flow.commands(run['id'])
         exports=[c for c in commands if c['request']['name'] in ('lunch_export_schedule','lunch_export_route','lunch_export_price')]
         assert len(exports)==3 and all(c['result'].get('artifact') for c in exports)
+        school = run['task_inputs']['targets'][0]['data']['facility']['name']
+        assert all(c['request']['arguments']['parameters']['query']['facility_name'] == school for c in exports)
         assert next(c for c in exports if c['request']['name']=='lunch_export_schedule')['request']['arguments']['parameters']['query']['format']=='original'
         assert next(c for c in exports if c['request']['name']=='lunch_export_price')['request']['arguments']['parameters']['query']['expected_fingerprint']=='b'*64
     asyncio.run(scenario())

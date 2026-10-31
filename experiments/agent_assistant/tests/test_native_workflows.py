@@ -115,10 +115,35 @@ def test_packaged_api_auth_and_extensions_with_latest_contracts(tmp_path,domain)
                 schema=await sandbox.request(run,domain,'GET','/openapi.json',authorization='Bearer synthetic-native-operator')
                 assert schema.status_code==200,schema.text
                 from experiments.agent_assistant.catalog import OPERATIONS
+                export_queries = {}
+                if domain == 'school-lunch':
+                    from experiments.agent_assistant.business_outputs import export_parameters
+                    from experiments.agent_assistant.task_flow import school_export_query
+                    school = response.json()[0]
+                    context = {'inputs': {'facility_id':school['id'],'month':'2026-11'},
+                               'targets':[{'data':school}]}
+                    saved = {'id':1,'version':1,'service_date':'2026-11-02','facility_id':school['id'],
+                             'layout_id':1,'layout_version':1}
+                    review = {'evidence':[{'operation':name,'data':[saved]}
+                                          for name in ('lunch_get_schedules','lunch_get_routes')]}
+                    export_queries.update({name:parameters['query'] for name,parameters in export_parameters(
+                        {'task_id':'lunch_month_exports','task_inputs':context},review)})
+                    procurement = {'evidence':[{'operation':'lunch_get_procurement','data':{'fingerprint':'a'*64}}]}
+                    export_queries.update({name:parameters['query'] for name,parameters in export_parameters(
+                        {'task_id':'lunch_procurement','task_inputs':context},procurement)})
+                    daily = {'task_id':'lunch_daily_bundle','task_inputs':{
+                        'inputs':context['inputs'],'targets':[{'data':{'facility':school}}]}}
+                    export_queries.update({name:{**school_export_query(daily),'expected_sources':'[]',
+                        'expected_fingerprint':'a'*64} for name in ('lunch_export_schedule','lunch_export_route','lunch_export_price')})
                 for name,op in OPERATIONS.items():
                     if op.domain==domain:
                         described=await tools.describe(run,{'operation':name})
                         assert described['ok'] and described['method']==op.method
+                        if name in export_queries:
+                            required={p['name'] for p in described['schema'].get('parameters',[])
+                                      if p.get('in')=='query' and p.get('required')}
+                            assert required <= export_queries[name].keys(), (name,required)
+                            assert export_queries[name]['facility_name'] == school['name']
                 if domain=='shift':
                     assert response.json()['start_date']<'2026-12-01'
                 else:
