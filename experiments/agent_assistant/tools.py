@@ -104,7 +104,8 @@ class Tools:
                 # Refresh server-owned read receipts after a verified native fix.
                 # Never change mutation IDs or blindly retry an unchanged source.
                 source = await run_blocking(lambda: hashlib.sha256(Path(manifest).read_bytes()).hexdigest())
-                command_id = 'native_read_' + hashlib.sha256((command_id + ':' + source).encode()).hexdigest()
+                request = json.dumps({'name': name, 'arguments': raw}, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
+                command_id = 'native_read_' + hashlib.sha256((command_id + ':' + source + ':' + request).encode()).hexdigest()
         try:
             return await self._execute(run_id, generation, name, raw, command_id)
         finally:

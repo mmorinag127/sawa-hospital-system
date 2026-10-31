@@ -50,6 +50,43 @@ def test_failed_read_is_not_retried_until_verified_native_source_changes(tmp_pat
     asyncio.run(scenario())
 
 
+def test_server_read_identity_binds_corrected_input_and_preserves_old_receipt(tmp_path):
+    import hashlib
+    from experiments.agent_assistant.business_contracts import SERVER_EXECUTION
+    async def scenario():
+        store, native, tools, run = shift(tmp_path)
+        manifest = tmp_path / 'native-source.json'; manifest.write_text('same-native-source')
+        native.configs = {'shift': {'source_manifest': str(manifest)}}
+        command = 'saved-export'
+        legacy_id = 'native_read_' + hashlib.sha256((command + ':' + hashlib.sha256(manifest.read_bytes()).hexdigest()).encode()).hexdigest()
+        old = {'name': 'shift_export', 'arguments': {'parameters': {'query': {'format': 'xlsx'}}}}
+        store.command(run['id'], legacy_id, old)
+        store.finish_command(run['id'], legacy_id, {'ok': False, 'status': 422})
+        ids = []
+        async def inspect_id(run_id, generation, name, raw, command_id):
+            store.command(run_id, command_id, {'name': name, 'arguments': raw})
+            store.finish_command(run_id, command_id, {'ok': True})
+            ids.append(command_id)
+            return {'ok': True}
+        tools._execute = inspect_id
+        token = SERVER_EXECUTION.set(True)
+        try:
+            first = {'parameters': {'query': {'format': 'xlsx', 'candidate_id': 1}}}
+            second = {'parameters': {'query': {'candidate_id': 1, 'format': 'xlsx'}}}
+            await tools.execute(run['id'], run['generation'], 'shift_export', first, command)
+            await tools.execute(run['id'], run['generation'], 'shift_export', second, command)
+            await tools.execute(run['id'], run['generation'], 'shift_export', {'parameters': {'query': {'format': 'xlsx', 'candidate_id': 2}}}, command)
+        finally:
+            SERVER_EXECUTION.reset(token)
+        assert ids[0] == ids[1] and ids[0] != ids[2] and legacy_id not in ids
+        with store.read() as db:
+            row = db.execute('SELECT request,result FROM commands WHERE run_id=? AND id=?', (run['id'], legacy_id)).fetchone()
+        assert json.loads(row['request']) == old
+        assert json.loads(row['result']) == {'ok': False, 'status': 422}
+        assert not native.writes
+    asyncio.run(scenario())
+
+
 def test_native_source_changes_never_change_server_mutation_ids(tmp_path):
     from experiments.agent_assistant.business_contracts import SERVER_EXECUTION
     async def scenario():

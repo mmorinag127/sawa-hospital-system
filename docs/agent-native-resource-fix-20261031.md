@@ -35,3 +35,14 @@ No CPU, memory, minimum instances, IAM, production or budget changes. No command
 - Source e8ef07ed passed all 30 formal commands (1119.283 seconds), was fast-forwarded into develop and deployed once through Actions 41204440886. Web 00473-p8q, worker 00916-scd and OCR 00140-llp have 100% traffic. This did not complete the four school live cases.
 - Monthly run 7c1352b1 correctly rejected missing coordinates in existing layout 2 and was stopped without approval. A new explicitly synthetic drawing 17 v2 with authored rectangle centers was prepared through ordinary APIs, leaving layout 2 untouched. Only the dedicated route 81 was updated to v4; business quantities and steps were unchanged.
 - Monthly run 957a170201504c1fa9a71ae269b12e9f reached valid human approval, but its native monthly schedule export returned 422 for missing required query facility_name. This is a controller bug, not a user input omission. All school export builders now use one strict selected-school binding; no fallback to model text or raw input names. The approved run is retained for ordinary reconciliation after the fix, with no business writes to replay. The next batch uses the latest successful signed e8ef07ed receipt as its baseline.
+# Corrected read identity after live export recovery
+
+The approved monthly run 957a retained its review but recovery after 8c3209ab
+detected a changed request under the old read command ID. GET receipts had been
+bound only to the native manifest, not the gateway-built request. Read identity
+now also includes the operation name and canonical JSON arguments. Identical
+inputs reuse a receipt; corrected inputs receive a distinct read-only command.
+Old receipts remain immutable, and mutation command IDs are unchanged.
+Focused Mac recovery tests: 19 passed. Final Linux verification and live
+reconciliation remain pending; this is not a completed school workflow.
+
