@@ -46,3 +46,14 @@ Old receipts remain immutable, and mutation command IDs are unchanged.
 Focused Mac recovery tests: 19 passed. Final Linux verification and live
 reconciliation remain pending; this is not a completed school workflow.
 
+# Monthly import form reconciliation
+
+Live import request e9e1323b8f9e4bb5955d39b964939506 exposed duplicate sibling
+React keys: the source form and RunEventHistory both used selected.id. Polling
+retained orphan forms (51 actual file inputs observed). No source was uploaded.
+The screen was left normally to stop DOM growth while retaining the request.
+The event-history key now has its own namespace. The source input and its
+confirmation state remain stable across 20 polls; leaving source mode removes
+the input. All 49 related React screen tests pass locally. Linux verification,
+deployment, and live same-request upload remain pending.
+

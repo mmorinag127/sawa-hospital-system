@@ -348,7 +348,18 @@ test('an unanswered task resumes and a changed question retires the typed reply'
 test('monthly source request has one attachment action; remote stop uncertainty remains retryable',async()=>{
  const initial={...makeRun(),task_id:'lunch_import',domains:['school-lunch'],task_inputs:{inputs:{facility_id:1,month:'2026-11'},targets:[{label:'合成校',data:{}}]}};const h=await mount({adminView:true,initial});try{
   assert.ok(h.document.querySelector('input[type=file]'));assert.equal(h.document.querySelector('textarea'),null);assert.equal(h.button('原本を添付して続ける').disabled,true);
+  const fileInput=h.document.querySelector('input[type=file]'),checkbox=h.document.querySelector('.answer-panel input[type=checkbox]');
+  await h.click(checkbox);
+  for(let i=0;i<20;i++){
+   await h.poll();
+   assert.equal(h.document.querySelectorAll('input[type=file]').length,1);
+   assert.equal(h.document.querySelector('input[type=file]'),fileInput);
+   assert.equal(h.document.querySelector('.answer-panel input[type=checkbox]'),checkbox);
+   assert.equal(checkbox.checked,true);
+   assert.equal([...h.document.querySelectorAll('summary')].filter(x=>x.textContent==='保存済みの全履歴').length,1);
+  }
   h.setRun({...initial,status:'stop_pending'});await h.poll();assert.equal(h.button('停止を再確認する').disabled,false);assert.doesNotMatch(h.document.querySelector('.next-action').textContent,/この画面でお待ち/);await h.click(h.button('停止を再確認する'));assert.match(h.document.querySelector('.next-action').textContent,/作業を停止しました/);assert.equal(h.calls.filter(c=>c.url.endsWith('/stop')).length,1);
+  assert.equal(h.document.querySelectorAll('input[type=file]').length,0);
  }finally{await h.close();}
 });
 test('correction sends the current review and failure reason stays visible',async()=>{
