@@ -72,7 +72,7 @@ def setup(root,domain,url):
          'python':os.environ.get('SAWA_AGENT_NATIVE_'+domain.upper().replace('-','_')+'_PYTHON',sys.executable),
          'env':{'AUTH_PROVIDER':'portal','PORTAL_AUTH_ME_URL':url}}
     store=Store(root);store.set_budget(1000)
-    sandbox=Sandbox(root,{domain:cfg});tools=Tools(store,sandbox)
+    sandbox=Sandbox(root,{domain:cfg},run_store=store);tools=Tools(store,sandbox)
     return store,sandbox,tools
 
 
@@ -358,6 +358,8 @@ def test_real_shift_business_condition_question_parse_confirm_resolve_and_output
                 assert await engine.advance(run['id']) is False
                 assert store.get(run['id'])['status']=='completed'
                 assert not engine.providers.started
+                assert not sandbox.children
+                assert not list(sandbox.path(run['id']).glob('*.process.json'))
                 with store.read() as db:
                     artifacts=db.execute('SELECT path FROM artifacts WHERE run_id=?',(run['id'],)).fetchall()
                 assert artifacts and all(Path(item['path']).is_file() for item in artifacts)

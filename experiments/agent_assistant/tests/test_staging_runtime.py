@@ -197,3 +197,24 @@ def test_new_work_reaps_completed_markers_without_touching_business_files(tmp_pa
         assert event['processes_remaining'] == event['model_caches_remaining'] == 0
         assert (sandbox.path(run['id'])/'data/shift/database.sqlite3').exists()
     asyncio.run(scenario())
+
+
+def test_completed_reaper_never_stops_an_unregistered_target_lookup(tmp_path):
+    from experiments.agent_assistant.tests.test_trial import prepared
+    from unittest.mock import AsyncMock
+    async def scenario():
+        store, sandbox, _, _ = prepared(tmp_path, ('shift',))
+        sandbox.run_store = store
+        sandbox.stop = AsyncMock(return_value=True)
+        ident = uuid4().hex
+        directory = sandbox.path(ident)
+        directory.mkdir()
+        marker = directory/'shift.process.json'
+        marker.write_text('{}')
+        assert await sandbox.release_completed()
+        sandbox.stop.assert_not_awaited()
+        assert marker.read_text() == '{}'
+        with pytest.raises(KeyError):
+            await sandbox.release_completed(ident)
+        sandbox.stop.assert_not_awaited()
+    asyncio.run(scenario())

@@ -411,7 +411,14 @@ class Sandbox:
         if run_id is None:
             candidates.update(marker.parent.name for marker in (self.root / 'runs').glob('*/*.process.json'))
         for ident in candidates:
-            current = await run_blocking(self.run_store.get, ident)
+            try:
+                current = await run_blocking(self.run_store.get, ident)
+            except KeyError:
+                if run_id is not None:
+                    raise
+                # Target lookups have owned temporary processes, not ledger runs.
+                # Never stop them (or any unrecognized process) as completed work.
+                continue
             if current['status'] != 'completed' or (expected_generation is not None and current['generation'] != expected_generation):
                 if run_id is not None:
                     return False
