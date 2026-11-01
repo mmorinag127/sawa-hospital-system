@@ -12,6 +12,7 @@ from experiments.agent_assistant.catalog import OPERATIONS
 from experiments.agent_assistant.store import Store, Conflict
 from experiments.agent_assistant.tools import Tools, Arguments
 from experiments.agent_assistant.tasks import TASKS, public_tasks
+from experiments.agent_assistant.task_flow import digest
 
 
 MONTH='2026-11'
@@ -398,6 +399,19 @@ def test_import_rebinds_only_exact_new_native_receipt_rows(tmp_path,change):
         assert native.writes==[]
         assert created==original_receipt
         assert native.data[path]==original_after
+        if change not in ('existing','extra','missing','duplicate'):
+            # Isolate the final receipt check from the earlier post-write gate.
+            evidence=[{'operation':'lunch_get_menus','parameters':{'query':QUERY},'data':deepcopy(native.data[path])}]
+            tools.flow.save_review(run['id'],{'id':'finish-review','state':'approved',
+                'actions':[],'applied':[],'evidence':evidence,'signature':digest(evidence)})
+            record(tools,run,'lunch_confirm_import',[deepcopy(created)])
+            if change in (None,'decimal_scale'):
+                await tools.flow.finish(run,[])
+            else:
+                with pytest.raises(Conflict):await tools.flow.finish(run,[])
+            assert native.writes==[]
+            assert created==original_receipt
+            assert native.data[path]==original_after
     asyncio.run(scenario())
 
 

@@ -914,7 +914,8 @@ class TaskFlow:
             current={str(x['id']):x for x in persisted}
             for command in confirms:
                 for saved in rows(command['result']['data']):
-                    if any(current[str(saved['id'])].get(key)!=value for key,value in saved.items()): raise Conflict('確定した献立の数量・内容が変更されています')
+                    actual=imported_menu_content(current[str(saved['id'])])
+                    if any(actual.get(key)!=value for key,value in imported_menu_content(saved).items()): raise Conflict('確定した献立の数量・内容が変更されています')
         for operation in spec['exports']:
             exported=[x for x in commands if x['rowid']>review.get('approved_after',0) and x['request']['name']==operation and x['result'].get('artifact',{}).get('id') in artifact_ids]
             if not exported: raise Conflict('必要な帳票が揃っていません')
