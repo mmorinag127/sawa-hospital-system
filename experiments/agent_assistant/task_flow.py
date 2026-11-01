@@ -3,6 +3,7 @@ import asyncio
 from bisect import bisect_left
 from copy import deepcopy
 from datetime import date
+from decimal import Decimal, InvalidOperation
 import json
 import shutil
 from uuid import uuid4
@@ -49,6 +50,23 @@ def school_export_query(run):
         raise Conflict('選択した学校名が一意ではありません')
     name = next(iter(names))
     return {'facility_id': inputs['facility_id'], 'month': inputs['month'], 'facility_name': name}
+
+
+def imported_menu_content(menu):
+    """Compare native Decimal fields by value, without rounding or changing receipts."""
+    content = deepcopy(menu)
+    for row in content.get('ingredients', []):
+        for owner, field in ((row, 'required_quantity'), (row.get('ingredient', {}), 'conversion_rate')):
+            if field not in owner or owner[field] is None:
+                continue
+            try:
+                value = Decimal(str(owner[field]))
+            except (InvalidOperation, ValueError):
+                raise Conflict('保存した献立の数値形式を照合できません') from None
+            if not value.is_finite():
+                raise Conflict('保存した献立の数値形式を照合できません')
+            owner[field] = value
+    return content
 
 
 def shift_confirmation_content(data, *, before=None):
@@ -742,15 +760,19 @@ class TaskFlow:
                 if after.get('confirmed') is not True: raise Conflict('確定した勤務案を再取得できません')
             elif name=='lunch_confirm_import' and entry['operation']=='lunch_get_menus':
                 # Import appends the approved transaction's returned rows only.
-                # Existing rows and every field of each created row stay exact.
+                # Existing rows stay exact; new native Decimal fields compare
+                # by exact value across the database's fixed-scale reload.
                 if not all(isinstance(value,list) for value in (before,after,receipt)) or not receipt:
                     raise Conflict('保存した献立の再取得結果を照合できません')
                 expected=before+receipt
                 ids=[item.get('id') for item in expected]
                 if any(type(ident) is not int for ident in ids) or len(set(ids))!=len(ids):
                     raise Conflict('保存した献立の識別子が重複しています')
-                stable_before=sorted(expected,key=lambda item:item['id'])
-                stable_after=sorted(after,key=lambda item:item.get('id',-1))
+                created_ids={item['id'] for item in receipt}
+                stable_before=before+[imported_menu_content(item) for item in receipt]
+                stable_after=[imported_menu_content(item) if item.get('id') in created_ids else item for item in after]
+                stable_before=sorted(stable_before,key=lambda item:item['id'])
+                stable_after=sorted(stable_after,key=lambda item:item.get('id',-1))
             elif name=='shift_confirm' and entry['operation']=='shift_get_runs':
                 # Only this transaction's selected run may change confirmation.
                 # Inventory membership and every other field remain immutable.

@@ -295,13 +295,18 @@ def test_import_only_adopts_current_attached_document_after_human_approval(tmp_p
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('change',[None,'existing','created','extra','missing','duplicate'])
+@pytest.mark.parametrize('change',[None,'existing','created','extra','missing','duplicate',
+    'decimal_scale','quantity_value','conversion_value','quantity_nan','quantity_inf',
+    'quantity_bool','conversion_null','unit','raw_quantity'])
 def test_import_rebinds_only_exact_new_native_receipt_rows(tmp_path,change):
     async def scenario():
         store,native,tools,run=lunch(tmp_path,'lunch_import')
         path='/api/school-lunch/menu-executions'
         before=deepcopy(native.data[path])
         created={**deepcopy(before[0]),'id':102,'name':'承認した追加献立'}
+        created['ingredients']=[{'id':301,'ingredient':{'id':401,'name':'合成食材','conversion_rate':'2.5'},
+            'required_quantity':'1.2','unit':'kg','raw_quantity':'1.2 kg','process_steps':[]}]
+        original_receipt=deepcopy(created)
         args=Arguments(query=QUERY,body={'source_document_id':'doc-synthetic','menus':[]})
         action={'operation':'lunch_confirm_import','parameters':{'ids':args.ids,'query':args.query,'body':args.body,'source_id':args.source_id}}
         review={'id':'synthetic-review','state':'approved','actions':[action],'applied':[],
@@ -313,7 +318,20 @@ def test_import_rebinds_only_exact_new_native_receipt_rows(tmp_path,change):
         if change=='extra':native.data[path].append({**created,'id':103})
         if change=='missing':native.data[path]=deepcopy(before)
         if change=='duplicate':native.data[path].append(deepcopy(created))
-        if change:
+        row=native.data[path][0].get('ingredients',[{}])[0]
+        if change=='decimal_scale':
+            row['required_quantity']='1.200000'
+            row['ingredient']['conversion_rate']='2.500000'
+        if change=='quantity_value':row['required_quantity']='1.2000001'
+        if change=='conversion_value':row['ingredient']['conversion_rate']='2.5000001'
+        if change=='quantity_nan':row['required_quantity']='NaN'
+        if change=='quantity_inf':row['required_quantity']='Infinity'
+        if change=='quantity_bool':row['required_quantity']=True
+        if change=='conversion_null':row['ingredient']['conversion_rate']=None
+        if change=='unit':row['unit']='g'
+        if change=='raw_quantity':row['raw_quantity']='1.200000 kg'
+        original_after=deepcopy(native.data[path])
+        if change not in (None,'decimal_scale'):
             with pytest.raises(Conflict):await tools.flow.after(run,'lunch_confirm_import',args,[created])
         else:
             await tools.flow.after(run,'lunch_confirm_import',args,[created])
@@ -321,6 +339,8 @@ def test_import_rebinds_only_exact_new_native_receipt_rows(tmp_path,change):
             assert saved['state']=='approved' and len(saved['applied'])==1
             assert saved['evidence'][0]['data']==native.data[path]
         assert native.writes==[]
+        assert created==original_receipt
+        assert native.data[path]==original_after
     asyncio.run(scenario())
 
 
