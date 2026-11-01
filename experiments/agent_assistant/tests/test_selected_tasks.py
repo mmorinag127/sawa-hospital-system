@@ -295,6 +295,35 @@ def test_import_only_adopts_current_attached_document_after_human_approval(tmp_p
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('change',[None,'existing','created','extra','missing','duplicate'])
+def test_import_rebinds_only_exact_new_native_receipt_rows(tmp_path,change):
+    async def scenario():
+        store,native,tools,run=lunch(tmp_path,'lunch_import')
+        path='/api/school-lunch/menu-executions'
+        before=deepcopy(native.data[path])
+        created={**deepcopy(before[0]),'id':102,'name':'承認した追加献立'}
+        args=Arguments(query=QUERY,body={'source_document_id':'doc-synthetic','menus':[]})
+        action={'operation':'lunch_confirm_import','parameters':{'ids':args.ids,'query':args.query,'body':args.body,'source_id':args.source_id}}
+        review={'id':'synthetic-review','state':'approved','actions':[action],'applied':[],
+                'evidence':[{'operation':'lunch_get_menus','parameters':{'query':QUERY},'data':before}]}
+        tools.flow.save_review(run['id'],review)
+        native.data[path]=[deepcopy(created),*deepcopy(before)]
+        if change=='existing':native.data[path][1]['servings']=11
+        if change=='created':native.data[path][0]['servings']=11
+        if change=='extra':native.data[path].append({**created,'id':103})
+        if change=='missing':native.data[path]=deepcopy(before)
+        if change=='duplicate':native.data[path].append(deepcopy(created))
+        if change:
+            with pytest.raises(Conflict):await tools.flow.after(run,'lunch_confirm_import',args,[created])
+        else:
+            await tools.flow.after(run,'lunch_confirm_import',args,[created])
+            saved=tools.flow.review(run['id'])
+            assert saved['state']=='approved' and len(saved['applied'])==1
+            assert saved['evidence'][0]['data']==native.data[path]
+        assert native.writes==[]
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('task_id',[x for x in TASKS if x!='hospital_pending_faxes'])
 def test_stop_fences_all_named_task_approval_and_retains_ledger(tmp_path,task_id):
     async def scenario():

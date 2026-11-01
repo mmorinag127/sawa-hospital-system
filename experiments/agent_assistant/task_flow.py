@@ -740,6 +740,17 @@ class TaskFlow:
                 stable_before=shift_confirmation_content(before)
                 stable_after=shift_confirmation_content(after, before=before)
                 if after.get('confirmed') is not True: raise Conflict('確定した勤務案を再取得できません')
+            elif name=='lunch_confirm_import' and entry['operation']=='lunch_get_menus':
+                # Import appends the approved transaction's returned rows only.
+                # Existing rows and every field of each created row stay exact.
+                if not all(isinstance(value,list) for value in (before,after,receipt)) or not receipt:
+                    raise Conflict('保存した献立の再取得結果を照合できません')
+                expected=before+receipt
+                ids=[item.get('id') for item in expected]
+                if any(type(ident) is not int for ident in ids) or len(set(ids))!=len(ids):
+                    raise Conflict('保存した献立の識別子が重複しています')
+                stable_before=sorted(expected,key=lambda item:item['id'])
+                stable_after=sorted(after,key=lambda item:item.get('id',-1))
             elif name=='shift_confirm' and entry['operation']=='shift_get_runs':
                 # Only this transaction's selected run may change confirmation.
                 # Inventory membership and every other field remain immutable.
