@@ -631,6 +631,18 @@ class TaskFlow:
             if data != command['result']['data']:
                 raise Conflict('エージェントの確認後に結果が変わりました。再取得して照合してください')
             evidence.append({'operation':name,'parameters':parameters,'data':data})
+        if run['task_id']=='lunch_import':
+            # Monthly counts and other navigation views change when an import
+            # succeeds. Bind approval to its authoritative source and full menu
+            # inventory instead, never to those derived presentation snapshots.
+            source_operations={'lunch_get_source_documents','lunch_get_source_document',
+                'lunch_get_import_job','lunch_get_source_review','lunch_get_menus'}
+            evidence=[entry for entry in evidence if entry['operation'] in source_operations]
+            if not any(entry['operation']=='lunch_get_menus' for entry in evidence):
+                inputs=run['task_inputs']['inputs']
+                parameters={'query':{'facility_id':inputs['facility_id'],'month':inputs['month']}}
+                evidence.append({'operation':'lunch_get_menus','parameters':parameters,
+                    'data':await self.read(run,'lunch_get_menus',parameters)})
         self.coverage(run,evidence)
         planned = []
         for action in actions:

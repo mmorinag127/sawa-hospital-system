@@ -48,7 +48,9 @@ task('shift_check','shift','人員不足・勤務制約違反を確認する','c
 task('shift_export','shift','確定した勤務表を出力する','confirmed_candidate',
      '選択された確定済みの勤務候補を取得し、利用者が対象と内容を確認・承認した後、その候補を明示して帳票を出力する。',exports=('shift_export',))
 task('lunch_import','school-lunch','献立・調理手配書を取り込む','school',
-     '利用者が学校と月を照合して添付した原本だけを抽出する。source_document_idをget_source_documentで再取得する。OCRの場合は完了した抽出ジョブとsource_reviewも取得し、原本と数量・単位・日付を対比して提示する。confirm_importの全入力を確認へ提出し、承認された内容だけを確定保存する。保存後の献立を取得し元の抽出内容と照合する。',
+     '利用者が学校と月を照合して添付した原本だけをlunch_import_sourceで抽出する。返されたsource_document_idをdocument_idとしてlunch_get_source_documentで再取得する。OCRの場合は完了した抽出ジョブlunch_get_import_jobと確認記録lunch_get_source_reviewも取得し、原本と数量・単位・日付を対比して提示する。'
+     'lunch_get_menusで対象校・対象月の既存献立を取得し、lunch_confirm_importの全入力をrequest_task_approvalへ提出する。証跡IDには成功した原本・献立のGETが返したcommand_idを指定し、read_tool_result・describe_operation・get_task_contextの命令IDを混ぜない。'
+     '月次取込に全校の月次概要lunch_get_monthや全校一覧の再読込は不要。取込で変わる月次件数を承認の入力に使わない。操作名を省略・推測せず、lunch_confirm_importなどの正確な公開名を使う。承認された内容だけを確定保存し、保存後の献立を取得して元の抽出内容と照合する。',
      writes=('lunch_import_source',),terminal=('lunch_save_source_review','lunch_confirm_import'))
 for ident,label in [('lunch_process_routes','工程表・動線図を作る'),('lunch_regenerate','献立変更後に作り直す')]:
     task(ident,'school-lunch',label,'menu',

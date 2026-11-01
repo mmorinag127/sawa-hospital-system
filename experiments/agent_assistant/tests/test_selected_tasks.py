@@ -61,8 +61,16 @@ class Native:
             self.data['/solve-runs/501'].update(confirmed=True,confirmed_at='synthetic-confirmed-time')
             return httpx.Response(200,json={'solve_run_id':501,'confirmed':True})
         if path=='/api/school-lunch/cooking-arrangements/confirm':
-            menus=[dict(id=101,facility={'id':1,'name':'合成試験校'},**{k:v for k,v in item.items() if k!='facility_name'}) for item in kwargs['body']['menus']]
-            self.data['/api/school-lunch/menu-executions']=menus
+            existing=self.data['/api/school-lunch/menu-executions']
+            first_id=max((item['id'] for item in existing),default=100)+1
+            menus=[dict(id=first_id+index,facility={'id':1,'name':'合成試験校'},**{k:v for k,v in item.items() if k!='facility_name'}) for index,item in enumerate(kwargs['body']['menus'])]
+            self.data['/api/school-lunch/menu-executions']=[*menus,*existing]
+            for school in self.data.get('/api/school-lunch/monthly-overview',{}).get('facilities',[]):
+                for day in school['days']:
+                    selected=[item for item in self.data['/api/school-lunch/menu-executions']
+                              if item['facility']['id']==school['id'] and item['service_date']==day['date']]
+                    day['menu_count']=len(selected)
+                    day['menu_statuses']=sorted({item['status'] for item in selected})
             return httpx.Response(201,json=menus)
         return httpx.Response(200,json={'ok':True})
 
@@ -279,6 +287,7 @@ def test_export_rechecks_version_after_receiving_bytes(tmp_path):
 def test_import_only_adopts_current_attached_document_after_human_approval(tmp_path):
     async def scenario():
         store,native,tools,run=lunch(tmp_path,'lunch_import')
+        native.data['/api/school-lunch/menu-executions']=[]
         record(tools,run,'lunch_import_source',{'source_document_id':'doc-synthetic'},{'query':QUERY})
         ids=[await get(tools,run,'lunch_get_source_document',{'document_id':'doc-synthetic'},QUERY)]
         menus=[{'facility_name':'合成試験校','service_date':'2026-11-02','name':'合成献立','servings':10,'version':1,'status':'draft','assignees':[],'ingredients':[]}]
@@ -292,6 +301,53 @@ def test_import_only_adopts_current_attached_document_after_human_approval(tmp_p
         result=await tools.execute(run['id'],0,'finish_work',{'summary':'合成献立の保存と再取得を確認','evidence_commands':ids,'artifact_ids':[]},'finish-import')
         assert result.get('ok'),result
         assert store.get(run['id'])['status']=='completed'
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('change',[None,'document','existing_menu','non_get_evidence'])
+def test_import_binds_source_and_inventory_not_derived_navigation_views(tmp_path,change):
+    async def scenario():
+        store,native,tools,run=lunch(tmp_path,'lunch_import')
+        menus_path='/api/school-lunch/menu-executions'
+        native.data[menus_path][0].update(name='既存献立',status='draft')
+        native.data['/api/school-lunch/monthly-overview']={'month':MONTH,'facilities':[
+            {'id':1,'name':'合成試験校','days':[{'date':'2026-11-02','menu_count':1,'menu_statuses':['draft']}]}]}
+        record(tools,run,'lunch_import_source',{'source_document_id':'doc-synthetic'},{'query':QUERY})
+        evidence=[await get(tools,run,'lunch_get_source_document',{'document_id':'doc-synthetic'},QUERY),
+                  await get(tools,run,'lunch_get_month',query=QUERY),
+                  await get(tools,run,'lunch_get_schools',query=QUERY)]
+        if change=='non_get_evidence':
+            evidence.append(record(tools,run,'describe_operation',{'operation':'lunch_confirm_import'}))
+        menu={'facility_name':'合成試験校','service_date':'2026-11-02','name':'合成献立','servings':10,
+              'version':1,'status':'draft','assignees':[],'ingredients':[]}
+        parameters={'query':QUERY,'body':{'source_document_id':'doc-synthetic','menus':[menu]}}
+        actions=[{'operation':'lunch_confirm_import','parameters':parameters}]
+        if change=='non_get_evidence':
+            with pytest.raises(Conflict,match='ネイティブGET'):
+                await tools.flow.submit(run,'原本と対象校の献立',evidence,actions)
+            assert tools.flow.review(run['id']) is None
+            assert native.writes==[]
+            return
+        await tools.flow.submit(run,'原本と対象校の献立',evidence,actions)
+        review=tools.flow.review(run['id'])
+        assert [item['operation'] for item in review['evidence']]==['lunch_get_source_document','lunch_get_menus']
+        assert review['evidence'][1]['data']==native.data[menus_path]
+        if change=='document':
+            native.data['/api/school-lunch/cooking-arrangements/documents/doc-synthetic']['result']['menus'][0]['servings']=11
+        if change=='existing_menu':native.data[menus_path][0]['servings']=11
+        if change:
+            with pytest.raises(Conflict,match='再確認'):
+                await tools.flow.decide(run,review['id'],True,'')
+            assert native.writes==[]
+            return
+        await tools.flow.decide(run,review['id'],True,'')
+        response=await tools.execute(run['id'],0,'lunch_confirm_import',{'parameters':parameters},'import-with-month-context')
+        assert response.get('ok'),response
+        assert native.data['/api/school-lunch/monthly-overview']['facilities'][0]['days'][0]['menu_count']==2
+        assert len(native.data[menus_path])==2
+        assert tools.flow.review(run['id'])['state']=='approved'
+        assert len(native.writes)==1
+        await tools.flow.recheck(run,tools.flow.review(run['id']))
     asyncio.run(scenario())
 
 

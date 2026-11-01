@@ -312,6 +312,7 @@ def test_import_and_procurement_use_the_saved_approved_source_for_native_complet
         engine, run = attach(store, native, tools, run)
         actions = []
         if task == 'lunch_import':
+            native.data['/api/school-lunch/menu-executions']=[]
             record(tools, run, 'lunch_import_source', {'source_document_id': 'doc-synthetic'}, {'query': QUERY})
             evidence = [await get(tools, run, 'lunch_get_source_document', {'document_id': 'doc-synthetic'}, QUERY)]
             menus = [{'facility_name': '合成試験校', 'service_date': '2026-11-02', 'name': '合成献立', 'servings': 10, 'version': 1, 'status': 'draft', 'assignees': [], 'ingredients': []}]
