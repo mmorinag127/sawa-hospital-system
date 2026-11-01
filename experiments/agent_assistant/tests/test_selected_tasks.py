@@ -320,7 +320,8 @@ def test_import_binds_source_and_inventory_not_derived_navigation_views(tmp_path
             evidence.append(record(tools,run,'describe_operation',{'operation':'lunch_confirm_import'}))
         menu={'facility_name':'合成試験校','service_date':'2026-11-02','name':'合成献立','servings':10,
               'version':1,'status':'draft','assignees':[],'ingredients':[]}
-        parameters={'query':QUERY,'body':{'source_document_id':'doc-synthetic','menus':[menu]}}
+        parameters={'query':QUERY,'body':{'source_document_id':'doc-synthetic','menus':[menu]},
+                    'reason':'原本と確認済み献立を照合した合成試験'}
         actions=[{'operation':'lunch_confirm_import','parameters':parameters}]
         if change=='non_get_evidence':
             with pytest.raises(Conflict,match='ネイティブGET'):
