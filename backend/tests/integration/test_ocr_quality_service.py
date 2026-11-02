@@ -46,6 +46,36 @@ def _seed_job(
         )
 
 
+def test_projection_preserves_presence_nulls_and_non_object_metrics():
+    _clear_ocr_jobs()
+    now = datetime.utcnow()
+    values = [{}, {"provider": "gemini", "llm_audit": None},
+              {"provider": "gemini", "llm_audit": {"body": "x" * 100000}},
+              {"provider": "gemini"}, None, [], "not an object"]
+    with session_scope() as session:
+        for index, metrics in enumerate(values):
+            session.add(OcrJob(id=f"quality-projection-{index}", status="running",
+                              input_reference="file://dummy.pdf", metrics=metrics,
+                              created_at=now, updated_at=now))
+    result = summarize_reparse_quality(now=now)
+    assert result["sample"]["included_jobs"] == 2
+    assert result["scope"]["skipped_reasons"] == {"non_reparse_llm_job": 1, "provider_not_llm": 4}
+    assert result["providers"][0]["provider"] == "gemini"
+    assert result["providers"][0]["total"] == 2
+
+
+def test_projection_uses_evidence_not_foreign_progress_keys():
+    _clear_ocr_jobs()
+    now = datetime.utcnow()
+    with session_scope() as session:
+        session.add(OcrJob(id="quality-evidence-owner", status="done",
+                          input_reference="file://dummy.pdf", created_at=now, updated_at=now,
+                          evidence_metrics={"provider": "gemini"},
+                          progress_metrics={"provider": "openai", "processing_stage": "done"}))
+    result = summarize_reparse_quality(now=now)
+    assert [row["provider"] for row in result["providers"]] == ["gemini"]
+
+
 def test_summarize_reparse_quality_detects_provider_gate_fail(monkeypatch):
     _clear_ocr_jobs()
     now = datetime.utcnow()

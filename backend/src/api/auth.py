@@ -3,6 +3,7 @@ import time
 import json
 import urllib.error
 import urllib.request
+from contextlib import nullcontext
 
 from fastapi import Depends, HTTPException, status, Request
 from google.auth.transport import requests as google_requests
@@ -197,12 +198,12 @@ def _google_email_or_none(request: Request) -> str | None:
     return _verify_google_token(token, request)
 
 
-def _local_current_user(account: str | None) -> UserContext:
+def _local_current_user(account: str | None, *, read_session=None) -> UserContext:
     identity = str(account or "").strip().lower()
     if not identity:
         raise HTTPException(status_code=403, detail="Active registered user required")
     try:
-        with session_scope() as session:
+        with (session_scope() if read_session is None else nullcontext(read_session)) as session:
             rows = session.execute(text(
                 "SELECT u.id, u.account, u.role, u.status, a.system_key "
                 "FROM users u LEFT JOIN user_system_access a "

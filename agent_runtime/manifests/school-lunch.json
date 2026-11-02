@@ -1,5 +1,5 @@
 {
-  "source_revision": "e7598f1c2e7490da792aa04e467fd1ce3380de30",
+  "source_revision": "e32dfaee0feebc755c1807eb13878b6770549a4c",
   "working_diff_sha256": "4d6ccbb89b0a62de1216abd60e06f0b9ad705f80d5abf3db7e15adc2e38d2510",
   "files": {
     "backend/Dockerfile": "8003085340a146430874bca700a031bad039a329213e9246f0b93975cfcb2eee",
@@ -148,7 +148,7 @@
     "backend/src/services/process_route_center_geometry.py": "452806d9a8d406191a8d4ada59f22860e2cd3d58a547803c9de83057ffac5670",
     "backend/src/services/process_route_defaults.py": "a07616bd9e4b33a616eb2b832bc0b598672d2b8cba75ef38c2d771a018203a19",
     "backend/src/services/process_route_layout_service.py": "dd8cef17b0e073cc35640e7d9719b91f3ae1833085d847306d6e4102a76fdef3",
-    "backend/src/services/process_route_network_service.py": "0804c8c81781bccfb43026eaa90309cb7587d98435ef70ef9b9115ec94bbc360",
+    "backend/src/services/process_route_network_service.py": "218d1170b389b68708ad23991c6c31d251b14c1f85638e177e9f5c895ac0fcdc",
     "backend/src/services/process_route_rules_service.py": "780e28d93b9a441cf337d4a8f5bbaa21a893b18a11895438c5f32c878413e9c8",
     "backend/src/services/process_shared_preparation.py": "9a23c03b7121474437bbb93081cf0930040e6c4170cfed94c5a2c3730ef0e27e",
     "backend/src/services/process_source_conflicts.py": "645305988d8085632bfa680b14d820b43e232e7acd4dc5cd0854aa99bcf55a9f",
@@ -204,8 +204,8 @@
       ]
     }
   ],
-  "upstream_base_revision": "801c187a3217976237901238e67b3a2ef305076c",
-  "upstream_delta_sha256": "6896857d47d190f3227858183cf5fe228eb63e6aa656662bb0e43e4a61d913b0",
+  "upstream_base_revision": "fd006d99db23129aa3a631d80be119ce627f403c",
+  "upstream_delta_sha256": "40301836d90403f911b34774464fcfdaac4eed109444c856f09f71c89a64eb2c",
   "retained_extensions": [
     {
       "path": "backend/src/api/implementation_price_tables.py",

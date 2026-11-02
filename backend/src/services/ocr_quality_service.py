@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from src.staging_data import order_runtime_setting as _runtime_setting
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import JSON, case, func, literal, select
 
 from src.db import session_scope
 from src.models.ocr_job import OcrJob
@@ -138,31 +138,37 @@ def summarize_reparse_quality(*, now: datetime | None = None) -> dict[str, Any]:
             "repair_pass_applied", "before_count", "after_count",
         )
         sqlite = session.get_bind().dialect.name == "sqlite"
-        presence = [
-            func.json_type(OcrJob.metrics, f"$.{key}").is_not(None)
-            if sqlite else OcrJob.metrics[key].is_not(None)
-            for key in presence_keys
-        ]
-        projected_rows = (
-            session.execute(
-                select(
+        if sqlite:
+            statement = select(
                     OcrJob.status,
                     OcrJob.error_message,
                     OcrJob.updated_at,
                     *(OcrJob.metrics[key] for key in value_keys),
-                    *presence,
-                    (func.json_type(OcrJob.metrics) if sqlite else func.json_typeof(OcrJob.metrics)),
-                )
-                .where(OcrJob.updated_at >= since)
-                .order_by(OcrJob.updated_at.desc())
-                .limit(max(sample_limit * 6, sample_limit))
+                    *(func.json_type(OcrJob.metrics, f"$.{key}").is_not(None) for key in presence_keys),
+                    func.json_type(OcrJob.metrics),
             )
-            .all()
-        )
+        else:
+            # Parse the large JSON once for all selected keys. Audit bodies
+            # contribute only key presence, never their potentially huge value.
+            source = case((func.json_typeof(OcrJob.evidence_metrics) == "object", OcrJob.evidence_metrics),
+                          else_=literal({}, type_=JSON))
+            fields = func.json_each(source).table_valued("key", "value")
+            projected = (select(func.json_object_agg(fields.c.key, case(
+                (fields.c.key.in_(presence_keys), literal(None, type_=JSON)),
+                else_=fields.c.value)))
+                .select_from(fields).where(fields.c.key.in_((*value_keys, *presence_keys)))
+                .correlate(OcrJob).scalar_subquery())
+            metrics = case((func.json_typeof(OcrJob.metrics) == "object",
+                            func.coalesce(projected, literal({}, type_=JSON))), else_=None)
+            statement = select(OcrJob.status, OcrJob.error_message, OcrJob.updated_at, metrics)
+        projected_rows = session.execute(statement.where(OcrJob.updated_at >= since)
+            .order_by(OcrJob.updated_at.desc()).limit(max(sample_limit * 6, sample_limit))).all()
         rows = []
         for row in projected_rows:
             metrics = None
-            if row[-1] == "object":
+            if not sqlite:
+                metrics = row[3]
+            elif row[-1] == "object":
                 metrics = dict(zip(value_keys, row[3:3 + len(value_keys)]))
                 metrics.update({key: None for key, present in zip(presence_keys, row[3 + len(value_keys):-1]) if present})
             rows.append((row[0], metrics, row[1], row[2]))
