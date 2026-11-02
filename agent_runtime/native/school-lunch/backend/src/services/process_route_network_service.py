@@ -288,18 +288,31 @@ def _route(start, end, regions, barriers, gates, required_gate_ids, lane, forbid
     # Point membership is separable by x. Avoid scanning unrelated walls and
     # rectangles at every grid point while producing the identical node set.
     allowed_y = _allowed_grid_y(xs, ys, regions, barriers)
-    nodes={(x,y) for x in xs for y in ys if y in allowed_y[x]}
-    rows={};cols={}
-    for p in nodes:
-        rows.setdefault(p[1],[]).append(p);cols.setdefault(p[0],[]).append(p)
-    graph={p:[] for p in nodes}
-    for group,axis in ((rows,0),(cols,1)):
-        for points in group.values():
-            points.sort(key=lambda p:p[axis])
-            # Only boxes intersecting this row/column can affect any edge on
-            # it. Preserve original order and exact EPS predicates; this is
-            # an index, not a reduced routing search or a geometry heuristic.
-            fixed=points[0][1-axis]
+    sorted_xs=sorted(xs)
+    rows={};cols={};graph={};crowding_lines={}
+    def nearby_occupied(axis, fixed):
+        line=(axis,fixed)
+        if line not in crowding_lines:
+            # Every omitted segment makes _parallel_crowding exactly false.
+            # Preserve source order for all potentially nonzero terms.
+            crowding_lines[line]=[(c,d) for c,d in occupied
+                if c[1-axis]==d[1-axis] and abs(fixed-c[1-axis])<MIN_LANE_GAP-EPS]
+        return crowding_lines[line]
+    def neighbours(p):
+        if p in graph:
+            return graph[p]
+        result=[]
+        # Same complete grid and left/right/up/down adjacency order as eager
+        # construction. Only materialize edges reached by the existing A*.
+        for axis,groups in ((0,rows),(1,cols)):
+            fixed=p[1-axis]
+            if fixed not in groups:
+                groups[fixed]=([x for x in sorted_xs if fixed in allowed_y[x]]
+                               if axis==0 else sorted(allowed_y[fixed]))
+            coordinates=groups[fixed]
+            position=bisect_left(coordinates,p[axis])
+            if position==len(coordinates) or coordinates[position]!=p[axis]:
+                continue
             line_key=(axis, fixed)
             coverage=geometry["coverage"].get(line_key)
             if coverage is None:
@@ -307,24 +320,30 @@ def _route(start, end, regions, barriers, gates, required_gate_ids, lane, forbid
             obstacles=geometry["obstacles"].get(line_key)
             if obstacles is None:
                 obstacles=geometry["obstacles"][line_key]=_line_intervals(forbidden,axis,fixed,obstacles=True)
-            for a,b in zip(points,points[1:]):
+            for index in (position-1,position+1):
+                if not 0<=index<len(coordinates):
+                    continue
+                q=(coordinates[index],fixed) if axis==0 else (fixed,coordinates[index])
+                a,b=sorted((p,q),key=lambda point:point[axis])
                 if not _line_edge_allowed(a[axis],b[axis],coverage,obstacles): continue
-                if not candidate_geometry and any(_parallel_crowding(a,b,c,d) for c,d in occupied): continue
+                if not candidate_geometry and any(_parallel_crowding(a,b,c,d) for c,d in nearby_occupied(axis,fixed)): continue
                 length=abs(a[axis]-b[axis])
-                graph[a].append((b,length));graph[b].append((a,length))
+                result.append((q,length))
+        graph[p]=result
+        return result
     # The search retains direction and required-gate index. Crossing a legal
     # but unrequested doorway is not an alternative to the requested route.
     queue=[(abs(end[0]-start[0])+abs(end[1]-start[1]),0,0,start,-1,0,0)];best={};parents={};serial=0;endkey=None
     # Direction/progress states revisit the same physical edge. Its occupancy
     # cost is invariant during this search; reuse that exact value, not a
     # shortened candidate list or an approximation of the routing constraints.
-    crowding_costs={};crowding_lines={};barrier_crossings=geometry["crossings"]
+    crowding_costs={};barrier_crossings=geometry["crossings"]
     while queue:
         _,_,cost,p,axis,sign,progress=heapq.heappop(queue)
         key=(p,axis,sign,progress)
         if key in best and cost>best[key]+EPS: continue
         if p==end and progress==len(required_gate_ids): endkey=key;break
-        for q,length in graph[p]:
+        for q,length in neighbours(p):
             naxis=0 if p[0]!=q[0] else 1;nsign=1 if q[naxis]>p[naxis] else -1
             if axis==-1 and start_direction is not None and (naxis,nsign)!=start_direction:continue
             if q==end and end_direction is not None and (naxis,nsign)!=end_direction:continue
@@ -356,14 +375,7 @@ def _route(start, end, regions, barriers, gates, required_gate_ids, lane, forbid
             if candidate_geometry:
                 physical_edge=(p,q) if p<q else (q,p)
                 if physical_edge not in crowding_costs:
-                    line=(naxis,p[1-naxis])
-                    if line not in crowding_lines:
-                        # Other orientations and distant parallel lines have
-                        # exactly zero cost. Index them once per coordinate;
-                        # retain every potentially nonzero term and its order.
-                        crowding_lines[line]=[(c,d) for c,d in occupied
-                            if c[1-naxis]==d[1-naxis] and abs(p[1-naxis]-c[1-naxis])<MIN_LANE_GAP-EPS]
-                    crowding_costs[physical_edge]=length*20*sum(_parallel_crowding(p,q,c,d) for c,d in crowding_lines[line])
+                    crowding_costs[physical_edge]=length*20*sum(_parallel_crowding(p,q,c,d) for c,d in nearby_occupied(naxis,p[1-naxis]))
                 penalty += crowding_costs[physical_edge]
             ncost=cost+length+80*turn+penalty
             nkey=(q,naxis,nsign,nextprogress)

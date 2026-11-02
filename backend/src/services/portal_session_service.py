@@ -95,7 +95,7 @@ def authenticate(token, request, *, cookie_auth=False):
             raise HTTPException(403, "Active registered user required")
         if str(user.account or "").strip().lower() != row.account:
             raise HTTPException(401, "Portal account changed")
-        identity = _local_current_user(row.account)
+        identity = _local_current_user(row.account, read_session=session)
         if automation_system(identity.account) is not None:
             raise HTTPException(403, "Human portal session required")
         # Do not resurrect a session concurrently revoked after the initial read.

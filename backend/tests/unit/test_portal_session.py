@@ -273,14 +273,28 @@ def test_concurrent_revoke_cannot_be_undone(fixture, monkeypatch):
     login(fixture)
     token = client.cookies.get(sessions.COOKIE)
     original = auth._local_current_user
-    def revoke_during_lookup(account):
-        identity = original(account)
+    def revoke_during_lookup(account, **kwargs):
+        identity = original(account, **kwargs)
         sessions.revoke(token)
         return identity
     monkeypatch.setattr(auth, "_local_current_user", revoke_during_lookup)
     assert client.get("/portal/auth/me").status_code == 401
     with scope() as session:
         assert session.get(PortalSession, sessions.digest(token)).revoked_at is not None
+
+
+def test_identity_lookup_reuses_caller_session_without_closing_it(fixture, monkeypatch):
+    _, scope, _ = fixture
+    def unexpected_scope():
+        raise AssertionError("Nested authentication connection")
+    monkeypatch.setattr(auth, "session_scope", unexpected_scope)
+    with scope() as session:
+        assert auth._local_current_user("human@example.invalid", read_session=session).role == "admin"
+        assert session.execute(text("SELECT 1")).scalar_one() == 1
+        session.execute(update(User).where(User.id == "user").values(status="disabled"))
+        with pytest.raises(HTTPException) as error:
+            auth._local_current_user("human@example.invalid", read_session=session)
+        assert error.value.status_code == 403
 
 
 def test_google_expiry_does_not_shorten_issued_session(fixture):
