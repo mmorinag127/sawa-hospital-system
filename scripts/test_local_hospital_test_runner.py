@@ -322,6 +322,21 @@ class ReceiptContractTest(unittest.TestCase):
                     AGENT_RUNNER.main()
                 execute.assert_not_called()
 
+    def test_auth_and_quality_changes_select_owned_regressions_without_unknown_fallback(self):
+        from backend_test_scope import select_modules
+        scope = select_modules(RUNNER.ROOT, ["backend/src/api/auth.py",
+            "backend/src/services/portal_session_service.py",
+            "backend/src/services/ocr_quality_service.py"])
+        for module in ("backend/tests/unit/test_portal_session.py",
+                       "backend/tests/contract/test_portal_google_auth.py",
+                       "backend/tests/contract/test_auth_guardrails.py",
+                       "backend/tests/integration/test_ocr_quality_service.py",
+                       "backend/tests/unit/test_current_ocr_operations.py"):
+            self.assertIn(module, scope["modules"])
+        self.assertIn("ocr-original-targets-artifacts-and-operator-values", scope["groups"])
+        with self.assertRaisesRegex(ValueError, "Map backend changes"):
+            select_modules(RUNNER.ROOT, ["backend/src/services/not_reviewed.py"])
+
     def test_general_backend_partition_maps_every_exclusion_to_a_dedicated_full_command(self):
         commands = {item['name']: item['command'] for item in json.loads(RUNNER.MANIFEST.read_text())['commands']}
         self.assertEqual(commands['backend-tests'], 'python3 scripts/run_local_backend_tests.py')

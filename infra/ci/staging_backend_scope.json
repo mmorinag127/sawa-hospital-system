@@ -3,6 +3,7 @@
   "scope": "staging-core-and-page-repair",
   "always": ["authentication-and-session", "ocr-original-targets-artifacts-and-operator-values"],
   "targets_by_source": {
+    "backend/src/services/ocr_quality_service.py": ["backend/tests/integration/test_ocr_quality_service.py", "backend/tests/unit/test_current_ocr_operations.py"],
     "backend/src/services/storage_service.py": ["backend/tests/integration/test_storage_service.py", "backend/tests/unit/test_agent_trial_transport.py", "backend/tests/unit/test_modernization_canonical_ocr_artifacts.py"],
     "backend/src/services/agent_trial_transport.py": ["backend/tests/unit/test_agent_trial_transport.py"],
     "backend/src/services/order_list_contract.py": [
@@ -15,6 +16,9 @@
     ]
   },
   "sources": {
+    "backend/src/api/auth.py": ["authentication-and-session"],
+    "backend/src/services/portal_session_service.py": ["authentication-and-session"],
+    "backend/src/services/ocr_quality_service.py": ["page-read-results-and-response-ownership"],
     "backend/pyproject.toml": ["*"],
     "backend/requirements.txt": ["*"],
     "backend/uv.lock": ["*"],
