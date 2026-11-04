@@ -39,9 +39,9 @@ def initialize_runtime():
 
     def formal_schema():
         with db.engine.connect() as connection:
-            require_formal_head(connection)
+            return require_formal_head(connection)
 
-    _startup_step("formal_schema", formal_schema)
-    _startup_step("menu_schema", menu_service.ensure_menu_schema)
-    _startup_step("facility_template_schema", facility_template_version_service.ensure_facility_template_version_schema)
+    inspection = _startup_step("formal_schema", formal_schema)
+    _startup_step("menu_schema", lambda: menu_service.ensure_menu_schema(inspection=inspection))
+    _startup_step("facility_template_schema", lambda: facility_template_version_service.ensure_facility_template_version_schema(inspection=inspection))
     _startup_step("facility_projection", facility_service.sync_facility_names_from_master)

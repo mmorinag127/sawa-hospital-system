@@ -288,8 +288,8 @@ def _monthly_item_diet_filter(column, diet_type: object):
     return column == normalized if normalized else column.in_([])
 
 
-def _menu_schema_missing_items(connection=None) -> list[str]:
-    inspector = inspect(get_engine() if connection is None else connection)
+def _menu_schema_missing_items(connection=None, *, inspection=None) -> list[str]:
+    inspector = inspection if inspection is not None else inspect(get_engine() if connection is None else connection)
     tables = set(inspector.get_table_names())
     required: dict[str, set[str]] = {
         "menu_masters": {"condiments", "revision"},
@@ -322,8 +322,18 @@ def _ensure_monthly_menu_item_identity_index(connection=None) -> None:
         raise MenuSchemaNotMigrated(str(exc)) from None
 
 
-def ensure_menu_schema(*, connection=None) -> None:
+def ensure_menu_schema(*, connection=None, inspection=None) -> None:
     global _MENU_SCHEMA_INITIALIZED
+    if inspection is not None:
+        from src.maintenance.formal_migration_schema import VerifiedCatalogInspection
+        if not isinstance(inspection, VerifiedCatalogInspection) or inspection.engine is not get_engine() or connection is not None:
+            raise ValueError('verified catalog must belong to the current startup engine')
+        missing = _menu_schema_missing_items(inspection=inspection)
+        if missing:
+            raise MenuSchemaNotMigrated('menu schema is not migrated: ' + ', '.join(missing))
+        # Canonical identity constraints were checked by require_formal_head.
+        _MENU_SCHEMA_INITIALIZED = True
+        return
     if connection is not None:
         missing = _menu_schema_missing_items(connection)
         if missing:

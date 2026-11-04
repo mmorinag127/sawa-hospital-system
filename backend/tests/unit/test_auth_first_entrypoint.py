@@ -25,6 +25,18 @@ def test_auth_import_does_not_import_business_or_workbook_processing():
     assert json.loads(result.stdout) == []
 
 
+def test_google_verifier_transport_is_not_loaded_for_session_entrypoint():
+    command = (
+        "import sys; import src.http_entrypoint; "
+        "assert 'google.auth.transport.requests' not in sys.modules; "
+        "from src.api import auth; "
+        "assert auth.id_token.verify_oauth2_token.__module__ == 'google.oauth2.id_token'; "
+        "assert auth.google_requests.Request.__module__ == 'google.auth.transport.requests'"
+    )
+    subprocess.run([sys.executable, '-c', command], check=True, capture_output=True,
+                   text=True, timeout=20)
+
+
 def test_formal_schema_failure_still_prevents_startup(monkeypatch):
     def reject():
         raise RuntimeError("formal schema mismatch")

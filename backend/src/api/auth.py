@@ -6,12 +6,20 @@ import urllib.request
 from contextlib import nullcontext
 
 from fastapi import Depends, HTTPException, status, Request
-from google.auth.transport import requests as google_requests
-from google.oauth2 import id_token
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.db import control_session_scope as session_scope
+
+
+def __getattr__(name):
+    # Keep the existing verifier seam without loading Google's TLS stack for
+    # session-cookie authentication or an unauthenticated denial.
+    from importlib import import_module
+    modules = {'google_requests': 'google.auth.transport.requests', 'id_token': 'google.oauth2.id_token'}
+    if name not in modules:
+        raise AttributeError(name)
+    return import_module(modules[name])
 
 
 class UserContext:
@@ -131,6 +139,8 @@ def _audience_candidates(request: Request) -> list[str]:
 
 
 def _verify_google_token(token: str, request: Request) -> str:
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token
     candidates = _audience_candidates(request)
     configs = _automation_configs()
     for _, email, audience, subject in configs:

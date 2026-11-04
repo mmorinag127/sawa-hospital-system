@@ -23,13 +23,17 @@ def get_engine():
     return database_engine()
 
 
-def ensure_facility_template_version_schema() -> None:
+def ensure_facility_template_version_schema(*, inspection=None) -> None:
     from src.models.facility_template_version import FacilityTemplateVersion
 
     global _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED
     if _FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED:
         return
-    inspector = inspect(get_engine())
+    if inspection is not None:
+        from src.maintenance.formal_migration_schema import VerifiedCatalogInspection
+        if not isinstance(inspection, VerifiedCatalogInspection) or inspection.engine is not get_engine():
+            raise ValueError('verified catalog must belong to the current startup engine')
+    inspector = inspection if inspection is not None else inspect(get_engine())
     if "facility_template_versions" not in set(inspector.get_table_names()):
         raise RuntimeError(
             "facility template version schema is not migrated; run migrations through 0025: "

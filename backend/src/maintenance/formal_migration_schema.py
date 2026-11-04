@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 
 import sqlalchemy as sa
-from alembic.config import Config
-from alembic.script import ScriptDirectory
 from src.monthly_menu_identity import RAW_COLUMNS
 
 from src.services.monthly_menu_identity_schema import (
@@ -20,6 +18,8 @@ ALEMBIC_CONFIG = Path(__file__).resolve().parents[2] / "alembic.ini"
 
 def formal_revision_chain():
     """Return the one linear revision chain declared by the actual Alembic source."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
     scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_CONFIG)))
     heads = scripts.get_heads()
     if len(heads) != 1:
@@ -37,7 +37,9 @@ def formal_revision_chain():
 
 
 def formal_head_revision():
-    return formal_revision_chain()[-1]
+    from src.maintenance.prepared_migration_source import read_head
+    prepared = read_head()
+    return prepared if prepared is not None else formal_revision_chain()[-1]
 
 
 def _clean(value):
@@ -152,8 +154,8 @@ def table_shapes(snapshot, dialect):
     return shapes
 
 
-def read_catalog(connection):
-    inspector = sa.inspect(connection)
+def read_catalog(connection, *, inspector=None):
+    inspector = sa.inspect(connection) if inspector is None else inspector
     if connection.dialect.name == "postgresql" and inspector.get_materialized_view_names():
         raise RuntimeError("catalog blocked: unsupported catalog object: materialized view")
     if connection.dialect.name == "postgresql":
@@ -412,14 +414,14 @@ def column_identity_policy(expected, dialect, revision):
     return policy
 
 
-def require_revision_catalog(connection, revision):
+def require_revision_catalog(connection, revision, *, inspector=None):
     dialect = connection.dialect.name
     contract = json.loads(CONTRACT.read_text())
     expected = contract["revisions"].get(dialect, {}).get(revision)
     if expected is None:
         raise RuntimeError(f"catalog blocked: revision {revision} has no observed {dialect} contract")
     policy = column_identity_policy(expected, dialect, revision)
-    catalog = read_catalog(connection)
+    catalog = read_catalog(connection, inspector=inspector)
     actual = table_shapes(catalog, dialect)
     missing_tables = sorted(set(expected["tables"]) - set(actual))
     if missing_tables:
@@ -448,6 +450,24 @@ def require_revision_catalog(connection, revision):
         raise RuntimeError(f"catalog blocked: revision {revision} {name} mismatch: {', '.join(keys)}")
     if int(revision) >= 23:
         require_canonical_identity_schema(connection)
+    return catalog
+
+
+class VerifiedCatalogInspection:
+    """Reuse one complete successful startup inspection, not a version-only cache."""
+
+    def __init__(self, catalog, engine):
+        self.catalog = catalog
+        self.engine = engine
+
+    def get_table_names(self):
+        return list(self.catalog['tables'])
+
+    def get_columns(self, table):
+        return self.catalog['tables'][table]['columns']
+
+    def get_indexes(self, table):
+        return self.catalog['tables'][table]['indexes']
 
 
 def require_formal_head(connection):
@@ -458,4 +478,5 @@ def require_formal_head(connection):
     head = formal_head_revision()
     if revisions != [head]:
         raise RuntimeError(f"runtime blocked: formal migration head {head} is required")
-    require_revision_catalog(connection, head)
+    catalog = require_revision_catalog(connection, head, inspector=inspector)
+    return VerifiedCatalogInspection(catalog, connection.engine)

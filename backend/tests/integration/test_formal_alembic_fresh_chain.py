@@ -377,8 +377,8 @@ def test_startup_uses_readonly_formal_head_before_any_business_initialization(fo
             connection.exec_driver_sql("ALTER TABLE facilities ADD COLUMN unknown_startup INTEGER")
     monkeypatch.setattr(main.db, "engine", engine)
     calls = []
-    monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: calls.append("menu"))
-    monkeypatch.setattr(main.facility_template_version_service, "ensure_facility_template_version_schema", lambda: calls.append("facility"))
+    monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda **kwargs: calls.append("menu"))
+    monkeypatch.setattr(main.facility_template_version_service, "ensure_facility_template_version_schema", lambda **kwargs: calls.append("facility"))
     monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: calls.append("sync"))
     before = _catalog_and_rows(engine)
     ddl = []
@@ -400,6 +400,30 @@ def test_startup_uses_readonly_formal_head_before_any_business_initialization(fo
         sa.event.remove(engine, "before_cursor_execute", record)
     assert ddl == []
     assert _catalog_and_rows(engine) == before
+
+
+def test_verified_startup_catalog_removes_only_redundant_inspection(formal_database, monkeypatch):
+    from src.services import menu_service, facility_template_version_service as templates
+    engine, config = formal_database
+    command.upgrade(config, 'head')
+    with engine.connect() as connection:
+        inspection = require_formal_head(connection)
+    monkeypatch.setattr(menu_service, 'get_engine', lambda: engine)
+    monkeypatch.setattr(templates, 'get_engine', lambda: engine)
+    monkeypatch.setattr(menu_service, '_MENU_SCHEMA_INITIALIZED', False)
+    monkeypatch.setattr(templates, '_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED', False)
+    statements = []
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+    sa.event.listen(engine, 'before_cursor_execute', record)
+    try:
+        menu_service.ensure_menu_schema(inspection=inspection)
+        templates.ensure_facility_template_version_schema(inspection=inspection)
+    finally:
+        sa.event.remove(engine, 'before_cursor_execute', record)
+    assert statements == []
+    assert menu_service._MENU_SCHEMA_INITIALIZED
+    assert templates._FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED
 
 
 def test_postflight_rejects_normal_return_after_corrupting_real_ddl(formal_database, monkeypatch):
