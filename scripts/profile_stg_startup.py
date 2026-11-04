@@ -92,7 +92,13 @@ def replace(document, directory):
 
 def restored_document(original, current, probe):
     # Never restore over an unrelated writer or a changed database binding.
-    if canonical(current['spec']) != canonical(probe['spec']):
+    def api_spec(document):
+        spec=deepcopy(document['spec'])
+        for traffic in spec.get('traffic',[]):
+            if traffic.get('percent')==0:
+                traffic.pop('percent')
+        return canonical(spec)
+    if api_spec(current) != api_spec(probe):
         raise RuntimeError('service changed outside this profiling run; refusing stale restore')
     result = deepcopy(current)
     result.pop('status',None)
@@ -157,7 +163,14 @@ def recover_reviewed_name(original, expected, directory):
         raise ValueError('current service differs from reviewed inventory')
     recovered=deepcopy(original)
     metadata=recovered['spec']['template']['metadata']
-    if metadata.get('name')!=expected['revision']:
+    reviewed_probe=expected.get('recover_profile_revision')
+    if reviewed_probe:
+        if metadata.get('name')!=reviewed_probe or not re.fullmatch(original['metadata']['name']+r'-profile-\d+-\d+',reviewed_probe):
+            raise ValueError('unexpected prior diagnostic revision')
+        for key in ('command','args'):
+            recovered['spec']['template']['spec']['containers'][0].pop(key,None)
+        recovered['spec']['traffic']=[{'revisionName':expected['revision'],'percent':100}]
+    elif metadata.get('name')!=expected['revision']:
         raise ValueError('only the reviewed extra original template name can be recovered')
     metadata.pop('name')
     if spec_hash(recovered)!=expected['spec_sha256']:
@@ -199,6 +212,10 @@ def profile(expected, output):
         image, revision = image_and_revision(original)
         if any(expected[name][key]!=value for key,value in {'image':image,'revision':revision,'spec_sha256':spec_hash(original)}.items()):
             raise ValueError('current service differs from reviewed inventory')
+        if expected[name].get('already_measured_revision'):
+            (output/(name+'-status.json')).write_text(json.dumps({'service':name,'restored':True,
+                'profile_revision':expected[name]['already_measured_revision'],'existing_measurement_retained':True},indent=2))
+            continue
         probe = probe_document(original,name,suffix)
         candidate = probe['spec']['template']['metadata']['name']
         record = {'service':name,'original_revision':revision,'profile_revision':candidate,'image':image,'restored':False}

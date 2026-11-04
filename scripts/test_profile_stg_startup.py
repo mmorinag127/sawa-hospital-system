@@ -112,6 +112,24 @@ class StartupProfileTests(unittest.TestCase):
         current=deepcopy(candidate);current['spec']['template']['spec']['containers'][0]['env'][0]['value']='new-owner-value'
         with self.assertRaises(RuntimeError): probe.restored_document(original,current,candidate)
 
+    def test_api_omits_only_zero_percent_without_weakening_full_spec_comparison(self):
+        original=service();candidate=probe.probe_document(original,'worker-stg','123-1')
+        current=deepcopy(candidate);current['spec']['traffic'][1].pop('percent')
+        self.assertEqual(probe.restored_document(original,current,candidate)['spec']['template'],original['spec']['template'])
+        current['spec']['traffic'][1]['tag']='another-owner-tag'
+        with self.assertRaises(RuntimeError): probe.restored_document(original,current,candidate)
+
+    def test_reviewed_prior_probe_recovery_requires_complete_original_spec_hash(self):
+        original=service();original['spec']['template']['metadata'].pop('name')
+        original['spec']['traffic']=[{'revisionName':'worker-stg-00001-abc','percent':100}]
+        current=probe.probe_document(original,'worker-stg','123-1')
+        expected={'image':probe.image_and_revision(original)[0],'revision':'worker-stg-00001-abc',
+            'spec_sha256':probe.spec_hash(original),'recover_from_sha256':probe.spec_hash(current),
+            'recover_profile_revision':'worker-stg-profile-123-1'}
+        with patch.object(probe,'replace') as replace,patch.object(probe,'describe',return_value=original):
+            probe.recover_reviewed_name(current,expected,'unused')
+            self.assertEqual(replace.call_args.args[0]['spec'],original['spec'])
+
     def test_local_execution_is_rejected(self):
         with patch.dict(os.environ,{},clear=True), self.assertRaises(ValueError), patch.object(probe,'cli') as cli:
             probe.require_actions({},dict.fromkeys(probe.TARGETS))
