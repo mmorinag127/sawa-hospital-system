@@ -60,6 +60,98 @@ def test_http_timeout_propagates_without_retry(monkeypatch, phase):
     assert response.read.call_count == (1 if phase == 'body' else 0)
 
 
+DOWNLOAD = '/artifacts-downloads/namespaces/sawahospitalsystem/repositories/backend/downloads/synthetic-download-id'
+BLOB = 'https://' + gate.REGISTRY + '/v2/sawahospitalsystem/backend/backend/blobs/sha256:' + 'a' * 64
+
+
+def redirect_transport(monkeypatch, location, *, code=302, second_status=200):
+    from io import BytesIO
+    from unittest.mock import MagicMock
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.status = second_status
+    response.read.return_value = b'complete-config'
+    opener = Mock()
+    opener.open.side_effect = [gate.urllib.error.HTTPError(BLOB, code, 'synthetic redirect',
+                                                       {'Location': location}, BytesIO()), response]
+    monkeypatch.setattr(gate.urllib.request, 'build_opener', Mock(return_value=opener))
+    return opener
+
+
+@pytest.mark.parametrize('code', [301, 302, 303, 307, 308])
+@pytest.mark.parametrize('location, expected', [
+    (DOWNLOAD, 'https://' + gate.REGISTRY + DOWNLOAD),
+    ('https://storage.googleapis.com/synthetic/config?signature=synthetic',
+     'https://storage.googleapis.com/synthetic/config?signature=synthetic'),
+])
+def test_registry_blob_redirect_keeps_complete_bytes_and_drops_authorization(monkeypatch, code, location, expected):
+    opener = redirect_transport(monkeypatch, location, code=code)
+    assert gate.read_http(BLOB, 'private-access-sentinel', blob_redirect=True, timeout=60) == (200, b'complete-config')
+    first, second = opener.open.call_args_list
+    assert first.args[0].get_header('Authorization') == 'Bearer private-access-sentinel'
+    assert second.args[0].get_header('Authorization') is None
+    assert second.args[0].full_url == expected
+    assert first.kwargs == second.kwargs == {'timeout': 60}
+
+
+@pytest.mark.parametrize('location', [
+    '', '//storage.googleapis.com/config', 'http://storage.googleapis.com/config',
+    'https://storage.googleapis.com.evil.invalid/config',
+    'https://storage.googleapis.com:8443/config', 'https://storage.googleapis.com:invalid/config',
+    'https://user:private-access-sentinel@storage.googleapis.com/config',
+    'https://storage.googleapis.com/config#private-access-sentinel',
+    'https://' + gate.REGISTRY + DOWNLOAD,
+    DOWNLOAD + '?signature=private-access-sentinel', DOWNLOAD + '#private-access-sentinel',
+    DOWNLOAD.replace('sawahospitalsystem', 'other-project'),
+    DOWNLOAD.replace('/backend/', '/other-repository/'),
+    DOWNLOAD.replace('synthetic-download-id', '../synthetic-download-id'),
+    DOWNLOAD.replace('synthetic-download-id', '%2e%2e%2fsynthetic-download-id'),
+    '/other/..' + DOWNLOAD, '/.' + DOWNLOAD, DOWNLOAD.replace('/downloads/', '/other/../downloads/'),
+    DOWNLOAD.replace('synthetic-download-id', '..'), DOWNLOAD.replace('synthetic-download-id', '.'),
+    '\n' + DOWNLOAD, DOWNLOAD.replace('synthetic-download-id', 'synthetic\tdownload'),
+    '/v2/sawahospitalsystem/backend/backend/blobs/synthetic-download-id',
+])
+def test_registry_blob_unknown_redirect_stops_without_leaking_location(monkeypatch, location):
+    opener = redirect_transport(monkeypatch, location)
+    with pytest.raises(gate.StagingConfigBlocked) as caught:
+        gate.read_http(BLOB, 'private-access-sentinel', blob_redirect=True)
+    assert str(caught.value) == 'staging-db-registry-blob-redirect-target-rejected'
+    opener.open.assert_called_once()
+
+
+@pytest.mark.parametrize('source', [
+    BLOB.replace(gate.REGISTRY, 'other.invalid'),
+    BLOB.replace('https:', 'http:'),
+    BLOB.replace('/v2/sawahospitalsystem/backend/', '/v2/other-project/backend/'),
+])
+def test_relative_download_requires_the_original_pinned_registry(monkeypatch, source):
+    opener = redirect_transport(monkeypatch, DOWNLOAD)
+    with pytest.raises(gate.StagingConfigBlocked, match='^staging-db-registry-blob-redirect-target-rejected$'):
+        gate.read_http(source, blob_redirect=True)
+    opener.open.assert_called_once()
+
+
+def test_blob_redirect_does_not_follow_a_second_redirect(monkeypatch):
+    opener = redirect_transport(monkeypatch, DOWNLOAD, second_status=302)
+    assert gate.read_http(BLOB, 'private-access-sentinel', blob_redirect=True) == (302, b'complete-config')
+    assert opener.open.call_count == 2
+    assert opener.open.call_args.args[0].get_header('Authorization') is None
+
+
+def test_image_config_still_rejects_redirected_content_with_a_wrong_digest(monkeypatch):
+    import hashlib
+    import json
+    expected_config = 'sha256:' + hashlib.sha256(b'expected-config').hexdigest()
+    manifest = json.dumps({'config': {'digest': expected_config}}).encode()
+    manifest_digest = 'sha256:' + hashlib.sha256(manifest).hexdigest()
+    read = Mock(side_effect=[(200, manifest), (200, b'different-config')])
+    monkeypatch.setattr(gate, 'read_http', read)
+    with pytest.raises(gate.StagingConfigBlocked, match='^staging-db-image-config-digest-mismatch$'):
+        gate.image_config(gate.REGISTRY + '/sawahospitalsystem/backend/backend@' + manifest_digest,
+                          'backend', 'private-access-sentinel')
+    assert read.call_args.kwargs['blob_redirect'] is True
+
+
 def install_cloud(monkeypatch):
     documents, images, calls = {}, {}, []
     for service, component in [('web-stg', 'frontend'), ('worker-stg', 'backend')]:
