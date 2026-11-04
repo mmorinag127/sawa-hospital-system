@@ -16,6 +16,10 @@
     ]
   },
   "sources": {
+    "backend/Dockerfile": ["*"],
+    "backend/src/runtime_startup.py": ["*"],
+    "backend/src/maintenance/prepared_migration_source.py": ["*"],
+    "backend/src/services/facility_template_version_service.py": ["*"],
     "backend/src/api/auth.py": ["authentication-and-session"],
     "backend/src/services/portal_session_service.py": ["authentication-and-session"],
     "backend/src/services/ocr_quality_service.py": ["page-read-results-and-response-ownership"],
