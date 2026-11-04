@@ -61,10 +61,30 @@ def read_http(url, token=None, *, accept='application/json', blob_redirect=False
         response = error
     with response:
         if blob_redirect and response.status in (301, 302, 303, 307, 308):
-            target = urllib.parse.urlsplit(response.headers.get('Location', ''))
-            require(target.scheme == 'https' and target.hostname == 'storage.googleapis.com'
-                    and target.port in (None, 443) and not target.username and not target.password
-                    and target.path.startswith('/') and not target.fragment, 'registry-blob-redirect-target-rejected')
+            location = response.headers.get('Location', '')
+            try:
+                target = urllib.parse.urlsplit(location)
+                relative = not target.scheme and not target.netloc and target.path.startswith('/')
+                registry_download = False
+                if relative:
+                    download_path = ('/artifacts-downloads/namespaces/' + re.escape(PROJECT)
+                                     + r'/repositories/backend/downloads/[A-Za-z0-9._~-]+')
+                    require(location == target.path and re.fullmatch(download_path, target.path) is not None,
+                            'registry-blob-redirect-target-rejected')
+                    source = urllib.parse.urlsplit(url)
+                    require(source.scheme == 'https' and source.hostname == REGISTRY
+                            and source.port in (None, 443) and not source.username and not source.password
+                            and not source.query and not source.fragment
+                            and source.path.startswith('/v2/' + PROJECT + '/backend/'),
+                            'registry-blob-redirect-target-rejected')
+                    target = urllib.parse.urlsplit(urllib.parse.urljoin(url, location))
+                    registry_download = target.hostname == REGISTRY and target.path == location and not target.query
+                require(target.scheme == 'https' and (target.hostname == 'storage.googleapis.com' or registry_download)
+                        and target.port in (None, 443) and not target.username and not target.password
+                        and target.path.startswith('/') and not target.fragment,
+                        'registry-blob-redirect-target-rejected')
+            except (TypeError, ValueError):
+                raise StagingConfigBlocked('staging-db-registry-blob-redirect-target-rejected') from None
             return read_http(target.geturl(), accept=accept, timeout=timeout)  # Never forward registry Authorization.
         body = response.read(2_000_001)
         require(len(body) <= 2_000_000, 'response-size-unexpected')
