@@ -27,7 +27,9 @@ COPY tmp ./tmp
 COPY pyproject.toml .
 
 # Compile immutable application sources at build time, not on each cold start.
-RUN python -m compileall -q src migrations ocr_pipeline
+RUN python -c 'from src.maintenance.formal_migration_schema import formal_revision_chain; from src.maintenance.prepared_migration_source import write; write(formal_revision_chain()[-1])' \
+    && python -m compileall -q src migrations ocr_pipeline
+ENV SAWA_PREPARED_RUNTIME=1
 
 # Trust Cloud Run's reverse proxy headers so request.url matches the public HTTPS URL.
 # This is required for verifying Cloud Scheduler OIDC tokens whose audience is the target URL.
