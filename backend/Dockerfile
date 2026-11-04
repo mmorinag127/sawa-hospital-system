@@ -33,4 +33,4 @@ ENV SAWA_PREPARED_RUNTIME=1
 
 # Trust Cloud Run's reverse proxy headers so request.url matches the public HTTPS URL.
 # This is required for verifying Cloud Scheduler OIDC tokens whose audience is the target URL.
-CMD ["uvicorn", "src.http_entrypoint:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips", "*"]
+CMD ["uvicorn", "src.http_entrypoint:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips", "*", "--ws", "none"]

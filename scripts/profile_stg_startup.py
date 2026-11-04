@@ -17,9 +17,9 @@ from local_receipt_signing import canonical, verify_signed
 PROJECT = 'sawahospitalsystem'
 REGION = 'asia-northeast2'
 TARGETS = {
-    'worker-stg': ['src.http_entrypoint:app', '--host', '0.0.0.0', '--port', '8080', '--proxy-headers', '--forwarded-allow-ips', '*'],
-    'price-api-stg': ['src.main:app', '--host', '0.0.0.0', '--port', '8080', '--proxy-headers', '--forwarded-allow-ips', '*'],
-    'shift-api-stg': ['shift_scheduler_backend.main:app', '--host', '0.0.0.0', '--port', '8080'],
+    'worker-stg': ['src.http_entrypoint:app', '--host', '0.0.0.0', '--port', '8080', '--proxy-headers', '--forwarded-allow-ips', '*', '--ws', 'none'],
+    'price-api-stg': ['src.main:app', '--host', '0.0.0.0', '--port', '8080', '--proxy-headers', '--forwarded-allow-ips', '*', '--ws', 'none'],
+    'shift-api-stg': ['shift_scheduler_backend.main:app', '--host', '0.0.0.0', '--port', '8080', '--ws', 'none'],
 }
 
 def cli(*args, data=False):
