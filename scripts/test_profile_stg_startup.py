@@ -46,11 +46,16 @@ class StartupProfileTests(unittest.TestCase):
         with self.assertRaises(ValueError): probe.image_and_revision(original)
 
     def test_no_split_or_tagged_traffic(self):
-        for traffic in ([{'revisionName':'other','percent':100}],
+        for traffic in ([{'revisionName':'','percent':100}],
                         [{'revisionName':'worker-stg-00001-abc','percent':50}],
                         [{'revisionName':'worker-stg-00001-abc','percent':100,'tag':'user'}]):
             original=service();original['status']['traffic']=traffic
             with self.assertRaises(ValueError): probe.image_and_revision(original)
+
+    def test_serving_revision_not_unused_latest_ready_is_authoritative(self):
+        original=service()
+        original['status']['latestReadyRevisionName']='worker-stg-unused-diagnostic'
+        self.assertEqual(probe.image_and_revision(original)[1],'worker-stg-00001-abc')
 
     def test_preserves_image_env_identity_resources_and_original(self):
         for name in probe.TARGETS:
@@ -72,6 +77,34 @@ class StartupProfileTests(unittest.TestCase):
         restored=probe.restored_document(original,current,candidate)
         self.assertEqual(restored['spec']['template'],original['spec']['template'])
         self.assertEqual(restored['spec']['traffic'],[{'revisionName':'worker-stg-00001-abc','percent':100}])
+
+    def test_omitted_template_name_is_not_added_during_restore(self):
+        original=service(); original['spec']['template']['metadata'].pop('name')
+        candidate=probe.probe_document(original,'worker-stg','123-1')
+        restored=probe.restored_document(original,candidate,candidate)
+        self.assertNotIn('name',restored['spec']['template']['metadata'])
+
+    def test_latest_policy_accepts_only_equivalent_normal_launch(self):
+        original=service();original['spec']['template']['metadata'].pop('name')
+        original['status']['_profile_active_launch']={'command':None,'args':None}
+        final=deepcopy(original)
+        final['status'].update(latestReadyRevisionName='worker-stg-restored-normal',traffic=[{'revisionName':'worker-stg-restored-normal','percent':100}])
+        self.assertTrue(probe.restoration_matches(original,final))
+        final['status']['_profile_active_launch']={'command':['/bin/sh'],'args':['profile']}
+        self.assertFalse(probe.restoration_matches(original,final))
+
+    def test_reviewed_extra_name_recovery_requires_both_full_spec_hashes(self):
+        original=service();original['spec']['template']['metadata'].pop('name')
+        current=deepcopy(original);current['spec']['template']['metadata']['name']='worker-stg-00001-abc'
+        expected={'image':probe.image_and_revision(original)[0],'revision':'worker-stg-00001-abc',
+                  'spec_sha256':probe.spec_hash(original),'recover_from_sha256':probe.spec_hash(current)}
+        with patch.object(probe,'replace') as replace,patch.object(probe,'describe',return_value=original):
+            self.assertEqual(probe.recover_reviewed_name(current,expected,'unused'),original)
+            self.assertNotIn('name',replace.call_args.args[0]['spec']['template']['metadata'])
+        current['spec']['template']['spec']['containers'][0]['env'][0]['value']='new-owner-value'
+        with patch.object(probe,'replace') as replace,self.assertRaises(ValueError):
+            probe.recover_reviewed_name(current,expected,'unused')
+        replace.assert_not_called()
 
     def test_unrelated_writer_cannot_be_overwritten(self):
         original=service();candidate=probe.probe_document(original,'worker-stg','123-1')
@@ -131,17 +164,17 @@ class StartupProfileTests(unittest.TestCase):
             doc=deepcopy(doc);name=doc['metadata']['name'];rev=doc['spec']['template']['metadata']['name']
             doc['status']={'latestReadyRevisionName':rev,'traffic':[{'revisionName':before[name]['status']['latestReadyRevisionName'],'percent':100}]}
             states[name]=doc
-        logs=[{'textPayload':'Application startup complete.'},{'textPayload':'startup_container_entry epoch=1'}, {'textPayload':'import time: 100 | 100 | sys'}]
         capture=io.StringIO()
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ,{'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1'}), \
              patch.object(probe,'describe',side_effect=lambda name:deepcopy(states[name])), patch.object(probe,'replace',side_effect=replace), \
-             patch.object(probe,'cli',return_value=logs),contextlib.redirect_stdout(capture):
+             patch.object(probe,'cli') as cli,contextlib.redirect_stdout(capture):
             output=Path(directory)/'public'
             probe.profile(expected,output)
             for name in states:
                 self.assertEqual(probe.spec_hash(states[name]),probe.spec_hash(before[name]))
                 self.assertTrue(json.loads((output/(name+'-status.json')).read_text())['restored'])
             self.assertEqual(list((Path(directory)/'startup-profile-private').iterdir()),[])
+            cli.assert_not_called()
         self.assertNotIn('must-not-print',capture.getvalue())
 
 if __name__=='__main__': unittest.main()

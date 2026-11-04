@@ -10,7 +10,6 @@ import re
 import shlex
 import subprocess
 import tempfile
-import time
 
 from local_receipt_signing import canonical, verify_signed
 
@@ -33,9 +32,12 @@ def describe(service):
     if service not in TARGETS:
         raise ValueError('only the three staging API services are allowed')
     result = cli('run','services','describe',service,'--project',PROJECT,'--region',REGION,'--format=json',data=True)
-    revision = result['status']['latestReadyRevisionName']
+    traffic=result['status']['traffic']
+    revision = traffic[0]['revisionName'] if len(traffic)==1 and traffic[0].get('percent')==100 else result['status']['latestReadyRevisionName']
     resolved = cli('run','revisions','describe',revision,'--project',PROJECT,'--region',REGION,'--format=json',data=True)
     result['status']['_profile_image_digest'] = resolved['status']['imageDigest']
+    active_container=resolved['spec']['containers'][0]
+    result['status']['_profile_active_launch']={key:active_container.get(key) for key in ('command','args')}
     return result
 
 def image_and_revision(service):
@@ -45,10 +47,10 @@ def image_and_revision(service):
     image = service['status'].get('_profile_image_digest',containers[0]['image'])
     if not re.fullmatch(r'asia-northeast2-docker.pkg.dev/sawahospitalsystem/[\w/-]+@sha256:[a-f0-9]{64}',image):
         raise ValueError('an immutable existing project image is required')
-    revision = service['status']['latestReadyRevisionName']
     traffic = service['status']['traffic']
-    if len(traffic)!=1 or traffic[0].get('revisionName')!=revision or traffic[0].get('percent')!=100 or traffic[0].get('tag'):
+    if len(traffic)!=1 or not traffic[0].get('revisionName') or traffic[0].get('percent')!=100 or traffic[0].get('tag'):
         raise ValueError('the existing service must have one untagged 100% revision')
+    revision=traffic[0]['revisionName']
     return image, revision
 
 def spec_hash(service):
@@ -93,9 +95,8 @@ def restored_document(original, current, probe):
     result = deepcopy(current)
     result.pop('status',None)
     result['spec'] = deepcopy(original['spec'])
-    result['spec']['template'].setdefault('metadata',{})['name'] = original['status']['latestReadyRevisionName']
     # Keep the original concrete traffic while re-selecting its existing template.
-    result['spec']['traffic'] = [{'revisionName':original['status']['latestReadyRevisionName'],'percent':100}]
+    result['spec']['traffic'] = [{'revisionName':image_and_revision(original)[1],'percent':100}]
     return result
 
 def require_actions(receipt, expected):
@@ -121,18 +122,50 @@ def restore(original, probe, directory):
     if spec_hash(current)==spec_hash(original):
         return
     restored = restored_document(original,current,probe)
-    revision = original['status']['latestReadyRevisionName']
     replace(restored,directory)
     current = describe(name)
-    if current['status']['latestReadyRevisionName']!=revision:
-        raise RuntimeError('original revision was not re-selected')
     if current['spec']['traffic'] != original['spec'].get('traffic'):
         current.pop('status',None)
         current['spec']['traffic'] = deepcopy(original['spec']['traffic'])
         replace(current,directory)
     final = describe(name)
-    if spec_hash(final)!=spec_hash(original) or image_and_revision(final)!=image_and_revision(original):
+    if not restoration_matches(original,final):
         raise RuntimeError('original staging settings were not restored exactly')
+
+def restoration_matches(original, final):
+    if spec_hash(final)!=spec_hash(original):
+        return False
+    old_image,old_revision=image_and_revision(original)
+    image,revision=image_and_revision(final)
+    if image!=old_image:
+        return False
+    if final['status'].get('_profile_active_launch')!=original['status'].get('_profile_active_launch'):
+        return False
+    policy=original['spec'].get('traffic',[])
+    if len(policy)==1 and policy[0].get('latestRevision') is True and policy[0].get('percent')==100:
+        # Restoring an originally unnamed template can create an equivalent revision.
+        # The original latest-revision policy is restored, never a profiling command.
+        return revision==final['status']['latestReadyRevisionName']
+    return revision==old_revision
+
+def recover_reviewed_name(original, expected, directory):
+    if spec_hash(original)==expected['spec_sha256']:
+        return original
+    if expected.get('recover_from_sha256')!=spec_hash(original):
+        raise ValueError('current service differs from reviewed inventory')
+    recovered=deepcopy(original)
+    metadata=recovered['spec']['template']['metadata']
+    if metadata.get('name')!=expected['revision']:
+        raise ValueError('only the reviewed extra original template name can be recovered')
+    metadata.pop('name')
+    if spec_hash(recovered)!=expected['spec_sha256']:
+        raise ValueError('template-name recovery does not match the complete original spec hash')
+    recovered.pop('status',None)
+    replace(recovered,directory)
+    result=describe(original['metadata']['name'])
+    if spec_hash(result)!=expected['spec_sha256'] or image_and_revision(result)!=(expected['image'],expected['revision']):
+        raise RuntimeError('reviewed original template recovery failed')
+    return result
 
 def restore_saved(private):
     for path in sorted(private.glob('*.json')):
@@ -159,8 +192,10 @@ def profile(expected, output):
     private.mkdir(mode=0o700,exist_ok=True)
     for name in TARGETS:
         original = describe(name)
+        with tempfile.TemporaryDirectory(prefix='sawa-private-recover-') as directory:
+            original=recover_reviewed_name(original,expected[name],directory)
         image, revision = image_and_revision(original)
-        if expected[name] != {'image':image,'revision':revision,'spec_sha256':spec_hash(original)}:
+        if any(expected[name][key]!=value for key,value in {'image':image,'revision':revision,'spec_sha256':spec_hash(original)}.items()):
             raise ValueError('current service differs from reviewed inventory')
         probe = probe_document(original,name,suffix)
         candidate = probe['spec']['template']['metadata']['name']
@@ -172,23 +207,17 @@ def profile(expected, output):
             with tempfile.TemporaryDirectory(prefix='sawa-private-profile-') as directory:
                 try:
                     replace(probe,directory)
-                    query = ('resource.type="cloud_run_revision" AND resource.labels.revision_name="'+candidate+'" AND '
-                             '(textPayload:"import time:" OR textPayload:"startup_container_entry" OR textPayload:"startup" '
-                             'OR textPayload:"Started server" OR textPayload:"Starting new instance" OR textPayload:"Uvicorn running")')
-                    for attempt in range(3):
-                        logs = cli('logging','read',query,'--project',PROJECT,'--limit','10000','--order=asc',
-                                   '--format=json(timestamp,textPayload,labels.instanceId)',data=True)
-                        if (any('Application startup complete.' in r.get('textPayload','') for r in logs)
-                                and any('startup_container_entry' in r.get('textPayload','') for r in logs)
-                                and any(re.search(r'import time:\s+\d+\s*\|',r.get('textPayload','')) for r in logs)):
-                            break
-                        time.sleep(5)
-                    else:
-                        raise RuntimeError('complete startup logs did not arrive')
-                    (output/(name+'-profile.json')).write_text(json.dumps(logs,indent=2))
+                    deployed=describe(name)
+                    active=deployed['status']['traffic']
+                    if (deployed['status']['latestReadyRevisionName']!=candidate
+                            or deployed['spec']['template']['spec']['containers'][0]['image']!=image
+                            or len(active)!=1 or active[0].get('revisionName')!=revision or active[0].get('percent')!=100):
+                        raise RuntimeError('diagnostic revision is not ready')
+                    record.update(profile_ready=True,logs_retrieval='separate authorized read-only account')
                 finally:
                     restore(original,probe,directory)
                     record['restored'] = True
+                    record['restored_serving_revision']=image_and_revision(describe(name))[1]
                     private_path.unlink()
         finally:
             (output/(name+'-status.json')).write_text(json.dumps(record,indent=2))
