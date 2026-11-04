@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import urllib.request
 
 from local_receipt_signing import canonical, verify_signed
 
@@ -76,7 +77,8 @@ def probe_document(original, name, suffix):
     command = 'printf "startup_container_entry epoch=%s\\n" "$(date +%s.%N)" >&2; exec python -X importtime -m uvicorn '+shlex.join(TARGETS[name])
     container['args'] = ['-c',command]
     # The diagnostic revision never receives the user's traffic.
-    result['spec']['traffic'] = [{'revisionName':revision,'percent':100}]
+    result['spec']['traffic'] = [{'revisionName':revision,'percent':100},
+                               {'revisionName':template['metadata']['name'],'percent':0,'tag':'startup-profile'}]
     return result
 
 def replace(document, directory):
@@ -208,11 +210,22 @@ def profile(expected, output):
                 try:
                     replace(probe,directory)
                     deployed=describe(name)
-                    active=deployed['status']['traffic']
+                    active=[t for t in deployed['status']['traffic'] if t.get('percent',0)>0]
+                    tagged=[t for t in deployed['status']['traffic'] if t.get('tag')=='startup-profile' and t.get('revisionName')==candidate]
                     if (deployed['status']['latestReadyRevisionName']!=candidate
                             or deployed['spec']['template']['spec']['containers'][0]['image']!=image
                             or len(active)!=1 or active[0].get('revisionName')!=revision or active[0].get('percent')!=100):
                         raise RuntimeError('diagnostic revision is not ready')
+                    if len(tagged)!=1 or not tagged[0].get('url','').startswith('https://startup-profile---'+name+'-'):
+                        raise RuntimeError('bounded diagnostic URL is missing')
+                    path='/portal' if name=='worker-stg' else '/health'
+                    # A tag activates only this revision; ordinary 100% traffic stays unchanged.
+                    # Any HTTP response proves the process started. Do not invoke business writes.
+                    try:
+                        with urllib.request.urlopen(tagged[0]['url']+path,timeout=90) as response:
+                            record['probe_http_status']=response.status
+                    except urllib.error.HTTPError as error:
+                        record['probe_http_status']=error.code
                     record.update(profile_ready=True,logs_retrieval='separate authorized read-only account')
                 finally:
                     restore(original,probe,directory)
