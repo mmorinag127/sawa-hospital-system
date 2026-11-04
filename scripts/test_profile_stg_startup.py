@@ -63,7 +63,8 @@ class StartupProfileTests(unittest.TestCase):
             doc=probe.probe_document(original,name,'123-1')
             self.assertEqual(original,before)
             self.assertNotIn('status',doc)
-            self.assertEqual(doc['spec']['traffic'],[{'revisionName':name+'-00001-abc','percent':100}])
+            self.assertEqual(doc['spec']['traffic'],[{'revisionName':name+'-00001-abc','percent':100},
+                {'revisionName':name+'-profile-123-1','percent':0,'tag':'startup-profile'}])
             container=doc['spec']['template']['spec']['containers'][0]
             previous=original['spec']['template']['spec']['containers'][0]
             for key in ('image','env','resources'): self.assertEqual(container[key],previous[key])
@@ -163,11 +164,15 @@ class StartupProfileTests(unittest.TestCase):
         def replace(doc,_):
             doc=deepcopy(doc);name=doc['metadata']['name'];rev=doc['spec']['template']['metadata']['name']
             doc['status']={'latestReadyRevisionName':rev,'traffic':[{'revisionName':before[name]['status']['latestReadyRevisionName'],'percent':100}]}
+            if '-profile-' in rev:
+                doc['status']['traffic'].append({'revisionName':rev,'percent':0,'tag':'startup-profile',
+                    'url':'https://startup-profile---'+name+'-example.a.run.app'})
             states[name]=doc
         capture=io.StringIO()
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ,{'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1'}), \
              patch.object(probe,'describe',side_effect=lambda name:deepcopy(states[name])), patch.object(probe,'replace',side_effect=replace), \
-             patch.object(probe,'cli') as cli,contextlib.redirect_stdout(capture):
+             patch.object(probe,'cli') as cli,patch.object(probe.urllib.request,'urlopen') as request,contextlib.redirect_stdout(capture):
+            request.return_value.__enter__.return_value.status=200
             output=Path(directory)/'public'
             probe.profile(expected,output)
             for name in states:
