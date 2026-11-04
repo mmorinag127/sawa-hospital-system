@@ -181,21 +181,34 @@ def load_service_db_config(project, region, service, *, expected_revision=None):
     active = traffic[0].get('revisionName', '')
     intended = status.get('latestCreatedRevisionName', '')
     require(active.startswith(service + '-') and intended.startswith(service + '-'), 'revision-unresolved')
-    require(intended == status.get('latestReadyRevisionName'), 'intended-revision-not-ready')
+    retired_intended = intended != status.get('latestReadyRevisionName')
     require(expected_revision is None or active == expected_revision, 'API-source-revision-changed')
     template = data.get('spec', {}).get('template', {})
     access = _access_token()
     configs = {}
+    digests = {}
     for name in dict.fromkeys((intended, active)):
         revision = describe('revisions', name)
         require(revision.get('metadata', {}).get('name') == name, 'revision-descriptor-mismatch')
         require(any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in revision.get('status', {}).get('conditions', [])), 'revision-not-ready')
-        image = image_config(revision_image_digest(revision, service),
+        if name == intended and retired_intended:
+            conditions = revision.get('status', {}).get('conditions', [])
+            require(intended != active
+                    and any(c.get('type') == 'Ready' and c.get('status') == 'True'
+                            and c.get('reason') == 'Retired' for c in conditions)
+                    and any(c.get('type') == 'Active' and c.get('status') == 'False'
+                            and c.get('reason') == 'Retired' for c in conditions),
+                    'intended-revision-not-ready')
+        digests[name] = revision_image_digest(revision, service)
+        image = image_config(digests[name],
                              'frontend' if service == 'web-stg' else 'backend', access)
         configs[name] = resolve_runtime(revision, image, service)
         if name == intended:
             require(_entries(template, service) == _entries(revision, service), 'intended-revision-env-mismatch')
             require(resolve_runtime(template, image, service) == configs[name], 'intended-runtime-mismatch')
+    if retired_intended:
+        require(digests[intended] == digests[active]
+                and configs[intended] == configs[active], 'retired-intended-runtime-mismatch')
     return configs[active]
 
 

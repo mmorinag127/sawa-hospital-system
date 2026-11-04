@@ -116,6 +116,42 @@ def test_actual_shape_resolves_both_active_and_intended_without_new_env(cloud_ca
         assert 'private-password' not in repr(config)
 
 
+@pytest.mark.parametrize('service', ['web-stg', 'worker-stg'])
+@pytest.mark.parametrize('case', ['retired', 'not-ready', 'not-retired', 'active', 'image', 'database'])
+def test_retired_intended_revision_requires_ready_and_identical_runtime(cloud_case, service, case):
+    documents, images, _, _ = cloud_case
+    data = documents['services', service]
+    active = service + '-r1'
+    intended = service + '-r2'
+    data['status']['latestCreatedRevisionName'] = intended
+    data['status']['latestReadyRevisionName'] = service + '-profile'
+    revision = deepcopy(documents['revisions', active])
+    revision['metadata']['name'] = intended
+    revision['status']['conditions'] = [
+        {'type': 'Ready', 'status': 'True', 'reason': 'Retired'},
+        {'type': 'Active', 'status': 'False', 'reason': 'Retired'},
+    ]
+    documents['revisions', intended] = revision
+    if case == 'not-ready':
+        revision['status']['conditions'][0]['status'] = 'False'
+    elif case == 'not-retired':
+        revision['status']['conditions'][0].pop('reason')
+    elif case == 'active':
+        data['status']['traffic'][0]['revisionName'] = intended
+    elif case == 'image':
+        digest = revision['status']['imageDigest'][:-64] + 'b' * 64
+        images[digest] = {'Env': []}
+        revision['status']['imageDigest'] = digest
+    elif case == 'database':
+        env_set(revision, 'DB_NAME', 'different-database')
+        env_set(data['spec']['template'], 'DB_NAME', 'different-database')
+    if case == 'retired':
+        assert load(service).db_name == 'orders'
+    else:
+        with pytest.raises(gate.StagingConfigBlocked):
+            load(service)
+
+
 @pytest.mark.parametrize('attachment',[gate.INSTANCE,gate.INSTANCE+',sawahospitalsystem:asia-northeast2:school-lunch-stg'])
 def test_staging_agent_sidecar_keeps_ingress_as_database_source(cloud_case,attachment):
     documents, _, _, _ = cloud_case
