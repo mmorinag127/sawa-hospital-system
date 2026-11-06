@@ -29,7 +29,7 @@ test("monthly menu page renders entries as a sheet-style grid", async ({ page })
       return;
     }
 
-    if (path.endsWith("/monthly-menus/2026-03/uploads") && method === "GET") {
+    if (method === "GET" && (path.endsWith("/monthly-menus/2026-03/uploads") || path.endsWith("/monthly-menus/2026-03/imports"))) {
       await route.fulfill({ status: 200, json: { items: [], next_before_id: null } });
       return;
     }
@@ -165,7 +165,7 @@ test("monthly menu detail selects same-name item by daypart and uses daypart dro
       await route.fulfill({ status: 200, json: { facilities: [], tags: [] } });
       return;
     }
-    if (path.endsWith("/monthly-menus/2026-06/uploads") && method === "GET") {
+    if (method === "GET" && (path.endsWith("/monthly-menus/2026-06/uploads") || path.endsWith("/monthly-menus/2026-06/imports"))) {
       await route.fulfill({ status: 200, json: { items: [], next_before_id: null } });
       return;
     }
@@ -269,7 +269,7 @@ test("monthly menu editor sends the selected item's EditForm values as the item 
     const method = route.request().method().toUpperCase();
     if (path.endsWith("/auth/me")) return route.fulfill({ status: 200, json: { role: "admin" } });
     if (path.endsWith("/monthly-menus/scope-options")) return route.fulfill({ status: 200, json: { facilities: [], tags: [] } });
-    if (path.endsWith("/monthly-menus/2026-07/uploads")) return route.fulfill({ status: 200, json: { items: [], next_before_id: null } });
+    if (method === "GET" && (path.endsWith("/monthly-menus/2026-07/uploads") || path.endsWith("/monthly-menus/2026-07/imports"))) return route.fulfill({ status: 200, json: { items: [], next_before_id: null } });
     if (path.endsWith("/monthly-menus/2026-07/items/MMI1") && method === "PUT") {
       savedPayload = JSON.parse(route.request().postData() || "{}");
       expect(route.request().headers()["if-match"]).toBe("item-read-1");
@@ -329,7 +329,7 @@ test("monthly menu page can create a facility exception from the selected entry"
       return;
     }
 
-    if (path.endsWith("/monthly-menus/2026-03/uploads") && method === "GET") {
+    if (method === "GET" && (path.endsWith("/monthly-menus/2026-03/uploads") || path.endsWith("/monthly-menus/2026-03/imports"))) {
       await route.fulfill({ status: 200, json: { items: [], next_before_id: null } });
       return;
     }
@@ -511,7 +511,7 @@ test("monthly menu saved upload requires explicit master review and apply", asyn
       return;
     }
 
-    if (path.endsWith("/monthly-menus/2026-03/uploads") && method === "GET") {
+    if (method === "GET" && (path.endsWith("/monthly-menus/2026-03/uploads") || path.endsWith("/monthly-menus/2026-03/imports"))) {
       await route.fulfill({ status: 200, json: { items: [], next_before_id: null } });
       return;
     }
@@ -860,7 +860,7 @@ test("monthly menu page can update masters, apply month-only overrides, and refl
       return;
     }
 
-    if (path.endsWith("/monthly-menus/2026-03/uploads") && method === "GET") {
+    if (method === "GET" && (path.endsWith("/monthly-menus/2026-03/uploads") || path.endsWith("/monthly-menus/2026-03/imports"))) {
       await route.fulfill({ status: 200, json: { items: [], next_before_id: null } });
       return;
     }

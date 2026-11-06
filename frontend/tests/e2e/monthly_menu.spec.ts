@@ -41,7 +41,7 @@ test("monthly menu index redirects to the latest registered month", async ({ pag
       return;
     }
 
-    if (path.endsWith("/monthly-menus/2026-03/uploads") && method === "GET") {
+    if (method === "GET" && (path.endsWith("/monthly-menus/2026-03/uploads") || path.endsWith("/monthly-menus/2026-03/imports"))) {
       await route.fulfill({ status: 200, json: { items: [], next_before_id: null } });
       return;
     }
@@ -103,7 +103,7 @@ test("monthly menu page renders entries in a sheet-style grid", async ({ page })
       return;
     }
 
-    if (path.endsWith("/monthly-menus/2026-03/uploads") && method === "GET") {
+    if (method === "GET" && (path.endsWith("/monthly-menus/2026-03/uploads") || path.endsWith("/monthly-menus/2026-03/imports"))) {
       await route.fulfill({ status: 200, json: { items: [], next_before_id: null } });
       return;
     }
