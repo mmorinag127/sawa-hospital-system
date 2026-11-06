@@ -95,6 +95,9 @@ def test_sidecar_preserves_existing_identity_secret_refs_and_other_settings():
     config={'operator_account':'existing@example.com','gemini_model':'gemini-test','input_usd_per_million':'1','output_usd_per_million':'2','max_output_tokens':'8192'}
     school={'spec':{'template':{'metadata':{'annotations':{'run.googleapis.com/cloudsql-instances':'sawahospitalsystem:asia-northeast2:school-lunch-stg'}},'spec':{'containers':[{'env':[{'name':'DATABASE_URL','valueFrom':{'secretKeyRef':{'name':'school-lunch-stg-database-url','key':'latest'}}}]}]}}}}
     school_settings = school['spec']['template']['spec']['containers'][0]['env']
+    web['metadata']['name'] = 'web-stg'
+    worker['metadata'] = {'name': 'worker-stg'}
+    values[0] = {'name': 'DB_HOST', 'value': '/cloudsql/sawahospitalsystem:asia-northeast2:orders-stg'}
     with pytest.raises(RuntimeError, match='process model'):
         sidecar.configure(web,worker,config,'registry/web@sha256:abc','registry/agent@sha256:def','test-token',school=school)
     school_settings.extend([{'name':'PROCESS_GEMINI_MODEL','value':'school-source-model'},

@@ -85,11 +85,12 @@ function assertOidcContract(workflow, expected) {
   const actual = oidcSteps(yaml.load(workflow));
   assert.deepEqual(actual.map(step => `${step.jobName}:${step.id}`).sort(), expected.map(step => `${step.jobName}:${step.id}`).sort());
   for (const step of actual) {
+    const contract = expected.find(item => item.jobName === step.jobName && item.id === step.id);
     assert.equal(step.with.token_format, "id_token");
-    assert.equal(step.with.id_token_audience, "${{ env.GOOGLE_OAUTH_CLIENT_ID }}");
-    assert.equal(step.with.id_token_include_email, true);
-    assert.equal(step.with.workload_identity_provider, expected.find(item => item.id === step.id).provider);
-    assert.equal(step.with.service_account, expected.find(item => item.id === step.id).serviceAccount);
+    assert.equal(step.with.id_token_audience, contract.audience ?? "${{ env.GOOGLE_OAUTH_CLIENT_ID }}");
+    assert.equal(step.with.id_token_include_email, contract.healthOnly ? undefined : true);
+    assert.equal(step.with.workload_identity_provider, contract.provider);
+    assert.equal(step.with.service_account, contract.serviceAccount);
   }
 }
 
@@ -144,6 +145,7 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.match(prodWorkflow, /--deploy-verification-token "\$DEPLOY_ID_TOKEN"/);
   assert.equal((prodWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 3);
   assertOidcContract(stgWorkflow, [
+    { jobName: "rehearse-retained-worker", id: "auth", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}", audience: "${{ env.WORKER_URL }}", healthOnly: true },
     { jobName: "deploy-backend", id: "auth-backend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
     { jobName: "deploy-frontend", id: "auth-frontend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
   ]);
