@@ -1,0 +1,25 @@
+{
+  "payload": {
+    "instance": "sawahospitalsystem:asia-northeast2:orders-prod",
+    "database": "orders",
+    "migration_source_sha256": "6c57dc775e2d59aec9d65caf758ae84f7af96c8a92334383e040247a26c3233f",
+    "dump_sha256": "417b0b5917244cbe9fa277dfa55abaaeb137830817c608034e131f0a4e5ca96c",
+    "restore_and_start_seconds": 12.188,
+    "migration_seconds": 58.186,
+    "formal_head_verified": true,
+    "existing_values_preserved": true,
+    "restored_sequences_preserved": true,
+    "source_sequence_snapshot_consistent": false,
+    "production_modified": false,
+    "post_migration_backup": {
+      "verified": true
+    },
+    "pre_migration_restore": {
+      "verified": true
+    },
+    "recovery_rehearsal_seconds": 29.848,
+    "cloud_sql_restore_verified": false,
+    "old_runtime_verified": false
+  },
+  "signature": "MEQCIGL24cXq+sqxBMFhcf4a6y1EjbgmWbrddVzJKUT2grQxAiBgwxmmiIJmk6bry/w56QqtPCb1ZDxJ1C5W2k9JDuAqWg=="
+}

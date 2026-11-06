@@ -16,6 +16,8 @@ from live_schema_adoption_support import owned_postgres, target
 from run_stg_schema_adoption import upgrade_connection
 from hospital_snapshot_fingerprints import fingerprints
 from src import staging_copy_schema as preservation
+from hospital_production_preflight import migration_source_digest
+from local_receipt_signing import sign
 
 
 def sequences(connection):
@@ -42,9 +44,11 @@ def restore_owned(directory, dump):
     return env
 
 
-def run(dump, source_receipt, *, verify_restore=False):
+def run(dump, source_receipt, *, verify_restore=False, signed_evidence=None):
     if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
         raise RuntimeError("local rehearsal only")
+    if signed_evidence is not None and not verify_restore:
+        raise RuntimeError("signed restore evidence requires actual restore verification")
     dump = dump.resolve(strict=True)
     source_receipt = json.loads(source_receipt.read_text())
     if (source_receipt.get('instance') != 'sawahospitalsystem:asia-northeast2:orders-prod'
@@ -89,6 +93,8 @@ def run(dump, source_receipt, *, verify_restore=False):
                     "--file=" + str(migrated_dump), "postgres",
                 ], env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
         receipt = {
+            "instance": source_receipt["instance"], "database": source_receipt["database"],
+            "migration_source_sha256": migration_source_digest(ROOT),
             "dump_sha256": digest,
             "source_sha": subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
@@ -124,6 +130,14 @@ def run(dump, source_receipt, *, verify_restore=False):
         receipt["cloud_sql_restore_verified"] = False
         receipt["old_runtime_verified"] = False
         (directory / "rehearsal.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        if signed_evidence is not None:
+            public = {key: value for key, value in receipt.items()
+                      if key not in {"preserved_tables", "source_sha", "worktree_dirty"}}
+            for key in ("post_migration_backup", "pre_migration_restore"):
+                public[key] = {"verified": receipt[key]["verified"]}
+            signed_evidence.parent.mkdir(parents=True, exist_ok=True)
+            with signed_evidence.open("x") as output:
+                output.write(json.dumps(sign(public), indent=2) + "\n")
     print(str(directory / "rehearsal.json"))
 
 
@@ -133,6 +147,8 @@ if __name__ == "__main__":
     parser.add_argument("--source-receipt", type=Path, required=True)
     parser.add_argument("--verify-restore", action="store_true",
                         help="Also verify migrated backup and original restore in fresh local DBs")
+    parser.add_argument("--signed-evidence", type=Path,
+                        help="Create signed metadata only after both restores succeed; never overwrite")
     args = parser.parse_args()
     os.umask(0o077)
-    run(args.dump, args.source_receipt, verify_restore=args.verify_restore)
+    run(args.dump, args.source_receipt, verify_restore=args.verify_restore, signed_evidence=args.signed_evidence)

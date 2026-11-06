@@ -17,7 +17,7 @@ def cloud(*args):
                             capture_output=True, text=True, check=False)
     if result.returncode:
         raise RuntimeError('production prerequisite unavailable: ' + ' '.join(args[:3]))
-    return json.loads(result.stdout)
+    return json.loads(result.stdout) if result.stdout.strip() else None
 
 
 def validate_agent_config(raw):
@@ -50,6 +50,15 @@ def migration_source_digest(root):
     return digest.hexdigest()
 
 
+def revision_images(revision):
+    containers = revision.get("spec", {}).get("containers", [])
+    status = revision.get("status", {})
+    resolved = {row.get("name"): row.get("imageDigest") for row in status.get("containerStatuses", [])}
+    if len(containers) == 1 and status.get("imageDigest"):
+        return [status["imageDigest"]]
+    return [resolved.get(row.get("name")) or row.get("image", "") for row in containers]
+
+
 def require_rollback_compatibility(service, target):
     root = Path(__file__).resolve().parents[1]
     evidence = verify_signed(json.loads((root /
@@ -74,9 +83,29 @@ def require_rollback_compatibility(service, target):
         raise RuntimeError("rollback runtime result does not match signed evidence: " + service)
 
 
+def require_database_restore_rehearsal():
+    root = Path(__file__).resolve().parents[1]
+    proof = verify_signed(json.loads((root / "docs/release-evidence/database-restore-rehearsal.json").read_text()))
+    if (proof.get("migration_source_sha256") != migration_source_digest(root)
+            or proof.get("instance") != PROJECT + ":" + REGION + ":orders-prod"
+            or proof.get("database") != "orders"
+            or proof.get("production_modified") is not False
+            or not re.fullmatch(r"[a-f0-9]{64}", proof.get("dump_sha256", ""))
+            or any(proof.get(key) is not True for key in (
+                "formal_head_verified", "existing_values_preserved", "restored_sequences_preserved"))
+            or any(proof.get(key, {}).get("verified") is not True
+                   for key in ("post_migration_backup", "pre_migration_restore"))):
+        raise RuntimeError("matching signed local database restore rehearsal required")
+
+
 def run():
     if require_context(os.environ) != 'prod':
         raise RuntimeError('production release required')
+    strategy = os.environ.get("ROLLBACK_STRATEGY", "migrated_database")
+    if strategy not in {"migrated_database", "restore_database"}:
+        raise RuntimeError("explicit supported rollback strategy required")
+    if strategy == "restore_database":
+        require_database_restore_rehearsal()
     agent_config = validate_agent_config(os.environ.get('PROD_AGENT_RUNTIME_CONFIG', ''))
     for prefix in ('AUTOMATION_AUTH_', 'SCHOOL_LUNCH_AUTOMATION_AUTH_'):
         for suffix in ('AUDIENCE', 'EMAIL', 'SUBJECT'):
@@ -106,7 +135,7 @@ def run():
             if len(traffic) != 1 or traffic[0].get('percent') != 100 or not traffic[0].get('revisionName'):
                 raise RuntimeError('single serving rollback revision required: ' + name)
             revision = cloud('run','revisions','describe',traffic[0]['revisionName'],'--region='+REGION)
-            images = [item.get('image','') for item in revision.get('spec',{}).get('containers',[])]
+            images = revision_images(revision)
             if not images:
                 raise RuntimeError('rollback image unresolved: '+name)
             runtime_digest = revision.get('status', {}).get('imageDigest', '')
@@ -121,8 +150,13 @@ def run():
                     or not any(c["type"] == "Ready" and c["status"] == "True"
                                for c in revision["status"]["conditions"])):
                 raise RuntimeError('retained rollback revision not ready: ' + name)
-            rollback[name] = {"revision": traffic[0]["revisionName"], "uid": metadata["uid"], "images": images}
-            require_rollback_compatibility(name, rollback[name])
+            scaling = descriptor.get("metadata", {}).get("annotations", {}).get("run.googleapis.com/scalingMode", "automatic")
+            if strategy == "restore_database" and scaling != "automatic":
+                raise RuntimeError("database restoration requires recorded automatic service scaling")
+            rollback[name] = {"revision": traffic[0]["revisionName"], "uid": metadata["uid"],
+                              "images": images, "scaling": "auto" if scaling == "automatic" else scaling}
+            if strategy == "migrated_database":
+                require_rollback_compatibility(name, rollback[name])
     # Reuse the exact deployment validation without writing a service or token.
     from configure_agent_sidecar import configure
     configure(copy.deepcopy(descriptors['web-prod']), descriptors['worker-prod'],
@@ -138,10 +172,10 @@ def run():
             raise RuntimeError('ready production frontend required: '+name)
     # Production mode validates existing IAM/queues/schedulers only; it never provisions them.
     from hospital_delivery_config import bootstrap
-    bootstrap()
+    bootstrap(allow_paused=True)
     receipt = {"run": os.environ["GITHUB_RUN_ID"], "sha": os.environ["GITHUB_SHA"],
                "ref": os.environ["GITHUB_REF"], "project": PROJECT, "region": REGION,
-               "services": rollback}
+               "services": rollback, "rollback_strategy": strategy}
     (Path(os.environ["RUNNER_TEMP"]) / "hospital-rollback.json").write_text(json.dumps(receipt))
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
         summary.write("\n### Pre-migration rollback targets\n\n")

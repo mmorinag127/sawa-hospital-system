@@ -97,7 +97,7 @@ def ensure_binding(resource, member, role, *, read_only=False):
         raise Blocked("required resource-scoped IAM binding not verified")
 
 
-def bootstrap():
+def bootstrap(*, allow_paused=False):
     environment = require_context()
     read_only = environment == "prod"
     service_target = "worker-" + environment
@@ -161,7 +161,8 @@ def bootstrap():
                    "--max-concurrent-dispatches=2", "--max-dispatches-per-second=1")
         queue_desc = gcloud("tasks", "queues", "describe", queue, f"--location={REGION}")
         require_equal(queue_desc.get("name"), f"projects/{PROJECT}/locations/{REGION}/queues/{queue}", "queue name")
-        require_equal(queue_desc.get("state"), "RUNNING", "queue state")
+        if not (allow_paused and environment == "prod" and queue_desc.get("state") == "PAUSED"):
+            require_equal(queue_desc.get("state"), "RUNNING", "queue state")
         require_equal(queue_desc.get("rateLimits", {}).get("maxConcurrentDispatches"), 2, "queue concurrency")
         require_equal(queue_desc.get("rateLimits", {}).get("maxDispatchesPerSecond"), 1, "queue dispatch rate")
         if queue_desc.get("httpTarget"):
@@ -182,7 +183,8 @@ def bootstrap():
         target = job_desc.get("httpTarget", {})
         for actual, expected, label in (
             (job_desc.get("name"), f"projects/{PROJECT}/locations/{REGION}/jobs/{job}", "job name"),
-            (job_desc.get("state"), "ENABLED", "drain state"),
+            (job_desc.get("state"), "PAUSED" if allow_paused and environment == "prod"
+             and job_desc.get("state") == "PAUSED" else "ENABLED", "drain state"),
             (job_desc.get("schedule"), "*/1 * * * *", "drain schedule"),
             (job_desc.get("timeZone"), "Etc/UTC", "drain timezone"),
             (job_desc.get("attemptDeadline"), "180s", "drain deadline"),
@@ -214,7 +216,7 @@ def main():
     output = Path("hospital-delivery-artifacts")
     output.mkdir(exist_ok=True)
     try:
-        env, evidence = bootstrap()
+        env, evidence = bootstrap(allow_paused=True)
         fragment = ",".join(f"{key}={value}" for key, value in sorted(env.items()))
         (output / "verified-env.txt").write_text(fragment + "\n")
         (output / "verified-descriptors.json").write_text(json.dumps(evidence, indent=2) + "\n")

@@ -33,6 +33,29 @@ on:
       rollback_from:
         description: "Traffic rollback: exact revision currently receiving traffic"
         type: string
+      rollback_mode:
+        description: "Database recovery keeps services disabled after restoring old traffic"
+        type: choice
+        options: [traffic, database]
+        default: traffic
+      rollback_strategy:
+        description: "Normal deployment recovery strategy; restore_database requires signed local restore proof"
+        type: choice
+        options: [migrated_database, restore_database]
+        default: migrated_database
+      database_recovery_confirmation:
+        description: "RESTORE_ORDERS_PROD_DATABASE or, after verification, REOPEN_RESTORED_ORDERS_PROD"
+        type: string
+      recovery_run:
+        description: "Reopening only: completed database recovery run ID"
+        type: string
+      recovery_attempt:
+        description: "Reopening only: completed recovery attempt"
+        type: string
+        default: "1"
+      current_revisions_json:
+        description: "Database recovery: exact current revision map for web-prod, worker-prod, ocr-pipeline-prod"
+        type: string
 
 concurrency:
   group: deploy-prod
@@ -41,6 +64,7 @@ concurrency:
 env:
   SAWA_LOCAL_TEST_PUBLIC_KEY: ${{ vars.SAWA_LOCAL_TEST_PUBLIC_KEY }}
   PRODUCTION_CONFIRMATION: ${{ inputs.production_confirmation }}
+  ROLLBACK_STRATEGY: ${{ inputs.rollback_strategy }}
   PROD_AGENT_RUNTIME_CONFIG: ${{ vars.PROD_AGENT_RUNTIME_CONFIG }}
   NODE_OPTIONS: --use-openssl-ca
   CLOUDSDK_CORE_CUSTOM_CA_CERTS_FILE: /etc/ssl/certs/ca-certificates.crt
@@ -378,11 +402,88 @@ jobs:
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
       - uses: google-github-actions/setup-gcloud@v3
       - name: Restore retained revision traffic only
+        if: inputs.rollback_mode == 'traffic'
         env:
           ORIGINAL_RUN: ${{ inputs.rollback_run }}
           TARGET_SERVICE: ${{ inputs.rollback_service }}
           CURRENT_REVISION: ${{ inputs.rollback_from }}
         run: python3 scripts/restore_hospital_traffic.py
+      - uses: actions/download-artifact@v4
+        if: inputs.rollback_mode == 'database'
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.rollback_run }}
+          name: hospital-db-recovery-point-${{ inputs.rollback_run }}-${{ inputs.rollback_attempt }}
+          path: ${{ runner.temp }}/rollback
+      - uses: astral-sh/setup-uv@v8.1.0
+        if: inputs.rollback_mode == 'database'
+        with:
+          version: '0.13.4'
+      - name: Validate database recovery identity
+        if: inputs.rollback_mode == 'database' && inputs.recovery_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ inputs.recovery_run }}
+          ATTEMPT: ${{ inputs.recovery_attempt }}
+          CONFIRMATION: ${{ inputs.database_recovery_confirmation }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN" =~ ^[1-9][0-9]*$ && "$ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN/attempts/$ATTEMPT" |
+            jq -e --arg sha "$GITHUB_SHA" --arg branch "$GITHUB_REF_NAME" --arg owner "$GITHUB_REPOSITORY_OWNER" --arg confirmation "$CONFIRMATION" '
+              .event == "workflow_dispatch" and .head_sha == $sha and .head_branch == $branch and
+              .actor.login == $owner and .triggering_actor.login == $owner and .status == "completed" and
+              (if $confirmation == "REOPEN_RESTORED_ORDERS_PROD" then .conclusion == "success"
+               else $confirmation == "FINISH_RESTORED_ORDERS_PROD" end) and
+              .path == ".github/workflows/deploy-prod.yml"' >/dev/null
+      - uses: actions/download-artifact@v4
+        if: inputs.rollback_mode == 'database' && inputs.recovery_run != ''
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.recovery_run }}
+          name: hospital-database-recovery-${{ inputs.recovery_run }}-${{ inputs.recovery_attempt }}
+          path: ${{ runner.temp }}/recovery
+      - name: Restore database with ingress disabled
+        if: inputs.rollback_mode == 'database'
+        env:
+          ORIGINAL_RUN: ${{ inputs.rollback_run }}
+          DATABASE_RECOVERY_CONFIRMATION: ${{ inputs.database_recovery_confirmation }}
+          CURRENT_REVISIONS_JSON: ${{ inputs.current_revisions_json }}
+          RECOVERY_RUN: ${{ inputs.recovery_run }}
+        run: |
+          set -euo pipefail
+          if [[ "$DATABASE_RECOVERY_CONFIRMATION" == REOPEN_RESTORED_ORDERS_PROD || "$DATABASE_RECOVERY_CONFIRMATION" == FINISH_RESTORED_ORDERS_PROD ]]; then
+            uv run --project backend --extra dev --frozen python scripts/restore_hospital_database.py
+            exit 0
+          fi
+          curl -fsSL -o "$RUNNER_TEMP/recovery-proxy" \
+            "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v${CLOUD_SQL_PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
+          echo "${CLOUD_SQL_PROXY_SHA256}  $RUNNER_TEMP/recovery-proxy" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/recovery-proxy"
+          "$RUNNER_TEMP/recovery-proxy" --address=127.0.0.1 --port=5432 \
+            "$PROJECT_ID:$REGION:orders-prod" > "$RUNNER_TEMP/recovery-proxy.log" 2>&1 &
+          proxy_pid=$!
+          trap 'kill "$proxy_pid" 2>/dev/null || true; wait "$proxy_pid" 2>/dev/null || true' EXIT
+          proxy_ready=false
+          for attempt in $(seq 1 30); do
+            kill -0 "$proxy_pid" || exit 1
+            if (echo > /dev/tcp/127.0.0.1/5432) 2>/dev/null; then
+              proxy_ready=true
+              break
+            fi
+            sleep 1
+          done
+          [[ "$proxy_ready" == true ]] || { echo 'Recovery proxy not ready' >&2; exit 1; }
+          uv run --project backend --extra dev --frozen python scripts/restore_hospital_database.py
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.rollback_mode == 'database'
+        with:
+          name: hospital-database-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/database-recovery.json
+            ${{ runner.temp }}/reopen-stop-failures.json
+            ${{ runner.temp }}/database-reopen.json
+          if-no-files-found: warn
 
   production-approval:
     needs:
@@ -488,6 +589,14 @@ jobs:
           jq -e --arg description "release-${GITHUB_SHA}-${GITHUB_RUN_ID}" \
             '[.[] | select(.description == $description and .status == "SUCCESSFUL")] | length == 1' \
             "$RUNNER_TEMP/orders-prod-backups.json" >/dev/null
+          jq --arg description "release-${GITHUB_SHA}-${GITHUB_RUN_ID}" \
+            '[.[] | select(.description == $description and .status == "SUCCESSFUL")][0] | {id,instance,description,status}' \
+            "$RUNNER_TEMP/orders-prod-backups.json" > "$RUNNER_TEMP/orders-prod-recovery-point.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hospital-db-recovery-point-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/orders-prod-recovery-point.json
+          if-no-files-found: error
       - id: cloudsql
         name: Resolve prod Cloud SQL instance
         run: |
@@ -666,6 +775,7 @@ jobs:
   deploy-frontend:
     needs:
       - source-gate
+      - build-backend
       - build-frontend
       - build-agent
       - deploy-backend
@@ -722,6 +832,19 @@ jobs:
           GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" \
           ENSURE_GCLOUD_AUTH=true \
           ./scripts/deploy_web_with_checks.sh
+      - name: Activate prepared delivery after application verification
+        env:
+          PRODUCTION_AGENT_IMAGE: ${{ needs.build-agent.outputs.image }}
+          PRODUCTION_FRONTEND_IMAGE: ${{ needs.build-frontend.outputs.image }}
+          PRODUCTION_BACKEND_IMAGE: ${{ needs.build-backend.outputs.image }}
+          PRODUCTION_PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
+        run: uv run --project backend --extra dev --frozen python scripts/activate_hospital_delivery.py
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: hospital-delivery-activation-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hospital-activation-failure.json
+          if-no-files-found: ignore
 
   build-agent:
     needs: [source-gate, build-backend]
