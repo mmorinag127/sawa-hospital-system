@@ -34,6 +34,7 @@ async function setup(page: Page) {
     if (path.endsWith("/monthly-menus/2026-10")) return route.fulfill({ json: snapshot });
     if (path.endsWith("/imports/saved-import-A")) return route.fulfill({ json: receipt });
     if (path.endsWith("/imports")) return route.fulfill({ json: { items: [receipt], next_before_id: null } });
+    if (path.endsWith("/monthly-menus/2026-10/uploads")) return route.fulfill({ json: { items: [], next_before_id: null } });
     return route.fulfill({ json: { items: [] } });
   });
 }
