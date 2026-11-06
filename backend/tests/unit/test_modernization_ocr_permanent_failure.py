@@ -287,15 +287,18 @@ def test_terminal_output_preserves_actual_validator_contract(owned_poll, monkeyp
 
 
 def queue(f, mode, *, force=False):
-    order = order_service.get_order_by_id(ORDER)
+    order, selected_version = orders._resolve_order_document_version(ORDER, f.receipt["document_id"])
     selected = [version for version in order["versions"]
                 if version["document_id"] == f.receipt["document_id"]]
     assert len(selected) == 1
+    assert selected[0]["detail_state"] == "not_loaded"
+    assert selected_version["id"] == selected[0]["id"]
+    assert selected_version["selected_version_input"]["document_id"] == f.receipt["document_id"]
     with db.session_scope() as session:
         revision = session.get(OrderWorkflowState, ORDER).revision
     queued, error = workflow.mark_ocr_run_queued(
         ORDER, JOB, input_reference=str(f.pdf), request_mode=mode,
-        job_metrics={**orders._document_selection_metrics(selected[0]),
+        job_metrics={**orders._document_selection_metrics(selected_version),
                      "reparse_ocr_prompt": None, "reparse_prompt_preset": None,
                      "reparse_requested_provider": None, "reparse_ocr_model": None,
                      "reparse_llm_assist": mode == "llm_reparse"},

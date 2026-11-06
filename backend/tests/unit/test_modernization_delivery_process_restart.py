@@ -96,11 +96,16 @@ def test_real_delivery_survives_process_exit_reclaims_and_acks_once(owned_failur
     order = order_service.get_order_by_id(ORDER)
     selected = [row for row in order["versions"] if row["document_id"] == f.receipt["document_id"]]
     assert len(selected) == 1 and selected[0]["storage_uri"] == str(f.pdf)
+    from src.services.order_serialization_service import read_order_version
+    assert selected[0]["detail_state"] == "not_loaded"
+    detail = read_order_version(ORDER, selected[0]["id"])
+    assert detail is not None
+    assert detail["selected_version_input"]["document_id"] == f.receipt["document_id"]
     with db.session_scope() as session:
         revision = session.get(OrderWorkflowState, ORDER).revision
     queued, error = workflow.mark_ocr_run_queued(
         ORDER, JOB, input_reference=str(f.pdf), request_mode="ocr_rerun",
-        job_metrics={"selected_version_input": selected[0]["selected_version_input"]},
+        job_metrics={"selected_version_input": detail["selected_version_input"]},
         delivery_selected_document_id=f.receipt["document_id"], expected_revision=revision,
     )
     assert error is None, (error, queued)

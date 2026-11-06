@@ -94,12 +94,18 @@ def test_valid_saved_raw_quantities_and_selected_identity_agree_across_read_surf
     assert detail["template_version_id"] == workflow["template_version_id"] == f.projection_id
     assert detail["document_id"] == "UNIT-DOC"
     assert len(detail["versions"]) == 1
-    assert detail["current_version"] == detail["versions"][0]
+    summary = detail["versions"][0]
+    assert summary["detail_state"] == "not_loaded"
+    assert summary["selected_version_input"] is None
+    assert summary["line_snapshot"] is None
+    assert detail["current_version"] == {key: value for key, value in summary.items()
+        if key not in {"selected_version_input", "line_snapshot", "line_count", "detail_state"}}
+    selected_detail = get_json(client, f"/orders/{f.order_id}/versions/{summary['id']}")
     with f.session_scope() as session:
         version = session.execute(
             select(OrderVersion).where(OrderVersion.order_id == f.order_id),
         ).scalar_one()
-        assert detail["current_version"]["selected_version_input"] == selected_version_snapshot(version)
+        assert selected_detail["selected_version_input"] == selected_version_snapshot(version)
     # No persisted lines exist in this unconfirmed fixture; GET must not
     # manufacture them from the working draft or the newer unselected draft.
     assert before["order_lines"] == []

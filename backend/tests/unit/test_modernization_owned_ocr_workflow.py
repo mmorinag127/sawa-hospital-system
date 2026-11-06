@@ -348,6 +348,7 @@ def test_selected_real_artifacts_stop_after_owned_pdf_document_retirement(owned_
 
 def _queue_and_claim_owned_workflow_attempt(f, *, force=False):
     from src.services import workflow_ocr_delivery_service as delivery
+    from src.services.order_serialization_service import read_order_version
 
     order = order_service.get_order_by_id(ORDER)
     assert order is not None
@@ -356,7 +357,9 @@ def _queue_and_claim_owned_workflow_attempt(f, *, force=False):
         if version["document_id"] == f.receipt["document_id"]
     ]
     assert len(versions) == 1, versions
-    selected = versions[0]
+    assert versions[0]["detail_state"] == "not_loaded"
+    selected = read_order_version(ORDER, versions[0]["id"])
+    assert selected is not None
     input_reference = selected["storage_uri"]
     with db.session_scope() as session:
         revision = session.get(OrderWorkflowState, ORDER).revision
@@ -503,6 +506,7 @@ def _add_owned_version_successor(f):
 def _assert_public_version_snapshots(payload):
     from src.models.order_version import OrderVersion
     from src.services.workflow_attempt_guard_service import selected_version_snapshot
+    from src.services.order_serialization_service import read_order_version
 
     with db.session_scope() as session:
         versions = session.execute(
@@ -514,7 +518,12 @@ def _assert_public_version_snapshots(payload):
         assert {version["id"] for version in payload["versions"]} == set(expected)
         for public in payload["versions"]:
             actual = session.get(OrderVersion, public["id"])
-            snapshot = public["selected_version_input"]
+            assert public["detail_state"] == "not_loaded"
+            assert public["selected_version_input"] is None
+            assert public["line_snapshot"] is None
+            detail = read_order_version(ORDER, public["id"])
+            assert detail is not None
+            snapshot = detail["selected_version_input"]
             assert snapshot == expected[actual.id]
             assert json.loads(json.dumps(snapshot, allow_nan=False)) == snapshot
             assert snapshot["document_id"] == public["document_id"] == actual.document_id
@@ -523,13 +532,15 @@ def _assert_public_version_snapshots(payload):
             assert snapshot["is_current"] is actual.is_current
         current = [version for version in payload["versions"] if version["is_current"]]
         assert len(current) == 1
-        assert payload["current_version"] == current[0]
+        assert payload["current_version"] == {key: value for key, value in current[0].items()
+            if key not in {"selected_version_input", "line_snapshot", "line_count", "detail_state"}}
         assert payload["document_id"] == current[0]["document_id"]
 
 
 def test_public_order_versions_transport_current_and_historical_exact_snapshots(owned_producer):
     """Local API selection helpers only; no HTTP, OCR or live execution proof."""
     from src.api import orders as orders_api
+    from src.services.order_serialization_service import read_order_version
 
     f = owned_producer
     original_receipt = _add_owned_version_successor(f)
@@ -547,9 +558,10 @@ def test_public_order_versions_transport_current_and_historical_exact_snapshots(
         expected_document = f.receipt["document_id"] if document_id is None else document_id
         matches = [v for v in public["versions"] if v["document_id"] == expected_document]
         assert len(matches) == 1
-        assert selected == matches[0]
+        detail = read_order_version(ORDER, matches[0]["id"])
+        assert selected == detail
         metrics = orders_api._document_selection_metrics(selected)
-        assert metrics["selected_version_input"] == matches[0]["selected_version_input"]
+        assert metrics["selected_version_input"] == detail["selected_version_input"]
         assert metrics["selected_document_id"] == expected_document
         assert metrics["selected_document_version"] == matches[0]["version_no"]
         assert metrics["selected_document_is_current"] is matches[0]["is_current"]
@@ -580,13 +592,16 @@ def test_public_order_summary_versions_preserve_exact_snapshots(owned_producer, 
 
 def test_public_version_snapshot_guard_accepts_exact_and_rejects_tampered_without_writes(owned_producer):
     from src.services.workflow_attempt_guard_service import lock_selected_version_input
+    from src.services.order_serialization_service import read_order_version
 
     _add_owned_version_successor(owned_producer)
     public = order_service.get_order_by_id(ORDER)
     _assert_public_version_snapshots(public)
     before = _owned_workflow_database_snapshot()
     for version in public["versions"]:
-        captured = deepcopy(version["selected_version_input"])
+        detail = read_order_version(ORDER, version["id"])
+        assert detail is not None
+        captured = deepcopy(detail["selected_version_input"])
         unchanged = deepcopy(captured)
         tampered = deepcopy(captured)
         tampered["is_current"] = not captured["is_current"]
@@ -615,6 +630,13 @@ def test_http_order_get_preserves_exact_current_and_historical_versions_without_
     client = TestClient(app)
     try:
         response = client.get(f"/orders/{ORDER}")
+        assert response.status_code == 200, response.text
+        from src.services.order_serialization_service import read_order_version
+        for version in response.json()["versions"]:
+            detail = client.get(f"/orders/{ORDER}/versions/{version['id']}")
+            assert detail.status_code == 200, detail.text
+            expected = read_order_version(ORDER, version["id"])
+            assert detail.json()["selected_version_input"] == expected["selected_version_input"]
     finally:
         client.close()
     assert response.status_code == 200, response.text
