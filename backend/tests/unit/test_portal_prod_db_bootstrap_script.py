@@ -11,6 +11,7 @@ sys.path.append(str(ROOT))
 
 from scripts.portal_prod_db_bootstrap import (  # noqa: E402
     _extract_email_from_id_token,
+    _load_service_db_config,
     _verify_live_portal_access,
 )
 from src.services.portal_access_bootstrap_service import PortalAccessBootstrapError  # noqa: E402
@@ -19,6 +20,43 @@ from src.services.portal_access_bootstrap_service import PortalAccessBootstrapEr
 def _token(payload: dict) -> str:
     encoded_payload = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
     return f"header.{encoded_payload.rstrip('=')}.signature"
+
+
+@pytest.mark.parametrize(
+    "host,override,error",
+    [
+        ("/cloudsql/project:region:selected", None, None),
+        ("/cloudsql/project:region:other", None, "does not match"),
+        (None, None, "Explicit Cloud SQL DB_HOST"),
+        ("localhost", None, "Explicit Cloud SQL DB_HOST"),
+        ("/cloudsql/project:region:selected", {"value": "postgresql://other/db"}, "DB_URI override"),
+        ("/cloudsql/project:region:selected", {"valueFrom": {"secretKeyRef": {"name": "uri", "key": "latest"}}}, "DB_URI override"),
+    ],
+)
+def test_service_db_config_requires_explicit_attached_target(monkeypatch, host, override, error):
+    env = [{"name": name, "value": value} for name, value in
+           {"DB_NAME": "orders", "DB_USER": "operator", "DB_PASSWORD": "synthetic"}.items()]
+    if host is not None:
+        env.append({"name": "DB_HOST", "value": host})
+    if override is not None:
+        env.append({"name": "DB_URI", **override})
+    service = {"spec": {"template": {
+        "metadata": {"annotations": {"run.googleapis.com/cloudsql-instances":
+                                     "project:region:first,project:region:selected"}},
+        "spec": {"containers": [{"env": env}]},
+    }}}
+    monkeypatch.setattr("scripts.portal_prod_db_bootstrap._run_gcloud_json", lambda *_args: service)
+    def unexpected_secret(*_args):
+        pytest.fail("Target validation must precede secret access")
+    monkeypatch.setattr("scripts.portal_prod_db_bootstrap._load_secret", unexpected_secret)
+    if error:
+        with pytest.raises(PortalAccessBootstrapError, match=error):
+            _load_service_db_config("project", "region", "worker-prod")
+    else:
+        config = _load_service_db_config("project", "region", "worker-prod")
+        assert config.instance_connection_name == "project:region:selected"
+        assert config.db_name == "orders"
+        assert config.db_user == "operator"
 
 
 def test_extract_email_from_id_token_returns_claim_email():

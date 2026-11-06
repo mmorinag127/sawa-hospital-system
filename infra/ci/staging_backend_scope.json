@@ -3,6 +3,7 @@
   "scope": "staging-core-and-page-repair",
   "always": ["authentication-and-session", "ocr-original-targets-artifacts-and-operator-values"],
   "targets_by_source": {
+    "backend/scripts/portal_prod_db_bootstrap.py": ["backend/tests/unit/test_portal_prod_db_bootstrap_script.py", "backend/tests/contract/test_prod_portal_db_bootstrap_gate.py"],
     "backend/src/services/ocr_quality_service.py": ["backend/tests/integration/test_ocr_quality_service.py", "backend/tests/unit/test_current_ocr_operations.py"],
     "backend/src/services/storage_service.py": ["backend/tests/integration/test_storage_service.py", "backend/tests/unit/test_agent_trial_transport.py", "backend/tests/unit/test_modernization_canonical_ocr_artifacts.py"],
     "backend/src/services/agent_trial_transport.py": ["backend/tests/unit/test_agent_trial_transport.py"],
@@ -16,6 +17,7 @@
     ]
   },
   "sources": {
+    "backend/scripts/portal_prod_db_bootstrap.py": ["authentication-and-session"],
     "backend/Dockerfile": ["*"],
     "backend/src/runtime_startup.py": ["*"],
     "backend/src/maintenance/prepared_migration_source.py": ["*"],
