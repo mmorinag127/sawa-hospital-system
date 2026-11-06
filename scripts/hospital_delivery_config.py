@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hospital_release_context import require_context as release_context
 
 PROJECT = "sawahospitalsystem"
 REGION = "asia-northeast2"
@@ -24,16 +26,19 @@ class Blocked(RuntimeError):
 
 
 def require_context():
+    try:
+        environment = release_context(os.environ)
+    except RuntimeError as exc:
+        raise Blocked(str(exc)) from exc
     expected = {
-        "GITHUB_ACTIONS": "true", "GITHUB_REF": "refs/heads/develop",
-        "GITHUB_REPOSITORY": "mmorinag127/sawa-hospital-system",
-        "PROJECT_ID": PROJECT, "REGION": REGION, "WORKER_SERVICE": SERVICE,
-        "WORKER_URL": URL,
+        "WORKER_SERVICE": "worker-" + environment,
+        "WORKER_URL": f"https://worker-{environment}-avlnzjjrca-dt.a.run.app",
     }
     if any(os.environ.get(key) != value for key, value in expected.items()):
-        raise Blocked("hospital delivery bootstrap requires exact staging Actions context")
+        raise Blocked("hospital delivery bootstrap requires exact release Actions context")
     if os.environ.get("CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT"):
         raise Blocked("credential impersonation override is forbidden")
+    return environment
 
 
 def gcloud(*args):
@@ -78,11 +83,13 @@ def resource_command(*args):
     raise Blocked("supported IAM command verb required")
 
 
-def ensure_binding(resource, member, role):
+def ensure_binding(resource, member, role, *, read_only=False):
     def contains(policy):
         return any(item.get("role") == role and not item.get("condition")
                    and member in item.get("members", []) for item in policy.get("bindings", []))
     if not contains(resource_command(*resource, "get-iam-policy")):
+        if read_only:
+            raise Blocked("production resource IAM must be provisioned before deployment: " + role)
         conditions = () if resource[:2] == ("tasks", "queues") else ("--condition=None",)
         resource_command(*resource, "add-iam-policy-binding", f"--member={member}",
                          f"--role={role}", *conditions)
@@ -91,14 +98,19 @@ def ensure_binding(resource, member, role):
 
 
 def bootstrap():
-    require_context()
+    environment = require_context()
+    read_only = environment == "prod"
+    service_target = "worker-" + environment
+    url = f"https://worker-{environment}-avlnzjjrca-dt.a.run.app"
+    runtime = email("worker-exec-" + environment)
+    deploy_identity = email("sawa-github-deploy-" + environment)
     active = gcloud("auth", "list", "--filter=status:ACTIVE")
-    require_equal([item["account"] for item in active], [DEPLOY], "existing WIF deploy identity")
-    worker = gcloud("run", "services", "describe", SERVICE, f"--region={REGION}")
-    require_equal(worker.get("status", {}).get("url"), URL, "worker URL")
+    require_equal([item["account"] for item in active], [deploy_identity], "existing WIF deploy identity")
+    worker = gcloud("run", "services", "describe", service_target, f"--region={REGION}")
+    require_equal(worker.get("status", {}).get("url"), url, "worker URL")
     spec = worker["spec"]["template"]["spec"]
-    require_equal(spec.get("serviceAccountName"), RUNTIME, "worker runtime identity")
-    descriptor(RUNTIME)
+    require_equal(spec.get("serviceAccountName"), runtime, "worker runtime identity")
+    descriptor(runtime)
     # Fail early on missing Scheduler authority; never grant project/Scheduler roles.
     jobs = gcloud("scheduler", "jobs", "list", f"--location={REGION}")
     accounts = gcloud("iam", "service-accounts", "list")
@@ -121,26 +133,30 @@ def bootstrap():
                    for item in policy.get("bindings", [])):
             raise Blocked(f"existing Google-managed service agent binding required: {role}")
     env = {}
-    evidence = {"worker_url": URL, "runtime": RUNTIME, "project_number": number,
+    evidence = {"worker_url": url, "runtime": runtime, "project_number": number,
                 "google_service_agents": agents, "flows": {}}
     for flow, prefix in FLOWS:
-        queue = f"hospital-{flow}-stg"
+        queue = f"hospital-{flow}-{environment}"
         identities = {}
         for kind in ("task", "drain"):
-            name = f"hosp-{flow}-{kind}-stg"
+            name = f"hosp-{flow}-{kind}-{environment}"
             account = email(name)
             if not any(item.get("email") == account for item in accounts):
+                if read_only:
+                    raise Blocked("production delivery account missing: " + name)
                 gcloud("iam", "service-accounts", "create", name)
             identities[kind] = descriptor(account)
             ensure_binding(("iam", "service-accounts", account),
-                           f"serviceAccount:{agents[kind]}", "roles/iam.serviceAccountOpenIdTokenCreator")
-            ensure_binding(("run", "services", f"--region={REGION}", SERVICE),
-                           f"serviceAccount:{account}", "roles/run.invoker")
+                           f"serviceAccount:{agents[kind]}", "roles/iam.serviceAccountOpenIdTokenCreator", read_only=read_only)
+            ensure_binding(("run", "services", f"--region={REGION}", service_target),
+                           f"serviceAccount:{account}", "roles/run.invoker", read_only=read_only)
         ensure_binding(("iam", "service-accounts", identities["task"]["email"]),
-                       f"serviceAccount:{RUNTIME}", "roles/iam.serviceAccountUser")
+                       f"serviceAccount:{runtime}", "roles/iam.serviceAccountUser", read_only=read_only)
         ensure_binding(("iam", "service-accounts", identities["drain"]["email"]),
-                       f"serviceAccount:{DEPLOY}", "roles/iam.serviceAccountUser")
+                       f"serviceAccount:{deploy_identity}", "roles/iam.serviceAccountUser", read_only=read_only)
         if not any(item.get("name", "").endswith(f"/queues/{queue}") for item in queues):
+            if read_only:
+                raise Blocked("production delivery queue missing: " + queue)
             gcloud("tasks", "queues", "create", queue, f"--location={REGION}",
                    "--max-concurrent-dispatches=2", "--max-dispatches-per-second=1")
         queue_desc = gcloud("tasks", "queues", "describe", queue, f"--location={REGION}")
@@ -152,14 +168,16 @@ def bootstrap():
             raise Blocked("queue-level HTTP override is forbidden")
         for role in ("roles/cloudtasks.enqueuer", "roles/cloudtasks.viewer"):
             ensure_binding(("tasks", "queues", f"--location={REGION}", queue),
-                           f"serviceAccount:{RUNTIME}", role)
-        job = f"hospital-{flow}-drain-stg"
-        uri = f"{URL}/worker/{flow}-deliveries/drain?limit=10"
+                           f"serviceAccount:{runtime}", role, read_only=read_only)
+        job = f"hospital-{flow}-drain-{environment}"
+        uri = f"{url}/worker/{flow}-deliveries/drain?limit=10"
         if not any(item.get("name", "").endswith(f"/jobs/{job}") for item in jobs):
+            if read_only:
+                raise Blocked("production drain scheduler missing: " + job)
             gcloud("scheduler", "jobs", "create", "http", job, f"--location={REGION}",
                    "--schedule=*/1 * * * *", "--time-zone=Etc/UTC", "--http-method=POST",
                    f"--uri={uri}", f"--oidc-service-account-email={identities['drain']['email']}",
-                   f"--oidc-token-audience={URL}", "--attempt-deadline=180s")
+                   f"--oidc-token-audience={url}", "--attempt-deadline=180s")
         job_desc = gcloud("scheduler", "jobs", "describe", job, f"--location={REGION}")
         target = job_desc.get("httpTarget", {})
         for actual, expected, label in (
@@ -170,7 +188,7 @@ def bootstrap():
             (job_desc.get("attemptDeadline"), "180s", "drain deadline"),
             (target.get("uri"), uri, "drain URL"),
             (target.get("httpMethod"), "POST", "drain method"),
-            (target.get("oidcToken"), {"serviceAccountEmail": identities["drain"]["email"], "audience": URL}, "drain OIDC"),
+            (target.get("oidcToken"), {"serviceAccountEmail": identities["drain"]["email"], "audience": url}, "drain OIDC"),
         ):
             require_equal(actual, expected, label)
         if target.get("oauthToken") or target.get("body"):
@@ -180,10 +198,10 @@ def bootstrap():
         }:
             raise Blocked("unexpected drain credential header")
         values = {"PROJECT_ID": PROJECT, "LOCATION": REGION, "QUEUE": queue,
-                  "TARGET_URL": URL, "SERVICE_ACCOUNT_EMAIL": identities["task"]["email"],
-                  "AUDIENCE": URL, "DISPATCH_DEADLINE_SECONDS": str(DEADLINE)}
+                  "TARGET_URL": url, "SERVICE_ACCOUNT_EMAIL": identities["task"]["email"],
+                  "AUDIENCE": url, "DISPATCH_DEADLINE_SECONDS": str(DEADLINE)}
         for kind, key in (("task", "WORKER"), ("drain", "DRAIN")):
-            values.update({f"{key}_ISSUER": "https://accounts.google.com", f"{key}_AUDIENCE": URL,
+            values.update({f"{key}_ISSUER": "https://accounts.google.com", f"{key}_AUDIENCE": url,
                            f"{key}_EMAIL": identities[kind]["email"], f"{key}_SUBJECT": identities[kind]["subject"]})
         env.update({prefix + key: value for key, value in values.items()})
         evidence["flows"][flow] = {"queue": queue_desc["name"], "identities": identities,

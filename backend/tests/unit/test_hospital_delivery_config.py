@@ -111,6 +111,8 @@ class Cloud:
 @pytest.fixture
 def cloud(monkeypatch, tmp_path):
     for key, value in {"GITHUB_ACTIONS": "true", "GITHUB_REF": "refs/heads/develop",
+        "GITHUB_REF_NAME": "develop", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_RUN_ID": "123",
+        "GITHUB_REPOSITORY_OWNER": "mmorinag127", "GITHUB_ACTOR": "mmorinag127", "GITHUB_TRIGGERING_ACTOR": "mmorinag127",
         "GITHUB_REPOSITORY": "mmorinag127/sawa-hospital-system", "PROJECT_ID": config.PROJECT,
         "REGION": config.REGION, "WORKER_SERVICE": config.SERVICE, "WORKER_URL": config.URL,
         "GITHUB_ENV": str(tmp_path / "github-env")}.items():

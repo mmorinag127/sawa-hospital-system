@@ -40,6 +40,8 @@ def ready(name):
 @pytest.fixture
 def environment(monkeypatch, tmp_path):
     for key, value in {'GITHUB_ACTIONS': 'true', 'GITHUB_REF': 'refs/heads/develop',
+                       'GITHUB_REF_NAME': 'develop', 'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_RUN_ID': '123',
+                       'GITHUB_REPOSITORY_OWNER': 'mmorinag127', 'GITHUB_ACTOR': 'mmorinag127', 'GITHUB_TRIGGERING_ACTOR': 'mmorinag127',
                        'GITHUB_REPOSITORY': 'mmorinag127/sawa-hospital-system', 'PROJECT_ID': mod.PROJECT,
                        'REGION': mod.REGION, 'GITHUB_SHA': SHA, 'RUNNER_TEMP': str(tmp_path)}.items():
         monkeypatch.setenv(key, value)
@@ -102,7 +104,7 @@ def test_actual_image_source_label(environment, monkeypatch, label_sha):
 
 @pytest.mark.parametrize('failure', [None, 'revision', 'settings', 'iam', 'digest', 'denied', 'namespace', 'not_ready'])
 def test_replace_verification_and_no_iam_repair(environment, monkeypatch, tmp_path, failure):
-    monkeypatch.setattr(mod, 'context', lambda *args: None)
+    monkeypatch.setattr(mod, 'context', lambda *args: 'stg')
     before = exported()
     if failure == 'namespace':
         before['metadata']['namespace'] = 'prod-project'

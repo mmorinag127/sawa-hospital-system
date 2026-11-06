@@ -19,6 +19,11 @@ on:
         options:
           - normal
           - recover-web-image
+          - rehearse-retained-worker
+      retained_revision:
+        description: "Rehearsal only: reviewed retained worker-stg revision"
+        required: false
+        type: string
       confirmation:
         description: "Recovery only: RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES"
         required: false
@@ -69,6 +74,59 @@ env:
   SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT: ${{ vars.STG_SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT }}
 
 jobs:
+  rehearse-retained-worker:
+    needs: source-gate
+    if: inputs.mode == 'rehearse-retained-worker'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Update TLS trust stores
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge "$minimum"
+      - uses: actions/checkout@v6
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          token_format: id_token
+          id_token_audience: ${{ env.WORKER_URL }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Exercise retained revision then restore original traffic
+        env:
+          STG_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          RETAINED_REVISION: ${{ inputs.retained_revision }}
+          REHEARSAL_CONFIRMATION: ${{ inputs.confirmation }}
+        run: python3 scripts/rehearse_stg_traffic.py
+      - name: Restore original staging traffic after interruption
+        if: always()
+        env:
+          STG_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          RETAINED_REVISION: ${{ inputs.retained_revision }}
+        run: python scripts/rehearse_stg_traffic.py --restore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stg-traffic-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stg-traffic-rehearsal.json
+          if-no-files-found: warn
+          retention-days: 7
+
   recover-web:
     needs: source-gate
     permissions:
@@ -162,6 +220,7 @@ jobs:
           RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
           EXPECTED_REVISION: ${{ inputs.expected_revision }}
           EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          RETAINED_REVISION: ${{ inputs.retained_revision }}
           IMAGE: ${{ steps.build.outputs.image }}
         run: |
           set -euo pipefail
@@ -180,6 +239,7 @@ jobs:
     steps:
       - name: Validate deployment mode and recovery inputs
         env:
+          RETAINED_REVISION: ${{ inputs.retained_revision }}
           DEPLOY_MODE: ${{ inputs.mode }}
           RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
           EXPECTED_REVISION: ${{ inputs.expected_revision }}
@@ -189,7 +249,13 @@ jobs:
           test "$GITHUB_REPOSITORY" = mmorinag127/sawa-hospital-system
           test "$GITHUB_REF" = refs/heads/develop
           case "$GITHUB_EVENT_NAME:${DEPLOY_MODE:-normal}" in
-            workflow_dispatch:normal) test -z "$RECOVERY_CONFIRMATION$EXPECTED_REVISION$EXPECTED_IMAGE" ;;
+            workflow_dispatch:normal) test -z "$RECOVERY_CONFIRMATION$EXPECTED_REVISION$EXPECTED_IMAGE$RETAINED_REVISION" ;;
+            workflow_dispatch:rehearse-retained-worker)
+              test "$RECOVERY_CONFIRMATION" = REHEARSE_STG_TRAFFIC_AND_RESTORE
+              test -z "$EXPECTED_IMAGE"
+              [[ "$EXPECTED_REVISION" =~ ^worker-stg-[a-z0-9-]+$ ]]
+              [[ "$RETAINED_REVISION" =~ ^worker-stg-[a-z0-9-]+$ ]]
+              ;;
             workflow_dispatch:recover-web-image)
               test "$RECOVERY_CONFIRMATION" = RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES
               [[ "$EXPECTED_REVISION" =~ ^web-stg-[a-z0-9-]+$ ]] || exit 1
@@ -260,7 +326,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_MODE}" = "recover-web-image" ]; then
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && ( "$DEPLOY_MODE" == recover-web-image || "$DEPLOY_MODE" == rehearse-retained-worker ) ]]; then
             echo "backend_changed=false" >> "$GITHUB_OUTPUT"
             echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
             exit 0

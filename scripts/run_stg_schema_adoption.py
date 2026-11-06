@@ -22,7 +22,7 @@ from src.maintenance.formal_migration_schema import require_formal_head
 from stg_replay_schema_targets import service_configuration, migration_configuration, replay_environment, registered_databases
 
 
-def upgrade_connection(connection):
+def upgrade_connection(connection, *, environment="staging"):
     global _PHASE
     _PHASE = "inspect_schema"
     tracked = inspect(connection).has_table("alembic_version")
@@ -31,7 +31,7 @@ def upgrade_connection(connection):
     if not tracked and not empty:
         _PHASE = "adopt_existing_schema"
         receipt = adopt(connection)
-        print("Verified staging adoption: " + receipt["baseline"] + " -> " + receipt["revision"])
+        print("Verified " + environment + " adoption: " + receipt["baseline"] + " -> " + receipt["revision"])
     else:
         previous = os.environ.get("ALEMBIC_DB_URI")
         os.environ["ALEMBIC_DB_URI"] = connection.engine.url.render_as_string(hide_password=False)

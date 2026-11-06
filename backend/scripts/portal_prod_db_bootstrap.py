@@ -229,6 +229,16 @@ def _load_service_db_config(project_id: str, region: str, service: str) -> Servi
         if secret_ref:
             secret_refs[name] = secret_ref
 
+    if env_map.get("DB_URI") or "DB_URI" in secret_refs:
+        raise PortalAccessBootstrapError("DB_URI override must not bypass the migration target")
+    host = env_map.get("DB_HOST", "")
+    if not host.startswith("/cloudsql/"):
+        raise PortalAccessBootstrapError("Explicit Cloud SQL DB_HOST is required")
+    selected_instance = host.removeprefix("/cloudsql/")
+    if selected_instance not in instance_connection_name.split(","):
+        raise PortalAccessBootstrapError("DB_HOST does not match the attached Cloud SQL instance")
+    instance_connection_name = selected_instance
+
     db_name = str(env_map.get("DB_NAME") or "").strip()
     db_user = str(env_map.get("DB_USER") or "").strip()
     if not db_name or not db_user:

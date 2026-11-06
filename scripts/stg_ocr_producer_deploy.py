@@ -1,4 +1,4 @@
-"""Replace only the staging producer image, retaining its exported specification."""
+"""Replace the producer image through owner-dispatched release Actions."""
 
 import argparse
 from copy import deepcopy
@@ -7,9 +7,12 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 
 import yaml
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hospital_release_context import require_context
 
 PROJECT = 'sawahospitalsystem'
 REGION = 'asia-northeast2'
@@ -41,11 +44,10 @@ def cloud(*args, output='json'):
 
 
 def context(image, source_sha):
-    expected = {'GITHUB_ACTIONS': 'true', 'GITHUB_REF': 'refs/heads/develop',
-                'GITHUB_REPOSITORY': 'mmorinag127/sawa-hospital-system',
-                'PROJECT_ID': PROJECT, 'REGION': REGION}
-    if any(os.environ.get(key) != value for key, value in expected.items()):
-        raise Blocked('Exact staging Actions context required')
+    try:
+        environment = require_context(os.environ)
+    except RuntimeError as exc:
+        raise Blocked(str(exc)) from exc
     if not re.fullmatch(re.escape(IMAGE_PREFIX) + r'@sha256:[0-9a-f]{64}', image):
         raise Blocked('Staging producer immutable image required')
     if not re.fullmatch(r'[0-9a-f]{40}', source_sha) or source_sha != os.environ.get('GITHUB_SHA'):
@@ -55,23 +57,24 @@ def context(image, source_sha):
     if os.environ.get('CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT'):
         raise Blocked('Credential override forbidden')
     accounts = cloud('auth', 'list', '--filter=status:ACTIVE')
-    if [entry['account'] for entry in accounts] != [DEPLOY]:
+    if [entry['account'] for entry in accounts] != [f'sawa-github-deploy-{environment}@{PROJECT}.iam.gserviceaccount.com']:
         raise Blocked('Existing staging WIF identity required')
     command(['docker', 'pull', image])
     inspected = json.loads(command(['docker', 'image', 'inspect', image]))
     if len(inspected) != 1 or image not in inspected[0].get('RepoDigests', []):
         raise Blocked('Producer image digest mismatch')
     labels = inspected[0].get('Config', {}).get('Labels', {})
-    if labels.get('sawa.git_sha') != source_sha or labels.get('sawa.release_branch') != 'develop':
+    if labels.get('sawa.git_sha') != source_sha or labels.get('sawa.release_branch') != os.environ['GITHUB_REF_NAME']:
         raise Blocked('Producer image source mismatch')
+    return environment
 
 
-def service():
-    return cloud('run', 'services', 'describe', SERVICE, f'--region={REGION}')
+def service(environment='stg'):
+    return cloud('run', 'services', 'describe', 'ocr-pipeline-'+environment, f'--region={REGION}')
 
 
-def exported():
-    return cloud('run', 'services', 'describe', SERVICE, f'--region={REGION}', output='export')
+def exported(environment='stg'):
+    return cloud('run', 'services', 'describe', 'ocr-pipeline-'+environment, f'--region={REGION}', output='export')
 
 
 def ready_revision(value):
@@ -94,16 +97,26 @@ def comparable(spec):
     return result
 
 
-def replacement(before, image):
-    if before.get('kind') != 'Service' or before.get('metadata', {}).get('name') != SERVICE:
+def replacement(before, image, environment='stg'):
+    if environment not in ('stg', 'prod'):
+        raise Blocked('Producer environment mismatch')
+    if before.get('kind') != 'Service' or before.get('metadata', {}).get('name') != 'ocr-pipeline-'+environment:
         raise Blocked('Producer service target mismatch')
     result = comparable(before)
     runtime = result['spec']['template']['spec']
-    if runtime.get('serviceAccountName') != RUNTIME or len(runtime.get('containers', [])) != 1:
+    if runtime.get('serviceAccountName') != f'ocr-pipeline-exec-{environment}@{PROJECT}.iam.gserviceaccount.com' or len(runtime.get('containers', [])) != 1:
         raise Blocked('Producer runtime/container mismatch')
     runtime['containers'][0]['image'] = image
     import runpy
-    snapshot = runpy.run_path(str(Path(__file__).with_name('staging_dataset_config.py')))['configuration'](os.environ)
+    snapshot = (runpy.run_path(str(Path(__file__).with_name('staging_dataset_config.py')))['configuration'](os.environ)
+                if environment == 'stg' else {})
+    if environment == 'prod':
+        entries = runtime['containers'][0].get('env', [])
+        if any('STG_REPLAY' in item['name'] or 'STAGING_DATA' in item['name'] for item in entries):
+            raise Blocked('Production producer contains staging dataset bindings')
+        values = {item['name']: item.get('value') for item in entries}
+        if values.get('DB_HOST') != '/cloudsql/'+PROJECT+':'+REGION+':orders-prod' or values.get('DB_NAME') != 'orders' or 'DB_URI' in values:
+            raise Blocked('Production producer database target mismatch')
     if snapshot:
         previous = runtime['containers'][0].get('env', [])
         runtime['containers'][0]['env'] = [entry for entry in previous if entry['name'] not in snapshot] + [
@@ -114,19 +127,20 @@ def replacement(before, image):
 def deploy(image, source_sha):
     global PHASE
     PHASE = 'source_identity_validation'
-    context(image, source_sha)
+    environment = context(image, source_sha)
+    target = 'ocr-pipeline-'+environment
     PHASE = 'capture_service_settings'
-    initial = service()
+    initial = service(environment)
     revision = ready_revision(initial)
-    before = exported()
+    before = exported(environment)
     project = cloud('projects', 'describe', PROJECT)
     if str(before.get('metadata', {}).get('namespace')) not in {PROJECT, str(project['projectNumber'])}:
         raise Blocked('Producer namespace mismatch')
-    iam = cloud('run', 'services', 'get-iam-policy', SERVICE, f'--region={REGION}')
-    desired = replacement(before, image)
+    iam = cloud('run', 'services', 'get-iam-policy', target, f'--region={REGION}')
+    desired = replacement(before, image, environment)
     PHASE = 'pre_replace_revision_validation'
     # Detect revision or configuration changes after capture, before replacing.
-    if ready_revision(service()) != revision or exported() != before:
+    if ready_revision(service(environment)) != revision or exported(environment) != before:
         raise Blocked('Producer changed during capture')
     with tempfile.TemporaryDirectory(prefix='stg-ocr-spec-', dir=os.environ.get('RUNNER_TEMP')) as directory:
         path = Path(directory) / 'service.json'
@@ -136,11 +150,11 @@ def deploy(image, source_sha):
         PHASE = 'replace_service'
         cloud('run', 'services', 'replace', str(path), f'--region={REGION}')
     PHASE = 'verify_ready_settings_iam_digest'
-    current = service()
+    current = service(environment)
     ready = ready_revision(current)
-    if comparable(exported()) != desired:
+    if comparable(exported(environment)) != desired:
         raise Blocked('Producer settings changed during deployment')
-    if cloud('run', 'services', 'get-iam-policy', SERVICE, f'--region={REGION}') != iam:
+    if cloud('run', 'services', 'get-iam-policy', target, f'--region={REGION}') != iam:
         raise Blocked('Producer IAM changed during deployment')
     observed = cloud('run', 'revisions', 'describe', ready, f'--region={REGION}')
     if observed.get('status', {}).get('imageDigest') != image:
