@@ -29,7 +29,20 @@ def sequences(connection):
         for schema, name in names}
 
 
-def run(dump, source_receipt):
+def restore_owned(directory, dump):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
+    env.update(PGHOST=str(directory / "socket"), PGPORT="55495",
+               PGUSER="adoption_test", PGDATABASE="postgres")
+    with (directory / "restore.log").open("w") as log:
+        subprocess.run([
+            str(Path(os.environ["OWNED_POSTGRES_PG_BIN"]) / "pg_restore"),
+            "--exit-on-error", "--single-transaction", "--no-owner", "--no-acl",
+            "--dbname=postgres", str(dump),
+        ], env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+    return env
+
+
+def run(dump, source_receipt, *, verify_restore=False):
     if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
         raise RuntimeError("local rehearsal only")
     dump = dump.resolve(strict=True)
@@ -45,18 +58,8 @@ def run(dump, source_receipt):
         raise RuntimeError("reviewed dump checksum mismatch")
     started = time.monotonic()
     with owned_postgres() as (engine, directory):
-        env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
-        env.update(PGHOST=str(directory / "socket"), PGPORT="55495",
-                   PGUSER="adoption_test", PGDATABASE="postgres")
         # The destination is created by owned_postgres, never supplied by the caller.
-        with (directory / "restore.log").open("w") as log:
-            result = subprocess.run([
-                str(Path(os.environ["OWNED_POSTGRES_PG_BIN"]) / "pg_restore"),
-                "--exit-on-error", "--single-transaction", "--no-owner", "--no-acl",
-                "--dbname=postgres", str(dump),
-            ], env=env, stdout=log, stderr=subprocess.STDOUT)
-        if result.returncode:
-            raise RuntimeError("local restore failed; inspect protected restore.log")
+        env = restore_owned(directory, dump)
         restored = time.monotonic()
         with target(engine.url), engine.connect() as connection:
             original_columns = preservation.columns(connection)
@@ -73,6 +76,18 @@ def run(dump, source_receipt):
             if any(sequence_after.get(name) != value for name, value in sequence_before.items()):
                 raise RuntimeError('migration changed an existing restored sequence')
         migrated = time.monotonic()
+        if verify_restore:
+            migrated_dump = directory / "post-migration.dump"
+            with engine.connect() as connection:
+                migrated_columns = preservation.columns(connection)
+                migrated_values = fingerprints(connection, migrated_columns)
+                migrated_sequences = sequences(connection)
+            with (directory / "dump.log").open("w") as log:
+                subprocess.run([
+                    str(Path(os.environ["OWNED_POSTGRES_PG_BIN"]) / "pg_dump"),
+                    "--format=custom", "--no-owner", "--no-acl",
+                    "--file=" + str(migrated_dump), "postgres",
+                ], env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
         receipt = {
             "dump_sha256": digest,
             "source_sha": subprocess.check_output(
@@ -89,6 +104,26 @@ def run(dump, source_receipt):
             "production_modified": False,
         }
         (directory / "rehearsal.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    if verify_restore:
+        recovery_started = time.monotonic()
+        checks = (
+            ("post_migration_backup", migrated_dump, migrated_columns,
+             migrated_values, migrated_sequences),
+            ("pre_migration_restore", dump, original_columns, before, sequence_before),
+        )
+        for name, backup, expected_columns, expected_values, expected_sequences in checks:
+            with owned_postgres() as (recovered, recovery_directory):
+                restore_owned(recovery_directory, backup)
+                with recovered.connect() as connection:
+                    if (preservation.columns(connection) != expected_columns
+                            or fingerprints(connection, expected_columns) != expected_values
+                            or sequences(connection) != expected_sequences):
+                        raise RuntimeError(name + " does not preserve the captured database")
+                receipt[name] = {"verified": True, "directory": str(recovery_directory)}
+        receipt["recovery_rehearsal_seconds"] = round(time.monotonic() - recovery_started, 3)
+        receipt["cloud_sql_restore_verified"] = False
+        receipt["old_runtime_verified"] = False
+        (directory / "rehearsal.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(str(directory / "rehearsal.json"))
 
 
@@ -96,6 +131,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dump", type=Path)
     parser.add_argument("--source-receipt", type=Path, required=True)
+    parser.add_argument("--verify-restore", action="store_true",
+                        help="Also verify migrated backup and original restore in fresh local DBs")
     args = parser.parse_args()
     os.umask(0o077)
-    run(args.dump, args.source_receipt)
+    run(args.dump, args.source_receipt, verify_restore=args.verify_restore)
