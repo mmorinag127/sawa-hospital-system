@@ -580,7 +580,9 @@ def test_menu_upload_history_lists_and_downloads_saved_file(tmp_path):
         menu_master_resolutions=[_create_resolution("MenuA")],
     )
 
-    uploads = menu_service.list_menu_uploads("2025-12")
+    page = menu_service.list_menu_uploads("2025-12")
+    assert page["next_before_id"] is None
+    uploads = page["items"]
     assert len(uploads) == 1
     assert uploads[0]["filename"] == "file.csv"
     assert uploads[0]["download_available"] is True

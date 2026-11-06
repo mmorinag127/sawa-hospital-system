@@ -105,10 +105,10 @@ def prepare(snapshot, output, legacy_source):
             entry["versions"] = [store.initial_facility_version(prepared, sha(settings_raw))]
             changes.append({"facility_id": entry["facility_id"], "changes": additions})
         store._encode(initial)
-        from src.services.config_service import validate_selected_authored_facility_config
-        for entry in initial["facilities"]:
-            validate_selected_authored_facility_config(entry["facility_id"], entry["versions"][0], master=initial)
         with target(engine.url), engine.connect() as connection:
+            from src.services.config_service import validate_selected_authored_facility_config
+            for entry in initial["facilities"]:
+                validate_selected_authored_facility_config(entry["facility_id"], entry["versions"][0], master=initial)
             upgrade_connection(connection, environment="local production-settings preparation")
             connection.rollback()
             if fingerprints(connection, columns) != receipt["tables"]:

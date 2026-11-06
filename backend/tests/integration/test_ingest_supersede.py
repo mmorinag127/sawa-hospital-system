@@ -47,10 +47,14 @@ def test_ingest_supersede_records_upload_time_versions_and_line_snapshots(tmp_pa
     assert updated["current_version"]["message_id"] == "msg-version-2"
     assert updated["versions"][0]["received_at"].isoformat() == "2025-12-23T11:00:00"
     assert updated["versions"][1]["received_at"].isoformat() == "2025-12-23T10:00:00"
-    assert updated["versions"][0]["line_snapshot"][0]["menu_name"] == "変更後メニュー"
-    assert updated["versions"][1]["line_snapshot"][0]["menu_name"] == "初回メニュー"
-    assert updated["versions"][0]["line_snapshot"][0]["quantity_original"] == 7
-    assert updated["versions"][1]["line_snapshot"][0]["quantity_original"] == 3
+    from src.services.order_serialization_service import read_order_version
+    assert all(version["detail_state"] == "not_loaded" and version["line_snapshot"] is None
+               for version in updated["versions"])
+    details = [read_order_version(updated["id"], version["id"]) for version in updated["versions"]]
+    assert details[0]["line_snapshot"][0]["menu_name"] == "変更後メニュー"
+    assert details[1]["line_snapshot"][0]["menu_name"] == "初回メニュー"
+    assert details[0]["line_snapshot"][0]["quantity_original"] == 7
+    assert details[1]["line_snapshot"][0]["quantity_original"] == 3
 
     retried = recognize_ingest(second, monkeypatch, second_rows)
 

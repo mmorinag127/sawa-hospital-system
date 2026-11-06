@@ -36,7 +36,7 @@ def test_user2_menu_masters_allows_operator(monkeypatch, hospital_operator):
     saved_item = {"id": "m1", "name": "Menu", "revision": 2}
     list_masters = create_autospec(
         menu_masters_api.menu_service.list_menu_masters_page,
-        return_value={"items": [read_item], "total": 1, "offset": 0, "limit": 1000},
+        return_value={"items": [read_item], "total": 1, "offset": 0, "limit": 100},
     )
     create_master = create_autospec(
         menu_masters_api.menu_service.create_menu_master,
@@ -50,8 +50,9 @@ def test_user2_menu_masters_allows_operator(monkeypatch, hospital_operator):
     client = TestClient(app)
     read = client.get("/menu-masters", headers=headers)
     assert read.status_code == 200
-    assert read.json() == {"items": [read_item], "total": 1, "offset": 0, "limit": 1000}
-    list_masters.assert_called_once_with(query=None, limit=1000, offset=0, sort="name", order="asc")
+    assert read.json() == {"items": [read_item], "total": 1, "offset": 0, "limit": 100}
+    list_masters.assert_called_once_with(query=None, limit=100, offset=0, sort="name", order="asc",
+                                       after_id=None, before_id=None, include_total=True)
     create_master.assert_not_called()
     save_master.assert_not_called()
 

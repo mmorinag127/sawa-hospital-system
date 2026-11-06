@@ -6,6 +6,7 @@ def readonly_catalog_statements(engine):
     if engine.dialect.name == "postgresql":
         allowed.add("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
     elif engine.dialect.name == "sqlite":
+        allowed.update({"PRAGMA query_only", "PRAGMA query_only=ON"})
         with engine.connect() as connection:
             objects = connection.exec_driver_sql(
                 "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'index')").all()

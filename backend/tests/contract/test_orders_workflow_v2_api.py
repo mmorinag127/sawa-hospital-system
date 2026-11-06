@@ -170,6 +170,11 @@ def test_download_document_uses_selected_document_version(monkeypatch) -> None:
 
 
 def test_workflow_v2_evidence_rerun_sets_selected_document_as_ocr_input(monkeypatch) -> None:
+    from tests.helpers.document_read import seed_document_read
+    seed_document_read("ORDocrinput", "gs://bucket/current.pdf", versions=(
+        (1, "DOC-v1", "gs://bucket/old.pdf", False),
+        (2, "DOC-v2", "gs://bucket/current.pdf", True),
+    ))
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(

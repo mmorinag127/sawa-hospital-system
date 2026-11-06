@@ -2,6 +2,7 @@
 from sqlalchemy import select
 
 from src.models.ocr_job import OcrJob
+from src.models.ocr_metrics_v1 import split_metrics
 from src.models.order_workflow_state import OrderWorkflowState
 
 
@@ -16,6 +17,7 @@ def inject_stale_job_diagnostics(case, **values):
             assert values["metrics"]["rerun_terminal_receipt"] == row["metrics"]["rerun_terminal_receipt"]
             for key in ("workflow_attempt_id", "request_identity", "nonworkflow_execution", "ingest_lease"):
                 assert values["metrics"].get(key) == row["metrics"].get(key)
+            values["metrics"], values["progress_metrics"] = split_metrics(values["metrics"])
         result = connection.execute(table.update().where(
             table.c.id == case.job, table.c.order_id == case.id,
         ).values(**values))
@@ -36,5 +38,7 @@ def inject_unowned_job_diagnostics(engine, job_id, **values):
         for key in ("rerun_terminal_receipt", "workflow_attempt_id", "request_identity",
                     "nonworkflow_execution", "ingest_lease"):
             assert old.get(key) is None and new.get(key) is None
+        if "metrics" in values:
+            values["metrics"], values["progress_metrics"] = split_metrics(values["metrics"])
         result = connection.execute(table.update().where(table.c.id == job_id).values(**values))
         assert result.rowcount == 1

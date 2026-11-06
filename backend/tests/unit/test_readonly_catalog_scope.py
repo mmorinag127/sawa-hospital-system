@@ -7,6 +7,7 @@ from tests.helpers.readonly_catalog import readonly_catalog_statements
 @pytest.mark.parametrize("statement", [
     "UPDATE orders SET status=status", "DELETE FROM orders", "CREATE TABLE unexpected(id INTEGER)",
     "PRAGMA foreign_keys=OFF", "PRAGMA main.user_version=1", "PRAGMA writable_schema=ON",
+    "PRAGMA query_only=OFF", "PRAGMA query_only=0",
     'PRAGMA main.table_xinfo("not_a_formal_table")', "BEGIN IMMEDIATE",
     'PRAGMA temp.foreign_key_list("not_a_formal_table")', "PRAGMA temp.foreign_keys=OFF",
 ])
@@ -26,3 +27,5 @@ def test_actual_formal_sqlite_tables_remain_inspectable_without_allowing_arbitra
     assert 'PRAGMA temp.foreign_key_list("order_documents")' in allowed
     assert 'PRAGMA main.index_list("monthly_menu_items")' in allowed
     assert "PRAGMA main.foreign_keys" not in allowed
+    assert "PRAGMA query_only" in allowed
+    assert "PRAGMA query_only=ON" in allowed

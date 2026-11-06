@@ -3,11 +3,16 @@ from datetime import datetime
 from src.db import session_scope
 from src.models.order import Order
 from src.models.order_version import OrderVersion
+from src.models.document import OrderDocument
 
 
 def seed_document_read(order_id, uri, *, versions=()):
     with session_scope() as session:
         session.add(Order(id=order_id, document_uri=uri, message_id=f"mail-{order_id}"))
+        for _, document_id, storage_uri, _ in versions:
+            session.add(OrderDocument(id=document_id, storage_uri=storage_uri,
+                                      source_email_id=f"mail-{order_id}"))
+        session.flush()
         for number, document_id, storage_uri, current in versions:
             session.add(OrderVersion(
                 id=f"{order_id}-{number}", order_id=order_id, version_no=number,

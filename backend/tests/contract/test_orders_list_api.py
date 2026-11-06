@@ -62,6 +62,8 @@ def test_list_orders_passes_limit_and_cursor_to_service(monkeypatch) -> None:
         before_received_at=None,
         before_id=None,
         job_bindings_out=None,
+        only_unassigned=False,
+        include_job_bindings=True,
     ):
         calls.append(
             {
@@ -70,6 +72,8 @@ def test_list_orders_passes_limit_and_cursor_to_service(monkeypatch) -> None:
                 "limit": limit,
                 "before_received_at": before_received_at,
                 "before_id": before_id,
+                "only_unassigned": only_unassigned,
+                "include_job_bindings": include_job_bindings,
             }
         )
         return {
@@ -103,6 +107,8 @@ def test_list_orders_passes_limit_and_cursor_to_service(monkeypatch) -> None:
             "limit": 25,
             "before_received_at": "2026-03-24T09:00:00",
             "before_id": "ORD-CURSOR",
+            "only_unassigned": False,
+            "include_job_bindings": True,
         }
     ]
 
