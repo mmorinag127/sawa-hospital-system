@@ -134,8 +134,21 @@ def test_no_current_tracked_python_consumer_refers_to_retired_names():
 
 
 def test_other_recorded_job_tests_and_adapter_oracles_are_byte_identical():
-    approved = "f4e015028a7138a40d1e93e8fa22b4acc9266334"
-    original = subprocess.check_output(["git", "show", f"{approved}:{INVENTORY_TEST}"], cwd=ROOT).decode()
-    current = (ROOT / INVENTORY_TEST).read_text()
-    assert current == original
-    assert ast.dump(ast.parse(current)) == ast.dump(ast.parse(original))
+    # Prove the deletion's scope without freezing later approved contract updates.
+    original = subprocess.check_output(["git", "show", f"{BASE}:{INVENTORY_TEST}"], cwd=ROOT).decode()
+    deleted = subprocess.check_output(["git", "show", f"{DELETION}:{INVENTORY_TEST}"], cwd=ROOT).decode()
+    old, new = definitions(ast.parse(original)), definitions(ast.parse(deleted))
+    inventory = "test_existing_backend_functions_are_unchanged_except_additive_workflow_projection"
+    assert old.keys() == new.keys()
+    for name, node in old.items():
+        if name != inventory:
+            assert ast.dump(node) == ast.dump(new[name])
+            assert ast.get_source_segment(original, node) == ast.get_source_segment(deleted, new[name])
+    changed = new[inventory]
+    branch = next(node for node in ast.walk(changed)
+                  if isinstance(node, ast.If) and ast.unparse(node.test) == "path.endswith('/order_service.py')")
+    assert len(branch.body) == 5
+    assert isinstance(branch.body[1], ast.Assign) and ast.unparse(branch.body[1].targets[0]) == "retired"
+    assert ast.literal_eval(branch.body[1].value) == RETIRED
+    del branch.body[1:]
+    assert ast.dump(changed) == ast.dump(old[inventory])

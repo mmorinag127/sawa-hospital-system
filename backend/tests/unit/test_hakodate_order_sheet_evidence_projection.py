@@ -528,8 +528,9 @@ def test_hakodate_payload_augmentation_uses_live_canonical_payload_not_legacy_oc
         [(region["bbox"][0] + region["bbox"][2]) / 2,
          (region["bbox"][1] + region["bbox"][3]) / 2] for region in calls[0]
     ]
-    assert "99" not in str(target_cells)
-    assert "９９" not in str(evidence_records)
+    # Provenance hashes can contain "99"; compare the legacy geometry and values.
+    assert all(target["bbox"] != payload["tables"][0]["cells"][0]["bbox"] for target in target_cells)
+    assert all(record["raw_text"] != payload["tokens"][0]["text"] for record in evidence_records)
     assert payload["table_rows"] == [["4/26", "朝", "旧OCR献立", "99"]]
 
 
