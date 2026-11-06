@@ -15,6 +15,11 @@ def test_document_selection_preserves_explicit_unresolved_menu_state(monkeypatch
         assert allow_unresolved_menu_amount is True
         return payload
     monkeypatch.setattr(orders.order_service, "get_order_by_id", read)
+    from src.services import order_serialization_service
+    def read_document(order_id, selected_id):
+        assert order_id == "O"
+        return next((version for version in versions if version["document_id"] == selected_id), None)
+    monkeypatch.setattr(order_serialization_service, "read_order_document_version", read_document)
     result, selected = orders._resolve_order_document_version("O", document_id)
     assert result is payload
     assert result["menu_amount_resolution"]["status"] == "unresolved"

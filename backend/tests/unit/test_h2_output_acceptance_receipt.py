@@ -229,9 +229,10 @@ def test_requested_delivery_template_failure_never_exports_alternative(monkeypat
     def unavailable(uri):
         raise OSError("requested template unavailable")
     monkeypatch.setattr(output_builder, "load_bytes_from_uri", unavailable)
-    monkeypatch.setattr(output_builder.pd.DataFrame, "to_excel", lambda *args, **kwargs: pytest.fail("alternative delivery write"))
+    monkeypatch.setattr(output_builder, "load_workbook", lambda *args, **kwargs: pytest.fail("alternative delivery workbook"))
     with pytest.raises(ValueError, match="delivery_template_load_failed"):
         output_builder._write_delivery_note(tmp_path / "delivery.xlsx", [{"own": 0}], [{"name": "own"}], "gs://own/template.xlsx", False)
+    assert not (tmp_path / "delivery.xlsx").exists()
 
 
 @pytest.mark.parametrize("columns", [[], [{"source": "menu", "name": "menu"}]])

@@ -51,12 +51,13 @@ def clone_selected_input(fixture):
         return identities.get(value, value) if isinstance(value, str) else deepcopy(value)
 
     with fixture.session_scope() as session:
-        for model, identifier in ((Order, fixture.order_id), (OrderDocument, "UNIT-DOC"),
+        for model, identifier in ((OrderDocument, "UNIT-DOC"), (Order, fixture.order_id),
                                   (UploadedPdf, "UNIT-PDF"), (OrderOcrEvidenceRun, fixture.evidence_id),
                                   (OrderSheetDraft, fixture.draft_id), (OrderWorkflowState, fixture.order_id)):
             original = session.get(model, identifier)
             assert original is not None
-            values = {column.name: replace(getattr(original, column.name)) for column in model.__table__.columns}
+            values = {column.name: replace(getattr(original, column.name))
+                      for column in model.__table__.columns if column.computed is None}
             session.execute(model.__table__.insert().values(**values))
         session.expire_all()
         orders._record_current_order_version(session, session.get(Order, other.order_id),

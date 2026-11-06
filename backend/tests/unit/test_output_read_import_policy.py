@@ -15,7 +15,8 @@ from src.models.order_workflow_state import OrderWorkflowState
 from src.services import order_service, output_builder, total_service, initial_saved_import_service as imports
 
 
-def strict_serializer(order, *, allow_unresolved_menu_amount=False):
+def strict_serializer(order, *, allow_unresolved_menu_amount=False, include_navigation=True):
+    assert include_navigation is True
     if not allow_unresolved_menu_amount:
         raise ValueError("unresolved-current-menu")
     return {"id": order.id, "template_version_id": order.template_version_id, "lines": []}
@@ -36,7 +37,7 @@ def test_import_preserves_candidate_and_bags_with_unresolved_metadata(imported, 
         assert candidate["initial_saved_bag_rows"] == snapshot["bagging"]["payload_json"]["bag_rows"]
         assert candidate["lines"] == imports.output_candidate(imports.get_binding(session, "O"))["lines"]
     assert serializer.call_count == 2
-    assert all(call.kwargs == {"allow_unresolved_menu_amount": True} for call in serializer.call_args_list)
+    assert all(call.kwargs == {"allow_unresolved_menu_amount": True, "include_navigation": True} for call in serializer.call_args_list)
 
 
 def test_nonimport_strict_and_missing_unchanged(imported, monkeypatch):
@@ -45,7 +46,7 @@ def test_nonimport_strict_and_missing_unchanged(imported, monkeypatch):
     monkeypatch.setattr(order_service, "serialize_order", serializer)
     with pytest.raises(ValueError, match="^unresolved-current-menu$"):
         order_service.get_order_for_output_read("OTHER", read_session=session)
-    assert serializer.call_args.kwargs == {"allow_unresolved_menu_amount": False}
+    assert serializer.call_args.kwargs == {"allow_unresolved_menu_amount": False, "include_navigation": True}
     serializer.reset_mock()
     assert order_service.get_order_for_output_read("missing", read_session=session) is None
     serializer.assert_not_called()
@@ -114,4 +115,4 @@ def test_runtime_sibling_dispatch(imported, monkeypatch, entry):
     loader.assert_called_once()
     assert loader.call_args.args == ("O",)
     if entry in {"totals", "accepted", "adoption"}:
-        assert loader.call_args.kwargs == {"read_session": session}
+        assert loader.call_args.kwargs == {"read_session": session, **({"include_navigation": False} if entry == "totals" else {})}

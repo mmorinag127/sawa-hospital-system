@@ -172,8 +172,8 @@ def test_download_document_uses_selected_document_version(monkeypatch) -> None:
 def test_workflow_v2_evidence_rerun_sets_selected_document_as_ocr_input(monkeypatch) -> None:
     from tests.helpers.document_read import seed_document_read
     seed_document_read("ORDocrinput", "gs://bucket/current.pdf", versions=(
-        (1, "DOC-v1", "gs://bucket/old.pdf", False),
-        (2, "DOC-v2", "gs://bucket/current.pdf", True),
+        (1, "DOC-ocrinput-v1", "gs://bucket/old.pdf", False),
+        (2, "DOC-ocrinput-v2", "gs://bucket/current.pdf", True),
     ))
     captured: dict[str, object] = {}
 
@@ -201,20 +201,20 @@ def test_workflow_v2_evidence_rerun_sets_selected_document_as_ocr_input(monkeypa
             "document": "gs://bucket/current.pdf",
             "versions": [
                 {
-                    "document_id": "DOC-v1",
+                    "document_id": "DOC-ocrinput-v1",
                     "version_no": 1,
                     "storage_uri": "gs://bucket/old.pdf",
                     "is_current": False,
                 },
                 {
-                    "document_id": "DOC-v2",
+                    "document_id": "DOC-ocrinput-v2",
                     "version_no": 2,
                     "storage_uri": "gs://bucket/current.pdf",
                     "is_current": True,
                 },
             ],
             "current_version": {
-                "document_id": "DOC-v2",
+                "document_id": "DOC-ocrinput-v2",
                 "version_no": 2,
                 "storage_uri": "gs://bucket/current.pdf",
                 "is_current": True,
@@ -229,7 +229,7 @@ def test_workflow_v2_evidence_rerun_sets_selected_document_as_ocr_input(monkeypa
         assert kwargs["expected_revision"] == 7
         assert kwargs["request_mode"] == "ocr_rerun"
         assert kwargs["stale_action"] == "retry"
-        assert kwargs["delivery_selected_document_id"] == "DOC-v1"
+        assert kwargs["delivery_selected_document_id"] == "DOC-ocrinput-v1"
         captured.update(kwargs)
         return {"workflow": {"order_id": order_id, "ocr_job_id": job_id}, "delivery": delivery}, None
     monkeypatch.setattr(orders_api.order_workflow_v2_service, "mark_ocr_run_queued", mark_queued)
@@ -238,13 +238,13 @@ def test_workflow_v2_evidence_rerun_sets_selected_document_as_ocr_input(monkeypa
 
     result = orders_api._enqueue_workflow_v2_evidence_rerun(
         "ORDocrinput",
-        selected_document_id="DOC-v1",
+        selected_document_id="DOC-ocrinput-v1",
         expected_revision=7,
     )
 
     assert result["accepted"] is True
     assert captured["input_reference"] == "gs://bucket/old.pdf"
-    assert captured["job_metrics"]["selected_document_id"] == "DOC-v1"
+    assert captured["job_metrics"]["selected_document_id"] == "DOC-ocrinput-v1"
     assert captured["job_metrics"]["selected_document_version"] == 1
     assert dispatched == [delivery]
 

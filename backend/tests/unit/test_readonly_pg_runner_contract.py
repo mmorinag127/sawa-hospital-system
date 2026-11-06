@@ -28,9 +28,10 @@ def test_owned_root_is_short_physical_tmp_without_alias():
 def test_existing_module_runs_unfiltered_with_owned_artifacts():
     root = Path('/tmp/sawa-ro-123-1')
     assert runner.pytest_command(root) == [
-        sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider',
+        sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', '-p', 'local_pg_input_guard',
         'backend/tests/integration/test_menu_readonly_boundary.py',
-        '--basetemp', str(root / 'tests'), '--junitxml', str(root / 'evidence/results.xml'), '-v',
+        'backend/tests/integration/test_native_startup_reflection.py',
+        '--basetemp', str(root / 'tests'), '--junitxml', str(root / 'evidence/results-readonly.xml'), '-v',
     ]
     assert runner.PG_BIN == Path(os.environ.get('PG_BIN', '/usr/lib/postgresql/16/bin'))
 

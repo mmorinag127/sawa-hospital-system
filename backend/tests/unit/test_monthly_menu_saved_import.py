@@ -171,7 +171,9 @@ def test_archive_changed_or_missing_never_applies(store, tmp_path, monkeypatch):
     (tmp_path / "source.xlsx").unlink()
     with pytest.raises(FileNotFoundError):
         service.review_menu_import("2026-10", receipt["id"], receipt["revision"], None, apply=True)
-    assert service.list_menu_imports("2026-10")[0]["state"] == "review"
+    listed = service.list_menu_imports("2026-10")
+    assert listed["items"][0]["state"] == "review"
+    assert listed["next_before_id"] is None
     with scope() as session:
         assert session.query(MonthlyMenuEntry).count() == 0
 
@@ -577,7 +579,7 @@ def test_snapshot_pending_guard_runs_before_sql_and_preserves_operator_state(sto
 
 @pytest.mark.parametrize("field", ["file_uri", "filename", "content_sha256", "sheet_name", "scope_override", "diet_types", "media_type"])
 @pytest.mark.parametrize("operation", ["read", "list", "review", "apply", "download"])
-def test_missing_persisted_source_keys_stop_every_caller_before_archive_or_business_write(store, tmp_path, monkeypatch, field, operation):
+def test_missing_source_blocks_detail_and_commands_but_list_is_metadata_only(store, tmp_path, monkeypatch, field, operation):
     scope, _ = store
     parsed(monkeypatch)
     masters(scope)
@@ -596,8 +598,19 @@ def test_missing_persisted_source_keys_stop_every_caller_before_archive_or_busin
         "apply": lambda: service.review_menu_import("2026-10", receipt["id"], receipt["revision"], None, apply=True),
         "download": lambda: service.get_menu_import_download("2026-10", receipt["id"]),
     }
-    with pytest.raises(ValueError, match="unresolved"):
-        calls[operation]()
+    if operation == "list":
+        listed = calls[operation]()
+        assert listed["next_before_id"] is None
+        assert len(listed["items"]) == 1
+        item = listed["items"][0]
+        assert item["id"] == receipt["id"] and item["state"] == "review"
+        assert field not in item["source"]
+        assert set(item) == {"id", "month_id", "state", "source", "created_at"}
+        with pytest.raises(ValueError, match="unresolved"):
+            calls["read"]()
+    else:
+        with pytest.raises(ValueError, match="unresolved"):
+            calls[operation]()
     with scope() as session:
         row = session.get(MonthlyMenuImport, receipt["id"])
         assert field not in row.source_json
@@ -686,7 +699,7 @@ def test_malformed_recorded_review_is_not_reconstructed_from_current_input(store
     {"resolutions": [{"source_name": "Fish", "action": "create", "unit_type": "count"}]},
     {"issues": [{}]}, {"master_diffs": [{}]},
     {"entries": [{"menu_date": "2026-10-01", "daypart": "朝食", "name": "Fish", "category": None, "diet_type": None, "slot_index": True}]}])
-def test_corrupt_nested_saved_review_stops_all_read_and_command_paths(store, tmp_path, monkeypatch, patch, operation):
+def test_corrupt_review_blocks_detail_and_commands_but_list_is_metadata_only(store, tmp_path, monkeypatch, patch, operation):
     scope, _ = store
     parsed(monkeypatch)
     masters(scope)
@@ -702,8 +715,19 @@ def test_corrupt_nested_saved_review_stops_all_read_and_command_paths(store, tmp
         "apply": lambda: service.review_menu_import("2026-10", receipt["id"], receipt["revision"], None, apply=True),
         "download": lambda: service.get_menu_import_download("2026-10", receipt["id"]),
     }
-    with pytest.raises(ValueError, match="unresolved"):
-        calls[operation]()
+    if operation == "list":
+        listed = calls[operation]()
+        assert listed["next_before_id"] is None
+        assert len(listed["items"]) == 1
+        item = listed["items"][0]
+        assert item["id"] == receipt["id"] and item["state"] == "review"
+        assert item["source"] == receipt["source"]
+        assert set(item) == {"id", "month_id", "state", "source", "created_at"}
+        with pytest.raises(ValueError, match="unresolved"):
+            calls["read"]()
+    else:
+        with pytest.raises(ValueError, match="unresolved"):
+            calls[operation]()
     with scope() as session:
         assert session.query(MonthlyMenuItem).count() == 0
         assert session.get(MenuEditRevision, "monthly-menu:2026-10").revision == 1

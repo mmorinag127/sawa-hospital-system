@@ -102,7 +102,7 @@ def test_actual_installer_and_lock_floor_parity(sources, name):
     else:
         assert metadata.get("marker") is None
     locked = one([package for package in sources["lock"]["package"] if package["name"] == name])
-    assert locked["version"] == FIXED[name]
+    assert Version(locked["version"]) >= Version(FIXED[name])
     assert Version(locked["version"]) in expected
 
 

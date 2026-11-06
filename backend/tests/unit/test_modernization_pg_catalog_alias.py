@@ -28,7 +28,7 @@ def compare(monkeypatch, tmp_path, expected, actual, dialect="postgresql"):
     path = tmp_path / "catalog.json"
     path.write_text(json.dumps(contract))
     monkeypatch.setattr(schema, "CONTRACT", path)
-    monkeypatch.setattr(schema, "read_catalog", lambda connection: deepcopy(actual))
+    monkeypatch.setattr(schema, "read_catalog", lambda connection, *, inspector=None: deepcopy(actual))
     schema.require_revision_catalog(SimpleNamespace(dialect=SimpleNamespace(name=dialect)), "0002")
 
 

@@ -1,6 +1,7 @@
 """Real SQL/source/CAS and output acceptance, synthetic OCR provider input only."""
 from copy import deepcopy
 from datetime import datetime
+from collections import Counter
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -158,8 +159,18 @@ def accepted(f, *, confirmed):
 def protected(before, after):
     # All input, historical and neighboring rows remain byte/value exact.
     for table in before:
-        if table not in {"orders", "order_workflow_states"}:
+        if table not in {"orders", "order_workflow_states", "order_dashboard_counts"}:
             assert after[table] == before[table], table
+    for snapshot_rows in (before, after):
+        expected = Counter((row["facility_code"], row["week_code"], row["status"])
+                           for row in snapshot_rows["orders"])
+        counts = snapshot_rows["order_dashboard_counts"]
+        actual = {(row["facility"], row["week"], row["status"]): row["row_count"]
+                  for row in counts if row["source_kind"] == "order"}
+        assert actual == dict(expected)
+        assert len(actual) == sum(row["source_kind"] == "order" for row in counts)
+    assert [row for row in after["order_dashboard_counts"] if row["source_kind"] != "order"] == [
+        row for row in before["order_dashboard_counts"] if row["source_kind"] != "order"]
     old_orders = {row["id"]: row for row in before["orders"]}
     new_orders = {row["id"]: row for row in after["orders"]}
     assert new_orders["unrelated-order"] == old_orders["unrelated-order"]

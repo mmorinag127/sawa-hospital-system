@@ -32,7 +32,7 @@ def metrics(messages):
     assert set(result) <= {
         'session', 'order', 'workflow_template', 'history_query', 'saved_sheet',
         'artifacts', 'response_serialization', 'workflow_serialize', 'ocr_row_serialize',
-        'sign_url', 'selectability', 'candidate_projection', 'session_exit',
+        'sign_url', 'selectability', 'candidate_projection', 'session_exit', 'database_execute',
     }
     for value in result.values():
         assert set(value) == {'seconds', 'count'}
@@ -79,6 +79,7 @@ def test_inspection_timing_keeps_response_queries_signing_validation_and_storage
     assert len(signs) == 2
     assert sorted(validations) == sorted([first, second])
     recorded = metrics(timing_logs)
+    assert recorded['database_execute']['count'] == len(queries)
     assert recorded['history_query']['count'] == 2
     assert recorded['ocr_row_serialize']['count'] == 2
     assert recorded['sign_url']['count'] == 2

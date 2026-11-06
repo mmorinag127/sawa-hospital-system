@@ -21,7 +21,12 @@ def test_paging_preserves_complete_scope_and_daily_line_count(isolated_formal_sc
     assert [row["id"] for row in result["orders"]] == ["fact-1"]
     assert result["facility_options"] == ["A", "B"]
     assert result["progress"] == [{"week": "2026-10", "pending": 0, "review": 1, "confirmed": 1, "error": 0}]
-    assert [row["id"] for row in list_facility_orders(facility="A", limit=1, offset=1)["orders"]] == ["fact-0"]
+    cursor = result["next_cursor"]
+    assert cursor == {"id": "fact-1", "source_kind": "order"}
+    following = list_facility_orders(facility="A", week="2026-10", limit=1,
+                                     before_id=cursor["id"], before_source_kind=cursor["source_kind"])
+    assert [row["id"] for row in following["orders"]] == ["fact-0"]
+    assert following["next_cursor"] is None
     daily = list_daily_order_facts(date(2026, 10, 1), facility="A")
     assert len(daily) == 1 and daily[0]["id"] == "fact-0" and daily[0]["line_count"] == 3
     with session_scope() as session:

@@ -63,7 +63,10 @@ def test_exact_current_reference_not_first_or_newest_pages_metadata_only_no_dml(
         before = snapshot(session)
         event.listen(history, "before_cursor_execute", observe)
         try:
-            pages = [read(session, page=page) for page in (1, 2)]
+            first = read(session)
+            assert first["next_before_id"] == "synthetic-order-current"
+            pages = [first, read(session, before_id=first["next_before_id"])]
+            assert pages[1]["next_before_id"] is None
             assert snapshot(session) == before
             assert not session.new and not session.dirty and not session.deleted
         finally:
@@ -279,8 +282,10 @@ def test_registered_contract_matches_committed_openapi_without_regeneration():
     assert actual == expected
     assert set(actual["paths"]) == {"/outputs/history"}
     assert {p["name"] for p in actual["paths"]["/outputs/history"]["get"]["parameters"]} == {
+            "order_id", "expected_workflow_revision", "page", "limit", "before_id",
+            "record_id", "validate_records"}
+    assert {p["name"] for p in actual["paths"]["/outputs/history"]["get"]["parameters"] if p["required"]} == {
         "order_id", "expected_workflow_revision", "page", "limit"}
-    assert all(p["required"] for p in actual["paths"]["/outputs/history"]["get"]["parameters"])
 
 
 def test_four_registered_facility_contracts_match_committed_schema_without_generation():

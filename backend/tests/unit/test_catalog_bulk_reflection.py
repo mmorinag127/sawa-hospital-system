@@ -40,6 +40,7 @@ class Result:
 class Connection:
     dialect = SimpleNamespace(name='postgresql')
     def __init__(self):
+        self.engine = object()
         self.sql = []
         self.unsupported = []
         self.types = []
@@ -136,7 +137,9 @@ def test_require_head_success_and_constraint_drift_rejection(monkeypatch, tmp_pa
     contract.write_text(json.dumps({'revisions': {'postgresql': {'0001': {
         'tables': {name: name for name in tables}, 'views': old['views']}}}, 'shapes': shapes}))
     monkeypatch.setattr(catalog, 'CONTRACT', contract)
-    assert catalog.require_formal_head(connection) is None
+    inspection = catalog.require_formal_head(connection)
+    assert isinstance(inspection, catalog.VerifiedCatalogInspection)
+    assert inspection.engine is connection.engine
     tables['a']['checks'][0]['sqltext'] = 'amount > 0'
     with pytest.raises(RuntimeError, match='mismatch: checks'):
         catalog.require_formal_head(connection)

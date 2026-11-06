@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import ast
 import importlib
 import os
+import shutil
+import sqlite3
 import uuid
 
 import pytest
@@ -67,10 +70,38 @@ def test_services_do_not_run_schema_repairs_at_import_or_read_time() -> None:
     offenders: list[str] = []
     for path in sorted((ROOT / "src" / "services").glob("*.py")):
         text = path.read_text(encoding="utf-8")
+        if path.name == "order_cleanup_manifest_v1.py":
+            tree = ast.parse(text)
+            create = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "create")
+            statement = "manifest.execute('CREATE INDEX rows_owner ON rows(table_name,owner_id,key_json)')"
+            calls = [node for node in ast.walk(create) if isinstance(node, ast.Call)
+                     and ast.get_source_segment(text, node) == statement]
+            assert len(calls) == 1
+            assert "closing(sqlite3.connect(path)) as manifest" in ast.get_source_segment(text, create)
+            text = text.replace(statement, "", 1)
         for token in forbidden:
             if token in text:
                 offenders.append(f"{path.relative_to(ROOT)}: {token}")
     assert offenders == []
+
+
+def test_cleanup_manifest_ddl_is_private_sqlite_not_application_database(tmp_path, monkeypatch):
+    from src.services import order_cleanup_manifest_v1 as service
+    owned = tmp_path / "manifest"
+    owned.mkdir(mode=0o700)
+    monkeypatch.setattr(service.tempfile, "mkdtemp", lambda *, prefix: str(owned))
+    class NoApplicationWrites:
+        def execute(self, *args, **kwargs):
+            pytest.fail("empty cleanup manifest must not touch application database")
+    try:
+        result = service.create(NoApplicationWrites(), {"owned": True}, [])
+        assert Path(result["path"]) == owned / "plan.sqlite"
+        assert Path(result["path"]).stat().st_mode & 0o777 == 0o600
+        with sqlite3.connect(result["path"]) as connection:
+            assert connection.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='rows_owner'").fetchall() == [("rows_owner",)]
+        assert result["sha256"] == service.digest_file(result["path"])
+    finally:
+        shutil.rmtree(owned)
 
 
 def test_runtime_modules_do_not_contain_ddl_statements() -> None:
@@ -272,11 +303,17 @@ def test_startup_calls_facility_schema_validator_without_ddl(monkeypatch, formal
     import src.main as main
 
     calls: list[str] = []
-    monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: calls.append("menu"))
-    monkeypatch.setattr(main.facility_template_version_service, "ensure_facility_template_version_schema", lambda: calls.append("facility"))
+    inspections = []
+    def checked(name, inspection):
+        assert inspection.engine is formal_startup_boundary
+        inspections.append(inspection)
+        calls.append(name)
+    monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda *, inspection: checked("menu", inspection))
+    monkeypatch.setattr(main.facility_template_version_service, "ensure_facility_template_version_schema", lambda *, inspection: checked("facility", inspection))
     monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: calls.append("facility-sync"))
     main._initialize_menu_schema()
     assert calls == ["menu", "facility", "facility-sync"]
+    assert inspections[0] is inspections[1]
 
 
 @pytest.mark.parametrize("partial", [False, True])
@@ -290,13 +327,15 @@ def test_startup_blocks_missing_or_partial_facility_schema_without_ddl(monkeypat
             connection.execute(text("CREATE TABLE facility_template_versions (id VARCHAR PRIMARY KEY, facility_id VARCHAR NOT NULL)"))
     monkeypatch.setattr(facility_template_version_service, "get_engine", lambda: engine)
     monkeypatch.setattr(facility_template_version_service, "_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED", False)
-    monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: None)
+    monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda *, inspection: None)
     monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: None)
     before = _sqlite_schema_snapshot(engine)
     statements, capture = _capture_sql(engine)
     try:
-        with pytest.raises(RuntimeError, match="migrations through 0025"):
+        with pytest.raises(ValueError, match="verified catalog must belong to the current startup engine"):
             main._initialize_menu_schema()
+        with pytest.raises(RuntimeError, match="migrations through 0025"):
+            facility_template_version_service.ensure_facility_template_version_schema()
     finally:
         event.remove(engine, "before_cursor_execute", capture)
     assert facility_template_version_service._FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED is False
@@ -312,12 +351,14 @@ def test_startup_accepts_migrated_facility_schema_without_ddl(monkeypatch, forma
     FacilityTemplateVersion.__table__.create(engine)
     monkeypatch.setattr(facility_template_version_service, "get_engine", lambda: engine)
     monkeypatch.setattr(facility_template_version_service, "_FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED", False)
-    monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda: None)
+    monkeypatch.setattr(main.menu_service, "ensure_menu_schema", lambda *, inspection: None)
     monkeypatch.setattr(main.facility_service, "sync_facility_names_from_master", lambda: None)
     before = _sqlite_schema_snapshot(engine)
     statements, capture = _capture_sql(engine)
     try:
-        main._initialize_menu_schema()
+        with pytest.raises(ValueError, match="verified catalog must belong to the current startup engine"):
+            main._initialize_menu_schema()
+        facility_template_version_service.ensure_facility_template_version_schema()
     finally:
         event.remove(engine, "before_cursor_execute", capture)
     assert facility_template_version_service._FACILITY_TEMPLATE_VERSION_SCHEMA_INITIALIZED is True

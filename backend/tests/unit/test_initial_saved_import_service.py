@@ -467,7 +467,8 @@ def test_nonimported_writes_do_not_read_json_or_force_extra_flush(imported, monk
     assert session.get(Order, "OTHER").status == "native-change"
 
 
-def test_later_configuration_never_rebinds_imported_saved_results(imported):
+def test_later_configuration_never_rebinds_imported_saved_results(imported, monkeypatch):
+    monkeypatch.setattr(store, "facility_change_today", lambda: date(2026, 11, 1))
     session, master, original = imported
     record = master["facilities"][0]["versions"][0]
     later = authored("future", "2026-11-01", None)
@@ -479,7 +480,8 @@ def test_later_configuration_never_rebinds_imported_saved_results(imported):
     assert binding["snapshot"]["template"]["valid_from"] is None
 
 
-def test_canonical_transition_retires_old_receipt_without_relabeling_old_rows(imported):
+def test_canonical_transition_retires_old_receipt_without_relabeling_old_rows(imported, monkeypatch):
+    monkeypatch.setattr(store, "facility_change_today", lambda: date(2026, 11, 1))
     session, master, original = imported
     from src.services import canonical_facility_lineage as lineage
     record = master["facilities"][0]["versions"][0]

@@ -23,22 +23,24 @@ SOURCE_SHA = '04ef4a6ce7897bb187bb4d91f77839cfa30edde7'
 
 
 @pytest.mark.parametrize('suite,prefix,modules', [
-    ('readonly', 'sawa-ro', ['backend/tests/integration/test_menu_readonly_boundary.py']),
+    ('readonly', 'sawa-ro', ['backend/tests/integration/test_menu_readonly_boundary.py',
+                            'backend/tests/integration/test_native_startup_reflection.py']),
     ('c1', 'sawa-c1', ['backend/tests/integration/test_menu_master_revision.py',
                       'backend/tests/integration/test_menu_editor_revision_contract.py']),
     ('c1-guards', 'sawa-c1-guards', ['backend/tests/integration/test_stg_menu_master_live.py',
                                    'backend/tests/integration/test_stg_menu_master_migration.py',
                                    'backend/tests/contract/test_automation_bootstrap_postgres.py']),
     ('menu-identity', 'sawa-menu-identity', ['backend/tests/integration/test_monthly_menu_identity_migration.py']),
-    ('output', 'sawa-output', ['backend/tests/integration/pg_output_boundary_cases.py']),
+    ('output', 'sawa-output', ['backend/tests/integration/pg_output_boundary_cases.py',
+                              'backend/tests/unit/test_ocr_history_postgresql.py']),
     ('formal', 'sawa-formal', ['backend/tests/integration/test_formal_alembic_fresh_chain.py']),
 ])
 def test_explicit_suite_selects_whole_modules_and_distinct_owned_root(suite, prefix, modules):
     root = runner.owned_root('123', '2', suite)
     assert root == Path('/tmp').resolve() / f'{prefix}-123-2'
     assert runner.pytest_command(root, suite) == [
-        sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', *modules,
-        '--basetemp', str(root / 'tests'), '--junitxml', str(root / 'evidence/results.xml'), '-v',
+        sys.executable, '-m', 'pytest', '-p', 'no:cacheprovider', '-p', 'local_pg_input_guard', *modules,
+        '--basetemp', str(root / 'tests'), '--junitxml', str(root / f'evidence/results-{suite}.xml'), '-v',
     ]
     assert runner.owned_root('123', '2') == runner.owned_root('123', '2', 'readonly')
     assert runner.pytest_command(root) == runner.pytest_command(root, 'readonly')
@@ -68,7 +70,7 @@ def test_unknown_suite_never_falls_back_or_creates_a_root(tmp_path, suite):
         runner.owned_root('123', '1', suite)
     with pytest.raises(ValueError, match='unknown suite'):
         runner.pytest_command(tmp_path, suite)
-    with pytest.raises(ValueError, match='unknown suite'):
+    with pytest.raises(ValueError, match='explicit distinct PostgreSQL suites required'):
         runner.run(tmp_path, '123', '1', suite)
     assert list(tmp_path.iterdir()) == []
 
@@ -160,7 +162,10 @@ def transport(monkeypatch, tmp_path):
                                         None, args[args.index('-d') + 1]) else {})}))
         elif args[:3] == [sys.executable, '-m', 'pytest']:
             code = state.pytest_exit
-            (root / 'evidence/results.xml').write_text('<testsuites/>')
+            Path(args[args.index('--junitxml') + 1]).write_text('<testsuites/>')
+            Path(env['SAWA_PG_COMMAND_INPUT_REPORT']).write_text(json.dumps({
+                'collected': 0, 'passed': 0, 'skipped': 0, 'failed': 0, 'exitstatus': code,
+            }))
             stdout.write(f'controlled pytest exit {code}\n')
         elif args[:2] == [sys.executable, 'backend/tests/integration/pg_output_migration_probe.py']:
             assert all(env[key] == env['MODERNIZATION_PG_TEST_URI']
@@ -209,7 +214,8 @@ def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeyp
     assert args == runner.pytest_command(root, suite)
     assert {env[key] for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')} == {
         'sqlite:///' + str(root / 'bootstrap.sqlite3')}
-    assert env['PYTHONPATH'] == str(source / 'backend') and env['PYTHONDONTWRITEBYTECODE'] == '1'
+    assert env['PYTHONPATH'] == os.pathsep.join([str(source / 'scripts'), str(source / 'backend')])
+    assert env['PYTHONDONTWRITEBYTECODE'] == '1'
     assert env['AUTH_DISABLED'] == 'true'
     assert all(env[key] == '1' for key in ('HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE', 'HF_DATASETS_OFFLINE'))
     for key, suffix in [('ORDERS_OUTPUT_DIR', 'output'), ('XDG_CACHE_HOME', 'cache'),
@@ -227,7 +233,8 @@ def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeyp
             '-o', f"-p {port} -k {socket} -c listen_addresses='' -c unix_socket_permissions=0700",
             '-w', 'start'] in commands
     if suite == 'c1':
-        assert not any((name.startswith(('C2_', 'PG')) and name != 'C2_MENU_READONLY_OWNED_ROOT')
+        assert env['PG_BIN'] == str(runner.PG_BIN)
+        assert not any((name.startswith(('C2_', 'PG')) and name not in {'C2_MENU_READONLY_OWNED_ROOT', 'PG_BIN'})
                        or name in ('PYTEST_ADDOPTS', 'PYTEST_PLUGINS') for name in env)
         assert [str(runner.PG_BIN / 'createdb'), '-h', str(socket), '-p', port,
                 '-U', 'mmorinag', 'c1_menu_master'] in commands
@@ -239,18 +246,19 @@ def test_exact_environment_commands_failure_exit_and_shutdown(transport, monkeyp
         assert metadata['source_sha'] == SOURCE_SHA and metadata['uris'][key] == env[key]
         assert metadata['modules'] == ['backend/tests/integration/test_menu_master_revision.py',
                                        'backend/tests/integration/test_menu_editor_revision_contract.py']
-        assert metadata['argv'] == args
+        assert metadata['argv'] == [args]
     else:
         assert env['C2_MENU_READONLY_OWNED_ROOT'] == str(root)
         assert not any(Path(args[0]).name == 'createdb' and args[1] != '--version' for args in commands)
         assert len([args for args in commands if Path(args[0]).name == 'psql' and args[1] == '-X']) == 1
     lifecycle = json.loads((root / 'evidence/lifecycle.json').read_text())
-    assert {'pytest_exit': exit_code} in lifecycle
+    assert {'suite': suite, 'pytest_exit': exit_code} in lifecycle
     assert {'shutdown_verified': True, 'socket_alias_used': False} in lifecycle
     assert [str(runner.PG_BIN / 'pg_ctl'), '-D', str(data), '-m', 'fast', '-w', 'stop'] in commands
     assert (root / 'evidence/git-sha.txt').read_text() == SOURCE_SHA + '\n'
     manifest = json.loads((root / 'evidence/sha256.json').read_text())
-    assert {'git-sha.txt', 'pytest.log', 'results.xml', 'lifecycle.json', 'stop.log'} <= manifest.keys()
+    assert {'git-sha.txt', f'pytest-{suite}.log', f'results-{suite}.xml',
+            f'inputs-{suite}.json', 'lifecycle.json', 'stop.log'} <= manifest.keys()
     for name, digest in manifest.items():
         assert digest == sha256((root / 'evidence' / name).read_bytes()).hexdigest()
 
@@ -310,7 +318,7 @@ def test_cleanup_failure_cannot_turn_successful_pytest_green(transport, failure,
     with pytest.raises((subprocess.CalledProcessError, RuntimeError)):
         runner.run(transport.source, '123', '1', suite)
     evidence = transport.root / 'evidence'
-    assert {'pytest_exit': 0} in json.loads((evidence / 'lifecycle.json').read_text())
+    assert {'suite': suite, 'pytest_exit': 0} in json.loads((evidence / 'lifecycle.json').read_text())
     assert (evidence / 'cleanup-error.log').read_text()
     assert 'cleanup-error.log' in json.loads((evidence / 'sha256.json').read_text())
 
@@ -340,11 +348,12 @@ def test_output_and_formal_use_current_owned_socket_and_all_cases(transport, sui
 
 def test_output_migration_failure_is_not_hidden_or_followed_by_transaction_cases(transport):
     transport.fail = 'migration-probe'
-    with pytest.raises(subprocess.CalledProcessError):
-        runner.run(transport.source, '123', '1', 'output')
+    assert runner.run(transport.source, '123', '1', 'output') == 1
     assert not transport.active
     assert not any(args[:3] == [sys.executable, '-m', 'pytest'] for args, _ in transport.commands)
-    assert (transport.root / 'evidence/runner-error.log').is_file()
+    lifecycle = json.loads((transport.root / 'evidence/lifecycle.json').read_text())
+    assert {'suite': 'output', 'not_started': 'migration_failed', 'migration_exit': 1} in lifecycle
+    assert (transport.root / 'evidence/migration.log').is_file()
 
 
 @pytest.mark.parametrize('suite', ['c1-guards', 'menu-identity'])
@@ -365,7 +374,8 @@ def test_fixed_profiles_check_every_database_before_whole_modules_and_preserve_f
     args, env = calls[0]
     assert args == runner.pytest_command(state.root, suite)
     assert {key for key in env if key.startswith(('PG', 'C1_', 'C2_'))
-            or key in ('TEST_BOOTSTRAP_DB_URI', 'PYTEST_ADDOPTS')} == set(databases) | {'C2_MENU_READONLY_OWNED_ROOT'}
+            or key in ('TEST_BOOTSTRAP_DB_URI', 'PYTEST_ADDOPTS')} == set(databases) | {'C2_MENU_READONLY_OWNED_ROOT', 'PG_BIN'}
+    assert env['PG_BIN'] == str(runner.PG_BIN)
     assert {env[key] for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')} == {
         'sqlite:///' + str(state.root / 'bootstrap.sqlite3')}
     for key, database in databases.items():
@@ -378,10 +388,10 @@ def test_fixed_profiles_check_every_database_before_whole_modules_and_preserve_f
     commands = [command for command, _ in state.commands]
     create = [command for command in commands if Path(command[0]).name == 'createdb' and command[1] != '--version']
     assert create == [[str(runner.PG_BIN / 'createdb'), '-h', str(socket), '-p', port, '-U', 'mmorinag', database]
-                      for database in databases.values() if database != 'postgres']
+                      for database in sorted(set(databases.values())) if database != 'postgres']
     sql = [command for command in commands if Path(command[0]).name == 'psql' and command[1] == '-X']
     assert len(sql) == len(databases)
-    for command, database in zip(sql, databases.values()):
+    for command, database in zip(sql, sorted(set(databases.values()))):
         assert command[:15] == [str(runner.PG_BIN / 'psql'), '-X', '-w', '-h', str(socket), '-p', port,
                                '-U', 'mmorinag', '-d', database, '-v', 'ON_ERROR_STOP=1', '-At', '-c']
         assert 'current_database()' in command[15] and 'current_user' in command[15]
@@ -389,16 +399,17 @@ def test_fixed_profiles_check_every_database_before_whole_modules_and_preserve_f
         assert all(commands.index(created) < commands.index(command) for created in create)
     metadata = json.loads((evidence / 'run.json').read_text())
     assert metadata['source_sha'] == SOURCE_SHA and metadata['source'] == str(state.source)
-    assert metadata['pg_root'] == str(pg) and metadata['argv'] == args
-    assert metadata['modules'] == args[5:-5] and metadata['uris'] == {key: env[key] for key in databases}
+    assert metadata['pg_root'] == str(pg) and metadata['argv'] == [args]
+    assert metadata['modules'] == args[7:-5] and metadata['uris'] == {key: env[key] for key in databases}
     lifecycle = json.loads((evidence / 'lifecycle.json').read_text())
-    assert {'pytest_exit': exit_code} in lifecycle
+    assert {'suite': suite, 'pytest_exit': exit_code} in lifecycle
     assert {'owned_postmaster_pid': 12345} in lifecycle
     assert {'postmaster_process_absent': True, 'pid': 12345} in lifecycle
     assert {'shutdown_verified': True, 'socket_alias_used': False} in lifecycle
     assert not (data / 'postmaster.pid').exists() and list(socket.iterdir()) == []
     manifest = json.loads((evidence / 'sha256.json').read_text())
-    assert {'run.json', 'git-sha.txt', 'results.xml', 'pytest.log', 'stop.log', 'lifecycle.json'} <= manifest.keys()
+    assert {'run.json', 'git-sha.txt', f'results-{suite}.xml', f'pytest-{suite}.log',
+            f'inputs-{suite}.json', 'stop.log', 'lifecycle.json'} <= manifest.keys()
     assert {f'server-{database}.json' for database in databases.values()} <= manifest.keys()
     for name, digest in manifest.items():
         assert digest == sha256((evidence / name).read_bytes()).hexdigest()

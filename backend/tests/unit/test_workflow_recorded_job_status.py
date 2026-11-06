@@ -59,7 +59,17 @@ def test_workflow_serializer_preserves_approved_receipt_and_recorded_job_project
     index = next(i for i, key in enumerate(result.keys)
                  if isinstance(key, ast.Constant) and key.value == "common_job_status")
     assert ast.unparse(result.values[index]) == "_recorded_workflow_job_status(row, meta, ocr_job)"
-    assert ast.dump(current) == ast.dump(original)
+    old_values = {key.value: value for key, value in zip(original_result.keys, original_result.values)
+                  if isinstance(key, ast.Constant)}
+    new_values = {key.value: value for key, value in zip(result.keys, result.values)
+                  if isinstance(key, ast.Constant)}
+    for key in old_keys - {"ocr_job"}:
+        assert ast.dump(new_values[key]) == ast.dump(old_values[key]), key
+    job_call = new_values["ocr_job"]
+    assert ast.unparse(job_call.func) == "_serialize_ocr_job"
+    assert [ast.unparse(value) for value in job_call.args] == ["ocr_job"]
+    assert {item.arg: ast.unparse(item.value) for item in job_call.keywords} == {
+        "session": "session", "_analysis": "_analysis", "_read_operation": "_read_operation"}
     assert callable(workflow._recorded_workflow_job_status)
     assert order_service._recorded_hospital_job_status is workflow._recorded_hospital_job_status
 

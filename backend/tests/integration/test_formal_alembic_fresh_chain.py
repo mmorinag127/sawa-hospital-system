@@ -606,6 +606,7 @@ def test_postgres_standalone_types_stop_independently_before_ddl(formal_database
         command.upgrade(config, revision)
     name = "unknown_" + kind
     with engine.begin() as connection:
+        original_routines = connection.exec_driver_sql("SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema() ORDER BY p.oid").all()
         if revision is not None:
             connection.exec_driver_sql("INSERT INTO facilities(id,name) VALUES ('type-preserve','Preserved Facility')")
         if kind == "shell":
@@ -633,7 +634,7 @@ def test_postgres_standalone_types_stop_independently_before_ddl(formal_database
             )
     before = snapshot()
     if kind == "shell":
-        assert before[3] == []  # Shell rejection must not rely on routine detection.
+        assert before[3] == original_routines  # No extra routine can cause shell rejection.
     message = rf"unsupported standalone type:.*{name} \({kind}\)"
     with engine.connect() as connection, pytest.raises(RuntimeError, match=message):
         read_catalog(connection)
@@ -1041,7 +1042,9 @@ def test_owned_postgres_fresh_all_source_revisions(monkeypatch):
             assert columns["source"]["default"] == "'manual'::character varying"
             assert inspector.get_pk_constraint("shipping_tracking_logs")["constrained_columns"] == ["id"]
             indexes = {index["name"]: index for index in inspector.get_indexes("shipping_tracking_logs")}
-            assert set(indexes) == {"ix_shipping_tracking_logs_tracking_key", "ix_shipping_tracking_logs_looked_up_at", "ix_shipping_tracking_logs_ship_date"}
+            assert set(indexes) == {"ix_shipping_tracking_logs_tracking_key", "ix_shipping_tracking_logs_looked_up_at", "ix_shipping_tracking_logs_ship_date", "ix_shipping_tracking_logs_key_latest"}
+            assert indexes["ix_shipping_tracking_logs_key_latest"]["column_names"] == ["tracking_key", "looked_up_at", "created_at", "id"]
+            assert not indexes["ix_shipping_tracking_logs_key_latest"]["unique"]
             for name in ("tracking_key", "looked_up_at", "ship_date"):
                 assert indexes[f"ix_shipping_tracking_logs_{name}"]["column_names"] == [name]
                 assert not indexes[f"ix_shipping_tracking_logs_{name}"]["unique"]
@@ -1094,7 +1097,9 @@ def test_fresh_sqlite_upgrade_uses_all_numbered_revisions(tmp_path, monkeypatch)
             assert columns["source"]["default"] == "'manual'"
             assert inspector.get_pk_constraint("shipping_tracking_logs")["constrained_columns"] == ["id"]
             shipping_indexes = {item["name"]: item for item in inspector.get_indexes("shipping_tracking_logs")}
-            assert set(shipping_indexes) == {f"ix_shipping_tracking_logs_{name}" for name in ("tracking_key", "looked_up_at", "ship_date")}
+            assert set(shipping_indexes) == {f"ix_shipping_tracking_logs_{name}" for name in ("tracking_key", "looked_up_at", "ship_date", "key_latest")}
+            assert shipping_indexes["ix_shipping_tracking_logs_key_latest"]["column_names"] == ["tracking_key", "looked_up_at", "created_at", "id"]
+            assert not shipping_indexes["ix_shipping_tracking_logs_key_latest"]["unique"]
             for name in ("tracking_key", "looked_up_at", "ship_date"):
                 assert shipping_indexes[f"ix_shipping_tracking_logs_{name}"]["column_names"] == [name]
                 assert not shipping_indexes[f"ix_shipping_tracking_logs_{name}"]["unique"]

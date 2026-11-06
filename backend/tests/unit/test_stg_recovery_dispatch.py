@@ -52,6 +52,9 @@ def test_recovery_is_in_authorized_workflow_with_original_steps():
                 assert line in actual['run'].splitlines()
             assert 'local_hospital_test_runner.py --validate' in actual['run']
         else:
+            expected = dict(expected)
+            if expected.get('name') == 'Recover image only and verify runtime database and cleanup protection':
+                expected['env'] = {**expected['env'], 'RETAINED_REVISION': '${{ inputs.retained_revision }}'}
             assert actual == expected
     assert recovery['needs'] == 'source-gate'
     assert recovery['permissions'] == old['permissions']
@@ -62,7 +65,7 @@ def test_recovery_is_in_authorized_workflow_with_original_steps():
     assert 'uses' not in recovery
     inputs = current[True]['workflow_dispatch']['inputs']
     assert inputs['mode']['default'] == 'normal'
-    assert inputs['mode']['options'] == ['normal', 'recover-web-image']
+    assert inputs['mode']['options'] == ['normal', 'recover-web-image', 'rehearse-retained-worker']
 
 
 def environment():
@@ -74,6 +77,7 @@ def environment():
         'DEPLOY_MODE': 'recover-web-image',
         'RECOVERY_CONFIRMATION': 'RECOVER_WEB_STG_IMAGE_AND_KEEP_STG_IMAGES',
         'EXPECTED_REVISION': 'web-stg-00365-n99',
+        'RETAINED_REVISION': '',
         'EXPECTED_IMAGE': 'asia-northeast2-docker.pkg.dev/sawahospitalsystem/backend/frontend@sha256:' + 'a' * 64,
         'OCR_MANIFEST': '', 'MENU_MANIFEST': '', 'VERIFY_MENU': 'false',
         'OUTPUT_ORDER': '', 'OUTPUT_DATE': '',

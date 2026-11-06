@@ -97,8 +97,12 @@ def test_owned_raw_borrow_keeps_checks_and_input(packet_row, monkeypatch, analys
     def tracked(*args, **kwargs):
         result = real(*args, **kwargs)
         if kwargs.get("copy_records") is False:
-            assert result is payload["hakodate_ocr_evidence"]["records"]
-            borrow_calls.append(result)
+            path = args[1][0]
+            canonical = payload
+            for key in path:
+                canonical = canonical[key]
+            assert result is canonical
+            borrow_calls.append(path)
         return result
 
     monkeypatch.setattr(orders, "_first_hakodate_payload_list", tracked)
@@ -120,7 +124,9 @@ def test_owned_raw_borrow_keeps_checks_and_input(packet_row, monkeypatch, analys
     assert payload == before
     if fault is None:
         assert actual == ("value", None)
-        assert len(borrow_calls) == 1
+        assert borrow_calls == [("hakodate_preprocessing", "target_cell_map"),
+                                ("hakodate_ocr_evidence", "records"),
+                                ("hakodate_ocr_evidence", "records")]
     else:
         assert actual[0] == "error"
         assert actual[2] == ("hakodate_own_record_identity_missing" if fault == "identity"

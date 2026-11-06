@@ -3,12 +3,10 @@ import ast
 import importlib.util
 import json
 from pathlib import Path
-import subprocess
 import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-PARENT = "0f93dafa0e280786bc461a60185bad2c5c64c1fc"
 API = "backend/src/api/menus.py"
 PREFIX = "/monthly-menus"
 OPERATIONS = {
@@ -19,10 +17,6 @@ OPERATIONS = {
     (PREFIX + "/{month_id}/imports/{import_id}/apply", "post"),
     (PREFIX + "/{month_id}/entries/{entry_id}/exceptions", "post"),
 }
-
-
-def parent_source(path):
-    return subprocess.check_output(["git", "show", f"{PARENT}:{path}"], cwd=ROOT, text=True)
 
 
 def definitions(source):
@@ -77,21 +71,32 @@ class MenuImportContractTests(unittest.TestCase):
         self.assertEqual(binary["responses"]["200"]["content"],
                          {"*/*": {"schema": {"type": "string", "format": "binary"}}})
 
-    def test_packet_did_not_change_handlers_request_signatures_or_producers(self):
-        before, after = definitions(parent_source(API)), definitions((ROOT / API).read_text())
-        for name, old in before.items():
+    def test_handlers_forward_identity_cursor_revision_and_explicit_resolution(self):
+        handlers = definitions((ROOT / API).read_text())
+        expected = {
+            "list_menu_imports": "_monthly_call(menu_service.list_menu_imports, month_id, before_id=before_id)",
+            "read_menu_import": "_monthly_call(menu_service.read_menu_import, month_id, import_id)",
+            "review_menu_import": "_monthly_call(menu_service.review_menu_import, month_id, import_id, if_match, body['resolutions'], input_expected=body.get('input_revision'))",
+            "apply_menu_import": "_monthly_call(menu_service.review_menu_import, month_id, import_id, if_match, None, apply=True)",
+        }
+        for name, expression in expected.items():
             with self.subTest(name=name):
-                new = after[name]
-                self.assertEqual(ast.dump(ast.Module(body=old.body, type_ignores=[])),
-                                 ast.dump(ast.Module(body=new.body, type_ignores=[])))
-                if not isinstance(old, ast.ClassDef):
-                    self.assertEqual(ast.dump(old.args), ast.dump(new.args))
-                    self.assertEqual(ast.dump(old.returns) if old.returns else None,
-                                     ast.dump(new.returns) if new.returns else None)
-        path = "backend/src/services/menu_service.py"
-        before, after = definitions(parent_source(path)), definitions((ROOT / path).read_text())
-        for name in ["_serialize_import", "_monthly_snapshot_body", "review_menu_import", "monthly_editor_command"]:
-            self.assertEqual(ast.dump(before[name]), ast.dump(after[name]), name)
+                result = next(node.value for node in handlers[name].body if isinstance(node, ast.Return))
+                self.assertEqual(ast.dump(result), ast.dump(ast.parse(expression, mode="eval").body))
+        review = handlers["review_menu_import"]
+        self.assertEqual(ast.unparse(review.body[0].test), "not isinstance(body.get('resolutions'), list)")
+        self.assertIsInstance(review.body[0].body[0], ast.Raise)
+        for name in ("review_menu_import", "apply_menu_import"):
+            self.assertEqual(handlers[name].args.args[-1].arg, "if_match")
+            self.assertEqual(ast.unparse(handlers[name].args.defaults[-1]), "Header(None)")
+        download = handlers["download_menu_import"]
+        self.assertEqual(ast.unparse(download.body[0].value),
+                         "_monthly_call(menu_service.get_menu_import_download, month_id, import_id)")
+        response = download.body[-1].value
+        self.assertEqual(ast.unparse(response.func), "Response")
+        self.assertEqual({kw.arg: ast.unparse(kw.value) for kw in response.keywords}, {
+            "content": "source['bytes']", "media_type": "source['media_type']",
+            "headers": "{'Content-Disposition': _attachment_content_disposition(source['filename'])}"})
 
     def test_docs_retain_unknown_nested_fields_and_nullable_menu(self):
         sys.path.insert(0, str(ROOT / "backend"))

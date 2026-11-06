@@ -163,6 +163,7 @@ def test_real_sql_receipt_reads_frozen_setting_not_current_json(monkeypatch, tmp
     future = {**deepcopy(original), "version_id": "future-display-change", "valid_from": "2026-11-01", "valid_to": None}
     future["facility"]["daily_label_comparable_diet_types"] = []
     from src.services import canonical_facility_store
+    monkeypatch.setattr(canonical_facility_store, "facility_change_today", lambda: date(2026, 11, 1))
     current["facilities"][0]["versions"] = canonical_facility_store.append_facility_version([original], future)
     path.write_text(json.dumps(current))
 
