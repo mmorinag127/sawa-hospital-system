@@ -34,7 +34,9 @@ def github(path):
         return json.load(response)
 
 
-def previous_source(runs, jobs):
+def previous_source(runs, jobs, component=None):
+    if component not in (None, "backend", "frontend"):
+        raise ValueError("Unknown staging component")
     if not runs:
         return None
     run = runs[0]
@@ -50,6 +52,14 @@ def previous_source(runs, jobs):
         return None
     if jobs.get("recover-web") != "skipped":
         raise ValueError("Verified staging recovery status is required")
+    if jobs.get("rehearse-retained-worker") == "success":
+        return None
+    deployments = [jobs.get(name) for name in ("deploy-backend", "deploy-frontend")]
+    if any(state not in {"success", "skipped"} for state in deployments):
+        raise ValueError("Verified staging deployment job results are required")
+    if (component is None and deployments != ["success", "success"]
+            or component is not None and jobs["deploy-" + component] != "success"):
+        return None
     return source
 
 
@@ -58,24 +68,37 @@ def main():
             or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
             or os.environ.get("GITHUB_REF") != "refs/heads/develop"):
         raise ValueError("Staging dispatch context is required")
-    result = github("/actions/workflows/deploy-stg.yml/runs?branch=develop&event=workflow_dispatch&status=success&per_page=1")
+    result = github("/actions/workflows/deploy-stg.yml/runs?branch=develop&event=workflow_dispatch&status=success&per_page=100")
     runs = result["workflow_runs"]
-    jobs = github(f"/actions/runs/{int(runs[0]['id'])}/jobs?per_page=100")["jobs"] if runs else []
-    source = previous_source(runs, {job["name"]: job["conclusion"] for job in jobs})
+    sources = {"backend": None, "frontend": None}
+    for run in runs:
+        records = github(f"/actions/runs/{int(run['id'])}/jobs?per_page=100")["jobs"]
+        jobs = {job["name"]: job["conclusion"] for job in records}
+        for component in sources:
+            if sources[component] is None:
+                sources[component] = previous_source([run], jobs, component)
+        # Rehearsals and no-op dispatches did not deploy their source. Recovery
+        # changed the serving image outside normal promotion, so rebaseline it.
+        if all(sources.values()) or jobs.get("recover-web") == "success":
+            break
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     if head != os.environ.get("GITHUB_SHA"):
         raise ValueError("Staging checkout source mismatch")
-    if source is None:
-        selected = (True, True)
-    else:
-        subprocess.run(["git", "fetch", "origin", source], check=True, capture_output=True)
-        subprocess.run(["git", "merge-base", "--is-ancestor", source, head], check=True)
-        paths = subprocess.check_output(["git", "diff", "--name-only", "-z", source, head], text=True)
-        selected = surfaces([path for path in paths.split("\0") if path])
+    selected, compared = [], {}
+    for index, source in enumerate(sources.values()):
+        if source is None:
+            selected.append(True)
+            continue
+        if source not in compared:
+            subprocess.run(["git", "fetch", "origin", source], check=True, capture_output=True)
+            subprocess.run(["git", "merge-base", "--is-ancestor", source, head], check=True)
+            paths = subprocess.check_output(["git", "diff", "--name-only", "-z", source, head], text=True)
+            compared[source] = surfaces([path for path in paths.split("\0") if path])
+        selected.append(compared[source][index])
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
         for name, value in zip(("backend_changed", "frontend_changed"), selected):
             output.write(f"{name}={str(value).lower()}\n")
-    print(json.dumps({"base_sha": source, "source_sha": head,
+    print(json.dumps({"base_shas": sources, "source_sha": head,
                       "backend_changed": selected[0], "frontend_changed": selected[1]}))
 
 

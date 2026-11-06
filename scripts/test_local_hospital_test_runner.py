@@ -104,10 +104,23 @@ class ReceiptContractTest(unittest.TestCase):
         run = {'event': 'workflow_dispatch', 'head_branch': 'develop', 'status': 'completed',
                'conclusion': 'success', 'path': '.github/workflows/deploy-stg.yml',
                'head_sha': 'a' * 40, 'head_repository': {'full_name': DEPLOY_SURFACES.REPOSITORY}}
-        jobs = {'source-gate': 'success', 'recover-web': 'skipped'}
+        jobs = {'source-gate': 'success', 'recover-web': 'skipped',
+                'deploy-backend': 'success', 'deploy-frontend': 'success'}
         self.assertEqual(DEPLOY_SURFACES.previous_source([run], jobs), 'a' * 40)
         self.assertIsNone(DEPLOY_SURFACES.previous_source([], {}))
         self.assertIsNone(DEPLOY_SURFACES.previous_source([run], {**jobs, 'recover-web': 'success'}))
+        self.assertIsNone(DEPLOY_SURFACES.previous_source([run], {**jobs, 'rehearse-retained-worker': 'success'}))
+        self.assertIsNone(DEPLOY_SURFACES.previous_source([run], {
+            **jobs, 'deploy-backend': 'skipped', 'deploy-frontend': 'skipped'}))
+        for name in ('deploy-backend', 'deploy-frontend'):
+            partial = {**jobs, name: 'skipped'}
+            self.assertIsNone(DEPLOY_SURFACES.previous_source([run], partial))
+            self.assertIsNone(DEPLOY_SURFACES.previous_source([run], partial, name.removeprefix('deploy-')))
+            other = 'frontend' if name == 'deploy-backend' else 'backend'
+            self.assertEqual(DEPLOY_SURFACES.previous_source([run], partial, other), 'a' * 40)
+            for state in (None, 'failure', 'cancelled'):
+                with self.subTest(job=name, state=state), self.assertRaises(ValueError):
+                    DEPLOY_SURFACES.previous_source([run], {**jobs, name: state})
         for key, value in (('event', 'pull_request'), ('head_branch', 'main'),
                            ('status', 'in_progress'), ('conclusion', 'failure'),
                            ('path', '.github/workflows/deploy-prod.yml'), ('head_sha', 'invalid'),
@@ -123,7 +136,9 @@ class ReceiptContractTest(unittest.TestCase):
                'conclusion': 'success', 'path': '.github/workflows/deploy-stg.yml',
                'head_sha': 'a' * 40, 'head_repository': {'full_name': DEPLOY_SURFACES.REPOSITORY}}
         jobs = {'jobs': [{'name': 'source-gate', 'conclusion': 'success'},
-                         {'name': 'recover-web', 'conclusion': 'skipped'}]}
+                         {'name': 'recover-web', 'conclusion': 'skipped'},
+                         {'name': 'deploy-backend', 'conclusion': 'success'},
+                         {'name': 'deploy-frontend', 'conclusion': 'success'}]}
         for conflict in (False, True):
             with tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / 'outputs'
@@ -149,6 +164,69 @@ class ReceiptContractTest(unittest.TestCase):
                         self.assertEqual(output.read_text(), 'backend_changed=false\nfrontend_changed=true\n')
                     self.assertIn(['git', 'merge-base', '--is-ancestor', 'a' * 40, 'b' * 40],
                                   [call.args[0] for call in commands.call_args_list])
+
+    def test_deploy_selection_ignores_noop_and_rehearsal_but_stops_at_recovery(self):
+        base = {'event': 'workflow_dispatch', 'head_branch': 'develop', 'status': 'completed',
+                'conclusion': 'success', 'path': '.github/workflows/deploy-stg.yml',
+                'head_repository': {'full_name': DEPLOY_SURFACES.REPOSITORY}}
+        runs = [{**base, 'id': index, 'head_sha': letter * 40}
+                for index, letter in ((3, 'c'), (2, 'b'), (1, 'a'))]
+
+        def records(**overrides):
+            states = {'source-gate': 'success', 'recover-web': 'skipped',
+                      'deploy-backend': 'skipped', 'deploy-frontend': 'skipped', **overrides}
+            return {'jobs': [{'name': key, 'conclusion': value} for key, value in states.items()]}
+
+        for recovery in (False, True):
+            responses = [{'workflow_runs': runs}, records(),
+                         records(**{'recover-web' if recovery else 'rehearse-retained-worker': 'success'})]
+            if not recovery:
+                responses.append(records(**{'deploy-backend': 'success', 'deploy-frontend': 'success'}))
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / 'outputs'
+                env = {'GITHUB_REPOSITORY': DEPLOY_SURFACES.REPOSITORY,
+                       'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/develop',
+                       'GITHUB_SHA': 'd' * 40, 'GITHUB_OUTPUT': str(output)}
+                with patch.dict(os.environ, env), patch.object(DEPLOY_SURFACES, 'github', side_effect=responses), \
+                     patch.object(DEPLOY_SURFACES.subprocess, 'check_output',
+                                  side_effect=['d' * 40, 'frontend/src/pages/index.tsx\0']), \
+                     patch.object(DEPLOY_SURFACES.subprocess, 'run') as commands:
+                    DEPLOY_SURFACES.main()
+                    self.assertEqual(output.read_text(),
+                        f'backend_changed={str(recovery).lower()}\nfrontend_changed=true\n')
+                    if recovery:
+                        commands.assert_not_called()
+                    else:
+                        self.assertIn(['git', 'merge-base', '--is-ancestor', 'a' * 40, 'd' * 40],
+                                      [call.args[0] for call in commands.call_args_list])
+
+    def test_deploy_selection_tracks_component_sources_independently(self):
+        base = {'event': 'workflow_dispatch', 'head_branch': 'develop', 'status': 'completed',
+                'conclusion': 'success', 'path': '.github/workflows/deploy-stg.yml',
+                'head_repository': {'full_name': DEPLOY_SURFACES.REPOSITORY}}
+        runs = [{**base, 'id': index, 'head_sha': letter * 40}
+                for index, letter in ((2, 'b'), (1, 'a'))]
+        records = []
+        for backend in ('skipped', 'success'):
+            states = {'source-gate': 'success', 'recover-web': 'skipped',
+                      'deploy-backend': backend, 'deploy-frontend': 'success'}
+            records.append({'jobs': [{'name': key, 'conclusion': value}
+                                     for key, value in states.items()]})
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'outputs'
+            env = {'GITHUB_REPOSITORY': DEPLOY_SURFACES.REPOSITORY,
+                   'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/develop',
+                   'GITHUB_SHA': 'c' * 40, 'GITHUB_OUTPUT': str(output)}
+            with patch.dict(os.environ, env), \
+                 patch.object(DEPLOY_SURFACES, 'github', side_effect=[{'workflow_runs': runs}, *records]), \
+                 patch.object(DEPLOY_SURFACES.subprocess, 'check_output',
+                              side_effect=['c' * 40, 'backend/src/app.py\0', 'docs/preparation.md\0']), \
+                 patch.object(DEPLOY_SURFACES.subprocess, 'run') as commands:
+                DEPLOY_SURFACES.main()
+            self.assertEqual(output.read_text(), 'backend_changed=true\nfrontend_changed=false\n')
+            for source in ('a', 'b'):
+                self.assertIn(['git', 'merge-base', '--is-ancestor', source * 40, 'c' * 40],
+                              [call.args[0] for call in commands.call_args_list])
 
     def test_staging_cache_keeps_immutable_source_output_and_readonly_selection_gate(self):
         workflow = yaml.safe_load((RUNNER.ROOT / '.github/workflows/deploy-stg.yml').read_text())
