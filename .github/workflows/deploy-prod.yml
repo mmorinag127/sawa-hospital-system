@@ -663,6 +663,10 @@ jobs:
               --environment prod --project-id "$PROJECT_ID" --region "$REGION" \
               --service "$WEB_SERVICE" --email "$AUTOMATION_AUTH_EMAIL" \
               --db-host 127.0.0.1 --db-port 5432
+            uv run --extra dev python scripts/price_automation_db_bootstrap.py \
+              --environment prod --project-id "$PROJECT_ID" --region "$REGION" \
+              --service "$WEB_SERVICE" --email "$SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL" \
+              --db-host 127.0.0.1 --db-port 5432
           )
 
   deploy-backend:

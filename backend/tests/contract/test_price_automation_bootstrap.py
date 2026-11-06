@@ -60,3 +60,45 @@ def test_price_bootstrap_rejects_production_and_other_identities(monkeypatch):
         with pytest.raises(PortalAccessBootstrapError):
             run_price_automation_bootstrap(connection, environment=environment, email=email)
         assert not connection.mock_calls
+
+
+def _production_context(monkeypatch):
+    _context(monkeypatch, "prod")
+    for key, value in {
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REPOSITORY": "mmorinag127/sawa-hospital-system",
+        "GITHUB_REPOSITORY_OWNER": "mmorinag127",
+        "GITHUB_ACTOR": "mmorinag127", "GITHUB_TRIGGERING_ACTOR": "mmorinag127",
+        "PRODUCTION_CONFIRMATION": "DEPLOY_PRODUCTION",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_production_price_identity_is_scoped_and_idempotent(engine, monkeypatch):
+    _production_context(monkeypatch)
+    email = EMAIL.replace("-stg@", "-prod@")
+    with engine.begin() as connection:
+        result = run_price_automation_bootstrap(connection, environment="prod", email=email)
+        assert result["created"] is True
+        assert connection.execute(text("SELECT system_key FROM user_system_access")).scalars().all() == ["school-lunch"]
+        assert connection.execute(text("SELECT actor FROM audit_logs")).scalar_one() == "system:prod-price-automation-db-bootstrap"
+        before = _snapshot(connection)
+        assert run_price_automation_bootstrap(connection, environment="prod", email=email)["created"] is False
+        assert _snapshot(connection) == before
+
+
+@pytest.mark.parametrize("field,value", [
+    ("GITHUB_EVENT_NAME", "repository_dispatch"),
+    ("GITHUB_REPOSITORY", "mmorinag127/other"),
+    ("GITHUB_REPOSITORY_OWNER", "other"), ("GITHUB_ACTOR", "other"),
+    ("GITHUB_TRIGGERING_ACTOR", "other"), ("PRODUCTION_CONFIRMATION", ""),
+    ("GITHUB_REF_NAME", "develop"), ("GITHUB_REF", "refs/heads/develop"),
+    ("GITHUB_ACTIONS", "false"), ("GITHUB_RUN_ID", ""),
+])
+def test_production_price_gate_rejects_before_database_access(monkeypatch, field, value):
+    _production_context(monkeypatch)
+    monkeypatch.setenv(field, value)
+    connection = Mock()
+    with pytest.raises(PortalAccessBootstrapError):
+        run_price_automation_bootstrap(connection, environment="prod", email=EMAIL.replace("-stg@", "-prod@"))
+    assert not connection.mock_calls

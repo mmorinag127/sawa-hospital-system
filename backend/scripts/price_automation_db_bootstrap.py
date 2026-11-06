@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.portal_automation_db_bootstrap import parse_args
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from staging_db_target import load_service_db_config as _load_service_db_config
+from scripts.portal_prod_db_bootstrap import _load_service_db_config as _load_production_db_config
 from src.services.portal_access_bootstrap_service import PortalAccessBootstrapError
 from src.services.price_automation_bootstrap_service import require_price_automation_context, run_price_automation_bootstrap
 
@@ -21,9 +22,10 @@ def main() -> int:
     try:
         args = parse_args()
         require_price_automation_context(environment=args.environment, email=args.email)
-        if args.project_id != "sawahospitalsystem" or args.region != "asia-northeast2" or args.service not in {"web-stg", "worker-stg"}:
-            raise PortalAccessBootstrapError("Staging project, region and service are required")
-        config = _load_service_db_config(args.project_id, args.region, args.service)
+        if args.project_id != "sawahospitalsystem" or args.region != "asia-northeast2" or args.service not in {f"web-{args.environment}", f"worker-{args.environment}"}:
+            raise PortalAccessBootstrapError("Project, region and service must match the environment")
+        loader = _load_service_db_config if args.environment == "stg" else _load_production_db_config
+        config = loader(args.project_id, args.region, args.service)
         engine = create_engine(URL.create("postgresql+psycopg2", username=config.db_user,
             password=config.db_password, host=args.db_host, port=args.db_port, database=config.db_name), pool_pre_ping=True)
         try:

@@ -243,6 +243,12 @@ def _load_service_db_config(project_id: str, region: str, service: str) -> Servi
     db_user = str(env_map.get("DB_USER") or "").strip()
     if not db_name or not db_user:
         raise PortalAccessBootstrapError("Cloud Run DB_NAME and DB_USER env vars are required")
+    if (project_id, region, service, instance_connection_name, db_name, db_user) not in {
+        ("sawahospitalsystem", "asia-northeast2", target,
+         "sawahospitalsystem:asia-northeast2:orders-prod", "orders", "orders_app")
+        for target in ("web-prod", "worker-prod")
+    }:
+        raise PortalAccessBootstrapError("Production bootstrap must target orders-prod/orders as orders_app")
 
     db_password = str(env_map.get("DB_PASSWORD") or "").strip()
     if not db_password and "DB_PASSWORD" in secret_refs:

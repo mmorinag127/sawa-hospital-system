@@ -13,15 +13,23 @@ from src.services.portal_access_bootstrap_service import (
 
 
 def require_price_automation_context(*, environment: str, email: str) -> None:
+    ref = os.getenv("GITHUB_REF_NAME", "")
+    branch_allowed = ref == "develop" if environment == "stg" else (
+        environment == "prod" and ref.startswith("release/prod-") and len(ref) > len("release/prod-")
+    )
     if (
-        environment != "stg"
-        or os.getenv("GITHUB_ACTIONS") != "true"
+        not branch_allowed or os.getenv("GITHUB_ACTIONS") != "true"
         or not os.getenv("GITHUB_RUN_ID", "").strip()
-        or os.getenv("GITHUB_REF") != "refs/heads/develop"
-        or os.getenv("GITHUB_REF_NAME") != "develop"
-        or email != "sawa-price-ui-verify-stg@sawahospitalsystem.iam.gserviceaccount.com"
+        or os.getenv("GITHUB_REF") != "refs/heads/" + ref
+        or email != f"sawa-price-ui-verify-{environment}@sawahospitalsystem.iam.gserviceaccount.com"
     ):
-        raise PortalAccessBootstrapError("School lunch automation bootstrap requires staging develop and its dedicated identity")
+        raise PortalAccessBootstrapError("School lunch automation bootstrap requires the environment branch and dedicated identity")
+    if environment == "prod" and any(os.getenv(key) != value for key, value in {
+        "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REPOSITORY": "mmorinag127/sawa-hospital-system",
+        "GITHUB_REPOSITORY_OWNER": "mmorinag127", "GITHUB_ACTOR": "mmorinag127",
+        "GITHUB_TRIGGERING_ACTOR": "mmorinag127", "PRODUCTION_CONFIRMATION": "DEPLOY_PRODUCTION",
+    }.items()):
+        raise PortalAccessBootstrapError("Owner-dispatched production confirmation required")
 
 
 def run_price_automation_bootstrap(connection, *, environment: str, email: str) -> dict:
@@ -50,6 +58,6 @@ def run_price_automation_bootstrap(connection, *, environment: str, email: str) 
     connection.execute(sa.text(
         "INSERT INTO user_system_access(user_id, system_key, enabled) VALUES(:id, 'school-lunch', TRUE)"
     ), {"id": user_id})
-    _insert_audit_log(connection, actor="system:stg-price-automation-db-bootstrap",
+    _insert_audit_log(connection, actor=f"system:{environment}-price-automation-db-bootstrap",
                       action="portal_automation_school_lunch_user_created", target=user_id)
     return {"user_id": user_id, "created": True}

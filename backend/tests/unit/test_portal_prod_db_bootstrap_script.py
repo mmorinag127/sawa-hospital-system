@@ -25,7 +25,8 @@ def _token(payload: dict) -> str:
 @pytest.mark.parametrize(
     "host,override,error",
     [
-        ("/cloudsql/project:region:selected", None, None),
+        ("/cloudsql/sawahospitalsystem:asia-northeast2:orders-prod", None, None),
+        ("/cloudsql/project:region:selected", None, "must target orders-prod"),
         ("/cloudsql/project:region:other", None, "does not match"),
         (None, None, "Explicit Cloud SQL DB_HOST"),
         ("localhost", None, "Explicit Cloud SQL DB_HOST"),
@@ -35,14 +36,14 @@ def _token(payload: dict) -> str:
 )
 def test_service_db_config_requires_explicit_attached_target(monkeypatch, host, override, error):
     env = [{"name": name, "value": value} for name, value in
-           {"DB_NAME": "orders", "DB_USER": "operator", "DB_PASSWORD": "synthetic"}.items()]
+           {"DB_NAME": "orders", "DB_USER": "orders_app", "DB_PASSWORD": "synthetic"}.items()]
     if host is not None:
         env.append({"name": "DB_HOST", "value": host})
     if override is not None:
         env.append({"name": "DB_URI", **override})
     service = {"spec": {"template": {
         "metadata": {"annotations": {"run.googleapis.com/cloudsql-instances":
-                                     "project:region:first,project:region:selected"}},
+                                     "project:region:first,project:region:selected,sawahospitalsystem:asia-northeast2:orders-prod"}},
         "spec": {"containers": [{"env": env}]},
     }}}
     monkeypatch.setattr("scripts.portal_prod_db_bootstrap._run_gcloud_json", lambda *_args: service)
@@ -51,12 +52,12 @@ def test_service_db_config_requires_explicit_attached_target(monkeypatch, host, 
     monkeypatch.setattr("scripts.portal_prod_db_bootstrap._load_secret", unexpected_secret)
     if error:
         with pytest.raises(PortalAccessBootstrapError, match=error):
-            _load_service_db_config("project", "region", "worker-prod")
+            _load_service_db_config("sawahospitalsystem", "asia-northeast2", "worker-prod")
     else:
-        config = _load_service_db_config("project", "region", "worker-prod")
-        assert config.instance_connection_name == "project:region:selected"
+        config = _load_service_db_config("sawahospitalsystem", "asia-northeast2", "worker-prod")
+        assert config.instance_connection_name == "sawahospitalsystem:asia-northeast2:orders-prod"
         assert config.db_name == "orders"
-        assert config.db_user == "operator"
+        assert config.db_user == "orders_app"
 
 
 def test_extract_email_from_id_token_returns_claim_email():
