@@ -45,6 +45,11 @@ def configure(web,worker,config,frontend_image,agent_image,token,*,school,portal
     front=ingress[0]; front.setdefault('name','web')
     front['image']=frontend_image
     front_env=envmap(front); backend_env=envmap(worker['spec']['template']['spec']['containers'][0])
+    if environment == 'prod' and 'GEMINI_API_KEY' not in backend_env:
+        backend_env['GEMINI_API_KEY'] = {
+            'name': 'GEMINI_API_KEY',
+            'valueFrom': {'secretKeyRef': {'name': 'gemini-api-key', 'key': 'latest'}},
+        }
     if portal_origin is not None:
         if portal_origin != f'https://web-{environment}-avlnzjjrca-dt.a.run.app':
             raise RuntimeError('portal origin is unresolved')
