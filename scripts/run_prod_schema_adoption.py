@@ -82,7 +82,7 @@ def production_database():
     return configs[0]
 
 
-def run():
+def run(*, verify_only=False):
     if require_context(os.environ) != "prod":
         raise RuntimeError("production release context required")
     if (os.environ.get("WEB_SERVICE"), os.environ.get("WORKER_SERVICE")) != ("web-prod", "worker-prod"):
@@ -99,8 +99,9 @@ def run():
             if tuple(connection.execute(text("SELECT current_database(), current_user")).one()) != ("orders", "orders_app"):
                 raise RuntimeError("connected production database or role mismatch")
             connection.rollback()
-            with migration_import_target(connection):
-                upgrade_connection(connection, environment="production")
+            if not verify_only:
+                with migration_import_target(connection):
+                    upgrade_connection(connection, environment="production")
             connection.rollback()
             with connection.begin():
                 connection.execute(text("SET TRANSACTION READ ONLY"))
@@ -110,8 +111,12 @@ def run():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--verify-only', action='store_true')
+    args = parser.parse_args()
     try:
-        run()
+        run(verify_only=args.verify_only)
     except Exception:
         print("production schema preparation failed; database details suppressed", file=sys.stderr)
         raise SystemExit(1)

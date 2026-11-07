@@ -1,5 +1,21 @@
 # Production maintenance integration
 
+## Migrated Checkpoint Continuation
+
+Run 42394152276 completed database migration/bootstrap, then stopped while
+comparing a tagged backend image with the digest stored in its Ready revision.
+Writer resumption now resolves tags to immutable registry digests before comparison.
+The migrated continuation input preserves the original application identities,
+successful backup lineage and completed bootstrap flags. It requires an owner
+failed run, no earlier frontend attempt, unchanged business/migration sources,
+and exact live writer revision UIDs/digests with read-only gates. Only these
+verified current writers are stopped; original rollback identities are not replaced.
+The database gate checks the formal schema read-only instead of replaying
+migration/bootstrap writes. Repeated continuation retains the first backup origin.
+
+Local related tests passed; full source-bound release validation and live
+continuation are not yet established. Production remains in maintenance.
+
 ## Current state: interrupted production entry
 
 This section supersedes historical status statements below. Source `6feaac5d`

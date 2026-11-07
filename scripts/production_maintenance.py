@@ -364,7 +364,7 @@ def verify_captured_tags(record, name, service, *, allow_retired=False):
     return [item for item in routes if (item["tag"], item["revision"]) in observed]
 
 
-def stop_writers():
+def stop_writers(writer_revisions=None):
     path, record = load()
     verify_display()
     from hospital_production_preflight import require_runtime_act_as
@@ -372,16 +372,18 @@ def stop_writers():
                             for name in SERVICES})
     record['maintenance_visible'] = True
     save(path, record)
+    targets = writer_revisions or {name: record['services'][name]['revision'] for name in WRITERS}
+    require(set(targets) == set(WRITERS), 'exact writer stop targets required')
     for name in WRITERS:
         service = cloud("run", "services", "describe", name, "--region=" + REGION)
         routes = verify_captured_tags(record, name, service, allow_retired=True)
-        require(serving(service, [item["tag"] for item in routes]) == record["services"][name]["revision"],
+        require(serving(service, [item["tag"] for item in routes]) == targets[name],
                 "writer revision changed")
         if routes:
             mutation(path, record, "retire-tags:" + name, "run", "services", "update-traffic", name,
                      "--remove-tags=" + ",".join(item["tag"] for item in routes), "--region=" + REGION, "--quiet")
         require(serving(cloud("run", "services", "describe", name, "--region=" + REGION))
-                == record["services"][name]["revision"], "writer traffic changed while retiring tags")
+                == targets[name], "writer traffic changed while retiring tags")
     for field, kind, resource in (("queues", "tasks", "queues"), ("schedules", "scheduler", "jobs")):
         for name in record[field]:
             current = cloud(kind, resource, "describe", name, "--location=" + REGION)
@@ -615,6 +617,9 @@ def hold_on_failure():
 
 
 def resume_writer(name, expected_image):
+    if expected_image and '@sha256:' not in expected_image and ':' in expected_image.rsplit('/', 1)[-1]:
+        from registry_image_digest import resolve_image_digest
+        expected_image = resolve_image_digest(expected_image)
     _, record = load()
     require(name in WRITERS and record["database_drained"], "verified maintenance required")
     service = cloud("run", "services", "describe", name, "--region=" + REGION)

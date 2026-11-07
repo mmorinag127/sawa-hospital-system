@@ -23,6 +23,10 @@ on:
         description: "Explicit failed pre-migration maintenance run to continue; preserve original evidence"
         required: false
         type: string
+      migrated_continuation:
+        description: "Owner-supplied failed migrated run and immutable writer identities JSON"
+        required: false
+        type: string
       rollback_run:
         description: "Traffic rollback only: originating deploy run ID (empty for normal deployment)"
         type: string
@@ -549,12 +553,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MAINTENANCE_RESUME_RUN: ${{ inputs.maintenance_resume_run }}
+          MIGRATED_CONTINUATION: ${{ inputs.migrated_continuation }}
           PRODUCTION_PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
           MAINTENANCE_IMAGE: ${{ needs.build-frontend.outputs.maintenance_image }}
         run: |
           set -euo pipefail
-          image="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$MAINTENANCE_IMAGE")"
-          uv run --project backend --extra dev --frozen python scripts/production_maintenance.py begin --image "$image" --original-run "$MAINTENANCE_RESUME_RUN"
+          if [[ -n "$MIGRATED_CONTINUATION" ]]; then
+            test -z "$MAINTENANCE_RESUME_RUN"
+            uv run --project backend --extra dev --frozen python scripts/resume_migrated_production.py
+          else
+            image="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$MAINTENANCE_IMAGE")"
+            uv run --project backend --extra dev --frozen python scripts/production_maintenance.py begin --image "$image" --original-run "$MAINTENANCE_RESUME_RUN"
+          fi
       - name: Preserve original rollback identities even if maintenance fails
         uses: actions/upload-artifact@v4
         if: always()
@@ -629,6 +639,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/production_maintenance.py download-start
       - name: Verify production prerequisites before any database mutation
+        if: inputs.migrated_continuation == ''
         env:
           PRODUCTION_FRONTEND_IMAGE: ${{ needs.build-frontend.outputs.image }}
           PRODUCTION_AGENT_IMAGE: ${{ needs.build-agent.outputs.image }}
@@ -660,6 +671,7 @@ jobs:
           chmod +x /tmp/cloud-sql-proxy
       - name: Run prod portal DB bootstrap gate
         env:
+          MIGRATED_CONTINUATION: ${{ inputs.migrated_continuation }}
           INSTANCE_CONNECTION_NAME: ${{ steps.cloudsql.outputs.instance }}
           DEPLOY_ID_TOKEN: ${{ steps.auth-db.outputs.id_token }}
         run: |
@@ -688,6 +700,18 @@ jobs:
           if [[ "$ready" != "1" ]]; then
             echo "cloud-sql-proxy did not become ready on 127.0.0.1:5432" >&2
             exit 1
+          fi
+          if [[ -n "$MIGRATED_CONTINUATION" ]]; then
+            python3 scripts/production_maintenance.py require-bootstrap
+            uv run --project backend --extra dev --frozen python scripts/run_prod_schema_adoption.py --verify-only
+            python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          record = json.loads((root / 'hospital-maintenance.json').read_text())
+          (root / 'orders-prod-recovery-point.json').write_text(json.dumps(record['migrated_recovery_point']))
+          PY
+            exit 0
           fi
           uv run --project backend --extra dev --frozen python scripts/production_maintenance.py drain
           gcloud sql backups create --project "$PROJECT_ID" --instance orders-prod \

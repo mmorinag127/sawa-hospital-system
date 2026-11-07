@@ -241,6 +241,28 @@ def test_old_writer_is_never_reopened_on_migrated_database(monkeypatch, tmp_path
     assert cloud.call_count == 1
 
 
+def test_writer_tag_resolves_to_exact_serving_digest_before_reopening(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    record_fixture(monkeypatch, tmp_path)
+    digest = 'registry/backend@sha256:' + 'c' * 64
+    resolve = Mock(return_value=digest)
+    monkeypatch.setitem(sys.modules, 'registry_image_digest', SimpleNamespace(resolve_image_digest=resolve))
+    updates = []
+    def cloud(*args):
+        if args[1] == 'revisions':
+            return {'spec': {'containers': [{'image': digest, 'env': [{'name': 'SAWA_RELEASE_READ_ONLY', 'value': '1'}]}]}}
+        if args[2] == 'update':
+            updates.append(args)
+            return {}
+        service = descriptor('new-worker')
+        service['metadata']['annotations'] = {'run.googleapis.com/scalingMode': 'automatic' if updates else 'manual', 'run.googleapis.com/manualInstanceCount': '0'}
+        return service
+    monkeypatch.setattr(maintenance, 'cloud', cloud)
+    maintenance.resume_writer('worker-prod', 'registry/backend:approved')
+    resolve.assert_called_once_with('registry/backend:approved')
+    assert len(updates) == 1 and '--scaling=auto' in updates[0]
+
+
 def test_workflow_orders_maintenance_before_migration_and_candidate_before_promotion():
     root = Path(__file__).resolve().parents[3]
     source = (root / ".github/workflows/deploy-prod.yml").read_text()
@@ -250,7 +272,10 @@ def test_workflow_orders_maintenance_before_migration_and_candidate_before_promo
     assert begin_source.index('preflight(capture_only=True)') < begin_source.index('capture()')
     assert begin_source.index('capture()') < begin_source.index('show(image)') < begin_source.index('stop_writers()')
     assert source.index("production_maintenance.py drain") < source.index("gcloud sql backups create", source.index("prod-db-bootstrap-gate:"))
-    assert source.index("gcloud sql backups create", source.index("prod-db-bootstrap-gate:")) < source.index("python scripts/run_prod_schema_adoption.py")
+    assert source.index("gcloud sql backups create", source.index("prod-db-bootstrap-gate:")) < source.index("python scripts/run_prod_schema_adoption.py\n")
+    continuation = source.split('if [[ -n "$MIGRATED_CONTINUATION" ]]; then')[-1].split('exit 0')[0]
+    assert 'run_prod_schema_adoption.py --verify-only' in continuation
+    assert 'gcloud sql backups create' not in continuation
     assert source.index("Verify deferred live portal authentication") < source.index("production_maintenance.py promote")
     assert source.index("production_maintenance.py promote") < source.index("python scripts/activate_hospital_delivery.py")
     assert "python3 scripts/production_maintenance.py hold-on-failure" in source
