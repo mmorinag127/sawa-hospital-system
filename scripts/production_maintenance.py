@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 import subprocess
 import tempfile
+import re
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
@@ -61,7 +62,7 @@ def mutation(path, record, operation, *args):
     return result
 
 
-def download_record(phase):
+def download_record(phase, *, allow_pristine=False):
     require(require_context(os.environ) == "prod", "production context required")
     require(phase in {"start", "database"}, "unknown maintenance phase")
     repository = os.environ["GITHUB_REPOSITORY"]
@@ -72,6 +73,8 @@ def download_record(phase):
     artifacts = [item for page in json.loads(output) for item in page["artifacts"]
                  if item["name"].startswith(prefix) and item["name"][len(prefix):].isdigit()
                  and not item.get("expired")]
+    if not artifacts and allow_pristine:
+        return False
     require(artifacts, "same-run maintenance artifact missing")
     selected = max(artifacts, key=lambda item: int(item["name"][len(prefix):]))
     require(int(selected["name"][len(prefix):]) <= int(os.environ["GITHUB_RUN_ATTEMPT"]),
@@ -81,7 +84,23 @@ def download_record(phase):
         subprocess.run(["gh", "run", "download", run, "--repo", repository,
                         "--name", selected["name"], "--dir", directory], check=True,
                        capture_output=True)
-        record = json.loads((Path(directory) / "hospital-maintenance.json").read_text())
+        maintenance_file = Path(directory) / 'hospital-maintenance.json'
+        if not maintenance_file.exists() and allow_pristine:
+            rollback = json.loads((Path(directory) / 'hospital-rollback.json').read_text())
+            require(rollback.get('run') == run and rollback.get('sha') == os.environ['GITHUB_SHA']
+                    and rollback.get('ref') == os.environ['GITHUB_REF']
+                    and set(rollback.get('services', {})) == set(SERVICES), 'partial start artifact mismatch')
+            for name, original in rollback['services'].items():
+                service = cloud('run', 'services', 'describe', name, '--region=' + REGION)
+                tags = [item['tag'] for item in service.get('status', {}).get('traffic', []) if item.get('tag')]
+                require(not service['metadata'].get('labels', {}).get('sawa-maintenance-run')
+                        and service['metadata'].get('annotations', {}).get('run.googleapis.com/scalingMode', 'automatic') == 'automatic'
+                        and serving(service, tags) == original['revision'], 'partial start already changed services')
+                revision = cloud('run', 'revisions', 'describe', original['revision'], '--region=' + REGION)
+                require(revision['metadata']['uid'] == original['uid']
+                        and revision_images(revision) == original['images'], 'partial original identity changed')
+            return False
+        record = json.loads(maintenance_file.read_text())
         require(record.get("run") == run and record.get("sha") == os.environ["GITHUB_SHA"]
                 and record.get("ref") == os.environ["GITHUB_REF"], "artifact source mismatch")
         if phase == "start":
@@ -90,6 +109,181 @@ def download_record(phase):
                     and rollback.get("services") == record["services"], "original rollback mismatch")
             save(destination / "hospital-rollback.json", rollback)
         save(destination / "hospital-maintenance.json", record)
+    return True
+
+
+def begin(image, original_run):
+    context()
+    repository, run = os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_RUN_ID']
+    pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp',
+        f'repos/{repository}/actions/runs/{run}/jobs?filter=all&per_page=100'], text=True))
+    downstream = {'prod-db-bootstrap-gate', 'deploy-backend', 'deploy-frontend'}
+    require(not any(item['name'] in downstream and
+                    (item.get('status') == 'in_progress' or
+                     (item.get('status') == 'completed' and item.get('conclusion') != 'skipped'))
+                    for page in pages for item in page['jobs']), 'cannot restart maintenance after downstream work')
+    found = download_record('start', allow_pristine=True)
+    if not found and original_run:
+        resume_start(original_run)
+        found = True
+    if not found:
+        from hospital_production_preflight import run as preflight
+        preflight(capture_only=True)
+        capture()
+        show(image)
+    else:
+        _, record = load()
+        require(not any(record.get(key) for key in ('database_drained', 'portal_bootstrap_complete',
+                    'candidate_revision', 'writers_verified_open', 'reopened')), 'maintenance start already advanced')
+        from hospital_production_preflight import require_runtime_act_as
+        descriptors = {name: cloud('run', 'services', 'describe', name, '--region=' + REGION)
+                       for name in SERVICES}
+        require_runtime_act_as(descriptors)
+        for name in SERVICES:
+            original = record['services'][name]
+            revision = cloud('run', 'revisions', 'describe', original['revision'], '--region=' + REGION)
+            require(revision['metadata']['uid'] == original['uid']
+                    and revision_images(revision) == original['images'], 'original identity changed on retry')
+            verify_captured_tags(record, name, descriptors[name], allow_retired=True)
+        portal = serving(descriptors['web-prod'], [item['tag'] for item in
+            record.get('tagged_routes', {}).get('web-prod', [])])
+        if portal == record['services']['web-prod']['revision']:
+            show(record.get('maintenance_image') or image)
+        else:
+            require(portal == record.get('maintenance_revision'), 'portal changed during start retry')
+            verify_display()
+    stop_writers()
+
+
+def resume_start(original_run):
+    path = context()
+    require(re.fullmatch(r'[1-9][0-9]*', original_run or ''), 'explicit original run required')
+    require(original_run != os.environ['GITHUB_RUN_ID'], 'use same-run artifact for retry')
+    repository = os.environ['GITHUB_REPOSITORY']
+    owner = repository.split('/')[0]
+    run = json.loads(subprocess.check_output(
+        ['gh', 'api', f'repos/{repository}/actions/runs/{original_run}'], text=True))
+    require(run.get('event') == 'workflow_dispatch' and run.get('status') == 'completed'
+            and run.get('conclusion') == 'failure'
+            and run.get('path') == '.github/workflows/deploy-prod.yml'
+            and run.get('actor', {}).get('login') == owner
+            and run.get('triggering_actor', {}).get('login') == owner
+            and str(run.get('head_branch', '')).startswith('release/prod-'),
+            'only an owner-dispatched failed production start can resume')
+    original_sha = run.get('head_sha', '')
+    require(re.fullmatch(r'[a-f0-9]{40}', original_sha), 'invalid original source')
+    subprocess.run(['git', 'merge-base', '--is-ancestor', original_sha, os.environ['GITHUB_SHA']],
+                   check=True, capture_output=True)
+    unchanged = ('backend/src', 'backend/scripts', 'backend/alembic', 'backend/migrations', 'backend/alembic.ini',
+                 'frontend/src', 'ocr_pipeline/app', 'agent_runtime', 'experiments',
+                 'scripts/run_stg_schema_adoption.py', 'scripts/run_prod_schema_adoption.py')
+    require(not subprocess.check_output(['git', 'diff', '--name-only', original_sha,
+                os.environ['GITHUB_SHA'], '--', *unchanged], text=True).strip(),
+            'business runtime or migration changed since interrupted start')
+    pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp',
+        f'repos/{repository}/actions/runs/{original_run}/jobs?filter=latest&per_page=100'], text=True))
+    jobs = {item['name']: item for page in pages for item in page['jobs']}
+    require(jobs.get('production-approval', {}).get('conclusion') == 'failure'
+            and all(jobs.get(name, {}).get('conclusion') == 'skipped'
+                    for name in ('prod-db-bootstrap-gate', 'deploy-backend', 'deploy-frontend')),
+            'original run advanced beyond maintenance start')
+    all_pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp',
+        f'repos/{repository}/actions/runs/{original_run}/jobs?filter=all&per_page=100'], text=True))
+    require(not any(item['name'] in {'prod-db-bootstrap-gate', 'deploy-backend', 'deploy-frontend'}
+                    and item.get('conclusion') != 'skipped' for page in all_pages for item in page['jobs']),
+            'original run executed downstream work in an earlier attempt')
+    artifact = f'hospital-maintenance-start-{original_run}-{run["run_attempt"]}'
+    with tempfile.TemporaryDirectory(dir=path.parent) as directory:
+        subprocess.run(['gh', 'run', 'download', original_run, '--repo', repository,
+                        '--name', artifact, '--dir', directory], check=True, capture_output=True)
+        original = json.loads((Path(directory) / 'hospital-maintenance.json').read_text())
+        rollback = json.loads((Path(directory) / 'hospital-rollback.json').read_text())
+    require(original.get('run') == original_run and original.get('sha') == original_sha
+            and original.get('ref') == 'refs/heads/' + run['head_branch']
+            and rollback.get('run') == original_run and rollback.get('sha') == original_sha
+            and rollback.get('rollback_strategy') == os.environ.get('ROLLBACK_STRATEGY') == 'restore_database'
+            and rollback.get('services') == original.get('services')
+            and set(original.get('services', {})) == set(SERVICES), 'original artifact mismatch')
+    require(original.get('maintenance_visible') is True
+            and original.get('database_drained') is False
+            and not any(original.get(key) for key in ('portal_bootstrap_complete', 'candidate_revision',
+                        'candidate_checks_passed', 'writers_verified_open', 'reopened')),
+            'only pre-migration maintenance start can resume')
+    initial = original
+    seen = set()
+    while initial.get('resume_origin'):
+        require(initial['run'] not in seen, 'cyclic maintenance provenance')
+        seen.add(initial['run'])
+        origin = initial['resume_origin']
+        initial = origin['maintenance']
+        require(initial['run'] == origin['run'] and initial['sha'] == origin['sha']
+                and initial['services'] == original['services']
+                and initial['maintenance_revision'] == original['maintenance_revision'],
+                'maintenance provenance changed')
+    build_run = initial['run']
+    require(re.fullmatch(r'[1-9][0-9]*', build_run), 'invalid maintenance build run')
+    build_info = json.loads(subprocess.check_output(
+        ['gh', 'api', f'repos/{repository}/actions/runs/{build_run}'], text=True))
+    require(build_info.get('head_sha') == initial['sha'] and build_info.get('event') == 'workflow_dispatch'
+            and build_info.get('path') == '.github/workflows/deploy-prod.yml'
+            and build_info.get('actor', {}).get('login') == owner
+            and build_info.get('triggering_actor', {}).get('login') == owner,
+            'original maintenance build provenance mismatch')
+    build_pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp',
+        f'repos/{repository}/actions/runs/{build_run}/jobs?filter=latest&per_page=100'], text=True))
+    builds = [item for page in build_pages for item in page['jobs']
+              if item['name'] == 'build-frontend' and item.get('conclusion') == 'success']
+    require(len(builds) == 1, 'original maintenance build must have succeeded')
+    build_log = subprocess.check_output(['gh', 'run', 'view', build_run, '--repo', repository,
+        '--job', str(builds[0]['id']), '--log'], text=True)
+    digests = set(re.findall(r' prod-frontend-' + initial['sha'][:12]
+        + r'-[0-9]{8}-[0-9]{6}-maintenance: digest: (sha256:[0-9a-f]{64}) size: [0-9]+\s*$',
+        build_log, re.MULTILINE))
+    require(len(digests) == 1, 'unique original maintenance push digest required')
+    maintenance_image = f'{REGION}-docker.pkg.dev/{PROJECT}/backend/frontend@' + next(iter(digests))
+    descriptors = {name: cloud('run', 'services', 'describe', name, '--region=' + REGION)
+                   for name in SERVICES}
+    from restore_hospital_database import assert_database_inventory
+    assert_database_inventory()
+    inventory = cloud('run', 'services', 'list', '--region=' + REGION)
+    attached = {item['metadata']['name'] for item in inventory
+                if f'{PROJECT}:{REGION}:orders-prod' in item.get('spec', {}).get('template', {})
+                .get('metadata', {}).get('annotations', {}).get('run.googleapis.com/cloudsql-instances', '').split(',')}
+    require(attached == set(SERVICES), 'unreviewed database consumer service')
+    from hospital_production_preflight import require_runtime_act_as
+    require_runtime_act_as(descriptors)
+    marker_run = original.get('maintenance_owner_run', original_run)
+    for name, service in descriptors.items():
+        prior = original['services'][name]
+        detail = cloud('run', 'revisions', 'describe', prior['revision'], '--region=' + REGION)
+        require(detail['metadata']['uid'] == prior['uid'] and revision_images(detail) == prior['images'],
+                'original revision identity changed')
+        routes = verify_captured_tags(original, name, service, allow_retired=True)
+        if name == 'web-prod':
+            require(serving(service) == original['maintenance_revision']
+                    and service['metadata'].get('labels', {}).get('sawa-maintenance-run') == marker_run,
+                    'original maintenance portal changed')
+            revision = cloud('run', 'revisions', 'describe', original['maintenance_revision'], '--region=' + REGION)
+            require(revision_images(revision) == [maintenance_image]
+                    and (not original.get('maintenance_uid')
+                         or revision['metadata']['uid'] == original['maintenance_uid'])
+                    and revision['spec']['containers'][0].get('command') == ['node']
+                    and revision['spec']['containers'][0].get('args') == ['/sawa-maintenance/server.cjs']
+                    and len(revision['spec']['containers']) == 1, 'maintenance runtime changed')
+        else:
+            require(serving(service, [item['tag'] for item in routes]) == prior['revision'],
+                    'writer changed before maintenance continuation')
+    origin = {'run': original_run, 'sha': original_sha, 'artifact': artifact,
+              'maintenance': original, 'rollback': rollback}
+    record = copy.deepcopy(original)
+    record.update(run=os.environ['GITHUB_RUN_ID'], sha=os.environ['GITHUB_SHA'],
+                  ref=os.environ['GITHUB_REF'], resume_origin=origin, operations=[],
+                  maintenance_image=maintenance_image, maintenance_owner_run=marker_run)
+    current_rollback = copy.deepcopy(rollback)
+    current_rollback.update(run=record['run'], sha=record['sha'], ref=record['ref'], resume_origin=origin)
+    save(path.parent / 'hospital-rollback.json', current_rollback)
+    save(path, record)
+    verify_display()
 
 
 def capture():
@@ -173,6 +367,11 @@ def verify_captured_tags(record, name, service, *, allow_retired=False):
 def stop_writers():
     path, record = load()
     verify_display()
+    from hospital_production_preflight import require_runtime_act_as
+    require_runtime_act_as({name: cloud('run', 'services', 'describe', name, '--region=' + REGION)
+                            for name in SERVICES})
+    record['maintenance_visible'] = True
+    save(path, record)
     for name in WRITERS:
         service = cloud("run", "services", "describe", name, "--region=" + REGION)
         routes = verify_captured_tags(record, name, service, allow_retired=True)
@@ -249,6 +448,7 @@ def show(image):
     template = replacement["spec"]["template"]
     template["metadata"]["name"] = "web-prod-maint-" + record["run"]
     record["maintenance_revision"] = template["metadata"]["name"]
+    record["maintenance_image"] = image
     save(path, record)
     containers = template["spec"]["containers"]
     container = containers[0]
@@ -272,6 +472,9 @@ def show(image):
     observed = cloud("run", "services", "describe", "web-prod", "--region=" + REGION)
     revision = serving(observed)
     require(revision == record["maintenance_revision"], "maintenance revision identity mismatch")
+    detail = cloud('run', 'revisions', 'describe', revision, '--region=' + REGION)
+    require(revision_images(detail) == [image], 'maintenance image mismatch')
+    record['maintenance_uid'] = detail['metadata']['uid']
     record["maintenance_visible"] = True
     save(path, record)
     verify_display()
@@ -300,6 +503,12 @@ def verify_display():
     service = cloud("run", "services", "describe", "web-prod", "--region=" + REGION)
     require(serving(service, record.get("candidate_tag")) == record.get("maintenance_revision"),
             "maintenance traffic changed")
+    if record.get('maintenance_uid') or record.get('maintenance_image'):
+        revision = cloud('run', 'revisions', 'describe', record['maintenance_revision'], '--region=' + REGION)
+        require((not record.get('maintenance_uid') or revision['metadata']['uid'] == record['maintenance_uid'])
+                and (not record.get('maintenance_image')
+                     or revision_images(revision) == [record['maintenance_image']]),
+                'maintenance revision identity changed')
     for route in ("/", "/login", "/api/auth/me"):
         try:
             response = urlopen(service["status"]["url"] + route, timeout=60)
@@ -469,14 +678,19 @@ def open_writers():
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("capture", "stop", "show", "verify-display", "candidate-url", "promote", "hold-on-failure", "open-writers", "download-start", "download-database", "drain", "bootstrap-complete", "require-bootstrap", "resume-writer"))
+    parser.add_argument("action", choices=("begin", "capture", "resume-start", "stop", "show", "verify-display", "candidate-url", "promote", "hold-on-failure", "open-writers", "download-start", "download-database", "drain", "bootstrap-complete", "require-bootstrap", "resume-writer"))
     parser.add_argument("--image")
     parser.add_argument("--service")
+    parser.add_argument("--original-run")
     args = parser.parse_args()
     if args.action.startswith("download-"):
         download_record(args.action.removeprefix("download-"))
+    elif args.action == 'begin':
+        begin(args.image or '', args.original_run or '')
     elif args.action == "capture":
         capture()
+    elif args.action == "resume-start":
+        resume_start(args.original_run)
     elif args.action == "stop":
         stop_writers()
     elif args.action == "show":

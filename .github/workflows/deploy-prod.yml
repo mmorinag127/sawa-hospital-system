@@ -19,6 +19,10 @@ on:
         description: "Enter DEPLOY_PRODUCTION"
         required: true
         type: string
+      maintenance_resume_run:
+        description: "Explicit failed pre-migration maintenance run to continue; preserve original evidence"
+        required: false
+        type: string
       rollback_run:
         description: "Traffic rollback only: originating deploy run ID (empty for normal deployment)"
         type: string
@@ -502,6 +506,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      actions: read
     env:
       PROD_AGENT_RUNTIME_CONFIG: ${{ vars.PROD_AGENT_RUNTIME_CONFIG }}
       SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE: ${{ vars.PROD_SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE }}
@@ -529,6 +534,8 @@ jobs:
       - name: Approved for production deploy
         run: echo "production deploy approved"
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v8.1.0
         with:
           version: '0.13.4'
@@ -540,15 +547,14 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v3
       - name: Preserve original hospital and enter maintenance before feature rollout
         env:
+          GH_TOKEN: ${{ github.token }}
+          MAINTENANCE_RESUME_RUN: ${{ inputs.maintenance_resume_run }}
           PRODUCTION_PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
           MAINTENANCE_IMAGE: ${{ needs.build-frontend.outputs.maintenance_image }}
         run: |
           set -euo pipefail
-          uv run --project backend --extra dev --frozen python scripts/hospital_production_preflight.py --capture-only
           image="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$MAINTENANCE_IMAGE")"
-          python3 scripts/production_maintenance.py capture
-          python3 scripts/production_maintenance.py show --image "$image"
-          python3 scripts/production_maintenance.py stop
+          uv run --project backend --extra dev --frozen python scripts/production_maintenance.py begin --image "$image" --original-run "$MAINTENANCE_RESUME_RUN"
       - name: Preserve original rollback identities even if maintenance fails
         uses: actions/upload-artifact@v4
         if: always()

@@ -1,4 +1,6 @@
 import json
+import io
+import copy
 import subprocess
 import sys
 from pathlib import Path
@@ -242,13 +244,191 @@ def test_old_writer_is_never_reopened_on_migrated_database(monkeypatch, tmp_path
 def test_workflow_orders_maintenance_before_migration_and_candidate_before_promotion():
     root = Path(__file__).resolve().parents[3]
     source = (root / ".github/workflows/deploy-prod.yml").read_text()
-    assert source.index("production_maintenance.py show") < source.index("prod-db-bootstrap-gate:")
-    assert source.index("production_maintenance.py show") < source.index("production_maintenance.py stop")
+    assert source.index("production_maintenance.py begin") < source.index("prod-db-bootstrap-gate:")
+    import inspect
+    begin_source = inspect.getsource(maintenance.begin)
+    assert begin_source.index('preflight(capture_only=True)') < begin_source.index('capture()')
+    assert begin_source.index('capture()') < begin_source.index('show(image)') < begin_source.index('stop_writers()')
     assert source.index("production_maintenance.py drain") < source.index("gcloud sql backups create", source.index("prod-db-bootstrap-gate:"))
     assert source.index("gcloud sql backups create", source.index("prod-db-bootstrap-gate:")) < source.index("python scripts/run_prod_schema_adoption.py")
     assert source.index("Verify deferred live portal authentication") < source.index("production_maintenance.py promote")
     assert source.index("production_maintenance.py promote") < source.index("python scripts/activate_hospital_delivery.py")
     assert "python3 scripts/production_maintenance.py hold-on-failure" in source
+
+
+@pytest.mark.parametrize('missing', [False, True])
+def test_runtime_act_as_checks_every_distinct_runtime_before_changes(monkeypatch, missing):
+    import hospital_production_preflight as preflight
+    accounts = [f'{name}@sawahospitalsystem.iam.gserviceaccount.com' for name in ('web', 'worker', 'producer')]
+    descriptors = {name: {'spec': {'template': {'spec': {'serviceAccountName': account}}}}
+                   for name, account in zip(maintenance.SERVICES, accounts)}
+    monkeypatch.setattr(preflight.subprocess, 'check_output', lambda *_a, **_k: 'private-test-token')
+    seen = []
+    def request(req, timeout):
+        seen.append(req.full_url)
+        assert json.loads(req.data) == {'permissions': ['iam.serviceAccounts.actAs']}
+        return io.BytesIO(json.dumps({'permissions': [] if missing else ['iam.serviceAccounts.actAs']}).encode())
+    monkeypatch.setattr(preflight, 'urlopen', request)
+    if missing:
+        with pytest.raises(RuntimeError, match='actAs permission missing'):
+            preflight.require_runtime_act_as(descriptors)
+    else:
+        preflight.require_runtime_act_as(descriptors)
+        assert len(seen) == 3
+
+
+@pytest.mark.parametrize('state', ['original', 'maintenance', 'foreign', 'uid', 'digest', 'db-ran', 'permission'])
+def test_same_run_begin_preserves_identities_and_phase_before_changes(monkeypatch, tmp_path, state):
+    import hospital_production_preflight as preflight
+    path, record = record_fixture(monkeypatch, tmp_path)
+    record.update(database_drained=False, portal_bootstrap_complete=False)
+    monkeypatch.setattr(maintenance, 'context', lambda: path)
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'owner/repo')
+    monkeypatch.setenv('GITHUB_RUN_ID', '123')
+    jobs = [{'name': 'prod-db-bootstrap-gate', 'status': 'completed', 'conclusion': 'success'}] if state == 'db-ran' else []
+    monkeypatch.setattr(maintenance.subprocess, 'check_output', lambda *_a, **_k: json.dumps([{'jobs': jobs}]))
+    monkeypatch.setattr(maintenance, 'download_record', lambda *_a, **_k: True)
+    def cloud(*args):
+        if args[1] == 'revisions':
+            return {'metadata': {'uid': 'changed' if state == 'uid' else 'original'},
+                    'spec': {'containers': [{'image': 'changed' if state == 'digest' else 'original'}]}}
+        name = args[3]
+        return descriptor(('old-web-prod' if state == 'original' else
+                           'foreign' if state == 'foreign' else 'maintenance')
+                          if name == 'web-prod' else 'old-' + name)
+    monkeypatch.setattr(maintenance, 'cloud', cloud)
+    permission = Mock(side_effect=RuntimeError('permission') if state == 'permission' else None)
+    monkeypatch.setattr(preflight, 'require_runtime_act_as', permission)
+    show, stop, verify = Mock(), Mock(), Mock()
+    monkeypatch.setattr(maintenance, 'show', show)
+    monkeypatch.setattr(maintenance, 'stop_writers', stop)
+    monkeypatch.setattr(maintenance, 'verify_display', verify)
+    if state in {'foreign', 'uid', 'digest', 'db-ran', 'permission'}:
+        with pytest.raises(RuntimeError):
+            maintenance.begin('image', '')
+        show.assert_not_called()
+        stop.assert_not_called()
+    else:
+        maintenance.begin('image', '')
+        assert show.call_count == (state == 'original')
+        assert verify.call_count == (state == 'maintenance')
+        stop.assert_called_once()
+
+
+@pytest.mark.parametrize('mismatch', [None, 'uid', 'image'])
+def test_maintenance_display_checks_saved_revision_identity(monkeypatch, tmp_path, mismatch):
+    _, record = record_fixture(monkeypatch, tmp_path)
+    record.update(maintenance_uid='static-uid', maintenance_image='static-image')
+    def cloud(*args):
+        if args[1] == 'services':
+            return descriptor()
+        return {'metadata': {'uid': 'changed' if mismatch == 'uid' else 'static-uid'},
+                'spec': {'containers': [{'image': 'changed' if mismatch == 'image' else 'static-image'}]}}
+    monkeypatch.setattr(maintenance, 'cloud', cloud)
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.code = 503
+    response.headers = {'X-Sawa-Maintenance': '1'}
+    request = Mock(return_value=response)
+    monkeypatch.setattr(maintenance, 'urlopen', request)
+    if mismatch:
+        with pytest.raises(RuntimeError, match='identity changed'):
+            maintenance.verify_display()
+        request.assert_not_called()
+    else:
+        maintenance.verify_display()
+        assert request.call_count == 3
+
+
+@pytest.mark.parametrize('failure', [None, 'nested', 'actor', 'migration', 'source', 'uid', 'image', 'permission', 'artifact'])
+def test_cross_run_start_uses_original_build_and_preserves_original_record(monkeypatch, tmp_path, failure):
+    import hospital_production_preflight as preflight
+    import restore_hospital_database as restore
+    path = tmp_path / 'hospital-maintenance.json'
+    sha = 'b' * 40
+    image = f'{maintenance.REGION}-docker.pkg.dev/{maintenance.PROJECT}/backend/frontend@sha256:' + 'c' * 64
+    original = {'run': '99', 'sha': sha, 'ref': 'refs/heads/release/prod-old',
+                'services': {name: {'revision': 'old-' + name, 'uid': 'old-uid', 'images': ['old-image']}
+                             for name in maintenance.SERVICES}, 'tagged_routes': {},
+                'maintenance_revision': 'maintenance', 'maintenance_visible': True,
+                'database_drained': False, 'queues': {}, 'schedules': {}}
+    rollback = {key: copy.deepcopy(original[key]) for key in ('run', 'sha', 'ref', 'services')}
+    rollback['rollback_strategy'] = 'restore_database'
+    if failure == 'nested':
+        initial = copy.deepcopy(original)
+        initial['run'] = '88'
+        original['maintenance_owner_run'] = '88'
+        original['resume_origin'] = {'run': '88', 'sha': sha, 'maintenance': initial}
+    if failure == 'artifact':
+        rollback['sha'] = 'd' * 40
+    metadata = {'event': 'workflow_dispatch', 'status': 'completed', 'conclusion': 'failure',
+                'path': '.github/workflows/deploy-prod.yml', 'actor': {'login': 'other' if failure == 'actor' else 'owner'},
+                'triggering_actor': {'login': 'owner'}, 'head_branch': 'release/prod-old',
+                'head_sha': sha, 'run_attempt': 1}
+    jobs = [{'name': 'production-approval', 'conclusion': 'failure'},
+            {'name': 'build-frontend', 'conclusion': 'success', 'id': 10}]
+    jobs += [{'name': name, 'conclusion': 'success' if failure == 'migration' else 'skipped'}
+             for name in ('prod-db-bootstrap-gate', 'deploy-backend', 'deploy-frontend')]
+    monkeypatch.setattr(maintenance, 'context', lambda: path)
+    for key, value in {'GITHUB_REPOSITORY': 'owner/repo', 'GITHUB_RUN_ID': '123',
+                       'GITHUB_SHA': 'a' * 40, 'GITHUB_REF': 'refs/heads/release/prod-new',
+                       'ROLLBACK_STRATEGY': 'restore_database'}.items():
+        monkeypatch.setenv(key, value)
+    def output(command, **kwargs):
+        if command[:2] == ['git', 'diff']:
+            return 'backend/src/changed.py' if failure == 'source' else ''
+        if command[:3] == ['gh', 'run', 'view']:
+            assert command[3] == ('88' if failure == 'nested' else '99')
+            return ' original prod-frontend-' + sha[:12] + '-20261107-070238-maintenance: digest: sha256:' + 'c' * 64 + ' size: 3042\n'
+        if '/jobs?' in command[-1]:
+            return json.dumps([{'jobs': jobs}])
+        return json.dumps(metadata)
+    def run(command, **kwargs):
+        if command[:3] == ['gh', 'run', 'download']:
+            destination = Path(command[command.index('--dir') + 1])
+            (destination / 'hospital-maintenance.json').write_text(json.dumps(original))
+            (destination / 'hospital-rollback.json').write_text(json.dumps(rollback))
+        else:
+            assert command[:3] == ['git', 'merge-base', '--is-ancestor']
+        return subprocess.CompletedProcess(command, 0)
+    monkeypatch.setattr(maintenance.subprocess, 'check_output', output)
+    monkeypatch.setattr(maintenance.subprocess, 'run', run)
+    monkeypatch.setattr(restore, 'assert_database_inventory', lambda: None)
+    monkeypatch.setattr(preflight, 'require_runtime_act_as',
+                        Mock(side_effect=RuntimeError('permission') if failure == 'permission' else None))
+    calls = []
+    def cloud(*args):
+        calls.append(args)
+        assert args[2] in {'describe', 'list'}
+        if args[2] == 'list':
+            return [{'metadata': {'name': name}, 'spec': {'template': {'metadata': {'annotations': {
+                'run.googleapis.com/cloudsql-instances': f'{maintenance.PROJECT}:{maintenance.REGION}:orders-prod'}}}}}
+                    for name in maintenance.SERVICES]
+        if args[1] == 'services':
+            name = args[3]
+            result = descriptor('maintenance' if name == 'web-prod' else 'old-' + name)
+            result['metadata']['labels'] = {'sawa-maintenance-run': '88' if failure == 'nested' else '99'}
+            return result
+        if args[3] == 'maintenance':
+            return {'metadata': {'uid': 'static-uid'}, 'spec': {'containers': [{
+                'image': 'wrong-image' if failure == 'image' else image,
+                'command': ['node'], 'args': ['/sawa-maintenance/server.cjs']}]}}
+        return {'metadata': {'uid': 'wrong-uid' if failure == 'uid' else 'old-uid'},
+                'spec': {'containers': [{'image': 'old-image'}]}}
+    monkeypatch.setattr(maintenance, 'cloud', cloud)
+    monkeypatch.setattr(maintenance, 'verify_display', Mock())
+    if failure not in {None, 'nested'}:
+        with pytest.raises(RuntimeError):
+            maintenance.resume_start('99')
+        assert not path.exists()
+    else:
+        maintenance.resume_start('99')
+        saved = json.loads(path.read_text())
+        assert saved['run'] == '123'
+        assert saved['resume_origin']['maintenance'] == original
+        assert saved['services'] == original['services']
+        assert saved['maintenance_image'] == image
+        assert saved['maintenance_owner_run'] == ('88' if failure == 'nested' else '99')
 
 
 def test_failed_mutation_preserves_intent_before_cloud_call(monkeypatch, tmp_path):
@@ -346,6 +526,42 @@ def test_retry_download_uses_prior_attempt_only_for_same_source(monkeypatch, tmp
     else:
         maintenance.download_record(phase)
         assert json.loads((tmp_path / "hospital-maintenance.json").read_text())["sha"] == "source"
+
+
+@pytest.mark.parametrize('state', ['empty', 'pristine', 'marker', 'stopped', 'uid'])
+def test_partial_start_artifact_only_allows_pristine_restart(monkeypatch, tmp_path, state):
+    monkeypatch.setattr(maintenance, 'require_context', lambda _env: 'prod')
+    for key, value in {'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2', 'GITHUB_SHA': 'source',
+                       'GITHUB_REF': 'refs/heads/release/prod-test', 'RUNNER_TEMP': str(tmp_path),
+                       'GITHUB_REPOSITORY': 'owner/repository'}.items():
+        monkeypatch.setenv(key, value)
+    artifacts = [] if state == 'empty' else [{'name': 'hospital-maintenance-start-123-1', 'expired': False}]
+    monkeypatch.setattr(maintenance.subprocess, 'check_output', lambda *_a, **_k: json.dumps([{'artifacts': artifacts}]))
+    def download(args, **kwargs):
+        destination = Path(args[args.index('--dir') + 1])
+        record = {'run': '123', 'sha': 'source', 'ref': 'refs/heads/release/prod-test',
+                  'services': {name: {'revision': 'old', 'uid': 'uid', 'images': ['image']}
+                               for name in maintenance.SERVICES}}
+        (destination / 'hospital-rollback.json').write_text(json.dumps(record))
+    monkeypatch.setattr(maintenance.subprocess, 'run', download)
+    def cloud(*args):
+        assert args[2] == 'describe'
+        if args[1] == 'revisions':
+            return {'metadata': {'uid': 'changed' if state == 'uid' else 'uid'},
+                    'spec': {'containers': [{'image': 'image'}]}}
+        service = descriptor('old')
+        if state == 'marker':
+            service['metadata']['labels'] = {'sawa-maintenance-run': '123'}
+        if state == 'stopped':
+            service['metadata']['annotations']['run.googleapis.com/scalingMode'] = 'manual'
+        return service
+    monkeypatch.setattr(maintenance, 'cloud', cloud)
+    if state in {'empty', 'pristine'}:
+        assert maintenance.download_record('start', allow_pristine=True) is False
+    else:
+        with pytest.raises(RuntimeError):
+            maintenance.download_record('start', allow_pristine=True)
+    assert not (tmp_path / 'hospital-maintenance.json').exists()
 
 
 def test_runtime_readonly_rejects_mutation_before_handler(monkeypatch):

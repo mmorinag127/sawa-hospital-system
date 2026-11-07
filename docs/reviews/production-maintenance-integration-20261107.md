@@ -1,5 +1,29 @@
 # Production maintenance integration
 
+## Current state: interrupted production entry
+
+This section supersedes historical status statements below. Source `6feaac5d`
+passed the complete 30-entry local batch (4,163.499 seconds). Owner-dispatched
+production run `42349517751` entered maintenance, paused transports and stopped
+the hospital worker, but failed to stop `ocr-pipeline-prod`: its deploy identity
+lacks `iam.serviceAccounts.actAs` on `ocr-pipeline-exec-prod`. No database migration
+or new business application deployment occurred. The portal remains HTTP 503.
+The narrowly scoped service-account permission is awaiting user approval.
+
+Recovery implementation checks all three runtime identities before mutations,
+preserves original application revision UIDs/digests across retries, rejects
+resumption after database/deploy advancement, and accepts an explicit failed
+owner-dispatched source run only with its original artifacts and build digest.
+It does not replace original application identities with the maintenance image.
+Same-run retries and partial-artifact failures fail closed on changed state.
+
+The recovery test batch passed 65 cases using isolated in-memory SQLite:
+`tmp/production-maintenance-recovery-tests.log`. The first invocation stopped
+before collection because no explicit test DB was configured. No production DB
+was used. These tests do not replace the source-bound full release receipt or
+prove actual Cloud Run resumption. Full verification and production completion
+remain outstanding. Do not rerun the old workflow version as a recovery shortcut.
+
 Approved scope: maintenance display through the existing production Actions route,
 preserve original revisions, stop writers, back up, deploy, verify, then reopen.
 No local deployment, no OIDC expansion, no automatic unverified rollback.

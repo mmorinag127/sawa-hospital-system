@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 from hospital_release_context import PROJECT, REGION, require_context
 from local_receipt_signing import verify_signed
@@ -18,6 +19,24 @@ def cloud(*args):
     if result.returncode:
         raise RuntimeError('production prerequisite unavailable: ' + ' '.join(args[:3]))
     return json.loads(result.stdout) if result.stdout.strip() else None
+
+
+def require_runtime_act_as(descriptors):
+    accounts = {item['spec']['template']['spec'].get('serviceAccountName', '')
+                for item in descriptors.values()}
+    if not accounts or any(not re.fullmatch(r'[a-z0-9-]+@' + re.escape(PROJECT)
+                                          + r'\.iam\.gserviceaccount\.com', name) for name in accounts):
+        raise RuntimeError('explicit production runtime service accounts required')
+    token = subprocess.check_output(['gcloud', 'auth', 'print-access-token'], text=True).strip()
+    for account in sorted(accounts):
+        request = Request('https://iam.googleapis.com/v1/projects/-/serviceAccounts/' + account
+                          + ':testIamPermissions', data=json.dumps(
+                              {'permissions': ['iam.serviceAccounts.actAs']}).encode(),
+                          headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+        with urlopen(request, timeout=30) as response:
+            permissions = json.load(response).get('permissions', [])
+        if 'iam.serviceAccounts.actAs' not in permissions:
+            raise RuntimeError('runtime actAs permission missing: ' + account)
 
 
 def validate_agent_config(raw):
@@ -181,6 +200,8 @@ def run(capture_only=False):
                               "images": images, "scaling": "auto" if scaling == "automatic" else scaling}
             if strategy == "migrated_database":
                 require_rollback_compatibility(name, rollback[name])
+    require_runtime_act_as({name: descriptors[name] for name in
+                            ('web-prod', 'worker-prod', 'ocr-pipeline-prod')})
     # Reuse the exact deployment validation without writing a service or token.
     from configure_agent_sidecar import configure
     if not capture_only:
@@ -201,6 +222,8 @@ def run(capture_only=False):
     receipt = {"run": os.environ["GITHUB_RUN_ID"], "sha": os.environ["GITHUB_SHA"],
                "ref": os.environ["GITHUB_REF"], "project": PROJECT, "region": REGION,
                "services": rollback, "rollback_strategy": strategy}
+    if maintenance and maintenance.get('resume_origin'):
+        receipt['resume_origin'] = maintenance['resume_origin']
     (Path(os.environ["RUNNER_TEMP"]) / "hospital-rollback.json").write_text(json.dumps(receipt))
     with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
         summary.write("\n### Pre-migration rollback targets\n\n")
