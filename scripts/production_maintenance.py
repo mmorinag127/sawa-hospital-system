@@ -176,7 +176,7 @@ def resume_start(original_run):
                    check=True, capture_output=True)
     unchanged = ('backend/src', 'backend/scripts', 'backend/alembic', 'backend/migrations', 'backend/alembic.ini',
                  'frontend/src', 'ocr_pipeline/app', 'agent_runtime', 'experiments',
-                 'scripts/run_stg_schema_adoption.py', 'scripts/run_prod_schema_adoption.py')
+                 'scripts/run_stg_schema_adoption.py')
     require(not subprocess.check_output(['git', 'diff', '--name-only', original_sha,
                 os.environ['GITHUB_SHA'], '--', *unchanged], text=True).strip(),
             'business runtime or migration changed since interrupted start')

@@ -1,6 +1,7 @@
 """Production Actions transport for reviewed adoption, upgrade and read-only preflight."""
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +17,26 @@ from run_stg_schema_adoption import upgrade_connection
 from src.maintenance.formal_migration_schema import require_formal_head
 
 INSTANCE = PROJECT + ":" + REGION + ":orders-prod"
+
+
+@contextmanager
+def migration_import_target(connection):
+    keys = ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI', 'DB_USER', 'DB_PASSWORD',
+            'DB_NAME', 'DB_HOST', 'DB_PORT', 'DB_DRIVER')
+    previous = {key: os.environ.get(key) for key in keys}
+    try:
+        for key in keys:
+            os.environ.pop(key, None)
+        uri = connection.engine.url.render_as_string(hide_password=False)
+        for key in keys[:3]:
+            os.environ[key] = uri
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def production_database():
@@ -78,7 +99,8 @@ def run():
             if tuple(connection.execute(text("SELECT current_database(), current_user")).one()) != ("orders", "orders_app"):
                 raise RuntimeError("connected production database or role mismatch")
             connection.rollback()
-            upgrade_connection(connection, environment="production")
+            with migration_import_target(connection):
+                upgrade_connection(connection, environment="production")
             connection.rollback()
             with connection.begin():
                 connection.execute(text("SET TRANSACTION READ ONLY"))
