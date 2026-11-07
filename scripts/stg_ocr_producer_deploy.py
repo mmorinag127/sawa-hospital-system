@@ -117,6 +117,8 @@ def replacement(before, image, environment='stg'):
         values = {item['name']: item.get('value') for item in entries}
         if values.get('DB_HOST') != '/cloudsql/'+PROJECT+':'+REGION+':orders-prod' or values.get('DB_NAME') != 'orders' or 'DB_URI' in values:
             raise Blocked('Production producer database target mismatch')
+        if os.environ.get('PRODUCTION_MAINTENANCE') == '1':
+            snapshot['SAWA_RELEASE_READ_ONLY'] = '1'
     if snapshot:
         previous = runtime['containers'][0].get('env', [])
         runtime['containers'][0]['env'] = [entry for entry in previous if entry['name'] not in snapshot] + [

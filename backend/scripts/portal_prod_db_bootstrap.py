@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-host", default=os.getenv("PORTAL_BOOTSTRAP_DB_HOST", "127.0.0.1"))
     parser.add_argument("--db-port", default=os.getenv("PORTAL_BOOTSTRAP_DB_PORT", "5432"))
     parser.add_argument("--actor", default=os.getenv("PORTAL_BOOTSTRAP_ACTOR", BOOTSTRAP_ACTOR))
+    parser.add_argument("--maintenance", action="store_true")
     return parser.parse_args()
 
 
@@ -129,6 +130,15 @@ def _verify_live_portal_access(*, live_auth_url: str, deploy_token: str) -> int:
     try:
         with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
             status_code = int(response.status)
+            content_type = response.headers.get_content_type()
+            raw = response.read(65537)
+            if content_type != "application/json" or len(raw) > 65536:
+                raise PortalAccessBootstrapError("live auth response is not bounded JSON")
+            identity = json.loads(raw)
+            if (not isinstance(identity, dict)
+                    or identity.get("role") not in {"admin", "operator", "viewer"}
+                    or identity.get("auth_disabled") is not False):
+                raise PortalAccessBootstrapError("live authenticated portal identity required")
     except urllib.error.HTTPError as exc:
         status_code = int(exc.code)
     except Exception as exc:
@@ -274,6 +284,13 @@ def _load_service_db_config(project_id: str, region: str, service: str) -> Servi
 def main() -> int:
     _require_ci_cd_prod_context()
     args = parse_args()
+    if args.maintenance:
+        sys.path.insert(0, str(ROOT.parent / "scripts"))
+        from production_maintenance import load, assert_stopped
+        _, maintenance = load()
+        if not maintenance.get("database_drained") or not maintenance.get("maintenance_revision"):
+            raise PortalAccessBootstrapError("verified maintenance and database drain required")
+        assert_stopped()
     config = _load_service_db_config(args.project_id, args.region, args.service)
     engine = create_engine(
         "postgresql+psycopg2://"
@@ -295,7 +312,7 @@ def main() -> int:
                 deploy_verification_email=deploy_verification_email,
                 actor=args.actor,
             )
-        live_auth_status = _verify_live_portal_access(
+        live_auth_status = None if args.maintenance else _verify_live_portal_access(
             live_auth_url=args.live_auth_url,
             deploy_token=args.deploy_verification_token,
         )
@@ -314,6 +331,7 @@ def main() -> int:
                     str(args.deploy_verification_token or "").strip()
                 ),
                 "live_auth_status": live_auth_status,
+                "live_auth_deferred_until_new_application": args.maintenance,
                 **result.to_dict(),
             },
             ensure_ascii=False,

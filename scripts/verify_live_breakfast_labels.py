@@ -16,9 +16,10 @@ def main():
     parser.add_argument("--target", choices=("stg", "prod"), required=True)
     parser.add_argument("--order-id", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--base-url")
     args = parser.parse_args()
     url = (
-        f"https://web-{args.target}-avlnzjjrca-dt.a.run.app/api/outputs/labels?"
+        (args.base_url or f"https://web-{args.target}-avlnzjjrca-dt.a.run.app").rstrip('/') + "/api/outputs/labels?"
         + urllib.parse.urlencode({"order_id": args.order_id})
     )
     request = urllib.request.Request(

@@ -65,3 +65,22 @@ test("callback retains Google double-cookie flow and no session is exposed in re
   assert.match(source, /NextResponse\.next\(\{ request: \{ headers \} \}\)/);
   assert.doesNotMatch(source, /NextResponse\.(?:next|rewrite)\([^\n]*\{ headers \}\)/);
 });
+
+test("release verification host rejects mutations without blocking promoted production", () => {
+  const exported = {};
+  const environment = {SAWA_RELEASE_READ_ONLY: "1"};
+  const next = {json: (body, options) => ({body, ...options}), next: () => ({status: 200})};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname, "../src/proxy.ts"), "utf8"), {
+    compilerOptions: {module: ts.ModuleKind.CommonJS},
+  }).outputText, {exports: exported, process: {env: environment}, Headers, URL,
+    require: name => name === "next/server" ? {NextResponse: next} : {portalProxyHeaders: () => new Headers()}});
+  const request = (host, method) => ({headers: new Headers({host}), method,
+    nextUrl: {pathname: "/api/orders"}, cookies: {getAll: () => []}});
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    assert.equal(exported.proxy(request("verify-123---web-prod.a.run.app", method)).status, 503);
+    assert.equal(exported.proxy(request("web-prod-avlnzjjrca-dt.a.run.app", method)).status, 200);
+  }
+  assert.equal(exported.proxy(request("verify-123---web-prod.a.run.app", "GET")).status, 200);
+  delete environment.SAWA_RELEASE_READ_ONLY;
+  assert.equal(exported.proxy(request("web-stg.a.run.app", "POST")).status, 200);
+});

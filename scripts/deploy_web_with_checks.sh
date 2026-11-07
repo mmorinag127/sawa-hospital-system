@@ -222,10 +222,20 @@ else
   if [[ -n "$WEB_CONTAINER_NAME" ]]; then WEB_CONTAINER_ARGS=(--container="$WEB_CONTAINER_NAME"); fi
   gcloud run deploy "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" "${WEB_CONTAINER_ARGS[@]}" --image="$IMAGE" "${WEB_PUBLIC_ARGS[@]}" "${WEB_SESSION_ARGS[@]}" --quiet
 fi
-gcloud run services update-traffic "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --to-latest --quiet
+if [[ "${PRODUCTION_MAINTENANCE:-0}" == "1" ]]; then
+  test "$WEB_SERVICE" = web-prod
+  test -n "${SAWA_AGENT_RUNTIME_IMAGE:-}"
+  WEB_URL="$(python3 "$SCRIPT_DIR/production_maintenance.py" candidate-url)"
+  printf 'PRODUCTION_CANDIDATE_URL=%s\n' "$WEB_URL" >> "$GITHUB_ENV"
+else
+  gcloud run services update-traffic "$WEB_SERVICE" --project="$PROJECT_ID" --region="$REGION" --to-latest --quiet
+fi
 
 LATEST_READY_REVISION="$(gcloud run services describe "${WEB_SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.latestReadyRevisionName)' || true)"
 TRAFFIC_REVISION="$(gcloud run services describe "${WEB_SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.traffic[0].revisionName)' || true)"
+if [[ "${PRODUCTION_MAINTENANCE:-0}" == "1" ]]; then
+  TRAFFIC_REVISION="$LATEST_READY_REVISION"
+fi
 TRAFFIC_IMAGE=""
 if [[ -n "${TRAFFIC_REVISION}" ]]; then
   TRAFFIC_IMAGE="$(gcloud run revisions describe "${TRAFFIC_REVISION}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(spec.containers[0].image)' || true)"

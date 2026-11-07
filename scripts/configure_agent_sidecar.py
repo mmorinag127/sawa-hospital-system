@@ -116,7 +116,8 @@ def configure(web,worker,config,frontend_image,agent_image,token,*,school,portal
     # Preserve existing service identity, mounts, secret refs, ingress, and traffic.
     clean={'apiVersion':'serving.knative.dev/v1','kind':'Service',
         'metadata':{'name':'web-'+environment,'namespace':web['metadata']['namespace'],
-                    'annotations':web['metadata'].get('annotations',{})},'spec':web['spec']}
+                    'annotations':web['metadata'].get('annotations',{}),
+                    'labels':web['metadata'].get('labels',{})},'spec':web['spec']}
     for key in ('run.googleapis.com/operation-id','run.googleapis.com/urls'):
         clean['metadata']['annotations'].pop(key,None)
     return clean
@@ -132,9 +133,21 @@ def main():
                 'output_usd_per_million', 'max_output_tokens')
     if any(not isinstance(config.get(key), str) or not config[key].strip() for key in required):
         raise RuntimeError('explicit agent runtime configuration required')
-    document=configure(service('web-'+environment),service('worker-'+environment),config,os.environ['IMAGE'],
+    web = service('web-'+environment)
+    if environment == 'prod' and os.environ.get('PRODUCTION_MAINTENANCE') == '1':
+        from production_maintenance import restore_frontend_entrypoint
+        web = restore_frontend_entrypoint(web)
+    document=configure(web,service('worker-'+environment),config,os.environ['IMAGE'],
                        os.environ['SAWA_AGENT_RUNTIME_IMAGE'],token,school=service('price-api-'+environment),
                        portal_origin=os.environ['PORTAL_PUBLIC_ORIGIN'],environment=environment)
+    if environment == 'prod' and os.environ.get('PRODUCTION_MAINTENANCE') == '1':
+        from production_maintenance import load
+        _, record = load()
+        document['spec']['traffic'] = [{'revisionName': record['maintenance_revision'], 'percent': 100}]
+        document['metadata'].setdefault('labels', {})['sawa-maintenance-run'] = os.environ['GITHUB_RUN_ID']
+        front = document['spec']['template']['spec']['containers'][0]
+        front['env'] = [entry for entry in front.get('env', []) if entry['name'] != 'SAWA_RELEASE_READ_ONLY']
+        front['env'].append(value('SAWA_RELEASE_READ_ONLY', '1'))
     path=Path(os.environ['RUNNER_TEMP'])/'sawa-agent-sidecar.json'
     path.write_text(json.dumps(document));path.chmod(0o600)
     try:

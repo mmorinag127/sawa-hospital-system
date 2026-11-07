@@ -10,6 +10,19 @@ from hospital_production_preflight import revision_images
 
 def run():
     require_equal(require_context(os.environ), "prod", "production dispatch")
+    maintenance = os.environ.get("PRODUCTION_MAINTENANCE") == "1"
+    if maintenance:
+        from production_maintenance import load, save, mutation
+        path, record = load()
+        require_equal(record.get("candidate_checks_passed"), True, "candidate application checks")
+        require_equal(record.get("writers_verified_open"), True, "verified writer activation")
+
+    def resume(group, name):
+        if maintenance:
+            mutation(path, record, "resume:" + name, *group, "resume", name, "--location=" + REGION)
+        else:
+            gcloud(*group, "resume", name, "--location=" + REGION)
+
     bootstrap(allow_paused=True)
     from registry_image_digest import resolve_image_digest
     for service, key in (("web-prod", "PRODUCTION_FRONTEND_IMAGE"),
@@ -42,10 +55,30 @@ def run():
                     continue
                 require_equal(state, "PAUSED", "prepared transport")
                 changed.append((group, name))
-                gcloud(*group, "resume", name, "--location=" + REGION)
+                resume(group, name)
                 require_equal(gcloud(*group, "describe", name, "--location=" + REGION).get("state"),
                               active, "activated transport")
         bootstrap()
+        if maintenance:
+            # Existing schedules outside the new delivery flows retain their original state.
+            prepared = {f"hospital-{flow}-drain-prod" for flow, _ in FLOWS}
+            for name, original in record["schedules"].items():
+                if name in prepared or original != "ENABLED":
+                    continue
+                state = gcloud("scheduler", "jobs", "describe", name, "--location=" + REGION).get("state")
+                require_equal(state, "PAUSED", "maintenance schedule remains paused")
+                changed.append((("scheduler", "jobs"), name))
+                resume(("scheduler", "jobs"), name)
+                require_equal(gcloud("scheduler", "jobs", "describe", name, "--location=" + REGION).get("state"),
+                              "ENABLED", "original schedule restored")
+            gcloud("run", "services", "update", "web-prod", "--remove-labels=sawa-maintenance-run",
+                   "--region=" + REGION, "--quiet")
+            descriptor = gcloud("run", "services", "describe", "web-prod", "--region=" + REGION)
+            require_equal(bool(descriptor.get("metadata", {}).get("labels", {}).get("sawa-maintenance-run")),
+                          False, "maintenance marker cleared")
+            record["application_checks_passed"] = True
+            record["reopened"] = True
+            save(path, record)
     except Exception:
         failures = []
         for group, name in reversed(changed):
@@ -56,7 +89,9 @@ def run():
             except Exception:
                 failures.append(name)
         (Path(os.environ["RUNNER_TEMP"]) / "hospital-activation-failure.json").write_text(
-            json.dumps({"unconfirmed_paused": failures}) + "\n")
+            json.dumps({"unconfirmed_paused": failures,
+                        "resume_attempted": [name for _, name in changed],
+                        "completed_deliveries_reverted": False}) + "\n")
         raise
 
 

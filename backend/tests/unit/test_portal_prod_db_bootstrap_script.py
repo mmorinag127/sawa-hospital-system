@@ -3,6 +3,7 @@ import json
 import pathlib
 import sys
 import urllib.error
+from email.message import Message
 
 import pytest
 
@@ -94,6 +95,14 @@ def test_extract_email_from_id_token_blocks_missing_email_verified_claim():
 class _Response:
     status = 200
 
+    def __init__(self, body=b'{"role":"operator","auth_disabled":false}', content_type="application/json"):
+        self.body = body
+        self.headers = Message()
+        self.headers["Content-Type"] = content_type
+
+    def read(self, limit):
+        return self.body[:limit]
+
     def __enter__(self):
         return self
 
@@ -145,3 +154,18 @@ def test_verify_live_portal_access_blocks_missing_token():
             live_auth_url="https://web.example/api/auth/me",
             deploy_token="",
         )
+
+
+@pytest.mark.parametrize("body,content_type", [
+    (b"<html>maintenance</html>", "text/html"),
+    (b'{"role":"admin","auth_disabled":true}', "application/json"),
+    (b'{"role":"admin"}', "application/json"),
+    (b'{"role":"unknown","auth_disabled":false}', "application/json"),
+    (b"[]", "application/json"),
+    (b"not-json", "application/json"),
+    (b" " * 65537, "application/json"),
+])
+def test_live_auth_rejects_false_success_payloads(monkeypatch, body, content_type):
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: _Response(body, content_type))
+    with pytest.raises(PortalAccessBootstrapError):
+        _verify_live_portal_access(live_auth_url="https://web.example/api/auth/me", deploy_token="token")

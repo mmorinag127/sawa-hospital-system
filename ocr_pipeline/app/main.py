@@ -240,6 +240,12 @@ logging.getLogger("gunicorn.error").setLevel(logging.INFO)
 logging.getLogger("gunicorn.access").setLevel(logging.INFO)
 
 app = Flask(__name__)
+
+
+@app.before_request
+def reject_release_maintenance_writes():
+    if os.environ.get("SAWA_RELEASE_READ_ONLY") == "1" and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        return jsonify({"error": "release_maintenance"}), 503, {"Retry-After": "300", "Cache-Control": "no-store"}
 app.logger.setLevel(logging.INFO)
 
 PROJECT_ID = (

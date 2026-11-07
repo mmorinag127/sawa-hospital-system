@@ -17,6 +17,12 @@ export function proxy(request: NextRequest) {
     url.port = "";
     return NextResponse.redirect(url, 308);
   }
+  if (process.env.SAWA_RELEASE_READ_ONLY === "1" && host !== CANONICAL_HOST &&
+      !["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+    return NextResponse.json({ error: "release_maintenance" }, {
+      status: 503, headers: { "Retry-After": "300", "Cache-Control": "no-store" },
+    });
+  }
   const pathname = request.nextUrl.pathname;
   let headers: Headers;
   try {

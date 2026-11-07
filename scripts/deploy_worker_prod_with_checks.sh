@@ -124,12 +124,17 @@ if [[ -z "${WEB_URL}" ]]; then
   echo "WEB_URL is required for CI identity preflight"
   exit 1
 fi
+if [[ "${PRODUCTION_MAINTENANCE:-}" == "1" ]]; then
+  test "$SERVICE" = worker-prod
+  python3 "$SCRIPT_DIR/production_maintenance.py" require-bootstrap
+else
 CI_IDENTITY_STATUS="$(curl -sS -o /dev/null -w "%{http_code}" \
   -H "Authorization: Bearer ${DEPLOY_ID_TOKEN}" \
   "${WEB_URL}/api/auth/me" || true)"
 if [[ "${CI_IDENTITY_STATUS}" != "200" ]]; then
   echo "CI verification identity must be registered, active, and granted hospital access before deploy: HTTP ${CI_IDENTITY_STATUS}"
   exit 1
+fi
 fi
 
 if [[ "${CHECK_WEB_PROXY}" == "1" && -z "${WEB_URL}" ]]; then
@@ -175,6 +180,9 @@ echo "current image=${CURRENT_IMAGE:-unknown}"
 
 echo "[2/9] deploy ${SERVICE}"
 WORKER_ENV_ARGS=("--update-env-vars=TEMPLATE_BUCKET=${TEMPLATE_BUCKET}")
+if [[ "${PRODUCTION_MAINTENANCE:-}" == "1" ]]; then
+  WORKER_ENV_ARGS+=("--update-env-vars=SAWA_RELEASE_READ_ONLY=1")
+fi
 if [[ -n "${WORKER_EXTRA_ENV_VARS}" ]]; then
   WORKER_ENV_ARGS+=("--update-env-vars=${WORKER_EXTRA_ENV_VARS}")
 fi
@@ -229,6 +237,10 @@ gcloud run services update-traffic "${SERVICE}" \
   --region="${REGION}" \
   --to-revisions="${DEPLOYED_REVISION}=100" \
   --quiet
+
+if [[ "${PRODUCTION_MAINTENANCE:-}" == "1" ]]; then
+  python3 "$SCRIPT_DIR/production_maintenance.py" resume-writer --service "$SERVICE" --image "$IMAGE"
+fi
 
 echo "[3/9] verify latest revision/image"
 LATEST_REVISION="$(gcloud run services describe "${SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.latestReadyRevisionName)')"

@@ -58,6 +58,22 @@ def test_image_only_preserves_every_other_setting():
     assert before == exported()
 
 
+def test_production_maintenance_installs_readonly_gate_without_changing_database(monkeypatch):
+    before = exported()
+    before['metadata']['name'] = 'ocr-pipeline-prod'
+    runtime = before['spec']['template']['spec']
+    runtime['serviceAccountName'] = 'ocr-pipeline-exec-prod@sawahospitalsystem.iam.gserviceaccount.com'
+    runtime['containers'][0]['env'].extend([
+        {'name': 'DB_HOST', 'value': '/cloudsql/sawahospitalsystem:asia-northeast2:orders-prod'},
+        {'name': 'DB_NAME', 'value': 'orders'}])
+    monkeypatch.setenv('PRODUCTION_MAINTENANCE', '1')
+    after = mod.replacement(before, IMAGE, 'prod')
+    entries = after['spec']['template']['spec']['containers'][0]['env']
+    assert entries[:-1] == runtime['containers'][0]['env']
+    assert entries[-1] == {'name': 'SAWA_RELEASE_READ_ONLY', 'value': '1'}
+    assert not any(entry['name'] == 'SAWA_RELEASE_READ_ONLY' for entry in runtime['containers'][0]['env'])
+
+
 @pytest.mark.parametrize('target', ['ocr-pipeline-prod', 'worker-stg', 'ocr-pipeline'])
 def test_other_service_rejected(target):
     before = exported()

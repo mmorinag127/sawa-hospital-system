@@ -98,7 +98,7 @@ def require_database_restore_rehearsal():
         raise RuntimeError("matching signed local database restore rehearsal required")
 
 
-def run():
+def run(capture_only=False):
     if require_context(os.environ) != 'prod':
         raise RuntimeError('production release required')
     strategy = os.environ.get("ROLLBACK_STRATEGY", "migrated_database")
@@ -118,10 +118,23 @@ def run():
     expected = {'web-prod': 'orders-prod', 'worker-prod': 'orders-prod',
                 'ocr-pipeline-prod': 'orders-prod', 'price-api-prod': 'school-lunch-prod',
                 'shift-api-prod': 'shift-prod'}
+    maintenance_path = Path(os.environ['RUNNER_TEMP']) / 'hospital-maintenance.json'
+    maintenance = None
+    if maintenance_path.exists():
+        if capture_only:
+            raise RuntimeError('never recapture an existing maintenance operation')
+        from production_maintenance import load, assert_stopped, verify_display
+        _, maintenance = load()
+        assert_stopped()
+        verify_display()
+    if capture_only:
+        expected = {name: db for name, db in expected.items() if db == 'orders-prod'}
     descriptors = {}
     rollback = {}
     for name, database in expected.items():
         descriptor = cloud('run','services','describe',name,'--region='+REGION)
+        if descriptor.get('metadata', {}).get('labels', {}).get('sawa-maintenance-run') and not maintenance:
+            raise RuntimeError('unfinished maintenance requires original-run recovery: ' + name)
         descriptors[name] = descriptor
         template = descriptor['spec']['template']
         instances = template.get('metadata',{}).get('annotations',{}).get('run.googleapis.com/cloudsql-instances','').split(',')
@@ -131,6 +144,17 @@ def run():
         if not ready:
             raise RuntimeError('ready production dependency required: '+name)
         if name in ('worker-prod','web-prod','ocr-pipeline-prod'):
+            if maintenance:
+                original = maintenance['services'][name]
+                old = cloud('run', 'revisions', 'describe', original['revision'], '--region=' + REGION)
+                if old['metadata']['uid'] != original['uid'] or revision_images(old) != original['images']:
+                    raise RuntimeError('original rollback identity changed: ' + name)
+                if name != 'web-prod':
+                    from production_maintenance import serving
+                    if serving(descriptor) != original['revision']:
+                        raise RuntimeError('writer changed before migration: ' + name)
+                rollback[name] = original
+                continue
             traffic = [item for item in descriptor.get('status', {}).get('traffic', []) if item.get('percent', 0)]
             if len(traffic) != 1 or traffic[0].get('percent') != 100 or not traffic[0].get('revisionName'):
                 raise RuntimeError('single serving rollback revision required: ' + name)
@@ -159,14 +183,15 @@ def run():
                 require_rollback_compatibility(name, rollback[name])
     # Reuse the exact deployment validation without writing a service or token.
     from configure_agent_sidecar import configure
-    configure(copy.deepcopy(descriptors['web-prod']), descriptors['worker-prod'],
-              agent_config, os.environ['PRODUCTION_FRONTEND_IMAGE'],
-              os.environ['PRODUCTION_AGENT_IMAGE'], '', school=descriptors['price-api-prod'],
-              portal_origin=os.environ['PORTAL_PUBLIC_ORIGIN'], environment='prod')
+    if not capture_only:
+        configure(copy.deepcopy(descriptors['web-prod']), descriptors['worker-prod'],
+                  agent_config, os.environ['PRODUCTION_FRONTEND_IMAGE'],
+                  os.environ['PRODUCTION_AGENT_IMAGE'], '', school=descriptors['price-api-prod'],
+                  portal_origin=os.environ['PORTAL_PUBLIC_ORIGIN'], environment='prod')
     from stg_ocr_producer_deploy import ready_revision, replacement
     ready_revision(descriptors['ocr-pipeline-prod'])
     replacement(descriptors['ocr-pipeline-prod'], os.environ['PRODUCTION_PRODUCER_IMAGE'], 'prod')
-    for name in ('shift-web-prod','price-web-prod'):
+    for name in (() if capture_only else ('shift-web-prod','price-web-prod')):
         data = cloud('run','services','describe',name,'--region='+REGION)
         if not data.get('status',{}).get('latestReadyRevisionName'):
             raise RuntimeError('ready production frontend required: '+name)
@@ -188,7 +213,10 @@ def run():
 
 if __name__ == '__main__':
     try:
-        run()
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--capture-only', action='store_true')
+        run(capture_only=parser.parse_args().capture_only)
     except Exception:
         raise SystemExit('production preflight blocked; cloud/credential details suppressed')
     print('production prerequisites verified before schema changes')

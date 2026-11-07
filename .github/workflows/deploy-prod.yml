@@ -294,6 +294,7 @@ jobs:
       id-token: write
     outputs:
       image: ${{ steps.build.outputs.image }}
+      maintenance_image: ${{ steps.build.outputs.maintenance_image }}
     steps:
       - name: Update TLS trust stores
         shell: bash
@@ -348,6 +349,11 @@ jobs:
             "$deploy_dir"
           docker push "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
+
+          maintenance_image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend:${tag}-maintenance"
+          docker build --build-arg "FRONTEND_IMAGE=$image" -t "$maintenance_image" infra/maintenance
+          docker push "$maintenance_image"
+          echo "maintenance_image=$maintenance_image" >> "$GITHUB_OUTPUT"
 
   rollback-traffic:
     if: inputs.rollback_run != ''
@@ -493,6 +499,14 @@ jobs:
       - build-agent
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROD_AGENT_RUNTIME_CONFIG: ${{ vars.PROD_AGENT_RUNTIME_CONFIG }}
+      SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE: ${{ vars.PROD_SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE }}
+      SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL: ${{ vars.PROD_SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL }}
+      SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT: ${{ vars.PROD_SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT }}
     steps:
       - name: Update TLS trust stores
         shell: bash
@@ -514,6 +528,42 @@ jobs:
             'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - name: Approved for production deploy
         run: echo "production deploy approved"
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: '0.13.4'
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Preserve original hospital and enter maintenance before feature rollout
+        env:
+          PRODUCTION_PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
+          MAINTENANCE_IMAGE: ${{ needs.build-frontend.outputs.maintenance_image }}
+        run: |
+          set -euo pipefail
+          uv run --project backend --extra dev --frozen python scripts/hospital_production_preflight.py --capture-only
+          image="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$MAINTENANCE_IMAGE")"
+          python3 scripts/production_maintenance.py capture
+          python3 scripts/production_maintenance.py show --image "$image"
+          python3 scripts/production_maintenance.py stop
+      - name: Preserve original rollback identities even if maintenance fails
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hospital-rollback-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hospital-rollback.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hospital-maintenance-start-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/hospital-maintenance.json
+            ${{ runner.temp }}/hospital-rollback.json
+          if-no-files-found: error
 
   prod-db-bootstrap-gate:
     needs:
@@ -527,9 +577,14 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      actions: read
     env:
       PORTAL_BOOTSTRAP_ADMIN_EMAIL: ${{ vars.PROD_PORTAL_BOOTSTRAP_ADMIN_EMAIL }}
       PORTAL_DEPLOY_VERIFICATION_EMAIL: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
+      PROD_AGENT_RUNTIME_CONFIG: ${{ vars.PROD_AGENT_RUNTIME_CONFIG }}
+      SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE: ${{ vars.PROD_SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE }}
+      SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL: ${{ vars.PROD_SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL }}
+      SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT: ${{ vars.PROD_SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT }}
     steps:
       - name: Update TLS trust stores
         shell: bash
@@ -563,6 +618,10 @@ jobs:
           id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
           id_token_include_email: true
       - uses: google-github-actions/setup-gcloud@v3
+      - name: Download source-bound maintenance start record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/production_maintenance.py download-start
       - name: Verify production prerequisites before any database mutation
         env:
           PRODUCTION_FRONTEND_IMAGE: ${{ needs.build-frontend.outputs.image }}
@@ -572,31 +631,8 @@ jobs:
           set -euo pipefail
           export PRODUCTION_FRONTEND_IMAGE="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "$PRODUCTION_FRONTEND_IMAGE")"
           uv run --project backend --extra dev --frozen python scripts/hospital_production_preflight.py
-      - name: Preserve pre-migration serving revision identities
-        uses: actions/upload-artifact@v4
-        with:
-          name: hospital-rollback-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/hospital-rollback.json
-          if-no-files-found: error
-      - name: Save production database recovery point before migration
-        run: |
-          set -euo pipefail
-          backup="$RUNNER_TEMP/orders-prod-backup.json"
-          gcloud sql backups create --project "$PROJECT_ID" --instance orders-prod \
-            --description "release-${GITHUB_SHA}-${GITHUB_RUN_ID}" --format=json > "$backup"
-          gcloud sql backups list --project "$PROJECT_ID" --instance orders-prod \
-            --format=json > "$RUNNER_TEMP/orders-prod-backups.json"
-          jq -e --arg description "release-${GITHUB_SHA}-${GITHUB_RUN_ID}" \
-            '[.[] | select(.description == $description and .status == "SUCCESSFUL")] | length == 1' \
-            "$RUNNER_TEMP/orders-prod-backups.json" >/dev/null
-          jq --arg description "release-${GITHUB_SHA}-${GITHUB_RUN_ID}" \
-            '[.[] | select(.description == $description and .status == "SUCCESSFUL")][0] | {id,instance,description,status}' \
-            "$RUNNER_TEMP/orders-prod-backups.json" > "$RUNNER_TEMP/orders-prod-recovery-point.json"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: hospital-db-recovery-point-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/orders-prod-recovery-point.json
-          if-no-files-found: error
+      - name: Verify maintenance remains active before database changes
+        run: python3 scripts/production_maintenance.py verify-display
       - id: cloudsql
         name: Resolve prod Cloud SQL instance
         run: |
@@ -647,6 +683,17 @@ jobs:
             echo "cloud-sql-proxy did not become ready on 127.0.0.1:5432" >&2
             exit 1
           fi
+          uv run --project backend --extra dev --frozen python scripts/production_maintenance.py drain
+          gcloud sql backups create --project "$PROJECT_ID" --instance orders-prod \
+            --description "release-${GITHUB_SHA}-${GITHUB_RUN_ID}" --format=json > "$RUNNER_TEMP/orders-prod-backup.json"
+          gcloud sql backups list --project "$PROJECT_ID" --instance orders-prod \
+            --format=json > "$RUNNER_TEMP/orders-prod-backups.json"
+          jq -e --arg description "release-${GITHUB_SHA}-${GITHUB_RUN_ID}" \
+            '[.[] | select(.description == $description and .status == "SUCCESSFUL")] | length == 1' \
+            "$RUNNER_TEMP/orders-prod-backups.json" >/dev/null
+          jq --arg description "release-${GITHUB_SHA}-${GITHUB_RUN_ID}" \
+            '[.[] | select(.description == $description and .status == "SUCCESSFUL")][0] | {id,instance,description,status}' \
+            "$RUNNER_TEMP/orders-prod-backups.json" > "$RUNNER_TEMP/orders-prod-recovery-point.json"
           uv run --project backend --extra dev --frozen python scripts/run_prod_schema_adoption.py
           (
             cd backend
@@ -656,7 +703,7 @@ jobs:
               --service "$WEB_SERVICE" \
               --deploy-verification-email "$PORTAL_DEPLOY_VERIFICATION_EMAIL" \
               --deploy-verification-token "$DEPLOY_ID_TOKEN" \
-              --live-auth-url "$WEB_URL/api/auth/me" \
+              --live-auth-url "$WEB_URL/api/auth/me" --maintenance \
               --db-host 127.0.0.1 \
               --db-port 5432
             uv run --extra dev python scripts/portal_automation_db_bootstrap.py \
@@ -668,8 +715,22 @@ jobs:
               --service "$WEB_SERVICE" --email "$SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL" \
               --db-host 127.0.0.1 --db-port 5432
           )
+          python3 scripts/production_maintenance.py bootstrap-complete
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hospital-maintenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hospital-maintenance.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hospital-db-recovery-point-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/orders-prod-recovery-point.json
+          if-no-files-found: ignore
 
   deploy-backend:
+    environment: production
     needs:
       - source-gate
       - build-backend
@@ -679,6 +740,12 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      actions: read
+    env:
+      PRODUCTION_MAINTENANCE: "1"
+      SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE: ${{ vars.PROD_SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE }}
+      SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL: ${{ vars.PROD_SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL }}
+      SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT: ${{ vars.PROD_SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT }}
     steps:
       - name: Update TLS trust stores
         shell: bash
@@ -699,6 +766,10 @@ jobs:
             'SSL_CERT_DIR=/etc/ssl/certs' \
             'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
+      - name: Download source-bound database maintenance record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/production_maintenance.py download-database
       - uses: astral-sh/setup-uv@v8.1.0
         with:
           version: '0.13.4'
@@ -739,6 +810,7 @@ jobs:
           set -euo pipefail
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
           uv run --project backend --extra dev --frozen python scripts/stg_ocr_producer_deploy.py --image "$PRODUCER_IMAGE" --source-sha "$GITHUB_SHA"
+          python3 scripts/production_maintenance.py resume-writer --service ocr-pipeline-prod --image "$PRODUCER_IMAGE"
       - name: Deploy worker-prod
         env:
           IMAGE: ${{ needs.build-backend.outputs.image }}
@@ -756,27 +828,12 @@ jobs:
           WEB_URL="$WEB_URL" GOOGLE_CLIENT_ID="$GOOGLE_OAUTH_CLIENT_ID" \
           GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" ENSURE_GCLOUD_AUTH=true \
           RUN_LOCAL_REGRESSION=0 \
+          CHECK_WEB_PROXY=0 \
           WORKER_EXTRA_ENV_VARS="OCR_OUTPUT_BUCKET=${PROJECT_ID}-prod-raw,OCR_PIPELINE_STATE_URI=gs://${PROJECT_ID}-prod-raw/ocr/pipeline_state.json,PORTAL_PUBLIC_ORIGIN=${PORTAL_PUBLIC_ORIGIN},PORTAL_SESSION_ABSOLUTE_SECONDS=${PORTAL_SESSION_ABSOLUTE_SECONDS},PORTAL_SESSION_IDLE_SECONDS=${PORTAL_SESSION_IDLE_SECONDS},PORTAL_LOGIN_TTL_SECONDS=${PORTAL_LOGIN_TTL_SECONDS},GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID},AUTOMATION_AUTH_AUDIENCE=${AUTOMATION_AUTH_AUDIENCE},AUTOMATION_AUTH_EMAIL=${AUTOMATION_AUTH_EMAIL},AUTOMATION_AUTH_SUBJECT=${AUTOMATION_AUTH_SUBJECT},SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE=${SCHOOL_LUNCH_AUTOMATION_AUTH_AUDIENCE},SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL=${SCHOOL_LUNCH_AUTOMATION_AUTH_EMAIL},SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT=${SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT},${HOSPITAL_DELIVERY_ENV}" \
           ./scripts/deploy_worker_prod_with_checks.sh "$IMAGE" "$ORDER_ID"
 
-      - name: Verify live breakfast label display
-        env:
-          VERIFICATION_TOKEN: ${{ steps.auth-backend.outputs.id_token }}
-          ORDER_ID: ${{ needs.source-gate.outputs.order_id }}
-        run: |
-          set -euo pipefail
-          mkdir -p verification
-          gcloud run services describe "$WORKER_SERVICE" --project="$PROJECT_ID" --region="$REGION" \
-            --format='json(status.latestReadyRevisionName,status.traffic,spec.template.spec.containers[0].image)' > verification/worker.json
-          python3 scripts/verify_live_breakfast_labels.py --target prod --order-id "$ORDER_ID" --output-dir verification
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: live-label-display-prod
-          path: verification/
-          retention-days: 7
-
   deploy-frontend:
+    environment: production
     needs:
       - source-gate
       - build-backend
@@ -787,6 +844,10 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      actions: read
+    env:
+      PRODUCTION_MAINTENANCE: "1"
+      PROD_AGENT_RUNTIME_CONFIG: ${{ vars.PROD_AGENT_RUNTIME_CONFIG }}
     steps:
       - name: Update TLS trust stores
         shell: bash
@@ -807,6 +868,10 @@ jobs:
             'SSL_CERT_DIR=/etc/ssl/certs' \
             'PIP_CERT=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
+      - name: Download source-bound database maintenance record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/production_maintenance.py download-database
       - id: auth-frontend
         uses: google-github-actions/auth@v3
         with:
@@ -836,6 +901,36 @@ jobs:
           GOOGLE_IDENTITY_SERVICE_ACCOUNT="$GOOGLE_IDENTITY_SERVICE_ACCOUNT" \
           ENSURE_GCLOUD_AUTH=true \
           ./scripts/deploy_web_with_checks.sh
+      - name: Verify deferred live portal authentication and breakfast labels
+        env:
+          VERIFICATION_TOKEN: ${{ steps.auth-frontend.outputs.id_token }}
+          ORDER_ID: ${{ needs.source-gate.outputs.order_id }}
+        run: |
+          set -euo pipefail
+          uv run --project backend --extra dev --frozen python - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'backend')
+          from scripts.portal_prod_db_bootstrap import _verify_live_portal_access
+          _verify_live_portal_access(live_auth_url=os.environ['PRODUCTION_CANDIDATE_URL'] + '/api/auth/me', deploy_token=os.environ['VERIFICATION_TOKEN'])
+          PY
+          mkdir -p verification
+          gcloud run services describe "$WORKER_SERVICE" --project="$PROJECT_ID" --region="$REGION" \
+            --format='json(status.latestReadyRevisionName,status.traffic,spec.template.spec.containers[0].image)' > verification/worker.json
+          python3 scripts/verify_live_breakfast_labels.py --target prod --order-id "$ORDER_ID" --output-dir verification --base-url "$PRODUCTION_CANDIDATE_URL"
+      - name: Promote verified portal candidate
+        env:
+          PRODUCTION_BACKEND_IMAGE: ${{ needs.build-backend.outputs.image }}
+          PRODUCTION_PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
+        run: |
+          set -euo pipefail
+          uv run --project backend --extra dev --frozen python scripts/production_maintenance.py open-writers
+          python3 scripts/production_maintenance.py promote
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-label-display-prod
+          path: verification/
+          retention-days: 7
       - name: Activate prepared delivery after application verification
         env:
           PRODUCTION_AGENT_IMAGE: ${{ needs.build-agent.outputs.image }}
@@ -843,6 +938,15 @@ jobs:
           PRODUCTION_BACKEND_IMAGE: ${{ needs.build-backend.outputs.image }}
           PRODUCTION_PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
         run: uv run --project backend --extra dev --frozen python scripts/activate_hospital_delivery.py
+      - name: Keep maintenance on unsuccessful portal verification
+        if: failure()
+        run: python3 scripts/production_maintenance.py hold-on-failure
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hospital-maintenance-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hospital-maintenance.json
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

@@ -22,6 +22,9 @@ def _install_stub_modules() -> None:
         def __init__(self, *_args, **_kwargs):
             self.logger = logging.getLogger("test-flask")
 
+        def before_request(self, func):
+            return func
+
         def route(self, *_args, **_kwargs):
             def _decorator(func):
                 return func
@@ -106,6 +109,19 @@ pipeline_main = importlib.import_module("app.main")
 
 
 class MainArtifactTests(unittest.TestCase):
+    def test_release_readonly_blocks_mutations_but_allows_reads(self):
+        response = types.SimpleNamespace(status_code=200, headers={})
+        with mock.patch.dict(pipeline_main.os.environ, {"SAWA_RELEASE_READ_ONLY": "1"}), \
+             mock.patch.object(pipeline_main, "jsonify", return_value=response):
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                with mock.patch.object(pipeline_main, "request", types.SimpleNamespace(method=method)):
+                    self.assertIs(pipeline_main.reject_release_maintenance_writes(), response)
+                    self.assertEqual(response.status_code, 503)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+            for method in ("GET", "HEAD", "OPTIONS"):
+                with mock.patch.object(pipeline_main, "request", types.SimpleNamespace(method=method)):
+                    self.assertIsNone(pipeline_main.reject_release_maintenance_writes())
+
     def test_producer_options_use_the_pinned_copy_and_restore_test_globals(self):
         data = pipeline_main._dataset_settings
         value = {"id": "replay-runtime", "runtime_settings_provenance": "production_environment", "components": {"order": {"producer_runtime_settings": {key: None for key in data.RUNTIME_PRODUCER_KEYS}}}}

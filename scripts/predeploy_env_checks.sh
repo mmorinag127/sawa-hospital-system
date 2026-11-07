@@ -72,8 +72,12 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-check_http_code_any "web_root" "$WEB_URL/" "200,308" ""
-check_http_code_any "web_login" "$WEB_URL/login" "200,308" ""
+if [[ "${PRODUCTION_MAINTENANCE:-0}" == "1" && "$CHECK_WEB_PROXY" == "0" ]]; then
+  python3 "$(dirname "$0")/production_maintenance.py" verify-display
+else
+  check_http_code_any "web_root" "$WEB_URL/" "200,308" ""
+  check_http_code_any "web_login" "$WEB_URL/login" "200,308" ""
+fi
 
 check_http_code_any "worker_health" "$WORKER_URL/health" "200" ""
 check_http_code_any "worker_backlog" "$WORKER_URL/health/backlog" "200" "$AUTHORIZATION_HEADER"
