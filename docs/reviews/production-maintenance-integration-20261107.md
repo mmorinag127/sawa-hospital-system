@@ -83,3 +83,21 @@ must be tied to the original source and run.
 
 Traffic tag behavior was checked against the official
 [gcloud update-traffic reference](https://docs.cloud.google.com/sdk/gcloud/reference/run/services/update-traffic).
+
+## Final batch findings
+
+The full batch for `29d7b659` completed all 30 entries in 4,133.704 seconds,
+with nine failed entries representing five distinct commands. No successful
+receipt was issued. Backend: 10,304 passed, 183 skipped, 3,182.04 seconds.
+The failures were collected before changing the source:
+
+- Shipping E2E checked an asynchronously populated request array immediately
+  after clicking. Await the same expected request payload; retain all UI assertions.
+- The producer read-only test expected a mutated response object, while Flask's
+  supported return format is `(body, status, headers)`. Check 503, no-store and
+  Retry-After on that tuple without changing the production handler.
+- Three PostgreSQL commands used the Linux default binary path on macOS. The
+  local launch script now explicitly sets PG_BIN, REFRESH_TEST_PG_BIN and
+  OWNED_POSTGRES_PG_BIN to the installed PG16 directory and checks its executables.
+
+These corrections are not yet a successful release verification or deployment.

@@ -115,9 +115,11 @@ class MainArtifactTests(unittest.TestCase):
              mock.patch.object(pipeline_main, "jsonify", return_value=response):
             for method in ("POST", "PUT", "PATCH", "DELETE"):
                 with mock.patch.object(pipeline_main, "request", types.SimpleNamespace(method=method)):
-                    self.assertIs(pipeline_main.reject_release_maintenance_writes(), response)
-                    self.assertEqual(response.status_code, 503)
-                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    body, status, headers = pipeline_main.reject_release_maintenance_writes()
+                    self.assertIs(body, response)
+                    self.assertEqual(status, 503)
+                    self.assertEqual(headers["Cache-Control"], "no-store")
+                    self.assertEqual(headers["Retry-After"], "300")
             for method in ("GET", "HEAD", "OPTIONS"):
                 with mock.patch.object(pipeline_main, "request", types.SimpleNamespace(method=method)):
                     self.assertIsNone(pipeline_main.reject_release_maintenance_writes())

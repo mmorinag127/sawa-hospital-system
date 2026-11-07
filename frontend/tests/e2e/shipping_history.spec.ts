@@ -210,7 +210,7 @@ test("shipping history groups rows by date, nests numbers under facility cards, 
   await expect(eventTrackingCard.getByRole("button", { name: "未使用" })).toBeVisible();
   page.once("dialog", (dialog) => dialog.accept());
   await eventTrackingCard.getByRole("button", { name: "未使用" }).click();
-  expect(manualStatusRequests.at(-1)).toMatchObject({
+  await expect.poll(() => manualStatusRequests.at(-1)).toMatchObject({
     tracking_number: "1111-1111-1111",
     status: "発送しなかった",
   });
