@@ -74,6 +74,12 @@ must be tied to the original source and run.
 - Reopen only the checked image digests; on failure retain maintenance and stop writers.
 - Resolve the operational uncertainty around revision readiness while service scaling is manual zero.
 - Update activation failure evidence: pausing prevents further delivery, but never undoes completed work.
+- Live inventory found existing `worker-prod` source-export tags. Capture their exact
+  revision UID/image identities, retire only captured tags through Actions before
+  stopping writers, and reject any new or changed tag. Do not recreate legacy URLs
+  on the migrated database. This also closes the manual-scaling tagged-route exception.
+- Local batch for `f4ef01ee` was interrupted after this live-inventory discovery;
+  it is incomplete and must not be used as a successful release receipt.
 
 Traffic tag behavior was checked against the official
 [gcloud update-traffic reference](https://docs.cloud.google.com/sdk/gcloud/reference/run/services/update-traffic).

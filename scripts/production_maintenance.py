@@ -35,7 +35,8 @@ def context():
 
 def serving(service, allowed_tag=None):
     traffic = service.get("status", {}).get("traffic", [])
-    require(not any(item.get("tag") and item["tag"] != allowed_tag for item in traffic),
+    allowed = {allowed_tag} if isinstance(allowed_tag, str) else set(allowed_tag or ())
+    require(not any(item.get("tag") and item["tag"] not in allowed for item in traffic),
             "tagged routes require explicit review")
     active = [item for item in traffic if item.get("percent")]
     require(len(active) == 1 and active[0].get("percent") == 100,
@@ -102,7 +103,7 @@ def capture():
     from restore_hospital_database import assert_database_inventory
     assert_database_inventory()
     record = {"run": os.environ["GITHUB_RUN_ID"], "sha": os.environ["GITHUB_SHA"],
-              "ref": os.environ["GITHUB_REF"], "services": {}, "queues": {},
+              "ref": os.environ["GITHUB_REF"], "services": {}, "tagged_routes": {}, "queues": {},
               "schedules": {}, "writers_stopped": False, "database_drained": False,
               "application_checks_passed": False, "reopened": False}
     for name in SERVICES:
@@ -114,7 +115,16 @@ def capture():
             require(containers and containers[0].get("ports")
                     and not any(item.get("ports") for item in containers[1:]),
                     "portal ingress container must be unambiguous")
-        revision = serving(service)
+        tagged = [item for item in service.get("status", {}).get("traffic", []) if item.get("tag")]
+        routes = []
+        for item in tagged:
+            detail = cloud("run", "revisions", "describe", item["revisionName"], "--region=" + REGION)
+            require(detail["metadata"].get("labels", {}).get("serving.knative.dev/service") == name,
+                    "tagged revision does not belong to service")
+            routes.append({"tag": item["tag"], "revision": item["revisionName"],
+                           "uid": detail["metadata"]["uid"], "images": revision_images(detail)})
+        record["tagged_routes"][name] = routes
+        revision = serving(service, [item["tag"] for item in routes])
         mode = service["metadata"].get("annotations", {}).get("run.googleapis.com/scalingMode", "automatic")
         require(mode == "automatic", "unexpected service scaling before maintenance")
         detail = cloud("run", "revisions", "describe", revision, "--region=" + REGION)
@@ -147,12 +157,32 @@ def load():
     return path, record
 
 
+def verify_captured_tags(record, name, service, *, allow_retired=False):
+    routes = record.get("tagged_routes", {}).get(name, [])
+    observed = {(item["tag"], item["revisionName"]) for item in service.get("status", {}).get("traffic", [])
+                if item.get("tag")}
+    expected = {(item["tag"], item["revision"]) for item in routes}
+    require(observed <= expected if allow_retired else observed == expected, "captured tags changed")
+    for item in routes:
+        detail = cloud("run", "revisions", "describe", item["revision"], "--region=" + REGION)
+        require(detail["metadata"]["uid"] == item["uid"] and revision_images(detail) == item["images"],
+                "captured tagged revision identity changed")
+    return [item for item in routes if (item["tag"], item["revision"]) in observed]
+
+
 def stop_writers():
     path, record = load()
     verify_display()
     for name in WRITERS:
         service = cloud("run", "services", "describe", name, "--region=" + REGION)
-        require(serving(service) == record["services"][name]["revision"], "writer revision changed")
+        routes = verify_captured_tags(record, name, service, allow_retired=True)
+        require(serving(service, [item["tag"] for item in routes]) == record["services"][name]["revision"],
+                "writer revision changed")
+        if routes:
+            mutation(path, record, "retire-tags:" + name, "run", "services", "update-traffic", name,
+                     "--remove-tags=" + ",".join(item["tag"] for item in routes), "--region=" + REGION, "--quiet")
+        require(serving(cloud("run", "services", "describe", name, "--region=" + REGION))
+                == record["services"][name]["revision"], "writer traffic changed while retiring tags")
     for field, kind, resource in (("queues", "tasks", "queues"), ("schedules", "scheduler", "jobs")):
         for name in record[field]:
             current = cloud(kind, resource, "describe", name, "--location=" + REGION)
@@ -207,7 +237,9 @@ def show(image):
     require(image.startswith(f"{REGION}-docker.pkg.dev/{PROJECT}/backend/") and "@sha256:" in image,
             "immutable maintenance image required")
     service = cloud("run", "services", "describe", "web-prod", "--region=" + REGION)
-    require(serving(service) == record["services"]["web-prod"]["revision"], "portal revision changed")
+    routes = verify_captured_tags(record, "web-prod", service)
+    require(serving(service, [item["tag"] for item in routes])
+            == record["services"]["web-prod"]["revision"], "portal revision changed")
     replacement = copy.deepcopy(service)
     replacement.pop("status", None)
     metadata = replacement["metadata"]

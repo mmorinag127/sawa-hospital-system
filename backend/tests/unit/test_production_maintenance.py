@@ -32,6 +32,25 @@ def test_only_current_candidate_tag_is_allowed():
         maintenance.serving(service, "verify-456")
 
 
+@pytest.mark.parametrize("change", [None, "new-tag", "changed-revision", "changed-uid", "retired"])
+def test_captured_tags_are_identity_bound_and_retired_without_guessing(monkeypatch, change):
+    route = {"tag": "source-export", "revision": "retained", "uid": "retained-id", "images": ["old-image"]}
+    record = {"tagged_routes": {"worker-prod": [route]}}
+    service = descriptor("current")
+    if change != "retired":
+        service["status"]["traffic"].append({"tag": "other" if change == "new-tag" else "source-export",
+            "revisionName": "different" if change == "changed-revision" else "retained"})
+    monkeypatch.setattr(maintenance, "cloud", lambda *_args: {
+        "metadata": {"uid": "changed" if change == "changed-uid" else "retained-id"},
+        "spec": {"containers": [{"image": "old-image"}]}})
+    if change in {"new-tag", "changed-revision", "changed-uid"}:
+        with pytest.raises(RuntimeError):
+            maintenance.verify_captured_tags(record, "worker-prod", service, allow_retired=True)
+    else:
+        assert maintenance.verify_captured_tags(record, "worker-prod", service, allow_retired=True) == (
+            [] if change == "retired" else [route])
+
+
 def record_fixture(monkeypatch, tmp_path):
     record = {"run": "123", "sha": "a" * 40, "ref": "refs/heads/release/prod-test",
               "services": {name: {"revision": "old-" + name, "uid": "original", "images": ["original"]}
