@@ -40,6 +40,11 @@ def active_on(staff, day):
                 or (staff.active_to and day > staff.active_to))
 
 
+def before_schedule_history(settings, day):
+    boundary = settings.get("schedule_history_start_date")
+    return boundary is not None and day < date.fromisoformat(boundary)
+
+
 def hard_pair_constraint(kind, first, second):
     if kind in {"avoid_same_weekday_off", "avoid_same_day_off", "avoid_same_day_assignment"}:
         return first + second <= 1
@@ -261,7 +266,7 @@ def required_history_errors(staffs, start, settings, prior_status, prior_time):
         time_days = boundary_time_days(settings, staff)
         for offset in range(1, max(binary_days, time_days) + 1):
             day = start - timedelta(days=offset)
-            if not active_on(staff, day):
+            if before_schedule_history(settings, day) or not active_on(staff, day):
                 continue
             key = (staff.id, day)
             if offset <= binary_days and prior_status.get(key) not in {"off", "working"}:
@@ -290,6 +295,8 @@ def minute_rules(staffs, dates, settings, minutes, prior_time):
         if weekly is not None:
             for last in dates:
                 window = [last - timedelta(days=offset) for offset in range(6, -1, -1)]
+                if before_schedule_history(settings, window[0]):
+                    continue
                 if window[0] < start and not settings.get("require_prior_period_continuity"):
                     continue
                 values = []
@@ -335,6 +342,8 @@ def binary_rules(staffs, dates, settings, off, prior_status):
         for size, code, relation, bound in windows:
             for last in dates:
                 window = [last - timedelta(days=offset) for offset in range(size - 1, -1, -1)]
+                if before_schedule_history(settings, window[0]):
+                    continue
                 if (window[0] < start and code != "max_consecutive_off_days"
                         and not settings.get("require_prior_period_continuity")):
                     continue

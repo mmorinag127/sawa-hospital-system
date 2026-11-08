@@ -831,6 +831,8 @@ def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None, _analysis=Non
         "order_document_id": job.order_document_id,
         "input_artifact_digest": job.input_artifact_digest,
         "status": job.status,
+        "fax_rotation_degrees": metrics.get("fax_rotation_degrees"),
+        "selected_document_id": metrics.get("selected_document_id"),
         "quantity_content_editable": quantity_content_editable,
         "template_version_id": job.template_version_id,
         "created_at": _serialize_datetime(job.created_at),
@@ -2744,6 +2746,8 @@ def mark_ocr_run_queued(
                 "selected_document_id": delivery_selected_document_id,
                 "first_pass_source": reservation_metrics["first_pass_source"],
                 "request_parameters": {
+                    **({"fax_rotation_degrees": reservation_metrics["fax_rotation_degrees"]}
+                       if "fax_rotation_degrees" in reservation_metrics else {}),
                     "request_mode": reservation_metrics["request_mode"],
                     "reparse_ocr_prompt": reservation_metrics.get("reparse_ocr_prompt"),
                     "reparse_prompt_preset": reservation_metrics.get("reparse_prompt_preset"),

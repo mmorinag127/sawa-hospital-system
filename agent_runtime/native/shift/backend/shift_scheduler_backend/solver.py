@@ -2219,6 +2219,9 @@ def _add_prior_period_continuity_rules(
     rule_config: dict,
     prior_statuses: list[tuple[int, date, str]],
 ) -> str | None:
+    from .operational_constraints import before_schedule_history
+    if before_schedule_history(rule_config, start_date - timedelta(days=1)):
+        return None
     if start_date.weekday() == 6:
         saturday = start_date - timedelta(days=1)
         prior_keys = {
@@ -2305,7 +2308,7 @@ def _add_prior_period_continuity_rules(
         required_prior_dates = [
             work_date
             for work_date in expected_prior_dates[-staff_history_days:]
-            if not (
+            if not before_schedule_history(rule_config, work_date) and not (
                 (staff.active_from and work_date < staff.active_from)
                 or (staff.active_to and work_date > staff.active_to)
             )
@@ -2325,6 +2328,8 @@ def _add_prior_period_continuity_rules(
             for index in range(max(0, history_days - window_size + 1), history_days):
                 window = combined_dates[index : index + window_size]
                 if len(window) != window_size or not (window[0] < start_date <= window[-1]):
+                    continue
+                if before_schedule_history(rule_config, window[0]):
                     continue
                 if any(
                     (staff.active_from and work_date < staff.active_from)

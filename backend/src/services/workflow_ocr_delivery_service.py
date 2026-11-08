@@ -120,10 +120,13 @@ def _validate_identity(row):
     if request["selected_document_id"] is not None and request["selected_document_id"] != pdf["document_id"]:
         raise ValueError("workflow_ocr_delivery_selected_document_mismatch")
     params = request["request_parameters"]
-    if (not isinstance(params, dict) or set(params) != REQUEST_KEYS
+    if (not isinstance(params, dict) or set(params) not in (REQUEST_KEYS, REQUEST_KEYS | {"fax_rotation_degrees"})
             or row.request_mode not in {"ocr_reparse", "llm_reparse", "ocr_rerun"}
             or params["request_mode"] != row.request_mode):
         raise ValueError("workflow_ocr_delivery_request_mode_unknown")
+    if "fax_rotation_degrees" in params and (
+            type(params["fax_rotation_degrees"]) is not int or params["fax_rotation_degrees"] not in (0, 180)):
+        raise ValueError("workflow_ocr_delivery_rotation_invalid")
     if row.request_mode in {"ocr_reparse", "llm_reparse"}:
         if type(params["reparse_llm_assist"]) is not bool:
             raise ValueError("workflow_ocr_delivery_llm_assist_required")

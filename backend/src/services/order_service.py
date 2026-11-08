@@ -9467,6 +9467,20 @@ def _build_live_hakodate_manifest_item(
             order_input_identity={"facility_code": facility_id, "week_code": week_code},
             session=session,
         )
+        from src.services.workflow_attempt_guard_service import current_workflow_execution
+        owner = current_workflow_execution() or {}
+        fax_rotation = owner.get("fax_rotation_degrees")
+        if fax_rotation is not None:
+            if type(fax_rotation) is not int or fax_rotation not in (0, 180):
+                raise ValueError("fax_rotation_invalid")
+            if owner.get("selected_pdf_receipt") != verified_input.selected_pdf_receipt:
+                raise ValueError("selected_document_input_changed")
+            saved_quad = workflow_meta.get("quad_override") or {}
+            if quad_override_px and saved_quad.get("rotation_degrees") == 180:
+                quad_override_px = quad_override_px[2:] + quad_override_px[:2]
+            if fax_rotation != (saved_quad.get("rotation_degrees") or 0):
+                # Keep saved corrections, but never reuse axes from the opposite orientation.
+                workflow_meta = {**workflow_meta, "header_axis_override": None, "row_axis_override": None}
         axis_source = {"selected_pdf_receipt": verified_input.selected_pdf_receipt, "configured_input": quad_configured_input, "order_input_identity": {"facility_code": facility_id, "week_code": week_code}, "session": session}
         header_axis_override = _normalize_operator_header_axis_override(workflow_meta.get("header_axis_override"), **axis_source)
         row_axis_override = _normalize_operator_row_axis_override(workflow_meta.get("row_axis_override"), **axis_source)
@@ -9534,6 +9548,7 @@ def _build_live_hakodate_manifest_item(
         canvas_height=accepted_canvas_height,
         render_width=render_width,
         quad_source=quad_override_source,
+        rotation_degrees=fax_rotation or 0,
         output_dir=registration_dir,
         template_axes_x=template_axes_x,
         template_axes_y=template_axes_y,
@@ -22674,7 +22689,9 @@ def _project_payload_quantities_onto_sheet_row_lists(
     ]
     if not normalized_rows or not normalized_fields or not normalized_payload_rows:
         return normalized_rows, {}
-    quantity_index = _build_sheet_quantity_index(normalized_fields, template=template)
+    # Projection transcribes physical columns, including separate excluded groups.
+    identities = quantity_field_identities_for_fields(template, normalized_fields)
+    quantity_index = {(field, None): idx for idx, field in enumerate(normalized_fields) if field in identities}
     if not quantity_index:
         return normalized_rows, {}
     quantity_columns = sorted(set(quantity_index.values()))

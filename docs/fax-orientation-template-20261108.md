@@ -1,5 +1,30 @@
 # FAX Orientation And Template Recovery
 
+## Follow-up Corrections (2026-11-08)
+
+- STEP1 now sends source-bound 0/180 orientation in the normal queued OCR command;
+  no quad-review visit or synchronous edge estimation is required to choose it.
+  The delivery identity seals the orientation with the selected PDF. Legacy queued
+  deliveries remain valid. Existing rotated manual corners are not turned twice.
+- ORD108ac1e3: FAC00003 has separately authored fish-exclusion regular/soft/mixer
+  columns on 2F and 3F. The former diet/area-only uniqueness check rejected these
+  physical columns. Distinct locked fields, explicit groups and source positions
+  now remain separate, while ambiguous duplicate identities remain rejected.
+- A rejected OCR prerequisite could increment revision, while the browser kept
+  the old revision and displayed every 409 as a concurrency conflict. Adopt only
+  an owned single-step domain-error transition; preserve dirty edits and true CAS
+  rejection. Render domain errors separately. Never automatically retry writes.
+- Shift `/shift/create`: allow a new operational boundary when no direct prior
+  candidate exists, without fabricating prior working/off days. Solver, post-edit
+  validation and native-agent copy share that boundary. Existing preceding
+  candidates still require their real, complete history and explicit selection.
+- Current follow-up status: implementations prepared; initial shift batch found
+  one additional legacy rest-history check, now corrected. Final related local
+  batches, integrations and live deployment remain unverified.
+
+The historical verification and deployment notes below describe the previous
+revision only, not evidence that these follow-up corrections are deployed.
+
 ## Scope
 
 Reported production order: ORD8b3b2ede, FAC00014, 2026-11-15 through

@@ -31,6 +31,8 @@ export type WorkflowV2 = {
     invalidated_at: string;
   } | null;
   quad_override?: {
+    rotation_degrees?: 0 | 180;
+    source_receipt?: { selected_pdf_receipt?: { document_id?: string } };
     quad_px?: number[][];
     quad_source?: string | null;
     decision?: string | null;
@@ -43,6 +45,8 @@ export type WorkflowV2 = {
     created_at?: string | null;
   } | null;
   ocr_job?: {
+    fax_rotation_degrees?: 0 | 180 | null;
+    selected_document_id?: string | null;
     ocr_job_id?: string | null;
     order_id?: string | null;
     workflow_attempt_id?: string | null;

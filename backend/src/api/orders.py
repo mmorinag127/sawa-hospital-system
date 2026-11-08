@@ -82,6 +82,7 @@ class WorkflowV2ContextConfirmBody(BaseModel):
 
 
 class WorkflowV2OcrRunBody(BaseModel):
+    rotation_degrees: Literal[0, 180] | None = None
     stale_action: str | None = None
     force: bool = False
     mode: str | None = None
@@ -526,6 +527,7 @@ def _enqueue_order_reparse_job(
     request_mode: str,
     selected_document_id: str | None = None,
     expected_revision: int,
+    rotation_degrees: int | None = None,
 ) -> dict:
     order, selected_version = _resolve_order_document_version(order_id, selected_document_id)
     if not order.get("facility"):
@@ -543,6 +545,7 @@ def _enqueue_order_reparse_job(
             delivery_selected_document_id=selected_document_id,
             request_mode=request_mode,
             job_metrics={
+                **({"fax_rotation_degrees": rotation_degrees} if rotation_degrees is not None else {}),
                 "processing_stage": "queued",
                 "result_state": "processing",
                 "confirmed_lines_retained": bool(order.get("lines_updated_at")),
@@ -1387,6 +1390,8 @@ def _raise_workflow_v2_ocr_prerequisite_error(error: str, workflow: dict | None 
     if normalized in {"context_not_confirmed", "facility_template_unresolved"}:
         raise HTTPException(status_code=400, detail=normalized)
     messages = {
+        "quantity_template_identity_duplicate": "帳票の数量列の食種・階・列グループが重複しています。施設テンプレートの列設定を確認してください。",
+        "quantity_template_alias_collision": "帳票の数量列名が重複しています。施設テンプレートの列設定を確認してください。",
         "menu_entries_missing": "対象週の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
         "monthly_menu_object_missing": "対象月の月次メニューが未登録です。メニューを登録してからOCRを実行してください。",
         "monthly_menu_lookup_failed": "対象週の月次メニューを解決できません。メニュー登録を確認してください。",
@@ -1508,6 +1513,7 @@ def _enqueue_workflow_v2_evidence_rerun(
     force: bool = False,
     selected_document_id: str | None = None,
     expected_revision: int,
+    rotation_degrees: int | None = None,
 ) -> dict:
     if stale_action not in {"retry", "wait"}:
         raise HTTPException(status_code=400, detail="stale_action must be retry or wait")
@@ -1529,6 +1535,7 @@ def _enqueue_workflow_v2_evidence_rerun(
             request_mode="ocr_rerun",
             delivery_selected_document_id=selected_document_id,
             job_metrics={
+                **({"fax_rotation_degrees": rotation_degrees} if rotation_degrees is not None else {}),
                 "workflow_version": "v2",
                 "processing_stage": "queued",
                 "result_state": "processing",
@@ -1598,6 +1605,7 @@ def run_order_workflow_v2_ocr(
             force=force,
             stale_action=stale_action,
             request_mode="llm_reparse",
+            rotation_degrees=(body.rotation_degrees if body else None),
             selected_document_id=(body.document_id if body else None),
             expected_revision=prerequisite_workflow["revision"],
         )
@@ -1605,6 +1613,7 @@ def run_order_workflow_v2_ocr(
         return result
     return _enqueue_workflow_v2_evidence_rerun(
         order_id,
+        rotation_degrees=(body.rotation_degrees if body else None),
         stale_action=stale_action,
         force=force,
         selected_document_id=(body.document_id if body else None),

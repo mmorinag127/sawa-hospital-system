@@ -862,6 +862,7 @@ def lock_current_workflow_attempt(
         owner["configured_input"] = deepcopy(captured["configured_input"])
         owner["reparse_read_input"] = deepcopy(captured)
         owner["selected_pdf_receipt"] = deepcopy((job.metrics or {}).get("selected_pdf_receipt"))
+        owner["fax_rotation_degrees"] = (job.metrics or {}).get("fax_rotation_degrees")
     selected = (job.metrics or {}).get("selected_version_input")
     return (
         (selected is None or lock_selected_version_input(session, order_id, selected, read_only=read_only))

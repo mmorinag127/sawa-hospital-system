@@ -212,6 +212,29 @@ def test_half_turn_rectification_moves_both_axes_not_mirror():
     np.testing.assert_array_equal(image, original)
 
 
+@pytest.mark.parametrize("automatic", [False, True])
+def test_step1_rotation_uses_real_rectification_without_quad_review(monkeypatch, automatic):
+    image = np.zeros((80, 80, 3), dtype=np.uint8)
+    image[:40, :40], image[:40, 40:] = [10, 20, 30], [40, 50, 60]
+    image[40:, 40:], image[40:, :40] = [70, 80, 90], [100, 110, 120]
+    original = image.copy()
+    points = [[0, 0], [79, 0], [79, 79], [0, 79]]
+    monkeypatch.setattr(raster, "template_axis_edge_counts_from_workbook", lambda *a, **k: (2, 2))
+    monkeypatch.setattr(raster, "estimate_edge_locked_quad_from_pdf", lambda *a, **k: {
+        "status": "ok", "refined_quad_px": points})
+    monkeypatch.setattr(raster, "render_pdf_page_to_bgr", lambda *a, **k: image)
+    monkeypatch.setattr(raster, "render_template_pdf_to_canvas", lambda *a, **k: image)
+    _, images = raster.build_fixed_quad_template_registration(
+        facility_code="fixture", order_id="fixture", fax_pdf="fixture", template_pdf="fixture",
+        quad_px=None if automatic else points, manifest_template_bbox=[0, 0, 79, 79],
+        canvas_width=80, canvas_height=80, render_width=80,
+        template_axes_x=[0, 79], template_axes_y=[0, 79], rotation_degrees=180)
+    # Real transform output overlays the border only; inspect interior quadrants.
+    np.testing.assert_array_equal(images["step2"][20, 20], image[60, 60])
+    np.testing.assert_array_equal(images["step2"][65, 65], image[15, 15])
+    np.testing.assert_array_equal(image, original)
+
+
 @pytest.mark.parametrize("change", ["pdf", "config", "week", "menu"])
 def test_real_geometry_producer_changes_for_actual_geometry_source_not_workflow_meta(geometry_roundtrip, change):
     _, order, pdf, configured, entries, _ = geometry_roundtrip

@@ -81,6 +81,8 @@ const formatApiError = (err: any, fallback: string) => {
     return "workflow revision を取得できません。再読込してから操作してください。";
   }
   if (err?.response?.status === 409) {
+    if (reviewError?.error && reviewError.error !== "workflow_revision_conflict")
+      return typeof reviewError.message === "string" ? reviewError.message : describeWorkflowBlocker(reviewError.error);
     return "他の更新と競合しました。編集中の値は保持しています。最新状態を確認してから、もう一度保存してください。";
   }
   const detail = err?.response?.data?.detail;
@@ -802,7 +804,7 @@ export default function OrderWorkflowV2Page() {
   const [quadReviewMessage, setQuadReviewMessage] = useState("");
   const [manualQuadMode, setManualQuadMode] = useState(false);
   const [manualQuadPoints, setManualQuadPoints] = useState<number[][]>([]);
-  const [quadRotation, setQuadRotation] = useState<0 | 180>(0);
+  const [faxRotation, setFaxRotation] = useState<0 | 180 | null>(null);
   const [storedHeaderAxisReview, setHeaderAxisReview] = useState<HeaderAxisReviewPayload | null>(null);
   const [headerAxisLoading, setHeaderAxisLoading] = useState(false);
   const [headerAxisMessage, setHeaderAxisMessage] = useState("");
@@ -905,6 +907,11 @@ export default function OrderWorkflowV2Page() {
     || "",
   ).trim();
   const effectiveSelectedDocumentId = selectedDocumentId || currentDocumentId;
+  const effectiveFaxRotation = faxRotation ?? (
+    workflow?.ocr_job?.selected_document_id === effectiveSelectedDocumentId
+      ? workflow.ocr_job.fax_rotation_degrees : null
+  ) ?? (workflow?.quad_override?.source_receipt?.selected_pdf_receipt?.document_id === effectiveSelectedDocumentId
+    ? workflow?.quad_override?.rotation_degrees : null) ?? 0;
   const quadContextRef = useRef({orderId, documentId:effectiveSelectedDocumentId, route:router.asPath});
   if (quadContextRef.current.orderId!==orderId || quadContextRef.current.documentId!==effectiveSelectedDocumentId || quadContextRef.current.route!==router.asPath) {
     ++quadContextGenerationRef.current;
@@ -1047,7 +1054,7 @@ export default function OrderWorkflowV2Page() {
     setHeaderAxisReview(null); setRowAxisReview(null); setRecognitionReview(null); setRecognitionValues({});
     axisSourceRef.current={};
     if (renderedInputGeneration===workingInputGenerationRef.current) {
-      setManualQuadPoints([]); setManualQuadMode(false); setQuadRotation(0); finishWorkflowEditorEdit("quad");
+      setManualQuadPoints([]); setManualQuadMode(false); setFaxRotation(null); finishWorkflowEditorEdit("quad");
     }
     if (quadBusyOwnerRef.current===busyGenerationRef.current) setBusy("");
     quadBusyOwnerRef.current=null;
@@ -1235,7 +1242,17 @@ export default function OrderWorkflowV2Page() {
       return captureWorkflowInputVersion(editor);
     });
     if (!ownsPageInput(captured.owner)) throw new Error("注文・PDF・認証または入力が変更されました。");
-    const response = await request(workflowMutationConfig(captured));
+    let response: T;
+    try {
+      response = await request(workflowMutationConfig(captured));
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail;
+      if (detail?.error && detail.error !== "workflow_revision_conflict"
+          && detail.workflow?.revision === captured.revision! + 1) {
+        adopt(() => { adoptOwnWorkflowCommandResponse(detail.workflow, captured); });
+      }
+      throw error;
+    }
     adopt(() => {
       const priorRevision = workflowRevisionRef.current?.revision;
       if (!adoptOwnWorkflowCommandResponse(response.data, captured)) {
@@ -1450,6 +1467,8 @@ export default function OrderWorkflowV2Page() {
       "monthly_menu_lookup_failed",
       "monthly_menu_facility_scope_missing",
       "week_unresolved",
+      "quantity_template_identity_duplicate",
+      "quantity_template_alias_collision",
     ].includes(item),
   );
   const selectedFacility = contextFacilityResolution.option;
@@ -2984,7 +3003,6 @@ export default function OrderWorkflowV2Page() {
       setQuadReview(response.data);
       const savedQuad = response.data?.saved_override?.quad_px;
       const savedRotation = response.data?.saved_override?.rotation_degrees === 180 ? 180 : 0;
-      if (canAdoptReadEditorInput("quad")) setQuadRotation(savedRotation);
       if (canAdoptReadEditorInput("quad") && Array.isArray(savedQuad) && savedQuad.length===4) {
         if (sameQuadOverrideSource(response.data.saved_override?.source_receipt,receipt))
           setManualQuadPoints(savedRotation === 180 ? [...savedQuad.slice(2), ...savedQuad.slice(0, 2)] : savedQuad);
@@ -3034,7 +3052,7 @@ export default function OrderWorkflowV2Page() {
       if (captured.revision!==receipt.workflow_revision) throw new Error("4点確認後にworkflow版が変わりました。元の入力は保存していません。");
       if (!current()) return;
       const quadResponse=await apiClient.put(`/orders/${own.context.orderId}/workflow-v2/quad-review`,
-        {decision,quad_px:points,source_receipt:receipt,rotation_degrees:quadRotation},workflowMutationConfig(captured));
+        {decision,quad_px:points,source_receipt:receipt,rotation_degrees:effectiveFaxRotation},workflowMutationConfig(captured));
       if (!current()) return;
       if (workflowFromMutationResponse(quadResponse.data)?.revision!==captured.revision!+1)
         throw new Error("4点補正のown revision遷移を確認できません。");
@@ -3353,6 +3371,7 @@ export default function OrderWorkflowV2Page() {
           stale_action: "retry",
           mode: ocrRunMode,
           document_id: effectiveSelectedDocumentId,
+          rotation_degrees: effectiveFaxRotation,
         };
         if (ocrRunMode === "llm") {
           payload.llm_assist = true;
@@ -4660,6 +4679,12 @@ export default function OrderWorkflowV2Page() {
                   <option value="llm">AIに任せる</option>
                 </NativeSelect>
               </label>
+              <label>
+                <input type="checkbox" checked={effectiveFaxRotation === 180}
+                  disabled={Boolean(busy || !effectiveSelectedDocumentId)}
+                  onChange={(event) => { ++workingInputGenerationRef.current; setFaxRotation(event.target.checked ? 180 : 0); }} />
+                FAXを上下反転（180度回転）
+              </label>
               <Button
                 className="btn workflow-ordinary-control"
                 type="button"
@@ -4971,12 +4996,6 @@ export default function OrderWorkflowV2Page() {
             </div>
           ) : null}
           <div className="quad-review-actions">
-            <label>
-              <input type="checkbox" checked={quadRotation === 180}
-                disabled={Boolean(busy || !quadReview?.source_receipt)}
-                onChange={(event) => { beginWorkflowEditorEdit("quad"); setQuadRotation(event.target.checked ? 180 : 0); }} />
-              FAXを上下反転（180度回転）
-            </label>
             <Button
               className="btn primary workflow-ordinary-control"
               type="button"

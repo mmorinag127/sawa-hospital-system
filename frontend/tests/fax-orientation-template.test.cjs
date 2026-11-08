@@ -27,8 +27,48 @@ test('failed template read is never classified as unregistered', () => {
   assert.equal(value('facilityTemplateMissing', {contextForm,facilityTemplateStatus}), false);
   assert.equal(value('facilityTemplateMissing', {contextForm,facilityTemplateStatus:{...facilityTemplateStatus,error:''}}), true);
 });
-test('upside-down option is sent through the guarded quad save command', () => {
-  assert.match(source, /rotation_degrees:quadRotation/);
+test('upside-down option is in Step1 and is sent without loading quad review', async () => {
+  const sent = [];
+  const run = value('runOcr', {
+    runAction: (_label, action) => action({adopt: fn => fn()}),
+    contextFacilityResolution: {status:'ready'}, effectiveSelectedDocumentId:'PDF-A',
+    ocrRunMode:'hakodate', effectiveFaxRotation:180, orderId:'ORDER-A',
+    executeWorkflowMutation: (_editor, request) => request({headers:{'If-Match':'"7"'}}),
+    apiClient: {post: async (...args) => {sent.push(args); return {data:{}};}},
+  });
+  await run();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][0], '/orders/ORDER-A/workflow-v2/ocr-runs');
+  assert.equal(sent[0][1].rotation_degrees, 180);
+  assert.equal(sent[0][1].document_id, 'PDF-A');
+  assert.equal(sent[0][2].headers['If-Match'], '"7"');
+  assert.match(source, /rotation_degrees:effectiveFaxRotation/);
   assert.match(source, /FAXを上下反転（180度回転）/);
   assert.match(source, /savedRotation === 180 \? \[\.\.\.savedQuad.slice\(2\), \.\.\.savedQuad.slice\(0, 2\)\]/);
+});
+
+test('domain rejection adopts only its own single revision transition, never a conflict or stale input', async () => {
+  for (const [code, revision, shouldAdopt] of [
+    ['quantity_template_identity_duplicate',8,true], ['workflow_revision_conflict',8,false],
+    ['quantity_template_identity_duplicate',9,false],
+  ]) {
+    const adopted = [], editor = {dirty:true}, original = {response:{status:409,data:{detail:{
+      error:code,workflow:{order_id:'A',revision},message:'列設定の重複',
+    }}}};
+    const mutate = value('executeWorkflowMutation', {
+      sheetDirtyRef:{current:true}, workflow:{}, beginWorkflowEditorEdit:()=>{},
+      captureWorkflowInputVersion:()=>({revision:7,owner:{}}), ownsPageInput:()=>true,
+      workflowMutationConfig:()=>({}), adoptOwnWorkflowCommandResponse:data=>{adopted.push(data);return true;},
+    });
+    await assert.rejects(mutate('ocrRun', async()=>{throw original;}, fn=>fn()), error=>error===original);
+    assert.equal(adopted.length, Number(shouldAdopt));
+    assert.equal(editor.dirty, true);
+  }
+});
+
+test('domain 409 is not disguised as another operator conflict', () => {
+  const format = value('formatApiError', {describeWorkflowBlocker:code=>code});
+  assert.equal(format({response:{status:409,data:{detail:{error:'quantity_template_identity_duplicate',
+    message:'数量列の重複'}}}}, 'fallback'), '数量列の重複');
+  assert.match(format({response:{status:409,data:{detail:{error:'workflow_revision_conflict'}}}}, ''), /他の更新と競合/);
 });

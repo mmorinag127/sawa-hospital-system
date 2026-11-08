@@ -875,7 +875,10 @@ def build_fixed_quad_template_registration(
     template_workbook_path: Path | str | None = None,
     template_sheet_name: str | None = None,
     page: int = 1,
+    rotation_degrees: int = 0,
 ) -> tuple[FixedQuadTemplateRegistrationResult, dict[str, np.ndarray]]:
+    if type(rotation_degrees) is not int or rotation_degrees not in (0, 180):
+        raise ValueError("fax_rotation_invalid")
     expected_x_count, expected_y_count = template_axis_edge_counts_from_workbook(template_workbook_path, sheet_name=template_sheet_name)
     if quad_px is None:
         estimate = estimate_edge_locked_quad_from_pdf(fax_pdf, dpi=220, render_width=render_width, page=page)
@@ -884,6 +887,8 @@ def build_fixed_quad_template_registration(
         quad_px = estimate["refined_quad_px"]
         if quad_source is None:
             quad_source = "edge_locked_v4_estimated_from_fax_pdf"
+    if rotation_degrees == 180:
+        quad_px = quad_px[2:] + quad_px[:2]
     original = render_pdf_page_to_bgr(fax_pdf, width=render_width, page=page)
     template = render_template_pdf_to_canvas(
         template_pdf,

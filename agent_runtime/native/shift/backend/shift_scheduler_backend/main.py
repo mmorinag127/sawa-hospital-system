@@ -847,6 +847,8 @@ def _automatic_prior_statuses(
         historical_settings = (candidate.score_breakdown_json or {}).get("rule_config")
         if not isinstance(historical_settings, dict):
             return ()
+        if historical_settings.get("schedule_history_start_date"):
+            settings["schedule_history_start_date"] = historical_settings["schedule_history_start_date"]
         from .validation_snapshot import historical_candidate_validation
         validation = historical_candidate_validation(session, candidate) if (
             confirmed_candidate(session, run) is not None
@@ -1589,13 +1591,19 @@ def solve(request: SolveRequest, session: Session = Depends(get_session)) -> dic
     )
     from .operational_constraints import history_days
     prior_time_history = [row.model_dump(mode="json") for row in request.prior_time_history]
+    from .schedule_selection import schedule_history_settings
+    settings = schedule_history_settings(
+        session, settings, resolved_period.start_date,
+        explicit_history=bool(prior_statuses or prior_time_history),
+    )
     requires_history = bool(settings.get("require_prior_period_continuity") or history_days(settings, session.query(Staff).all()))
     has_prior_staff = any(
         (staff.active_from is None or staff.active_from < resolved_period.start_date)
         and (staff.active_to is None or staff.active_to >= resolved_period.start_date)
         for staff in session.query(Staff).all()
     )
-    if not prior_statuses and requires_history and has_prior_staff:
+    if (not prior_statuses and requires_history and has_prior_staff
+            and settings.get("schedule_history_start_date") != resolved_period.start_date.isoformat()):
         prior_statuses = _automatic_prior_statuses(
             session,
             start_date=resolved_period.start_date,

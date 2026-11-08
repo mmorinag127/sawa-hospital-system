@@ -212,7 +212,7 @@ def resolve_quantity_field_identities(template: Any) -> dict[str, tuple[str, str
     if not isinstance(template, dict) or not isinstance(template.get("columns"), list):
         raise QuantitySchemaError("quantity_template_source_required")
     resolved: dict[str, tuple[str, str | None]] = {}
-    identities: set[tuple[str, str | None]] = set()
+    identities: dict[tuple[str, str | None], list[dict]] = {}
     fields: set[str] = set()
     for column in template["columns"]:
         if not isinstance(column, dict):
@@ -227,9 +227,17 @@ def resolve_quantity_field_identities(template: Any) -> dict[str, tuple[str, str
         diet = column.get("diet_type")
         area = column.get("area_id")
         identity = authored_quantity_identity(diet, area)
-        if identity in identities:
-            raise QuantitySchemaError("quantity_template_identity_duplicate")
-        identities.add(identity)
+        siblings = identities.setdefault(identity, [])
+        if siblings:
+            # Excluded dietary columns may have separately authored meal groups.
+            grouped = [*siblings, column]
+            if (identity[0] not in {"no_fish", "no_meat", "no_fried", "forbidden_other", "sesame_allergy"}
+                    or any(not item.get("name_locked") or not str(item.get("header_group") or "").strip()
+                           or type(item.get("source_index")) is not int or item["source_index"] < 0 for item in grouped)
+                    or len({str(item["header_group"]).strip() for item in grouped}) != len(grouped)
+                    or len({item["source_index"] for item in grouped}) != len(grouped)):
+                raise QuantitySchemaError("quantity_template_identity_duplicate")
+        siblings.append(column)
         if not field:
             raise QuantitySchemaError("quantity_template_field_required")
         if field in resolved:
@@ -243,7 +251,6 @@ def resolve_quantity_field_identities(template: Any) -> dict[str, tuple[str, str
 def quantity_field_identities_for_fields(template: Any, fields: list[str]) -> dict[str, tuple[str, str | None]]:
     resolved = resolve_quantity_field_identities(template)
     selected: dict[str, tuple[str, str | None]] = {}
-    seen: set[tuple[str, str | None]] = set()
     matched_fields: set[str] = set()
     for field in fields:
         canonical_field = field.lower()
@@ -253,10 +260,9 @@ def quantity_field_identities_for_fields(template: Any, fields: list[str]) -> di
                 raise QuantitySchemaError("quantity_template_field_unknown")
             continue
         identity = resolved[canonical_field]
-        if canonical_field in matched_fields or identity in seen:
+        if canonical_field in matched_fields:
             raise QuantitySchemaError("quantity_template_alias_collision")
         matched_fields.add(canonical_field)
-        seen.add(identity)
         selected[field] = identity
     if not selected:
         raise QuantitySchemaError("quantity_template_field_missing")

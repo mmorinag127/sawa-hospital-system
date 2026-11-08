@@ -136,7 +136,11 @@ def validate_candidate(
         else:
             config = session.query(RuleConfig).filter(RuleConfig.name == "active").one_or_none()
             settings = build_active_settings(config.config_json if config else {})
-    from .operational_constraints import input_calendar_dates, input_calendar_errors
+    saved_settings = (candidate.score_breakdown_json or {}).get("rule_config") or {}
+    settings.pop("schedule_history_start_date", None)
+    if saved_settings.get("schedule_history_start_date"):
+        settings["schedule_history_start_date"] = saved_settings["schedule_history_start_date"]
+    from .operational_constraints import before_schedule_history, input_calendar_dates, input_calendar_errors
     period_dates = input_calendar_dates(session, start, end)
     candidate_statuses = session.query(CandidateStaffStatus).options(joinedload(CandidateStaffStatus.shift_template)).filter(
         CandidateStaffStatus.candidate_id == candidate_id,
@@ -480,7 +484,7 @@ def validate_candidate(
             consecutive = 0
             prior_dates = [start - timedelta(days=offset) for offset in range(max_consecutive_off_days, 0, -1)]
             for work_date in prior_dates:
-                if not is_active_on_date(staff, work_date):
+                if before_schedule_history(settings, work_date) or not is_active_on_date(staff, work_date):
                     consecutive = 0
                     continue
                 prior_status = prior_status_by_key.get((staff.id, work_date))
@@ -538,6 +542,7 @@ def validate_candidate(
         prior_saturday = start - timedelta(days=1)
         if (
             minimum_off_days and start.weekday() == 6
+            and not before_schedule_history(settings, prior_saturday)
             and is_active_on_date(staff, prior_saturday) and is_active_on_date(staff, start)
             and (staff_id, prior_saturday) not in prior_status_by_key
         ):

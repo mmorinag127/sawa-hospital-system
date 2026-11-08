@@ -29,6 +29,19 @@ def direct_predecessor_run(session: Session, next_start_date: date) -> SolveRun 
     return next(iter(predecessor_runs(session, next_start_date)), None)
 
 
+def schedule_history_settings(session: Session, settings: dict, start_date: date, *, explicit_history: bool) -> dict:
+    """Record the first schedule boundary without inventing pre-operation history."""
+    resolved = dict(settings)
+    resolved.pop("schedule_history_start_date", None)
+    first = session.query(CandidateSchedule.id).join(SolveRun).filter(
+        SolveRun.status == "succeeded", SolveRun.period_end_key == start_date.isoformat(),
+    ).first()
+    if first is None:
+        if not explicit_history:
+            resolved["schedule_history_start_date"] = start_date.isoformat()
+    return resolved
+
+
 def require_direct_predecessor(session: Session, run: SolveRun, next_start_date: date) -> None:
     if run.id not in {row.id for row in predecessor_runs(session, next_start_date)}:
         raise HTTPException(status_code=409, detail={
@@ -152,6 +165,9 @@ def prior_history_coverage_errors(session: Session, candidate: CandidateSchedule
         from .validation_snapshot import historical_time_rows
 
         settings = effective_rule_config(session)
+        boundary = ((candidate.score_breakdown_json or {}).get("rule_config") or {}).get("schedule_history_start_date")
+        if boundary is not None:
+            settings = {**settings, "schedule_history_start_date": boundary}
         prior_status = _load_prior_statuses(config)
         prior_status.update({(row.staff_id, row.work_date): "off" if row.status == "off" else "working"
                              for row in statuses})
