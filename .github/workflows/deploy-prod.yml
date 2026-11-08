@@ -177,6 +177,7 @@ jobs:
           fi
       - name: Require exact successful local hospital test receipt
         env:
+          GH_TOKEN: ${{ github.token }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
           LOCAL_TEST_RECEIPT: ${{ inputs.local_test_receipt }}
           SAWA_LOCAL_TEST_PUBLIC_KEY: ${{ vars.SAWA_LOCAL_TEST_PUBLIC_KEY }}

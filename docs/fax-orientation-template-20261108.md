@@ -46,6 +46,28 @@ template. Thus the UI's unregistered-template claim was unsupported.
 
 ## Release Status
 
+Source 03a44554 was fast-forward pushed to develop after the user approved
+staging verification followed by production deployment. Remote develop had
+been 419046eb, exactly the reviewed base; no newer source was discarded.
+
 These source changes are not yet deployed. No Actions, budget changes,
 production context save, production OCR execution or business mutation was
 performed. A successful local test is not live-production acceptance.
+
+The production gate requires full backend execution. The previous specifically
+approved corrective receipt covers deployment/read-only corrections, not this
+new rotation API/UI feature. It must not be silently extended to assert the
+new feature passed the old full run. A concrete question about signed
+baseline-plus-difference verification versus executing the existing full run
+was sent to the user. The user then explicitly approved signed difference-based
+verification. Receipt version6 now verifies the signed source419 baseline,
+successful owner production run42460685431, ancestry, an exact reviewed path
+allowlist, and fixed backend/frontend/typecheck commands on a clean source.
+It records full_rerun=false. Dependency/migration/unreviewed paths, failed or
+missing commands, substituted sources, and recursive change baselines fail.
+Existing owner dispatch, production approval, authentication and rollback gates
+remain unchanged. No unexecuted tests are asserted as passed.
+
+Pre-deploy staging baseline: worker-stg-00930-7tk, image
+sha256:e4cd9807911f9bc52de6420acb38383417fe916d0edce02077363d355e6c7092,
+100 percent traffic; web-stg-00485-zjs.
