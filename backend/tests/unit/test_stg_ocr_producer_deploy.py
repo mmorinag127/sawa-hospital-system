@@ -37,6 +37,32 @@ def ready(name):
                        'traffic': [{'revisionName': name, 'latestRevision': True, 'percent': 100}]}}
 
 
+@pytest.mark.parametrize('mode', ['latest', 'pinned', 'explicit-pinned'])
+def test_ready_revision_accepts_only_the_actual_newest_ready_identity(mode):
+    value = ready('newest-ready')
+    if mode == 'pinned':
+        value['status']['traffic'][0].pop('latestRevision')
+    elif mode == 'explicit-pinned':
+        value['status']['traffic'][0]['latestRevision'] = False
+    before = copy.deepcopy(value)
+    assert mod.ready_revision(value) == 'newest-ready'
+    assert value == before
+
+
+@pytest.mark.parametrize('failure', ['newer-pending', 'not-ready', 'old-traffic', 'split', 'tagged'])
+def test_pinned_traffic_does_not_weaken_revision_readiness_checks(failure):
+    value = ready('newest-ready')
+    status = value['status']
+    status['traffic'][0].pop('latestRevision')
+    if failure == 'newer-pending': status['latestCreatedRevisionName'] = 'pending'
+    if failure == 'not-ready': status['conditions'][0]['status'] = 'False'
+    if failure == 'old-traffic': status['traffic'][0]['revisionName'] = 'older'
+    if failure == 'split': status['traffic'].append({'revisionName': 'other', 'percent': 1})
+    if failure == 'tagged': status['traffic'][0]['tag'] = 'unreviewed'
+    with pytest.raises(mod.Blocked):
+        mod.ready_revision(value)
+
+
 @pytest.fixture
 def environment(monkeypatch, tmp_path):
     for key, value in {'GITHUB_ACTIONS': 'true', 'GITHUB_REF': 'refs/heads/develop',
@@ -56,6 +82,19 @@ def test_image_only_preserves_every_other_setting():
     expected['spec']['template']['spec']['containers'][0]['image'] = IMAGE
     assert after == expected
     assert before == exported()
+
+
+def test_pinned_deployment_advances_only_image_and_revision_selector():
+    before = exported()
+    before['spec']['traffic'] = [{'revisionName': 'old-reviewed', 'percent': 100}]
+    original = copy.deepcopy(before)
+    after = mod.replacement(before, IMAGE)
+    expected = copy.deepcopy(before)
+    del expected['spec']['template']['metadata']['name']
+    expected['spec']['template']['spec']['containers'][0]['image'] = IMAGE
+    expected['spec']['traffic'] = [{'latestRevision': True, 'percent': 100}]
+    assert after == expected
+    assert before == original
 
 
 def test_production_maintenance_installs_readonly_gate_without_changing_database(monkeypatch):

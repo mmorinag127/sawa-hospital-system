@@ -85,8 +85,8 @@ def ready_revision(value):
             or not any(item.get('type') == 'Ready' and item.get('status') == 'True'
                        for item in status.get('conditions', []))
             or len(traffic) != 1 or traffic[0].get('revisionName') != revision
-            or traffic[0].get('percent') != 100 or traffic[0].get('latestRevision') is not True):
-        raise Blocked('Producer ready revision / 100 percent latest traffic required')
+            or traffic[0].get('percent') != 100 or traffic[0].get('tag')):
+        raise Blocked('Producer ready revision / 100 percent newest revision required')
     return revision
 
 
@@ -103,6 +103,8 @@ def replacement(before, image, environment='stg'):
     if before.get('kind') != 'Service' or before.get('metadata', {}).get('name') != 'ocr-pipeline-'+environment:
         raise Blocked('Producer service target mismatch')
     result = comparable(before)
+    # An explicit image deployment advances even an identity-pinned old route.
+    result['spec']['traffic'] = [{'latestRevision': True, 'percent': 100}]
     runtime = result['spec']['template']['spec']
     if runtime.get('serviceAccountName') != f'ocr-pipeline-exec-{environment}@{PROJECT}.iam.gserviceaccount.com' or len(runtime.get('containers', [])) != 1:
         raise Blocked('Producer runtime/container mismatch')

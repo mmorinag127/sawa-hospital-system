@@ -30,6 +30,7 @@ TESTS = list(dict.fromkeys([*DEPLOY_TESTS, *sorted(FAILED_MODULES),
     'backend/tests/unit/test_inspection_demand_read.py',
     'backend/tests/unit/test_page_performance_projections.py',
     'backend/tests/unit/test_order_workflow_v2_service.py',
+    'backend/tests/unit/test_stg_ocr_producer_deploy.py',
     'backend/tests/unit/test_production_corrective_receipt.py']))
 ALLOWED = DEPLOY_ALLOWED | {
     '.github/workflows/deploy-stg.yml',
@@ -39,6 +40,8 @@ ALLOWED = DEPLOY_ALLOWED | {
     'backend/src/services/workflow_display_read_service.py',
     'backend/src/services/order_workflow_v2_service.py',
     'backend/tests/unit/test_initial_saved_import_service.py',
+    'scripts/stg_ocr_producer_deploy.py',
+    'backend/tests/unit/test_stg_ocr_producer_deploy.py',
     'backend/tests/unit/test_live_label_verification_privacy.py',
     'scripts/production_corrective_receipt.py',
     'backend/tests/unit/test_production_corrective_receipt.py',
