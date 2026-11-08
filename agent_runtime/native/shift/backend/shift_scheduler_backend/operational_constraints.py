@@ -295,7 +295,8 @@ def minute_rules(staffs, dates, settings, minutes, prior_time):
         if weekly is not None:
             for last in dates:
                 window = [last - timedelta(days=offset) for offset in range(6, -1, -1)]
-                if before_schedule_history(settings, window[0]):
+                window = [day for day in window if not before_schedule_history(settings, day)]
+                if not window:
                     continue
                 if window[0] < start and not settings.get("require_prior_period_continuity"):
                     continue

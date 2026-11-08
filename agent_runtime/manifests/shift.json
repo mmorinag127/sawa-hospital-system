@@ -1,5 +1,5 @@
 {
-  "source_revision": "d08c44dd218252c617a38b3258e939a1e98d1791",
+  "source_revision": "d26e8c78ef0aa32191c32674e085de8f99391362",
   "working_diff_sha256": "1b29f4cfb3800a3108751dee493cd0919bec4e39263f9e48d7e0c49c3b28ade0",
   "files": {
     "backend/.dockerignore": "eac1f6c03c0f0a4720853b53e1ab37c7b633c31820aa05cbda28a0f5304c964d",
@@ -33,7 +33,7 @@
     "backend/shift_scheduler_backend/jobs.py": "b34352bd7d2a987d4b7c2094db17660e2a7ff3ef240f01dc03e61912ccbef06d",
     "backend/shift_scheduler_backend/main.py": "f694581caa572c2acfd58109c150b9edb48f44a7c11d4df7583e6465361996d3",
     "backend/shift_scheduler_backend/models.py": "410a4110f70ef72ad6ba8b178ab8bdf2613bae7cdb265c70d08a899587a01558",
-    "backend/shift_scheduler_backend/operational_constraints.py": "d7ef9fa671075213532ae60dd78b8f253b996d0f94044952b386b2125065116e",
+    "backend/shift_scheduler_backend/operational_constraints.py": "eb8af6ffd73fc8ceeb51c84ec3cc80d70e4e1f4f2c89114a2a6cba78abbb3131",
     "backend/shift_scheduler_backend/pdf_parity.py": "2f1d77a11c78009ca21f1400374f828066e2f290c9db30224e0853f865af7e2d",
     "backend/shift_scheduler_backend/pdf_reference_fixtures.py": "2b1669499ea8b305f881c40a950d140380e55beaa52b5f79a2c836967df04887",
     "backend/shift_scheduler_backend/pdf_seed_data.py": "74fe6a664ae81f6884cb66403e05906aa962c9cd0e8dfcdf2d206205688f6285",
@@ -80,7 +80,7 @@
     }
   ],
   "upstream_base_revision": "d3276e7415847006c20b557145e70c296bbf81f3",
-  "upstream_delta_sha256": "e8031235b921c94b9e8e1e9218a33baa194e426f781fd023df5b81cfa55602ac",
+  "upstream_delta_sha256": "ec471cffb65f1f39281f26e4376649b6647aef812a7a8714a3349cf1f8870efb",
   "retained_extensions": [
     {
       "path": "backend/Dockerfile",
