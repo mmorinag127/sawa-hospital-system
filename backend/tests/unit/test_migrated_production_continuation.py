@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'scripts'))
 import resume_migrated_production as subject
 
 
-@pytest.mark.parametrize('failure', [None, 'actor', 'runtime', 'bootstrap', 'backup', 'uid', 'writeable', 'earlier-frontend', 'nested'])
+@pytest.mark.parametrize('failure', [None, 'actor', 'runtime', 'bootstrap', 'backup', 'uid', 'writeable', 'earlier-frontend', 'nested', 'frontend-before-candidate', 'frontend-after-candidate'])
 def test_migrated_checkpoint_preserves_originals_and_blocks_drift(monkeypatch, tmp_path, failure):
     image = 'registry/backend@sha256:' + 'c' * 64
     e = {'GITHUB_RUN_ID': '222', 'GITHUB_REPOSITORY': 'owner/repo', 'GITHUB_SHA': 'b' * 40,
@@ -30,11 +30,13 @@ def test_migrated_checkpoint_preserves_originals_and_blocks_drift(monkeypatch, t
         record['migrated_origin'] = {**copy.deepcopy(record), 'run': '99', 'sha': 'c' * 40}
         backup['description'] = 'release-' + 'c' * 40 + '-99'
         record['migrated_recovery_point'] = copy.deepcopy(backup)
+    if failure == 'frontend-after-candidate': record['candidate_revision'] = 'unverified-candidate'
     def output(command, **kwargs):
         if command[0] == 'git': return 'backend/src/changed.py' if failure == 'runtime' else ''
         if '/jobs?' in command[-1]:
+            front = failure in {'frontend-before-candidate', 'frontend-after-candidate'}
             page = {'jobs': [{'name': n, 'conclusion': c} for n, c in (
-                ('prod-db-bootstrap-gate', 'success'), ('deploy-backend', 'failure'), ('deploy-frontend', 'skipped'))]}
+                ('prod-db-bootstrap-gate', 'success'), ('deploy-backend', 'success' if front else 'failure'), ('deploy-frontend', 'failure' if front else 'skipped'))]}
             if '--slurp' in command:
                 if failure == 'earlier-frontend': page['jobs'].append({'name': 'deploy-frontend', 'conclusion': 'success'})
                 return json.dumps([page])
@@ -62,7 +64,7 @@ def test_migrated_checkpoint_preserves_originals_and_blocks_drift(monkeypatch, t
         mutations.append('stop')
     monkeypatch.setattr(subject, 'stop_writers', stop)
     proof = {'run': '111', 'writers': {n: {'revision': 'new', 'uid': 'new-uid', 'images': [image]} for n in ('worker-prod', 'ocr-pipeline-prod')}}
-    if failure and failure != 'nested':
+    if failure and failure not in {'nested', 'frontend-before-candidate'}:
         with pytest.raises(RuntimeError): subject.resume(proof)
         assert not mutations and not path.exists()
     else:

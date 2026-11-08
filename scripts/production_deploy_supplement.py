@@ -12,8 +12,11 @@ from local_receipt_signing import sign, verify_signed
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED = {
     '.github/workflows/deploy-prod.yml', 'scripts/deploy_worker_prod_with_checks.sh',
+    'scripts/deploy_web_with_checks.sh',
     'scripts/local_hospital_test_runner.py', 'scripts/production_deploy_supplement.py',
+    'scripts/production_maintenance.py', 'scripts/resume_migrated_production.py',
     'backend/tests/unit/test_production_maintenance.py',
+    'backend/tests/unit/test_migrated_production_continuation.py',
     'backend/tests/unit/test_production_deploy_supplement.py',
 }
 TESTS = [

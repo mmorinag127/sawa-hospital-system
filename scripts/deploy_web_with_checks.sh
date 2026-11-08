@@ -234,7 +234,8 @@ fi
 LATEST_READY_REVISION="$(gcloud run services describe "${WEB_SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.latestReadyRevisionName)' || true)"
 TRAFFIC_REVISION="$(gcloud run services describe "${WEB_SERVICE}" --project="${PROJECT_ID}" --region="${REGION}" --format='value(status.traffic[0].revisionName)' || true)"
 if [[ "${PRODUCTION_MAINTENANCE:-0}" == "1" ]]; then
-  TRAFFIC_REVISION="$LATEST_READY_REVISION"
+  TRAFFIC_REVISION="$(python3 "$SCRIPT_DIR/production_maintenance.py" candidate-revision)"
+  LATEST_READY_REVISION="$TRAFFIC_REVISION"
 fi
 TRAFFIC_IMAGE=""
 if [[ -n "${TRAFFIC_REVISION}" ]]; then

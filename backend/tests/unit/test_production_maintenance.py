@@ -17,7 +17,7 @@ def descriptor(revision="maintenance", tag=None):
     if tag:
         traffic.append({"revisionName": "candidate", "tag": tag, "url": "https://candidate.a.run.app"})
     return {"metadata": {"annotations": {}}, "status": {"traffic": traffic,
-            "latestReadyRevisionName": "candidate", "url": "https://web.a.run.app"}}
+            "latestReadyRevisionName": "candidate", "latestCreatedRevisionName": "candidate", "url": "https://web.a.run.app"}}
 
 
 @pytest.mark.parametrize("traffic", [[], [{"revisionName": "a", "percent": 50},
@@ -149,21 +149,37 @@ def test_stopped_writer_check_rejects_automatic_scaling(monkeypatch):
         maintenance.assert_stopped()
 
 
-def test_candidate_is_verified_without_public_promotion(monkeypatch, tmp_path):
+@pytest.mark.parametrize('state', ['ready', 'pending', 'timeout', 'uid', 'digest'])
+def test_candidate_is_verified_without_public_promotion(monkeypatch, tmp_path, state):
     _, record = record_fixture(monkeypatch, tmp_path)
     monkeypatch.setenv("IMAGE", "front@sha256:123")
     monkeypatch.setenv("SAWA_AGENT_RUNTIME_IMAGE", "agent@sha256:456")
     import registry_image_digest
     monkeypatch.setattr(registry_image_digest, "resolve_image_digest", lambda value: value)
-    revision = {"metadata": {"uid": "candidate-uid"}, "spec": {"containers": [
+    revision = {"metadata": {"uid": "candidate-uid"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}, "spec": {"containers": [
         {"image": "front@sha256:123"}, {"image": "agent@sha256:456"}]}}
-    cloud = Mock(side_effect=[descriptor(), revision, None, descriptor(tag="verify-123")])
+    initial = descriptor()
+    initial['status']['latestReadyRevisionName'] = 'maintenance'
+    import copy
+    pending = copy.deepcopy(revision)
+    pending['status']['conditions'][0]['status'] = 'False'
+    changed = copy.deepcopy(revision)
+    if state == 'uid': changed['metadata']['uid'] = 'different'
+    if state == 'digest': changed['spec']['containers'][0]['image'] = 'different@sha256:abc'
+    checks = [pending, revision] if state == 'pending' else [pending] if state == 'timeout' else [changed]
+    cloud = Mock(side_effect=[initial, revision, None, descriptor(tag="verify-123"), *checks])
+    monkeypatch.setattr(maintenance.time, 'monotonic', Mock(side_effect=[0, 301 if state == 'timeout' else 1]))
+    monkeypatch.setattr(maintenance.time, 'sleep', Mock())
     monkeypatch.setattr(maintenance, "cloud", cloud)
     monkeypatch.setattr(maintenance, "verify_display", lambda: None)
-    assert maintenance.candidate_url() == "https://candidate.a.run.app"
+    if state in {'timeout', 'uid', 'digest'}:
+        with pytest.raises(RuntimeError): maintenance.candidate_url()
+    else:
+        assert maintenance.candidate_url() == "https://candidate.a.run.app"
     assert "--to-revisions=maintenance=100" in cloud.call_args_list[2].args
     assert record["candidate_uid"] == "candidate-uid"
     assert not record["reopened"]
+    assert all('--to-revisions=candidate=100' not in call.args for call in cloud.call_args_list)
 
 
 def test_live_display_requires_503_and_maintenance_header(monkeypatch, tmp_path):

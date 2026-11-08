@@ -526,7 +526,7 @@ def candidate_url():
     service = cloud("run", "services", "describe", "web-prod", "--region=" + REGION)
     require(serving(service, record.get("candidate_tag")) == record["maintenance_revision"],
             "maintenance traffic must remain active")
-    revision = service["status"]["latestReadyRevisionName"]
+    revision = service["status"]["latestCreatedRevisionName"]
     require(revision not in {record["maintenance_revision"], record["services"]["web-prod"]["revision"]},
             "new candidate revision required")
     expected = sorted([os.environ["IMAGE"], os.environ["SAWA_AGENT_RUNTIME_IMAGE"]])
@@ -541,6 +541,15 @@ def candidate_url():
           "--to-revisions=" + record["maintenance_revision"] + "=100", "--region=" + REGION, "--quiet")
     service = cloud("run", "services", "describe", "web-prod", "--region=" + REGION)
     require(serving(service, tag) == record["maintenance_revision"], "candidate changed public traffic")
+    deadline = time.monotonic() + 300
+    while True:
+        ready = cloud('run', 'revisions', 'describe', revision, '--region=' + REGION)
+        require(ready['metadata']['uid'] == record['candidate_uid']
+                and sorted(revision_images(ready)) == expected, 'candidate identity changed while starting')
+        if any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in ready.get('status', {}).get('conditions', [])):
+            break
+        require(time.monotonic() < deadline, 'candidate readiness timed out')
+        time.sleep(2)
     tagged = [item for item in service["status"]["traffic"] if item.get("tag") == tag]
     require(len(tagged) == 1 and tagged[0].get("revisionName") == revision
             and not tagged[0].get("percent"), "candidate route mismatch")
@@ -558,7 +567,7 @@ def promote():
     require(record.get("writers_verified_open") is True, "writer activation must be verified")
     require(record.get("candidate_revision") and record.get("candidate_url"), "verified candidate required")
     service = cloud("run", "services", "describe", "web-prod", "--region=" + REGION)
-    require(service["status"]["latestReadyRevisionName"] == record["candidate_revision"],
+    require(service["status"]["latestCreatedRevisionName"] == record["candidate_revision"],
             "candidate changed before promotion")
     detail = cloud("run", "revisions", "describe", record["candidate_revision"], "--region=" + REGION)
     require(detail["metadata"]["uid"] == record["candidate_uid"]
@@ -683,7 +692,7 @@ def open_writers():
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("begin", "capture", "resume-start", "stop", "show", "verify-display", "candidate-url", "promote", "hold-on-failure", "open-writers", "download-start", "download-database", "drain", "bootstrap-complete", "require-bootstrap", "resume-writer"))
+    parser.add_argument("action", choices=("begin", "capture", "resume-start", "stop", "show", "verify-display", "candidate-url", "candidate-revision", "promote", "hold-on-failure", "open-writers", "download-start", "download-database", "drain", "bootstrap-complete", "require-bootstrap", "resume-writer"))
     parser.add_argument("--image")
     parser.add_argument("--service")
     parser.add_argument("--original-run")
@@ -704,6 +713,15 @@ def main():
         verify_display()
     elif args.action == "candidate-url":
         print(candidate_url())
+    elif args.action == 'candidate-revision':
+        _, record = load()
+        revision = record['candidate_revision']
+        detail = cloud('run', 'revisions', 'describe', revision, '--region=' + REGION)
+        require(detail['metadata']['uid'] == record['candidate_uid']
+                and sorted(revision_images(detail)) == record['candidate_images']
+                and any(c.get('type') == 'Ready' and c.get('status') == 'True'
+                        for c in detail.get('status', {}).get('conditions', [])), 'verified candidate is not ready')
+        print(revision)
     elif args.action == "promote":
         promote()
     elif args.action == "open-writers":

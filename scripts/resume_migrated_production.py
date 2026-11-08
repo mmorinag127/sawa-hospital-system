@@ -31,18 +31,28 @@ def resume(proof):
     require(not subprocess.check_output(['git', 'diff', '--name-only', old_sha, e['GITHUB_SHA'], '--', *protected], text=True).strip(),
             'business runtime or migration changed')
     jobs = {j['name']: j for j in api('/jobs?filter=latest&per_page=100')['jobs']}
+    frontend_failed = jobs.get('deploy-frontend', {}).get('conclusion') == 'failure'
     require(jobs.get('prod-db-bootstrap-gate', {}).get('conclusion') == 'success'
-            and jobs.get('deploy-backend', {}).get('conclusion') == 'failure'
-            and jobs.get('deploy-frontend', {}).get('conclusion') == 'skipped', 'unsupported migrated checkpoint')
+            and ((jobs.get('deploy-backend', {}).get('conclusion') == 'failure'
+                  and jobs.get('deploy-frontend', {}).get('conclusion') == 'skipped')
+                 or (jobs.get('deploy-backend', {}).get('conclusion') == 'success' and frontend_failed)), 'unsupported migrated checkpoint')
     pages = json.loads(subprocess.check_output(['gh', 'api', '--paginate', '--slurp',
         f'repos/{repo}/actions/runs/{donor}/jobs?filter=all&per_page=100'], text=True))
-    require(not any(j['name'] == 'deploy-frontend' and j.get('conclusion') != 'skipped'
-                    for page in pages for j in page['jobs']), 'frontend ran in an earlier attempt')
+    frontend_attempts = [j for page in pages for j in page['jobs']
+                         if j['name'] == 'deploy-frontend' and j.get('conclusion') != 'skipped']
+    require(not frontend_attempts or (frontend_failed and len(frontend_attempts) == 1
+            and frontend_attempts[0].get('conclusion') == 'failure'), 'frontend ran in an earlier attempt')
     attempt = str(run['run_attempt'])
     with tempfile.TemporaryDirectory(dir=path.parent) as directory:
         for name in (f'hospital-maintenance-{donor}-{attempt}', f'hospital-rollback-{donor}-{attempt}',
                      f'hospital-db-recovery-point-{donor}-{attempt}'):
             subprocess.run(['gh', 'run', 'download', donor, '--repo', repo, '--name', name, '--dir', directory], check=True, capture_output=True)
+        if frontend_failed:
+            final = Path(directory) / 'final'
+            final.mkdir()
+            subprocess.run(['gh', 'run', 'download', donor, '--repo', repo,
+                '--name', f'hospital-maintenance-final-{donor}-{attempt}', '--dir', str(final)], check=True, capture_output=True)
+            (Path(directory) / 'hospital-maintenance.json').write_bytes((final / 'hospital-maintenance.json').read_bytes())
         record = json.loads((Path(directory) / 'hospital-maintenance.json').read_text())
         rollback = json.loads((Path(directory) / 'hospital-rollback.json').read_text())
         backup = json.loads((Path(directory) / 'orders-prod-recovery-point.json').read_text())
