@@ -29,10 +29,20 @@ def _saved_reference(session, model, identity, order_id, *columns):
 
 
 def _reference_error(session, order, state, meta, *, reads=None, include_overlay=False):
+    if workflow._workflow_template_selection_pending(state, meta) and not state.draft_id:
+        return None
+    from src.services.initial_saved_import_service import get_binding
+    from src.services.facility_master_service import get_snapshot
+    master = workflow._inspection_call("facility_master_snapshot", get_snapshot).master
+    imported = get_binding(session, order.id, template_version_id=order.template_version_id, master=master)
+    if imported is not None:
+        if reads is not None:
+            reads["initial_saved_binding"] = imported
+        return None
     if workflow._workflow_template_selection_pending(state, meta):
         return None
     version, error = workflow._require_existing_workflow_template_version(
-        session, order=order, workflow=state, meta=meta,
+        session, order=order, workflow=state, meta=meta, master=master,
     )
     if error:
         return error
@@ -386,8 +396,10 @@ def get_display(order_id, *, scope="summary", history_before_id=None, selected_d
                 target_map = sheet_data.get("target_cell_map")
                 needs_evidence = not (isinstance(target_map, list) and target_map)
                 evidence = session.get(OrderOcrEvidenceRun, draft.base_evidence_run_id) if draft and needs_evidence else None
-                result["saved_sheet"] = workflow._saved_sheet_with_target_cell_map(order=order, workflow=state,
-                    saved_sheet=draft, evidence_payload=evidence.payload_json if evidence and evidence.order_id == order.id else None)
+                result["saved_sheet"] = (workflow._serialize_saved_sheet(draft)
+                    if reads.get("initial_saved_binding") is not None else
+                    workflow._saved_sheet_with_target_cell_map(order=order, workflow=state,
+                        saved_sheet=draft, evidence_payload=evidence.payload_json if evidence and evidence.order_id == order.id else None))
                 sheet = result["saved_sheet"].get("sheet")
                 result["pre_save_checks"] = workflow._workflow_pre_save_checks(meta)
                 result["pre_save_status"] = workflow._pre_save_status_for_sheet(meta, workflow._stable_json_hash(sheet)) if isinstance(sheet, dict) else None
@@ -398,7 +410,12 @@ def get_display(order_id, *, scope="summary", history_before_id=None, selected_d
             workflow._inspection_next("display_output")
             if error:
                 return None, error
-            if state and workflow._canonical_workflow_v2_state(state, meta) == "confirmed":
+            imported = reads.get("initial_saved_binding")
+            if imported is not None:
+                snapshot = imported["snapshot"]
+                result["bagging_result"] = deepcopy(snapshot["bagging"]["payload_json"]) if snapshot["bagging"] else None
+                result["output_bundle"] = deepcopy(snapshot["output"]["payload_json"]) if snapshot["output"] else None
+            elif state and workflow._canonical_workflow_v2_state(state, meta) == "confirmed":
                 snapshot = session.get(OrderConfirmedSnapshot, serialized["confirmed_snapshot_id"])
                 artifacts = order_output_artifact_service.confirmed_snapshot_artifact_payloads(session, snapshot, expected_order_id=order.id) if snapshot else None
                 if artifacts is None:

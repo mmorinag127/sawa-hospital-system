@@ -1681,10 +1681,12 @@ def _require_existing_workflow_template_version(
     order: Order,
     workflow: OrderWorkflowState,
     meta: dict[str, Any],
+    master: dict | None = None,
 ) -> tuple[str | None, str | None]:
     from src.services.initial_saved_import_service import get_binding
     from src.services.facility_master_service import get_snapshot
-    master = _inspection_call("facility_master_snapshot", get_snapshot).master
+    if master is None:
+        master = _inspection_call("facility_master_snapshot", get_snapshot).master
     imported = get_binding(session, order.id, template_version_id=order.template_version_id, master=master)
     if imported is not None:
         if imported["snapshot"]["template"] is None:

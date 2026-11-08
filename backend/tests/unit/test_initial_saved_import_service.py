@@ -43,6 +43,51 @@ def command(order_id="O", revision=1):
         workflow._workflow_command_identity.reset(token)
 
 
+@pytest.mark.parametrize("scope", ["initial", "summary", "ocr", "sheet", "output", "inspection"])
+def test_display_preserves_receipt_validated_initial_saved_state(imported, monkeypatch, scope):
+    from sqlalchemy import event
+    from src.services import workflow_display_read_service as display
+    session, master, snapshot = imported
+    before = all_rows(session)
+    @contextmanager
+    def reader():
+        yield session
+    monkeypatch.setattr(display, "session_scope", reader)
+    writes = []
+    def guard(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE")):
+            writes.append(statement)
+            raise AssertionError("display attempted a database write")
+    event.listen(session.bind, "before_cursor_execute", guard)
+    try:
+        payload, error = display.get_display("O", scope=scope)
+        assert error is None, error
+        assert payload["workflow"]["state"] == snapshot["workflow"]["state"]
+        assert payload["workflow"]["revision"] == snapshot["workflow"]["revision"]
+        if "output" in payload["loaded_sections"]:
+            assert payload["bagging_result"] == snapshot["bagging"]["payload_json"]
+            assert payload["output_bundle"] == snapshot["output"]["payload_json"]
+        assert all_rows(session) == before
+        assert not writes
+    finally:
+        event.remove(session.bind, "before_cursor_execute", guard)
+
+
+def test_display_rejects_changed_initial_saved_source(imported, monkeypatch):
+    from src.models.order_output_artifact import OrderBaggingResult
+    from src.services import workflow_display_read_service as display
+    session, master, snapshot = imported
+    row = session.get(OrderBaggingResult, "B")
+    row.payload_json = {**row.payload_json, "unexpected_change": True}
+    session.commit()
+    @contextmanager
+    def reader():
+        yield session
+    monkeypatch.setattr(display, "session_scope", reader)
+    with pytest.raises(ValueError, match="initial_saved_source_changed"):
+        display.get_display("O", scope="initial")
+
+
 @pytest.fixture
 def editable_import(saved, monkeypatch, tmp_path):
     import hashlib

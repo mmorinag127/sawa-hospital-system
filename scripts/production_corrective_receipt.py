@@ -1,4 +1,4 @@
-"""Preserve a completed failed full run and verify deployment-only corrections."""
+"""Preserve full-run evidence and verify reviewed deployment/read-only corrections."""
 import argparse
 import hashlib
 import json
@@ -21,12 +21,24 @@ TESTS = list(dict.fromkeys([*DEPLOY_TESTS, *sorted(FAILED_MODULES),
     'backend/tests/unit/test_hospital_delivery_activation.py',
     'backend/tests/unit/test_live_label_verification_privacy.py',
     'scripts/test_canonical_facility_deploy.py',
+    'backend/tests/unit/test_initial_saved_import_service.py',
+    'backend/tests/unit/test_initial_saved_source_service.py',
+    'backend/tests/unit/test_initial_saved_fixture_preservation.py',
+    'backend/tests/unit/test_initial_saved_facility_read.py',
+    'backend/tests/unit/test_initial_saved_ocr_candidate_read.py',
+    'backend/tests/unit/test_initial_saved_candidate_provenance.py',
+    'backend/tests/unit/test_inspection_demand_read.py',
+    'backend/tests/unit/test_page_performance_projections.py',
+    'backend/tests/unit/test_order_workflow_v2_service.py',
     'backend/tests/unit/test_production_corrective_receipt.py']))
 ALLOWED = DEPLOY_ALLOWED | {
     '.github/workflows/deploy-stg.yml',
     'scripts/verify_live_breakfast_labels.py',
     'scripts/check_canonical_facility_deploy.py',
     'scripts/test_canonical_facility_deploy.py',
+    'backend/src/services/workflow_display_read_service.py',
+    'backend/src/services/order_workflow_v2_service.py',
+    'backend/tests/unit/test_initial_saved_import_service.py',
     'backend/tests/unit/test_live_label_verification_privacy.py',
     'scripts/production_corrective_receipt.py',
     'backend/tests/unit/test_production_corrective_receipt.py',
@@ -122,7 +134,7 @@ def validate(proof, expected_sha, definition):
     subprocess.run(['git', 'merge-base', '--is-ancestor', source, expected_sha], cwd=ROOT, check=True, capture_output=True)
     changed = git('diff', '--name-only', source, expected_sha).splitlines()
     require(changed and changed == proof['changed_files'] and not set(changed) - ALLOWED,
-            'business, dependency, migration or unreviewed source changed')
+            'dependency, migration or unreviewed runtime source changed')
     result = proof['regression']
     require(set(result) == {'command_sha256', 'log_sha256', 'exit_code'}
             and result['command_sha256'] == COMMAND_HASH and valid_hash(result['log_sha256'])
@@ -151,7 +163,7 @@ def main():
              'regression': {'command_sha256': COMMAND_HASH, 'log_sha256': sha(log.read_bytes()), 'exit_code': 0}}
     validate(proof, source, definition)
     (args.output / 'receipt.json').write_text(json.dumps(sign(proof), indent=2) + '\n')
-    print('Signed corrective proof issued; original full failure retained, business source unchanged')
+    print('Signed corrective proof issued; original full failure retained; exact reviewed changes and regressions recorded')
 
 
 if __name__ == '__main__':

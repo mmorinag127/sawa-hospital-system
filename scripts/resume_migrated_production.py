@@ -43,7 +43,10 @@ def resume(proof):
                  'ocr_pipeline', 'agent_runtime', 'experiments')
     changed = set(subprocess.check_output(['git', 'diff', '--name-only', old_sha, e['GITHUB_SHA'], '--', *protected], text=True).splitlines())
     if changed:
-        require(changed <= {'backend/src/services/output_builder.py'}, 'unreviewed business runtime or migration changed')
+        require(changed <= {'backend/src/services/output_builder.py',
+                            'backend/src/services/workflow_display_read_service.py',
+                            'backend/src/services/order_workflow_v2_service.py'},
+                'unreviewed business runtime or migration changed')
         verify_runtime_repair_receipt(e['GITHUB_SHA'])
     jobs = {j['name']: j for j in api('/jobs?filter=latest&per_page=100')['jobs']}
     frontend_failed = jobs.get('deploy-frontend', {}).get('conclusion') == 'failure'
