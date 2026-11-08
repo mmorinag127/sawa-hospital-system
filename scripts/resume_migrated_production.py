@@ -1,5 +1,6 @@
 """Carry a migrated checkpoint forward without repeating database writes."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,16 @@ import re
 import subprocess
 import tempfile
 
-from production_maintenance import context, cloud, require, save, serving, revision_images, verify_display, stop_writers
+from production_maintenance import context, cloud, require, save, serving, revision_images, verify_display, stop_writers, assert_stopped
+
+
+def verify_runtime_repair_receipt(sha):
+    from local_receipt_signing import verify_signed
+    from local_hospital_test_runner import validate_receipt
+    proof = verify_signed(json.loads(os.environ['LOCAL_TEST_RECEIPT']))
+    require(proof.get('receipt_version') in (1, 2), 'runtime repair requires original full receipt')
+    manifest = Path(__file__).with_name('local_hospital_test_manifest.json')
+    validate_receipt(proof, sha, hashlib.sha256(manifest.read_bytes()).hexdigest(), require_full=True)
 
 
 def resume(proof):
@@ -27,9 +37,14 @@ def resume(proof):
     old_sha = run['head_sha']
     subprocess.run(['git', 'merge-base', '--is-ancestor', old_sha, e['GITHUB_SHA']], check=True, capture_output=True)
     protected = ('backend/src', 'backend/scripts', 'backend/alembic', 'backend/migrations',
-                 'backend/alembic.ini', 'frontend/src', 'ocr_pipeline', 'agent_runtime', 'experiments')
-    require(not subprocess.check_output(['git', 'diff', '--name-only', old_sha, e['GITHUB_SHA'], '--', *protected], text=True).strip(),
-            'business runtime or migration changed')
+                 'backend/alembic.ini', 'backend/Dockerfile', 'backend/Dockerfile.base',
+                 'backend/requirements.txt', 'backend/pyproject.toml', 'backend/uv.lock',
+                 'frontend/src', 'frontend/Dockerfile', 'frontend/package.json', 'frontend/package-lock.json',
+                 'ocr_pipeline', 'agent_runtime', 'experiments')
+    changed = set(subprocess.check_output(['git', 'diff', '--name-only', old_sha, e['GITHUB_SHA'], '--', *protected], text=True).splitlines())
+    if changed:
+        require(changed <= {'backend/src/services/output_builder.py'}, 'unreviewed business runtime or migration changed')
+        verify_runtime_repair_receipt(e['GITHUB_SHA'])
     jobs = {j['name']: j for j in api('/jobs?filter=latest&per_page=100')['jobs']}
     frontend_failed = jobs.get('deploy-frontend', {}).get('conclusion') == 'failure'
     require(jobs.get('prod-db-bootstrap-gate', {}).get('conclusion') == 'success'
@@ -59,7 +74,17 @@ def resume(proof):
     require(record['run'] == rollback['run'] == donor and record['sha'] == rollback['sha'] == old_sha
             and record['services'] == rollback['services'] and record['database_drained'] is True
             and record['portal_bootstrap_complete'] is True and not record.get('reopened')
-            and not record.get('candidate_revision') and not record.get('writers_verified_open'), 'migrated artifact mismatch')
+            and not record.get('writers_verified_open'), 'migrated artifact mismatch')
+    if record.get('candidate_revision'):
+        require(frontend_failed and record.get('held_after_failure') is True
+                and record.get('failure_hold_unconfirmed') == []
+                and not record.get('candidate_checks_passed'), 'candidate was not safely retired')
+        portal = cloud('run', 'services', 'describe', 'web-prod', '--region=asia-northeast2')
+        require(serving(portal) == record['maintenance_revision'], 'portal maintenance ownership changed')
+        candidate = cloud('run', 'revisions', 'describe', record['candidate_revision'], '--region=asia-northeast2')
+        require(candidate['metadata']['uid'] == record['candidate_uid']
+                and sorted(revision_images(candidate)) == record['candidate_images'], 'retired candidate identity changed')
+        assert_stopped()
     backup_origin = record
     seen = set()
     while backup_origin.get('migrated_origin'):
@@ -84,6 +109,9 @@ def resume(proof):
         require(all(any(v.get('name') == 'SAWA_RELEASE_READ_ONLY' and v.get('value') == '1' for v in c.get('env', []))
                     for c in revision['spec']['containers']), 'writer is not read-only')
     origin = copy.deepcopy(record)
+    for key in ('candidate_revision', 'candidate_uid', 'candidate_images', 'candidate_tag', 'candidate_url',
+                'held_after_failure', 'failure_hold_unconfirmed'):
+        record.pop(key, None)
     record.update(run=e['GITHUB_RUN_ID'], sha=e['GITHUB_SHA'], ref=e['GITHUB_REF'],
                   migrated_origin=origin, migrated_recovery_point=backup)
     rollback.update(run=record['run'], sha=record['sha'], ref=record['ref'])

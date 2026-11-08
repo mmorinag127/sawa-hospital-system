@@ -1,5 +1,7 @@
 import base64
+from copy import deepcopy
 import hashlib
+import json
 from pathlib import Path
 import sys
 
@@ -31,3 +33,40 @@ def test_preparation_rejects_ci_before_any_io(monkeypatch, tmp_path, key):
     with pytest.raises(ValueError, match="local preparation only"):
         preparation.prepare(tmp_path / "missing", output, "HEAD")
     assert not output.exists()
+
+
+@pytest.mark.parametrize('values', [[], ['staff', 'no_meat']])
+def test_explicit_display_migration_is_nonmutating_and_idempotent(values):
+    original = {'facility_id': 'synthetic', 'areas': [], 'unknown': {'preserved': True}}
+    before = deepcopy(original)
+    result, changes = preparation.apply_label_display_settings(original, {'synthetic': values})
+    assert result == {**original, 'daily_label_comparable_diet_types': values}
+    assert changes == [{'op': 'add', 'path': '/daily_label_comparable_diet_types', 'value': values}]
+    assert original == before
+    assert preparation.apply_label_display_settings(result, {'synthetic': values}) == (result, [])
+
+
+@pytest.mark.parametrize('values', [None, 'staff', {}, [None], ['']])
+def test_explicit_display_migration_rejects_invalid_values(values):
+    with pytest.raises(ValueError, match='daily_label_comparable_diet_types_invalid'):
+        preparation.apply_label_display_settings({'facility_id': 'synthetic'}, {'synthetic': values})
+
+
+def test_explicit_display_migration_does_not_default_or_replace_authored_values():
+    with pytest.raises(ValueError, match='explicit_label_display_settings_required'):
+        preparation.apply_label_display_settings({'facility_id': 'synthetic'}, {})
+    with pytest.raises(ValueError, match='existing_label_display_settings_conflict'):
+        preparation.apply_label_display_settings({'facility_id': 'synthetic', 'daily_label_comparable_diet_types': ['staff']}, {'synthetic': []})
+
+
+@pytest.mark.parametrize('value', [None, [], 'staff', 0])
+def test_explicit_settings_file_rejects_nonobjects_before_database_work(tmp_path, value):
+    snapshot = tmp_path / 'snapshot'
+    snapshot.mkdir()
+    (snapshot / 'source.json').write_text('{}')
+    (snapshot / 'settings.json').write_text('{}')
+    settings = tmp_path / 'labels.json'
+    settings.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match='explicit_label_display_settings_required'):
+        preparation.prepare(snapshot, tmp_path / 'output', 'HEAD', settings)
+    assert not (tmp_path / 'output').exists()

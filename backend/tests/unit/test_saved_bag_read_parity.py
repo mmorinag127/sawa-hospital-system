@@ -2,9 +2,13 @@
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import date
+import csv
+from io import BytesIO, StringIO
 from unittest.mock import Mock
+import zipfile
 
 import pytest
+from openpyxl import load_workbook
 from sqlalchemy import event
 
 from test_initial_saved_source_service import saved, all_rows
@@ -19,10 +23,10 @@ from src.services import output_builder as output
 
 
 @pytest.fixture
-def bag_import(saved, monkeypatch):
+def bag_import(saved, monkeypatch, request):
     rows = [
         {"date": "2026-09-13", "daypart": "昼", "menu_name": "Saved menu",
-         "menu_category": "Saved category", "diet_type": diet, "area_id": "X",
+         "menu_category": "主菜", "diet_type": diet, "area_id": "X",
          "bag_type": "saved", "quantity": qty,
          "source_refs": [{"line_id": diet, "quantity": qty, "unknown": None}]}
         for diet, qty in [("staff", 5), ("mixer", 3), ("regular", 68)]
@@ -35,6 +39,8 @@ def bag_import(saved, monkeypatch):
     snapshot = source.capture_saved_source(saved, "O")
     facility = authored()["facility"]
     facility.pop("daily_label_comparable_diet_types", None)
+    if hasattr(request, 'param'):
+        facility['daily_label_comparable_diet_types'] = deepcopy(request.param)
     master = {"facilities": [{"facility_id": "F", "versions": [store.initial_facility_version(facility, "a" * 64)]}]}
     prepared = imports.prepare_import_master(master, [snapshot], {"recorded_policy": True})
     monkeypatch.setattr(facility_master_service, "get_snapshot", lambda: store.MasterSnapshot(prepared, "synthetic", "owned"))
@@ -128,12 +134,91 @@ def test_import_validation_stops_saved_read(bag_import, change, configured):
     rebuild.assert_not_called()
 
 
-def test_context_uses_same_saved_rows(bag_import):
-    _, _, original, rebuild = bag_import
+@pytest.mark.parametrize('bag_import', [[], ['staff', 'mixer']], indirect=True)
+def test_context_binds_frozen_display_settings_without_changing_saved_rows(bag_import):
+    session, _, original, rebuild = bag_import
     order = {"id": "O", "facility": "F", "template_version_id": "T"}
     candidate = output._accepted_output_candidate(order)
+    frozen = deepcopy(candidate)
+    before = all_rows(session)
     context = output._prepare_output_context("O", original_adoption={"order": order, "candidate": candidate}, require_invoice=False)
-    assert [{**row, "date": row["date"].isoformat()} for row in context["bags"]] == original
+    values = candidate['configured_input']['facility']['daily_label_comparable_diet_types']
+    for actual, saved_row in zip(context['bags'], original, strict=True):
+        assert actual['daily_label_comparable_diet_types'] == values
+        assert actual['area_name'] == ''
+        assert {**{k: v for k, v in actual.items() if k not in {'area_name', 'daily_label_comparable_diet_types'}},
+                'date': actual['date'].isoformat()} == saved_row
+        output._daily_label_category_suffix_for_bag(actual)
+    assert candidate == frozen
+    assert all_rows(session) == before
+    assert output.build_bag_payload_for_outputs(order, accepted_candidate=candidate) == original
+    rebuild.assert_not_called()
+
+
+def test_imported_context_rejects_missing_display_settings_without_inference(bag_import):
+    _, _, _, rebuild = bag_import
+    order = {'id': 'O', 'facility': 'F', 'template_version_id': 'T'}
+    candidate = output._accepted_output_candidate(order)
+    with pytest.raises(ValueError, match='daily_label_comparable_diet_types_required'):
+        output._prepare_output_context('O', original_adoption={'order': order, 'candidate': candidate}, require_invoice=False)
+    rebuild.assert_not_called()
+
+
+@pytest.mark.parametrize('bag_import', [[], ['staff', 'mixer']], indirect=True)
+def test_imported_label_csv_workbook_and_daily_bundle_use_display_copy(bag_import, monkeypatch, tmp_path):
+    session, _, original, rebuild = bag_import
+    order = {'id': 'O', 'facility': 'F', 'template_version_id': 'T'}
+    monkeypatch.setattr(output.order_service, 'get_order_for_output_read', lambda identity: deepcopy(order))
+    monkeypatch.setattr(output.order_service, 'list_orders_by_line_date', lambda *args, **kwargs: [deepcopy(order)])
+    monkeypatch.setattr(output, 'OUTPUT_DIR', tmp_path)
+    candidate = output._accepted_output_candidate(order)
+    settings = candidate['configured_input']['facility']['daily_label_comparable_diet_types']
+    expected = {'主菜', '主菜（職員）', '主菜（ミキサー）'} if settings else {'主菜'}
+    before = all_rows(session)
+    csv_path, _ = output.build_label_csv_for_order('O')
+    rows = list(csv.DictReader(StringIO(csv_path.read_bytes().decode('cp932'))))
+    assert {row['メニュー'] for row in rows} == expected
+    workbook_path, _ = output.build_label_workbook_for_order('O')
+    workbook = load_workbook(workbook_path, read_only=True)
+    cells = {cell.value for sheet in workbook for row in sheet for cell in row if isinstance(cell.value, str)}
+    workbook.close()
+    assert expected <= cells
+    for kind in ('labels', 'labels_csv'):
+        bundle, report = output.build_daily_output_bundle(date(2026, 9, 13), bundle_type=kind)
+        assert report['success_orders'] == 1
+        with zipfile.ZipFile(bundle) as archive:
+            files = [name for name in archive.namelist() if name.endswith('.xlsx' if kind == 'labels' else '.csv')]
+            assert len(files) == 1
+            data = archive.read(files[0])
+            if kind == 'labels_csv':
+                assert {row['メニュー'] for row in csv.DictReader(StringIO(data.decode('cp932')))} == expected
+            else:
+                book = load_workbook(BytesIO(data), read_only=True)
+                values = {cell.value for sheet in book for row in sheet for cell in row if isinstance(cell.value, str)}
+                book.close()
+                assert expected <= values
+    assert output.build_bag_payload_for_outputs(order) == original
+    assert all_rows(session) == before
+    rebuild.assert_not_called()
+
+
+@pytest.mark.parametrize('area,expected', [('2F', 'Second'), ('east', 'Second'), ('unknown', None)])
+@pytest.mark.parametrize('bag_import', [['staff']], indirect=True)
+def test_imported_display_copy_uses_authored_area_names(bag_import, area, expected):
+    _, _, _, rebuild = bag_import
+    order = {'id': 'O', 'facility': 'F', 'template_version_id': 'T'}
+    candidate = output._accepted_output_candidate(order)
+    candidate['configured_input']['facility']['areas'] = [{'area_id': '2F', 'name': 'Second', 'aliases': ['east']}]
+    candidate['initial_saved_bag_rows'][0]['area_id'] = area
+    before = deepcopy(candidate)
+    if expected is None:
+        with pytest.raises(ValueError, match='label_area_identity_unresolved'):
+            output._prepare_output_context('O', original_adoption={'order': order, 'candidate': candidate}, require_invoice=False)
+    else:
+        ctx = output._prepare_output_context('O', original_adoption={'order': order, 'candidate': candidate}, require_invoice=False)
+        assert ctx['bags'][0]['area_name'] == expected
+        assert ctx['bags'][0]['area_id'] == area
+    assert candidate == before
     rebuild.assert_not_called()
 
 

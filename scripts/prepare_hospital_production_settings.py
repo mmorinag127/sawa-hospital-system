@@ -36,13 +36,34 @@ def document(value):
     return json.loads(raw)
 
 
-def prepare(snapshot, output, legacy_source):
+def apply_label_display_settings(config, settings):
+    from src.services.config_validator import resolve_daily_label_comparable_diet_types
+    identity = config['facility_id']
+    if identity not in settings:
+        raise ValueError('explicit_label_display_settings_required')
+    supplied = {'daily_label_comparable_diet_types': deepcopy(settings[identity])}
+    resolve_daily_label_comparable_diet_types(supplied)
+    result = deepcopy(config)
+    field = 'daily_label_comparable_diet_types'
+    if field in result:
+        if result[field] != supplied[field]:
+            raise ValueError('existing_label_display_settings_conflict')
+        return result, []
+    result[field] = supplied[field]
+    return result, [{'op': 'add', 'path': '/' + field, 'value': deepcopy(supplied[field])}]
+
+
+def prepare(snapshot, output, legacy_source, label_display_settings=None):
     if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
         raise ValueError("local preparation only")
     snapshot = snapshot.resolve(strict=True)
     receipt = json.loads((snapshot / "source.json").read_bytes())
     settings_raw = (snapshot / "settings.json").read_bytes()
     settings = json.loads(settings_raw)
+    label_raw = label_display_settings.read_bytes() if label_display_settings is not None else None
+    label_values = json.loads(label_raw) if label_raw is not None else None
+    if label_raw is not None and not isinstance(label_values, dict):
+        raise ValueError('explicit_label_display_settings_required')
     dump = snapshot / "production.dump"
     if (receipt.get("instance") != "sawahospitalsystem:asia-northeast2:orders-prod"
             or receipt.get("database") != "orders" or receipt.get("production_read_only") is not True
@@ -94,6 +115,8 @@ def prepare(snapshot, output, legacy_source):
         configs = {item["facility_id"]: item for item in resolved}
         if len(entries) != len(master["facilities"]) or len(configs) != len(resolved) or entries.keys() != configs.keys():
             raise ValueError("facility inventory mismatch")
+        if label_values is not None and label_values.keys() != entries.keys():
+            raise ValueError('label_display_settings_inventory_mismatch')
         initial = deepcopy(master)
         changes = []
         for entry in initial["facilities"]:
@@ -102,6 +125,9 @@ def prepare(snapshot, output, legacy_source):
             config = configs[entry["facility_id"]]
             prepared, additions = prepare_config(config, facility_id=entry["facility_id"],
                                                   template_id=config["fax_template_id"])
+            if label_values is not None:
+                prepared, label_changes = apply_label_display_settings(prepared, label_values)
+                additions.extend(label_changes)
             entry["versions"] = [store.initial_facility_version(prepared, sha(settings_raw))]
             changes.append({"facility_id": entry["facility_id"], "changes": additions})
         store._encode(initial)
@@ -139,6 +165,8 @@ def prepare(snapshot, output, legacy_source):
                   "legacy_source_sha": legacy_sha, "facility_master_sha256": sha(data),
                   "facilities": len(entries), "saved_orders": ids, "configuration_changes": changes,
                   "production_modified": False, "published": False}
+        if label_raw is not None:
+            report['label_display_settings_sha256'] = sha(label_raw)
         (output / "preparation.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"output": str(output), "facilities": len(entries), "saved_orders": len(ids),
                       "production_modified": False, "published": False}))
@@ -149,6 +177,7 @@ if __name__ == "__main__":
     parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--legacy-source", required=True)
+    parser.add_argument("--label-display-settings", type=Path)
     args = parser.parse_args()
     os.umask(0o077)
-    prepare(args.snapshot, args.output, args.legacy_source)
+    prepare(args.snapshot, args.output, args.legacy_source, args.label_display_settings)

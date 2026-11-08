@@ -6433,6 +6433,9 @@ def _prepare_output_context(
             facility_id=facility_id,
             facility_config=facility_config,
         )
+        if imported:
+            # Bind display metadata on a copy, never rewrite accepted saved rows.
+            bags = _apply_daily_label_facility_rules_to_bags(bags, facility_config, facility_id)
         if timings is not None:
             timings["prepare_bags_ms"] = round((time.perf_counter() - bags_started) * 1000, 1)
     return {

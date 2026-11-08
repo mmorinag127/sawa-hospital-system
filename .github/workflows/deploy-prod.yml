@@ -554,6 +554,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MAINTENANCE_RESUME_RUN: ${{ inputs.maintenance_resume_run }}
           MIGRATED_CONTINUATION: ${{ inputs.migrated_continuation }}
+          LOCAL_TEST_RECEIPT: ${{ inputs.local_test_receipt }}
           PRODUCTION_PRODUCER_IMAGE: ${{ needs.build-backend.outputs.producer_image }}
           MAINTENANCE_IMAGE: ${{ needs.build-frontend.outputs.maintenance_image }}
         run: |
