@@ -202,13 +202,13 @@ def test_imported_label_csv_workbook_and_daily_bundle_use_display_copy(bag_impor
     rebuild.assert_not_called()
 
 
-@pytest.mark.parametrize('area,expected', [('2F', 'Second'), ('east', 'Second'), ('unknown', None)])
+@pytest.mark.parametrize('area,expected', [('2F', 'Second'), ('Second', 'Second'), ('unknown', None)])
 @pytest.mark.parametrize('bag_import', [['staff']], indirect=True)
 def test_imported_display_copy_uses_authored_area_names(bag_import, area, expected):
     _, _, _, rebuild = bag_import
     order = {'id': 'O', 'facility': 'F', 'template_version_id': 'T'}
     candidate = output._accepted_output_candidate(order)
-    candidate['configured_input']['facility']['areas'] = [{'area_id': '2F', 'name': 'Second', 'aliases': ['east']}]
+    candidate['configured_input']['facility']['areas'] = [{'area_id': '2F', 'name': 'Second'}]
     candidate['initial_saved_bag_rows'][0]['area_id'] = area
     before = deepcopy(candidate)
     if expected is None:
