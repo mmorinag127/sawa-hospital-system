@@ -135,6 +135,7 @@ class WorkflowV2QuadReviewBody(BaseModel):
     decision: str
     quad_px: list[list[float]]
     source_receipt: dict | None = None
+    rotation_degrees: Literal[0, 180] = 0
 
 
 class WorkflowV2HeaderAxisReviewBody(BaseModel):
@@ -1624,6 +1625,7 @@ def save_order_workflow_v2_quad_review(order_id: str, body: WorkflowV2QuadReview
             decision=body.decision,
             quad_px=body.quad_px,
             source_receipt=body.source_receipt,
+            rotation_degrees=body.rotation_degrees,
             expected_revision=expected_revision,
         )
     )

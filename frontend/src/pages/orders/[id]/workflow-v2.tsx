@@ -71,6 +71,8 @@ const WORKFLOW_READ_PENDING_MESSAGE = "注文情報を取得しています。�
 
 const formatApiError = (err: any, fallback: string) => {
   const reviewError = err?.response?.data?.detail;
+  if (reviewError?.error === "canonical_lineage_provenance_missing")
+    return "保存された施設版を確認できません。Step1で対象週の登録済みテンプレートを確認し、設定を保存してください。";
   if (reviewError === "recognition_review_result_changed") return "確認対象と最新のOCRジョブが一致しません。Step2で最新の読み取り結果を選択してください。原文と保存履歴は変更していません。";
   if (reviewError === "ocr_result_saved_history_conflict") return describeWorkflowBlocker(reviewError);
   if (reviewError === "recognition_acceptance_saved_draft_conflict") return "別のOCR結果に紐づく保存済みシートがあります。編集内容を保持して採用を停止しました。使用するOCRと保存済みシートを確認してください。";
@@ -800,6 +802,7 @@ export default function OrderWorkflowV2Page() {
   const [quadReviewMessage, setQuadReviewMessage] = useState("");
   const [manualQuadMode, setManualQuadMode] = useState(false);
   const [manualQuadPoints, setManualQuadPoints] = useState<number[][]>([]);
+  const [quadRotation, setQuadRotation] = useState<0 | 180>(0);
   const [storedHeaderAxisReview, setHeaderAxisReview] = useState<HeaderAxisReviewPayload | null>(null);
   const [headerAxisLoading, setHeaderAxisLoading] = useState(false);
   const [headerAxisMessage, setHeaderAxisMessage] = useState("");
@@ -1044,7 +1047,7 @@ export default function OrderWorkflowV2Page() {
     setHeaderAxisReview(null); setRowAxisReview(null); setRecognitionReview(null); setRecognitionValues({});
     axisSourceRef.current={};
     if (renderedInputGeneration===workingInputGenerationRef.current) {
-      setManualQuadPoints([]); setManualQuadMode(false); finishWorkflowEditorEdit("quad");
+      setManualQuadPoints([]); setManualQuadMode(false); setQuadRotation(0); finishWorkflowEditorEdit("quad");
     }
     if (quadBusyOwnerRef.current===busyGenerationRef.current) setBusy("");
     quadBusyOwnerRef.current=null;
@@ -1381,7 +1384,7 @@ export default function OrderWorkflowV2Page() {
     workflow?.facility_id
       && workflow?.week_start
       && workflow?.week_end
-      && !["uploaded", "facility_template_unresolved"].includes(String(workflow?.state || "")),
+      && !["uploaded", "facility_template_unresolved", "template_version_mismatch"].includes(String(workflow?.state || "")),
   );
   const facilityConfigReadKey = JSON.stringify([orderId, contextForm.facility_id, effectiveWeekStart, effectiveWeekEnd,
     workflowContextConfirmed, workflow?.facility_id, workflow?.week_start, workflow?.week_end, workflow?.template_version_id, workflow?.revision]);
@@ -1463,6 +1466,7 @@ export default function OrderWorkflowV2Page() {
   const facilityTemplateMissing = Boolean(
     contextForm.facility_id
       && !facilityTemplateStatus.loading
+      && !facilityTemplateStatus.error
       && facilityTemplateStatus.facilityId === contextForm.facility_id
       && !facilityTemplateStatus.templateId,
   );
@@ -2979,8 +2983,11 @@ export default function OrderWorkflowV2Page() {
       quadSourceRef.current={review:response.data,context:own.context,generation:own.generation,auth:own.auth!};
       setQuadReview(response.data);
       const savedQuad = response.data?.saved_override?.quad_px;
+      const savedRotation = response.data?.saved_override?.rotation_degrees === 180 ? 180 : 0;
+      if (canAdoptReadEditorInput("quad")) setQuadRotation(savedRotation);
       if (canAdoptReadEditorInput("quad") && Array.isArray(savedQuad) && savedQuad.length===4) {
-        if (sameQuadOverrideSource(response.data.saved_override?.source_receipt,receipt)) setManualQuadPoints(savedQuad);
+        if (sameQuadOverrideSource(response.data.saved_override?.source_receipt,receipt))
+          setManualQuadPoints(savedRotation === 180 ? [...savedQuad.slice(2), ...savedQuad.slice(0, 2)] : savedQuad);
         else {
           setManualQuadPoints([]);
           setQuadReviewMessage("保存済み4点のPDF・入力の正本を確認できません。保存済み補正点は反映していません。");
@@ -3027,7 +3034,7 @@ export default function OrderWorkflowV2Page() {
       if (captured.revision!==receipt.workflow_revision) throw new Error("4点確認後にworkflow版が変わりました。元の入力は保存していません。");
       if (!current()) return;
       const quadResponse=await apiClient.put(`/orders/${own.context.orderId}/workflow-v2/quad-review`,
-        {decision,quad_px:points,source_receipt:receipt},workflowMutationConfig(captured));
+        {decision,quad_px:points,source_receipt:receipt,rotation_degrees:quadRotation},workflowMutationConfig(captured));
       if (!current()) return;
       if (workflowFromMutationResponse(quadResponse.data)?.revision!==captured.revision!+1)
         throw new Error("4点補正のown revision遷移を確認できません。");
@@ -4673,6 +4680,8 @@ export default function OrderWorkflowV2Page() {
               <p className="workflow-warning">
                 {facilityTemplateMissing
                   ? "施設テンプレートが未登録です。OCR実行前に帳票レイアウトを登録してください。"
+                  : facilityTemplateStatus.error
+                    ? `施設テンプレートの取得に失敗しました: ${facilityTemplateStatus.error}`
                   : facilityTemplateColumnsUnresolved
                     ? "施設テンプレートの列定義が未解決です。OCR実行前に施設区分列を確認してください。"
                     : facilityTemplateDirty
@@ -4739,6 +4748,8 @@ export default function OrderWorkflowV2Page() {
                   <p>
                     {facilityTemplateStatus.loading
                       ? "施設テンプレート設定を確認中です。"
+                      : facilityTemplateStatus.error
+                        ? "施設テンプレート設定を取得できませんでした。未登録かどうかは未確認です。"
                       : facilityTemplateStatus.templateId
                         ? `登録済み: ${facilityTemplateStatus.facilityTemplateId || contextFacilityLabel}`
                         : "この施設には帳票レイアウトが登録されていません。未登録のままOCRは実行できません。"}
@@ -4960,6 +4971,12 @@ export default function OrderWorkflowV2Page() {
             </div>
           ) : null}
           <div className="quad-review-actions">
+            <label>
+              <input type="checkbox" checked={quadRotation === 180}
+                disabled={Boolean(busy || !quadReview?.source_receipt)}
+                onChange={(event) => { beginWorkflowEditorEdit("quad"); setQuadRotation(event.target.checked ? 180 : 0); }} />
+              FAXを上下反転（180度回転）
+            </label>
             <Button
               className="btn primary workflow-ordinary-control"
               type="button"

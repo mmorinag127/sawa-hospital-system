@@ -128,6 +128,7 @@ export type QuadReviewPayload = {
   image_size?: number[] | null;
   suggested_quad_px?: number[][] | null;
   saved_override?: {
+    rotation_degrees?: 0 | 180;
     source_receipt?: Record<string, unknown> | null;
     quad_px?: number[][];
     quad_source?: string | null;

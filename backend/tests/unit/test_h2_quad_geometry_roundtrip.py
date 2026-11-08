@@ -158,6 +158,60 @@ def test_real_get_put_get_retains_geometry_proof_while_mutation_digest_changes(g
     assert state.revision == saved["revision"]
 
 
+@pytest.mark.parametrize("rotation", [0, 180])
+def test_upside_down_quad_persists_through_real_ocr_normalizer(geometry_roundtrip, rotation):
+    state, order, pdf, configured, _, _ = geometry_roundtrip
+    review, error = workflow.get_quad_review(order.id, document_id=pdf["document_id"])
+    assert error is None
+    receipt = review["source_receipt"]
+    points = review["suggested_quad_px"]
+    original = deepcopy(pdf)
+    saved, error = workflow.save_quad_review_decision(
+        order.id, decision="approved_estimate", quad_px=points,
+        source_receipt=receipt, rotation_degrees=rotation,
+        expected_revision=receipt["workflow_revision"])
+    assert error is None
+    after, error = workflow.get_quad_review(order.id, document_id=pdf["document_id"])
+    assert error is None
+    override = after["saved_override"]
+    assert override["rotation_degrees"] == rotation
+    actual, _ = order_service._normalize_operator_quad_override(
+        override, selected_pdf_receipt=pdf, configured_input=configured,
+        order_input_identity=receipt["order_input_identity"])
+    assert actual == (points[2:] + points[:2] if rotation else points)
+    assert pdf == original
+    assert saved["revision"] == receipt["workflow_revision"] + 1
+    assert state.revision == saved["revision"]
+
+
+@pytest.mark.parametrize("rotation", [-180, 90, 360, True, "180"])
+def test_quad_rotation_rejects_unsupported_values_without_write(geometry_roundtrip, rotation):
+    state, order, _, _, _, _ = geometry_roundtrip
+    before = state.revision
+    _, error = workflow.save_quad_review_decision(
+        order.id, decision="manual_override", quad_px=[[0, 0]] * 4,
+        source_receipt={}, rotation_degrees=rotation, expected_revision=before)
+    assert error == "quad_rotation_invalid"
+    assert state.revision == before
+
+
+def test_half_turn_rectification_moves_both_axes_not_mirror():
+    image = np.zeros((12, 12, 3), dtype=np.uint8)
+    image[:6, :6] = [10, 20, 30]
+    image[:6, 6:] = [40, 50, 60]
+    image[6:, 6:] = [70, 80, 90]
+    image[6:, :6] = [100, 110, 120]
+    original = image.copy()
+    result = raster.rectify_fax_to_template_grid(
+        image, quad_px=[[11, 11], [0, 11], [0, 0], [11, 0]],
+        table_bbox=[0, 0, 11, 11], canvas_width=12, canvas_height=12)
+    np.testing.assert_array_equal(result[2, 2], image[9, 9])
+    np.testing.assert_array_equal(result[2, 9], image[9, 2])
+    np.testing.assert_array_equal(result[9, 2], image[2, 9])
+    np.testing.assert_array_equal(result[9, 9], image[2, 2])
+    np.testing.assert_array_equal(image, original)
+
+
 @pytest.mark.parametrize("change", ["pdf", "config", "week", "menu"])
 def test_real_geometry_producer_changes_for_actual_geometry_source_not_workflow_meta(geometry_roundtrip, change):
     _, order, pdf, configured, entries, _ = geometry_roundtrip

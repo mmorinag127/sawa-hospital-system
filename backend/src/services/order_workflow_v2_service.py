@@ -1956,7 +1956,10 @@ def save_quad_review_decision(
     decision: str,
     quad_px: object,
     source_receipt: dict[str, Any] | None = None,
+    rotation_degrees: int = 0,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    if type(rotation_degrees) is not int or rotation_degrees not in (0, 180):
+        return None, "quad_rotation_invalid"
     normalized_decision = _normalize_id(decision).lower()
     if normalized_decision not in {"approved_estimate", "manual_override"}:
         return None, "quad_decision_invalid"
@@ -1997,7 +2000,9 @@ def save_quad_review_decision(
         meta = _workflow_meta(workflow)
         source = "operator_approved_estimate" if normalized_decision == "approved_estimate" else "operator_manual"
         replacement = {
-            "quad_px": normalized_quad,
+            # Map raw bottom corners to template top corners; the PDF stays intact.
+            "quad_px": normalized_quad[2:] + normalized_quad[:2] if rotation_degrees == 180 else normalized_quad,
+            "rotation_degrees": rotation_degrees,
             "quad_source": source,
             "decision": normalized_decision,
             "coordinate_space": {"mode": "render_width", "width": HAKODATE_LIVE_RENDER_WIDTH},
