@@ -15,12 +15,16 @@ ALLOWED = {
     'scripts/deploy_web_with_checks.sh',
     'scripts/local_hospital_test_runner.py', 'scripts/production_deploy_supplement.py',
     'scripts/production_maintenance.py', 'scripts/resume_migrated_production.py',
+    'scripts/registry_image_digest.py',
     'backend/tests/unit/test_production_maintenance.py',
     'backend/tests/unit/test_migrated_production_continuation.py',
+    'backend/tests/unit/test_registry_platform_digest.py',
     'backend/tests/unit/test_production_deploy_supplement.py',
 }
 TESTS = [
     'scripts/test_local_hospital_test_runner.py',
+    'backend/tests/unit/test_registry_image_digest.py',
+    'backend/tests/unit/test_registry_platform_digest.py',
     'backend/tests/unit/test_production_maintenance.py',
     'backend/tests/unit/test_migrated_production_continuation.py',
     'backend/tests/unit/test_production_migration_import_target.py',

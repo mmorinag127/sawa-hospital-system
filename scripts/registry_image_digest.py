@@ -1,6 +1,7 @@
 """Resolve the approved registry image from manifest bytes, without metadata APIs."""
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import re
 import sys
@@ -12,9 +13,9 @@ from staging_db_target import read_http, _access_token, REGISTRY
 from stg_ocr_producer_deploy import Blocked
 
 PREFIX = REGISTRY + '/sawahospitalsystem/backend/'
-ACCEPT = 'application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json'
+ACCEPT = 'application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json'
 IMAGE = re.compile(re.escape(PREFIX) +
-                   r'(frontend|backend|ocr-pipeline)(?::([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})|@(sha256:[0-9a-f]{64}))')
+                   r'(frontend|backend|ocr-pipeline|agent-runtime)(?::([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})|@(sha256:[0-9a-f]{64}))')
 
 
 def resolve_image_digest(image):
@@ -32,6 +33,22 @@ def resolve_image_digest(image):
     digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
     if expected is not None and digest != expected:
         raise Blocked('registry_manifest_digest_mismatch')
+    document = json.loads(raw)
+    if 'manifests' in document:
+        matches = [item for item in document['manifests']
+                   if item.get('platform', {}).get('os') == 'linux'
+                   and item.get('platform', {}).get('architecture') == 'amd64']
+        if len(matches) != 1 or not re.fullmatch(r'sha256:[0-9a-f]{64}', matches[0].get('digest', '')):
+            raise Blocked('unique_linux_amd64_manifest_required')
+        child = matches[0]['digest']
+        status, content = read_http(
+            f'https://{REGISTRY}/v2/sawahospitalsystem/backend/{component}/manifests/{child}',
+            _access_token(), accept=ACCEPT, blob_redirect=False)
+        if status != 200 or not isinstance(content, bytes) or 'sha256:' + hashlib.sha256(content).hexdigest() != child:
+            raise Blocked('platform_manifest_digest_mismatch')
+        if 'manifests' in json.loads(content):
+            raise Blocked('nested_platform_index_rejected')
+        digest = child
     return PREFIX + component + '@' + digest
 
 

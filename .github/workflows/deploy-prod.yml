@@ -1049,4 +1049,5 @@ jobs:
             --build-arg "BASE_IMAGE=$base_image" --build-arg "SOURCE_REVISION=$GITHUB_SHA" \
             --file agent_runtime/Dockerfile --tag "$image" --tag "$cache_image" .
           digest="$(python3 -c 'import json; print(json.load(open("/tmp/agent-build.json"))["containerimage.digest"])')"
-          echo "image=${image%:*}@$digest" >> "$GITHUB_OUTPUT"
+          runtime_image="$(uv run --project backend --extra dev --frozen python scripts/registry_image_digest.py --image "${image%:*}@$digest")"
+          echo "image=$runtime_image" >> "$GITHUB_OUTPUT"
