@@ -144,6 +144,10 @@ def require_frontend_dependencies() -> None:
 
 
 def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash: str, *, require_full: bool = False) -> None:
+    if isinstance(receipt, dict) and receipt.get('receipt_version') == 4:
+        from production_deploy_supplement import validate
+        validate(receipt, expected_sha, expected_definition_hash)
+        return
     if type(receipt) is not dict:
         raise ValueError("receipt fields do not match the local receipt contract")
     required = {"receipt_version", "owner_attestation", "source_sha_start", "source_sha_end", "clean_before", "clean_after", "definition_sha256", "commands"}
