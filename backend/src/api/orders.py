@@ -1589,6 +1589,8 @@ def run_order_workflow_v2_ocr(
     stale_action = str((body.stale_action if body else None) or "retry").strip().lower()
     force = bool(body.force) if body else False
     mode = str((body.mode if body else None) or "hakodate").strip().lower()
+    if mode == "llm" and body and body.rotation_degrees == 180:
+        raise HTTPException(status_code=422, detail="fax_rotation_requires_hakodate")
     prerequisite_workflow, prerequisite_error = order_workflow_v2_service.ensure_ocr_prerequisites(
         order_id, expected_revision=expected_revision
     )

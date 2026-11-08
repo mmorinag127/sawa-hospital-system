@@ -17,11 +17,20 @@ def test_step1_api_passes_selected_rotation_and_document_to_guarded_queue(monkey
     monkeypatch.setattr(orders, "_enqueue_order_reparse_job", enqueue)
     monkeypatch.setattr(orders, "_enqueue_workflow_v2_evidence_rerun", enqueue)
     orders.run_order_workflow_v2_ocr("fixture-order", orders.WorkflowV2OcrRunBody(
-        mode=mode, document_id="fixture-pdf", rotation_degrees=180), expected_revision=7)
+        mode=mode, document_id="fixture-pdf", rotation_degrees=180 if mode == "hakodate" else None), expected_revision=7)
     assert len(captured) == 1
-    assert captured[0][1]["rotation_degrees"] == 180
+    assert captured[0][1]["rotation_degrees"] == (180 if mode == "hakodate" else None)
     assert captured[0][1]["selected_document_id"] == "fixture-pdf"
     assert captured[0][1]["expected_revision"] == 8
+
+
+def test_llm_does_not_silently_accept_an_unapplied_hakodate_rotation():
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as error:
+        orders.run_order_workflow_v2_ocr("fixture-order", orders.WorkflowV2OcrRunBody(
+            mode="llm", rotation_degrees=180), expected_revision=7)
+    assert error.value.status_code == 422
+    assert error.value.detail == "fax_rotation_requires_hakodate"
 
 
 def identity(rotation):

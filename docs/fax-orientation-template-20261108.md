@@ -6,6 +6,8 @@
   no quad-review visit or synchronous edge estimation is required to choose it.
   The delivery identity seals the orientation with the selected PDF. Legacy queued
   deliveries remain valid. Existing rotated manual corners are not turned twice.
+  As with the original four-point action, this option applies to Hakodate mode.
+  AI mode cannot silently accept an orientation it does not apply.
 - ORD108ac1e3: FAC00003 has separately authored fish-exclusion regular/soft/mixer
   columns on 2F and 3F. The former diet/area-only uniqueness check rejected these
   physical columns. Distinct locked fields, explicit groups and source positions

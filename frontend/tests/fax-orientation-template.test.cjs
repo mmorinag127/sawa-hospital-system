@@ -43,7 +43,7 @@ test('upside-down option is in Step1 and is sent without loading quad review', a
   assert.equal(sent[0][1].document_id, 'PDF-A');
   assert.equal(sent[0][2].headers['If-Match'], '"7"');
   assert.match(source, /rotation_degrees:effectiveFaxRotation/);
-  assert.match(source, /FAXを上下反転（180度回転）/);
+  assert.match(source, /FAXを上下反転（180度回転・箱館方式）/);
   assert.match(source, /savedRotation === 180 \? \[\.\.\.savedQuad.slice\(2\), \.\.\.savedQuad.slice\(0, 2\)\]/);
 });
 

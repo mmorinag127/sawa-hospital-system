@@ -3371,7 +3371,7 @@ export default function OrderWorkflowV2Page() {
           stale_action: "retry",
           mode: ocrRunMode,
           document_id: effectiveSelectedDocumentId,
-          rotation_degrees: effectiveFaxRotation,
+          ...(ocrRunMode === "hakodate" ? {rotation_degrees: effectiveFaxRotation} : {}),
         };
         if (ocrRunMode === "llm") {
           payload.llm_assist = true;
@@ -4681,9 +4681,9 @@ export default function OrderWorkflowV2Page() {
               </label>
               <label>
                 <input type="checkbox" checked={effectiveFaxRotation === 180}
-                  disabled={Boolean(busy || !effectiveSelectedDocumentId)}
+                  disabled={Boolean(busy || !effectiveSelectedDocumentId || ocrRunMode !== "hakodate")}
                   onChange={(event) => { ++workingInputGenerationRef.current; setFaxRotation(event.target.checked ? 180 : 0); }} />
-                FAXを上下反転（180度回転）
+                FAXを上下反転（180度回転・箱館方式）
               </label>
               <Button
                 className="btn workflow-ordinary-control"
