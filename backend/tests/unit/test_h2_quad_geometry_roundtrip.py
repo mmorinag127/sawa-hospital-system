@@ -219,7 +219,8 @@ def test_step1_rotation_uses_real_rectification_without_quad_review(monkeypatch,
     image[40:, 40:], image[40:, :40] = [70, 80, 90], [100, 110, 120]
     original = image.copy()
     points = [[0, 0], [79, 0], [79, 79], [0, 79]]
-    monkeypatch.setattr(raster, "template_axis_edge_counts_from_workbook", lambda *a, **k: (2, 2))
+    y_count = len(raster.master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS) + 2
+    monkeypatch.setattr(raster, "template_axis_edge_counts_from_workbook", lambda *a, **k: (2, y_count))
     monkeypatch.setattr(raster, "estimate_edge_locked_quad_from_pdf", lambda *a, **k: {
         "status": "ok", "refined_quad_px": points})
     monkeypatch.setattr(raster, "render_pdf_page_to_bgr", lambda *a, **k: image)
@@ -228,7 +229,7 @@ def test_step1_rotation_uses_real_rectification_without_quad_review(monkeypatch,
         facility_code="fixture", order_id="fixture", fax_pdf="fixture", template_pdf="fixture",
         quad_px=None if automatic else points, manifest_template_bbox=[0, 0, 79, 79],
         canvas_width=80, canvas_height=80, render_width=80,
-        template_axes_x=[0, 79], template_axes_y=[0, 79], rotation_degrees=180)
+        template_axes_x=[0, 79], template_axes_y=[*range(y_count - 1), 79], rotation_degrees=180)
     # Real transform output overlays the border only; inspect interior quadrants.
     np.testing.assert_array_equal(images["step2"][20, 20], image[60, 60])
     np.testing.assert_array_equal(images["step2"][65, 65], image[15, 15])

@@ -34,7 +34,7 @@ function harness(){
     workflow:null,outputGenerationsRef:{current:{download:0,preview:0}},outputOwnersRef:{current:{}},
     setDownloadMessage:value=>{state.downloadMessage=value;},setOutputPreviewLoading:value=>{state.outputPreviewLoading=value;},setOutputPreviewMessage:value=>{state.outputPreviewMessage=value;},setOutputPreview:value=>{state.outputPreview=value;},
     workflowJobRef:{current:{orderId:'order-A',jobId:null,attemptId:null,state:'context_confirmed'}},
-    quadAuth:()=>state.auth,quadReview:review,quadRotation:0,setQuadRotation:value=>{state.rotation=value;},hasActiveSessionAuthHeader:()=>state.auth!==null,browserSessionKey:()=>state.auth,
+    quadAuth:()=>state.auth,quadReview:review,effectiveFaxRotation:0,hasActiveSessionAuthHeader:()=>state.auth!==null,browserSessionKey:()=>state.auth,
     setBusyState:value=>{state.busy=value;},setSelectedDocumentIdState:()=>{},setQuadReview:value=>{state.review=value;},setManualQuadPoints:value=>{state.points=plain(value);},setManualQuadMode:value=>{state.manualQuadMode=value;},
     setQuadReviewLoading:value=>{state.loading=value;},setQuadReviewMessage:value=>{state.quadMessage=value;},setError:value=>{state.error=value;},setMessage:value=>{state.message=value;},setVisibleStep:value=>{state.step=value;},
     contextFacilityResolution:{status:'ready'},contextForm:{facility_id:'facility-A'},facilityTemplateColumnDraft:[{quantity:0,unknown:null}],expandedCellCopyMode:'disabled',
@@ -87,10 +87,11 @@ test('rotation reload restores raw corner order and guarded save sends selected 
   const h=harness();
   const raw=h.receipt.suggested_quad_px;
   h.review.saved_override={source_receipt:h.receipt,rotation_degrees:180,quad_px:[...raw.slice(2),...raw.slice(0,2)]};
+  h.context.workflow={quad_override:h.review.saved_override};
+  h.context.effectiveFaxRotation=actual('effectiveFaxRotation',{...h.context,faxRotation:null});
   await h.load();
-  assert.equal(h.state.rotation,180);
+  assert.equal(h.context.effectiveFaxRotation,180);
   assert.deepEqual(h.state.points,raw);
-  h.context.quadRotation=180;
   await h.save();
   assert.equal(h.state.calls[1].body.rotation_degrees,180);
   assert.deepEqual(plain(h.state.calls[1].body.quad_px),raw);

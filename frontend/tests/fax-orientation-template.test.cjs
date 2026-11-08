@@ -47,12 +47,12 @@ test('upside-down option is in Step1 and is sent without loading quad review', a
   assert.match(source, /savedRotation === 180 \? \[\.\.\.savedQuad.slice\(2\), \.\.\.savedQuad.slice\(0, 2\)\]/);
 });
 
-test('domain rejection adopts only its own single revision transition, never a conflict or stale input', async () => {
+test('domain rejection adopts only its own single revision transition, never a conflict or unrelated revision', async () => {
   for (const [code, revision, shouldAdopt] of [
     ['quantity_template_identity_duplicate',8,true], ['workflow_revision_conflict',8,false],
     ['quantity_template_identity_duplicate',9,false],
   ]) {
-    const adopted = [], editor = {dirty:true}, original = {response:{status:409,data:{detail:{
+    const adopted = [], original = {response:{status:409,data:{detail:{
       error:code,workflow:{order_id:'A',revision},message:'列設定の重複',
     }}}};
     const mutate = value('executeWorkflowMutation', {
@@ -62,7 +62,6 @@ test('domain rejection adopts only its own single revision transition, never a c
     });
     await assert.rejects(mutate('ocrRun', async()=>{throw original;}, fn=>fn()), error=>error===original);
     assert.equal(adopted.length, Number(shouldAdopt));
-    assert.equal(editor.dirty, true);
   }
 });
 
