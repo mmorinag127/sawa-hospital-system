@@ -678,13 +678,36 @@ def open_writers():
         mutation(path, record, "open:" + name, "run", "services", "update", name,
                  "--remove-env-vars=SAWA_RELEASE_READ_ONLY", "--region=" + REGION, "--quiet")
         observed = cloud("run", "services", "describe", name, "--region=" + REGION)
-        ready = cloud("run", "revisions", "describe", serving(observed), "--region=" + REGION)
+        opened = observed.get("status", {}).get("latestCreatedRevisionName")
+        require(opened and opened != revision, "new opened writer revision required")
+        ready = cloud("run", "revisions", "describe", opened, "--region=" + REGION)
+        opened_uid = ready.get("metadata", {}).get("uid")
+        require(opened_uid, "opened writer identity missing")
         require(revision_images(ready) == images, "writer image changed while opening")
-        require(any(item.get("type") == "Ready" and item.get("status") == "True"
-                    for item in ready.get("status", {}).get("conditions", [])), "opened writer is not ready")
         require(not any(entry.get("name") == "SAWA_RELEASE_READ_ONLY"
                     for container in ready["spec"]["containers"] for entry in container.get("env", [])),
                 "writer read-only gate removal not confirmed")
+        # A pinned traffic target does not follow an environment-only revision.
+        # Route only the identity/image/gate-verified revision, then confirm Ready.
+        require(serving(observed) in {revision, opened}, "writer traffic changed while opening")
+        mutation(path, record, "route-open:" + name, "run", "services", "update-traffic", name,
+                 "--to-revisions=" + opened + "=100", "--region=" + REGION, "--quiet")
+        deadline = time.monotonic() + 300
+        while True:
+            observed = cloud("run", "services", "describe", name, "--region=" + REGION)
+            require(observed.get("status", {}).get("latestCreatedRevisionName") == opened,
+                    "opened writer revision changed")
+            ready = cloud("run", "revisions", "describe", opened, "--region=" + REGION)
+            require(ready.get("metadata", {}).get("uid") == opened_uid and revision_images(ready) == images,
+                    "opened writer identity changed")
+            require(not any(entry.get("name") == "SAWA_RELEASE_READ_ONLY"
+                        for container in ready["spec"]["containers"] for entry in container.get("env", [])),
+                    "writer read-only gate returned")
+            if serving(observed) == opened and any(item.get("type") == "Ready" and item.get("status") == "True"
+                        for item in ready.get("status", {}).get("conditions", [])):
+                break
+            require(time.monotonic() < deadline, "opened writer readiness timed out")
+            time.sleep(2)
     record["writers_verified_open"] = True
     save(path, record)
 

@@ -639,7 +639,9 @@ def test_runtime_readonly_rejects_mutation_before_handler(monkeypatch):
         assert len(calls) == 2
 
 
-@pytest.mark.parametrize("failure", [None, "wrong-image", "missing-gate", "update-failed"])
+@pytest.mark.parametrize("failure", [None, "wrong-image", "missing-gate", "update-failed",
+    "unchanged-revision", "opened-wrong-image", "opened-missing-uid", "gate-not-removed",
+    "unrelated-traffic", "route-failed", "replaced-uid", "replaced-latest", "readiness-timeout"])
 def test_open_writers_checks_release_and_gate_before_mutation(monkeypatch, tmp_path, failure):
     from types import SimpleNamespace
     path, record = record_fixture(monkeypatch, tmp_path)
@@ -650,17 +652,39 @@ def test_open_writers_checks_release_and_gate_before_mutation(monkeypatch, tmp_p
     monkeypatch.setenv("PRODUCTION_BACKEND_IMAGE", "new-image")
     monkeypatch.setenv("PRODUCTION_PRODUCER_IMAGE", "new-image")
     opened = set()
+    routed = set()
     mutations = []
+    clock = iter(range(0, 2000, 301))
+    monkeypatch.setattr(maintenance.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(maintenance.time, "sleep", lambda *_: None)
     def cloud(*args):
         if args[:3] == ("run", "services", "describe"):
-            return descriptor(args[3])
+            name = args[3]
+            current = name + "-opened" if name in routed else name
+            result = descriptor(current)
+            result["status"]["latestCreatedRevisionName"] = name + "-opened" if name in opened else name
+            if failure == "unchanged-revision": result["status"]["latestCreatedRevisionName"] = name
+            if failure == "unrelated-traffic" and name in opened: result["status"]["traffic"] = [{"revisionName": "unrelated", "percent": 100}]
+            if failure == "replaced-latest" and name in routed: result["status"]["latestCreatedRevisionName"] = "unrelated"
+            return result
         if args[:3] == ("run", "revisions", "describe"):
             if args[3] == "candidate":
                 return {"metadata": {"uid": "candidate-id"}, "spec": {"containers": [{"image": "front"}]}}
-            return {"spec": {"containers": [{"image": "wrong" if failure == "wrong-image" else "new-image",
-                "env": [] if args[3] in opened or failure == "missing-gate" else [
+            is_open = args[3].endswith("-opened")
+            name = args[3].removesuffix("-opened")
+            return {"metadata": {"uid": None if is_open and failure == "opened-missing-uid" else
+                                     "replaced" if name in routed and failure == "replaced-uid" else args[3] + "-id"},
+                "spec": {"containers": [{"image": "wrong" if failure == "wrong-image" or is_open and failure == "opened-wrong-image" else "new-image",
+                "env": [] if is_open and failure != "gate-not-removed" or failure == "missing-gate" else [
                     {"name": "SAWA_RELEASE_READ_ONLY", "value": "1"}]}]},
-                "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+                "status": {"conditions": [{"type": "Ready", "status": "Unknown" if is_open and failure == "readiness-timeout" else "True"}]}}
+        if args[:3] == ("run", "services", "update-traffic"):
+            name = args[3]
+            assert "--to-revisions=" + name + "-opened=100" in args
+            assert name in opened
+            if failure == "route-failed": raise RuntimeError("traffic update failed")
+            routed.add(name)
+            return
         assert args[:3] == ("run", "services", "update")
         assert "--remove-env-vars=SAWA_RELEASE_READ_ONLY" in args
         assert json.loads(path.read_text())["operations"][-1]["state"] == "started"
@@ -673,9 +697,10 @@ def test_open_writers_checks_release_and_gate_before_mutation(monkeypatch, tmp_p
         with pytest.raises(RuntimeError):
             maintenance.open_writers()
         assert not record.get("writers_verified_open")
-        if failure != "update-failed":
+        if failure in {"wrong-image", "missing-gate"}:
             assert not mutations
     else:
         maintenance.open_writers()
         assert set(mutations) == set(maintenance.WRITERS)
+        assert routed == set(maintenance.WRITERS)
         assert record["writers_verified_open"] is True

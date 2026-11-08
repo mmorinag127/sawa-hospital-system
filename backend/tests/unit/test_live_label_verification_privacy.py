@@ -61,6 +61,6 @@ def test_live_label_artifacts_publish_only_allowlisted_metadata(target):
     workflow = yaml.safe_load((root / f'.github/workflows/deploy-{target}.yml').read_text())
     artifacts = [step['with'] for job in workflow['jobs'].values() for step in job.get('steps', [])
                  if step.get('uses', '').startswith('actions/upload-artifact@')
-                 and step.get('with', {}).get('name') == f'live-label-display-{target}']
+                 and step.get('with', {}).get('name') == f'live-label-display-{target}-${{{{ github.run_attempt }}}}']
     assert len(artifacts) == 1
     assert set(artifacts[0]['path'].splitlines()) == {'verification/public-attestation.json', 'verification/worker.json'}

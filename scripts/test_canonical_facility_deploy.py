@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -10,6 +11,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class CanonicalDeployTest(unittest.TestCase):
+    def test_deployed_revision_must_use_exact_approved_source(self):
+        uri = "gs://synthetic-bucket/approved.json"
+        for values in ([uri], [], ["gs://synthetic-bucket/old.json"], [uri, uri]):
+            with self.subTest(values=values):
+                revision = {"spec": {"containers": [{"env": [
+                    {"name": "FACILITY_MASTER_URI", "value": value} for value in values]}]}}
+                result = subprocess.run([sys.executable, str(ROOT / "scripts/check_canonical_facility_deploy.py"), "--verify-revision"],
+                    input=json.dumps(revision), env=dict(os.environ, PYTHONPATH=str(ROOT / "backend"), K_SERVICE="worker-prod", FACILITY_MASTER_URI=uri),
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, values == [uri])
+                self.assertNotIn(uri, result.stderr)
+
     def environment(self, directory, uri):
         env = dict(os.environ, PYTHONPATH=str(ROOT / "backend"),
                    PYTHONDONTWRITEBYTECODE="1", FACILITY_MASTER_URI=uri,

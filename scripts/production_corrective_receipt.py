@@ -20,10 +20,13 @@ FAILED_MODULES = {
 TESTS = list(dict.fromkeys([*DEPLOY_TESTS, *sorted(FAILED_MODULES),
     'backend/tests/unit/test_hospital_delivery_activation.py',
     'backend/tests/unit/test_live_label_verification_privacy.py',
+    'scripts/test_canonical_facility_deploy.py',
     'backend/tests/unit/test_production_corrective_receipt.py']))
 ALLOWED = DEPLOY_ALLOWED | {
     '.github/workflows/deploy-stg.yml',
     'scripts/verify_live_breakfast_labels.py',
+    'scripts/check_canonical_facility_deploy.py',
+    'scripts/test_canonical_facility_deploy.py',
     'backend/tests/unit/test_live_label_verification_privacy.py',
     'scripts/production_corrective_receipt.py',
     'backend/tests/unit/test_production_corrective_receipt.py',

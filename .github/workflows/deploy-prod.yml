@@ -959,7 +959,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: live-label-display-prod
+          name: live-label-display-prod-${{ github.run_attempt }}
           path: |
             verification/public-attestation.json
             verification/worker.json

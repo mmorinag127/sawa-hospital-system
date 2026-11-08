@@ -238,6 +238,10 @@ gcloud run services update-traffic "${SERVICE}" \
   --to-revisions="${DEPLOYED_REVISION}=100" \
   --quiet
 
+gcloud run revisions describe "${DEPLOYED_REVISION}" \
+  --project="${PROJECT_ID}" --region="${REGION}" --format=json \
+  | PYTHONPATH="${WORKSPACE_DIR}/backend" python3 "${SCRIPT_DIR}/check_canonical_facility_deploy.py" --verify-revision
+
 if [[ "${PRODUCTION_MAINTENANCE:-}" == "1" ]]; then
   uv run --project "$WORKSPACE_DIR/backend" --extra dev --frozen python \
     "$SCRIPT_DIR/production_maintenance.py" resume-writer --service "$SERVICE" --image "$IMAGE"
