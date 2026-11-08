@@ -263,6 +263,16 @@ def test_writer_tag_resolves_to_exact_serving_digest_before_reopening(monkeypatc
     assert len(updates) == 1 and '--scaling=auto' in updates[0]
 
 
+def test_writer_resume_uses_locked_backend_dependency_runtime():
+    root = Path(__file__).resolve().parents[3]
+    worker = (root / 'scripts/deploy_worker_prod_with_checks.sh').read_text()
+    workflow = (root / '.github/workflows/deploy-prod.yml').read_text()
+    assert 'uv run --project "$WORKSPACE_DIR/backend" --extra dev --frozen python' in worker
+    assert 'python3 "$SCRIPT_DIR/production_maintenance.py" resume-writer' not in worker
+    assert 'uv run --project backend --extra dev --frozen python scripts/production_maintenance.py resume-writer' in workflow
+    assert 'uv run --project backend --extra dev --frozen python scripts/production_maintenance.py open-writers' in workflow
+
+
 def test_workflow_orders_maintenance_before_migration_and_candidate_before_promotion():
     root = Path(__file__).resolve().parents[3]
     source = (root / ".github/workflows/deploy-prod.yml").read_text()

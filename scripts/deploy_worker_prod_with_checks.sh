@@ -239,7 +239,8 @@ gcloud run services update-traffic "${SERVICE}" \
   --quiet
 
 if [[ "${PRODUCTION_MAINTENANCE:-}" == "1" ]]; then
-  python3 "$SCRIPT_DIR/production_maintenance.py" resume-writer --service "$SERVICE" --image "$IMAGE"
+  uv run --project "$WORKSPACE_DIR/backend" --extra dev --frozen python \
+    "$SCRIPT_DIR/production_maintenance.py" resume-writer --service "$SERVICE" --image "$IMAGE"
 fi
 
 echo "[3/9] verify latest revision/image"

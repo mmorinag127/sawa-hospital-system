@@ -840,7 +840,7 @@ jobs:
           set -euo pipefail
           gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
           uv run --project backend --extra dev --frozen python scripts/stg_ocr_producer_deploy.py --image "$PRODUCER_IMAGE" --source-sha "$GITHUB_SHA"
-          python3 scripts/production_maintenance.py resume-writer --service ocr-pipeline-prod --image "$PRODUCER_IMAGE"
+          uv run --project backend --extra dev --frozen python scripts/production_maintenance.py resume-writer --service ocr-pipeline-prod --image "$PRODUCER_IMAGE"
       - name: Deploy worker-prod
         env:
           IMAGE: ${{ needs.build-backend.outputs.image }}
