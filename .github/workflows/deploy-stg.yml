@@ -720,7 +720,9 @@ jobs:
         if: always()
         with:
           name: live-label-display-stg
-          path: verification/
+          path: |
+            verification/public-attestation.json
+            verification/worker.json
           retention-days: 7
 
   deploy-frontend:

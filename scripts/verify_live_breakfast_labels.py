@@ -1,4 +1,4 @@
-"""Read the deployed label download and retain its exact CSV as evidence."""
+"""Verify live labels without publishing business payloads from hosted runners."""
 
 import argparse
 import csv
@@ -27,8 +27,6 @@ def main():
     )
     with urllib.request.urlopen(request, timeout=240) as response:
         data = response.read()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    (args.output_dir / "labels.csv").write_bytes(data)
     rows = list(csv.DictReader(io.StringIO(data.decode("cp932"))))
     breakfast = [row for row in rows if row.get("時間", "").startswith("朝")]
     assert breakfast, "Live order has no breakfast labels; choose an order with breakfast"
@@ -43,8 +41,18 @@ def main():
             for part in ("朝", "昼", "夕")
         },
     }
-    report = json.dumps(summary, ensure_ascii=False, indent=2)
-    (args.output_dir / "summary.json").write_text(report, encoding="utf-8")
+    args.output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not (os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI")):
+        private_csv = args.output_dir / "labels.csv"
+        private_csv.write_bytes(data)
+        private_csv.chmod(0o600)
+        private_summary = args.output_dir / "summary.json"
+        private_summary.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        private_summary.chmod(0o600)
+    public = {"verification_commit": summary["verification_commit"],
+              "csv_sha256": summary["csv_sha256"], "verified": True}
+    report = json.dumps(public, indent=2)
+    (args.output_dir / "public-attestation.json").write_text(report, encoding="utf-8")
     print(report)
 
 
