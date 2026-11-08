@@ -29,3 +29,23 @@ def test_linux_amd64_child_is_verified_against_original_index(monkeypatch, failu
     else:
         assert subject.resolve_image_digest(image) == subject.PREFIX + 'agent-runtime@' + digest
         assert read.call_args.args[0].endswith('/manifests/' + digest)
+
+
+@pytest.mark.parametrize('raw', [b'wrong manifest', b'\xff', b'null', b'[]', b'1',
+    b'{"manifests":null}', b'{"manifests":[null]}', b'{"manifests":[{"platform":null}]}',
+    b'{"manifests":[{"platform":{"os":"linux","architecture":"amd64"},"digest":null}]}'])
+def test_invalid_parent_manifest_fails_with_domain_error(monkeypatch, raw):
+    monkeypatch.setattr(subject, '_access_token', lambda: 'caller')
+    monkeypatch.setattr(subject, 'read_http', Mock(return_value=(200, raw)))
+    with pytest.raises(subject.Blocked):
+        subject.resolve_image_digest(subject.PREFIX + 'frontend:test')
+
+
+@pytest.mark.parametrize('child', [b'wrong manifest', b'null', b'[]'])
+def test_invalid_child_with_matching_digest_is_not_accepted(monkeypatch, child):
+    digest = 'sha256:' + hashlib.sha256(child).hexdigest()
+    index = json.dumps({'manifests': [{'platform': {'os': 'linux', 'architecture': 'amd64'}, 'digest': digest}]}).encode()
+    monkeypatch.setattr(subject, '_access_token', lambda: 'caller')
+    monkeypatch.setattr(subject, 'read_http', Mock(side_effect=[(200, index), (200, child)]))
+    with pytest.raises(subject.Blocked, match='registry_manifest_invalid'):
+        subject.resolve_image_digest(subject.PREFIX + 'frontend:test')

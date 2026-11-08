@@ -18,6 +18,16 @@ IMAGE = re.compile(re.escape(PREFIX) +
                    r'(frontend|backend|ocr-pipeline|agent-runtime)(?::([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})|@(sha256:[0-9a-f]{64}))')
 
 
+def manifest_document(raw):
+    try:
+        document = json.loads(raw)
+    except (ValueError, UnicodeError, TypeError):
+        raise Blocked('registry_manifest_invalid') from None
+    if not isinstance(document, dict):
+        raise Blocked('registry_manifest_invalid')
+    return document
+
+
 def resolve_image_digest(image):
     match = IMAGE.fullmatch(image)
     if not match:
@@ -33,12 +43,18 @@ def resolve_image_digest(image):
     digest = 'sha256:' + hashlib.sha256(raw).hexdigest()
     if expected is not None and digest != expected:
         raise Blocked('registry_manifest_digest_mismatch')
-    document = json.loads(raw)
+    document = manifest_document(raw)
     if 'manifests' in document:
-        matches = [item for item in document['manifests']
+        descriptors = document['manifests']
+        if not isinstance(descriptors, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get('platform', {}), dict)
+                for item in descriptors):
+            raise Blocked('registry_manifest_invalid')
+        matches = [item for item in descriptors
                    if item.get('platform', {}).get('os') == 'linux'
                    and item.get('platform', {}).get('architecture') == 'amd64']
-        if len(matches) != 1 or not re.fullmatch(r'sha256:[0-9a-f]{64}', matches[0].get('digest', '')):
+        if (len(matches) != 1 or not isinstance(matches[0].get('digest'), str)
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', matches[0]['digest'])):
             raise Blocked('unique_linux_amd64_manifest_required')
         child = matches[0]['digest']
         status, content = read_http(
@@ -46,7 +62,7 @@ def resolve_image_digest(image):
             _access_token(), accept=ACCEPT, blob_redirect=False)
         if status != 200 or not isinstance(content, bytes) or 'sha256:' + hashlib.sha256(content).hexdigest() != child:
             raise Blocked('platform_manifest_digest_mismatch')
-        if 'manifests' in json.loads(content):
+        if 'manifests' in manifest_document(content):
             raise Blocked('nested_platform_index_rejected')
         digest = child
     return PREFIX + component + '@' + digest

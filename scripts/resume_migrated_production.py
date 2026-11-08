@@ -15,7 +15,7 @@ def verify_runtime_repair_receipt(sha):
     from local_receipt_signing import verify_signed
     from local_hospital_test_runner import validate_receipt
     proof = verify_signed(json.loads(os.environ['LOCAL_TEST_RECEIPT']))
-    require(proof.get('receipt_version') in (1, 2), 'runtime repair requires original full receipt')
+    require(proof.get('receipt_version') in (1, 2, 5), 'runtime repair requires exhaustive source-bound verification')
     manifest = Path(__file__).with_name('local_hospital_test_manifest.json')
     validate_receipt(proof, sha, hashlib.sha256(manifest.read_bytes()).hexdigest(), require_full=True)
 

@@ -106,7 +106,7 @@ def test_migrated_checkpoint_preserves_originals_and_blocks_drift(monkeypatch, t
     assert verified == ([e['GITHUB_SHA']] if failure == 'runtime-full' else [])
 
 
-@pytest.mark.parametrize('version', [1, 2, 4])
+@pytest.mark.parametrize('version', [1, 2, 4, 5])
 def test_runtime_repair_requires_original_full_receipt(monkeypatch, version):
     import local_receipt_signing
     import local_hospital_test_runner
@@ -119,7 +119,7 @@ def test_runtime_repair_requires_original_full_receipt(monkeypatch, version):
         validated.append(True)
     monkeypatch.setattr(local_hospital_test_runner, 'validate_receipt', validate)
     if version == 4:
-        with pytest.raises(RuntimeError, match='original full receipt'):
+        with pytest.raises(RuntimeError, match='exhaustive source-bound verification'):
             subject.verify_runtime_repair_receipt('a' * 40)
         assert not validated
     else:

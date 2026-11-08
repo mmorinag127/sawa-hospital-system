@@ -213,13 +213,22 @@ def test_tag_exact_digest_no_delete_or_iam(monkeypatch):
     assert read.call_args.args == (f'https://{r_digest.REGISTRY}/v2/{p.PROJECT}/backend/frontend/manifests/stg-protected-{digest}', 'test-token')
 
 
-@pytest.mark.parametrize('status,manifest', [(404, b'not found'), (403, b'denied'), (200, b'wrong manifest')])
+@pytest.mark.parametrize('status,manifest', [(404, b'not found'), (403, b'denied'), (200, b'{"schemaVersion":2,"config":{}}')])
 def test_tag_digest_mismatch_or_registry_failure_stops(monkeypatch, status, manifest):
     monkeypatch.setattr(p, 'command', Mock(return_value=''))
     monkeypatch.setattr(r_digest, '_access_token', lambda: 'test-token')
     monkeypatch.setattr(r_digest, 'read_http', Mock(return_value=(status, manifest)))
     expected = 'protected_tag_digest_mismatch' if status == 200 else 'registry_manifest_http_failure'
     with pytest.raises(r.Blocked, match=expected):
+        p.protect_image(IMAGE, 'frontend')
+
+
+@pytest.mark.parametrize('manifest', [b'wrong manifest', b'[]', b'null'])
+def test_malformed_registry_body_is_blocked_at_protection_boundary(monkeypatch, manifest):
+    monkeypatch.setattr(p, 'command', Mock(return_value=''))
+    monkeypatch.setattr(r_digest, '_access_token', lambda: 'test-token')
+    monkeypatch.setattr(r_digest, 'read_http', Mock(return_value=(200, manifest)))
+    with pytest.raises(r.Blocked, match='registry_manifest_invalid'):
         p.protect_image(IMAGE, 'frontend')
 
 
