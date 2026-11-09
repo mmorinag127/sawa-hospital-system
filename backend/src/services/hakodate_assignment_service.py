@@ -1265,9 +1265,7 @@ def canonical_generated_column_slots(template: dict[str, Any], *, col_count: int
             if not isinstance(column.get("diet_type"), str) or not column["diet_type"].strip():
                 raise ValueError("hakodate_authored_quantity_diet_required")
             authored = dict(column)
-            authored.pop("name", None)
             authored.pop("header", None)
-            authored.pop("name_locked", None)
         else:
             authored = column
         spec = _canonical_slot_from_template_column(authored, fallback_index=column["index"])

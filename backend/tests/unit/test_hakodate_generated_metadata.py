@@ -10,6 +10,24 @@ from src.services import master_order_form_template_service as master
 from test_modernization_dynamic_form_layout import copied_master, entries_for, facility, WEEK
 
 
+def test_generated_slots_preserve_explicit_locked_fields_without_merging_diet_columns():
+    template = {"columns": [
+        {"index": 0, "role": "menu_name", "header": "Menu"},
+        *[{"index": index + 1, "role": "quantity", "diet_type": "no_fish",
+           "area_id": "2F", "name": f"qty.no_fish_{diet}_2f", "name_locked": True}
+          for index, diet in enumerate(("regular", "soft", "mixer"))],
+        {"index": 4, "role": "quantity", "diet_type": "regular", "area_id": "3F",
+         "name": "qty.stale_x"},
+    ]}
+    before = deepcopy(template)
+    slots = assignment.canonical_generated_column_slots(template, col_count=8)
+    assert [slot["slot_name"] for slot in slots[1:]] == [
+        "qty.no_fish_regular_2f", "qty.no_fish_soft_2f", "qty.no_fish_mixer_2f",
+        "qty.regular_3f",
+    ]
+    assert template == before
+
+
 def test_generated_metadata_preserves_prod_labels_note_and_nfkc(tmp_path, copied_master):
     config = facility()
     column = config["fax_template"]["columns"][3]

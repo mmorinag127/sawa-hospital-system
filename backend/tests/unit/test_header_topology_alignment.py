@@ -101,6 +101,18 @@ def test_private_reported_original_uses_authored_facility_week_and_menu(tmp_path
     assert header["structural_match"]["skipped_template_indexes"] == []
     workbook = load_workbook(workbook_path)
     try:
+        plan = subject.canonical_logical_target_plan(
+            worksheet=workbook[master.FACILITY_TEMPLATE_SHEET_NAME],
+            fax_template=config["config"]["fax_template"],
+            draft_sheet={"fields": ["date", "daypart", "menu"], "rows": [
+                [entry["menu_date"], entry["daypart"], entry["name"]]
+                for entry in diagnostic["source_receipt"]["physical_menu_entries"]
+            ]},
+        )
+        assert {target["field"] for target in plan if target["role"] == "quantity"} == {
+            column["name"] for column in config["config"]["fax_template"]["columns"]
+            if column["role"] == "quantity"
+        }
         corrected, rows = subject._row_intersection_correct_ys(
             rectified_fax=image, corrected_xs=corrected_xs, template_ys=ys,
             worksheet=workbook[master.FACILITY_TEMPLATE_SHEET_NAME],

@@ -33,6 +33,8 @@ ALLOWED = {
     "backend/tests/unit/test_page_performance_projections.py",
     "backend/tests/unit/test_header_topology_alignment.py",
     "backend/tests/unit/test_modernization_printed_header_boundaries.py",
+    "backend/src/services/hakodate_assignment_service.py",
+    "backend/tests/unit/test_hakodate_generated_metadata.py",
     *{"agent_runtime/native/shift/backend/shift_scheduler_backend/" + name for name in (
         "main.py", "schedule_selection.py", "operational_constraints.py", "solver.py", "candidate_validation.py")},
 }
@@ -48,6 +50,9 @@ PYTEST += ["backend/tests/unit/" + name for name in (
 PYTEST += ["backend/tests/contract/test_saved_sheet_quantity_schema.py"]
 PYTEST += ["backend/tests/unit/test_page_performance_projections.py"]
 PYTEST += ["backend/tests/unit/test_header_topology_alignment.py"]
+PYTEST += ["backend/tests/unit/test_hakodate_generated_metadata.py",
+           "backend/tests/unit/test_hakodate_assignment_service.py",
+           "backend/tests/unit/test_hakodate_order_sheet_evidence_projection.py"]
 PYTEST += ["backend/tests/unit/" + name for name in (
     "test_ocr_header_recovery.py", "test_ocr_row_recovery.py", "test_h2_operator_repair_revision.py",
 )]
