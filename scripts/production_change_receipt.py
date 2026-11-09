@@ -41,6 +41,7 @@ ALLOWED = {
     "backend/src/services/ocr_recognition_recovery_service.py",
     "backend/src/services/workflow_ocr_delivery_service.py",
     "backend/tests/unit/test_bounded_ocr_execution_json.py",
+    "backend/src/maintenance/formal_migration_schema.py", "backend/alembic/catalog_contracts.json",
     *{"agent_runtime/native/shift/backend/shift_scheduler_backend/" + name for name in (
         "main.py", "schedule_selection.py", "operational_constraints.py", "solver.py", "candidate_validation.py")},
 }

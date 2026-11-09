@@ -1,7 +1,6 @@
 """Bound JSON parser memory without changing archived OCR inputs or quantities."""
 from alembic import op
 import sqlalchemy as sa
-from src.models.ocr_display_projection_v2 import function_ddl, FUNCTION
 
 revision = "0039"
 down_revision = "0038"
@@ -12,6 +11,7 @@ depends_on = None
 def upgrade():
     if op.get_bind().dialect.name != "postgresql":
         return
+    from src.models.ocr_display_projection_v2 import function_ddl, FUNCTION
     op.execute(function_ddl())
     op.drop_column("ocr_jobs", "display_read_json")
     op.add_column("ocr_jobs", sa.Column("display_read_json", sa.Text(), sa.Computed(
@@ -21,6 +21,7 @@ def upgrade():
 def downgrade():
     if op.get_bind().dialect.name != "postgresql":
         return
+    from src.models.ocr_display_projection_v2 import FUNCTION
     from src.models.ocr_display_projection_v1 import expression
     from src.models.ocr_metrics_v1 import PROGRESS_KEYS
     op.drop_column("ocr_jobs", "display_read_json")

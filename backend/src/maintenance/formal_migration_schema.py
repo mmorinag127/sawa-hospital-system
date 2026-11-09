@@ -201,6 +201,8 @@ def read_catalog(connection, *, inspector=None):
                 WHERE t.tgfoid=p.oid AND NOT t.tgisinternal AND tn.nspname=current_schema())
               AND NOT EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid=d.refobjid
                 WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e' AND e.extname='pg_trgm')
+              AND NOT ((p.proname='sawa_ocr_display_projection_v2' AND p.proargtypes='114 114'::oidvector)
+                    OR (p.proname='sawa_json_keys_v1' AND p.proargtypes='114 1009'::oidvector))
             ORDER BY p.proname
         """).scalars().all()
         if routines:
@@ -276,6 +278,16 @@ def read_catalog(connection, *, inspector=None):
             ORDER BY t.relname,c.conname
         """).mappings())
         native += _postgres_scaling_features(connection)
+        native += [{"table_name": "ocr_jobs", "display_projection_function": dict(row)}
+                   for row in connection.exec_driver_sql("""
+            SELECT p.proname, pg_get_function_identity_arguments(p.oid) AS arguments,
+                   pg_get_functiondef(p.oid) AS definition
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+            WHERE n.nspname=current_schema() AND (
+                (p.proname='sawa_ocr_display_projection_v2' AND p.proargtypes='114 114'::oidvector)
+                OR (p.proname='sawa_json_keys_v1' AND p.proargtypes='114 1009'::oidvector))
+            ORDER BY p.proname
+        """).mappings()]
     else:
         raise RuntimeError("catalog blocked: unsupported migration dialect")
     return {"tables": tables, "native": _clean([dict(item) for item in native]),
