@@ -2446,6 +2446,7 @@ def _match_printed_header_topology(
         for column in contract[-1]["column_votes"]
     }
     candidates = []
+    rejected = []
     for end, cluster in enumerate(clusters):
         if not set(expected).issubset(cluster.get("column_votes", [])):
             continue
@@ -2454,7 +2455,12 @@ def _match_printed_header_topology(
                      if column in level.get("column_votes", [])]
             for column in expected
         }
-        if any(len(actual[column]) != len(edges) for column, edges in expected.items()):
+        mismatches = [
+            {"column": column, "expected": len(edges), "observed": len(actual[column])}
+            for column, edges in expected.items() if len(actual[column]) != len(edges)
+        ]
+        if mismatches:
+            rejected.append({"body_cluster": end, "column_count_mismatches": mismatches})
             continue
         matches: dict[int, list[int]] = {}
         for column, edges in expected.items():
@@ -2466,7 +2472,8 @@ def _match_printed_header_topology(
         if len(matches.get(0, [])) != 1 or matches.get(len(contract) - 1) != [end]:
             continue
         candidates.append({"body_cluster": end, "matches": matches})
-    evidence = {"method": "printed_header_column_topology", "candidates": candidates}
+    evidence = {"method": "printed_header_column_topology", "candidates": candidates,
+                "rejected_body_candidates": rejected}
     if len(candidates) != 1:
         return None, evidence
     return candidates[0]["matches"], evidence

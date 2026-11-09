@@ -32,6 +32,7 @@ ALLOWED = {
     "backend/src/services/workflow_display_read_service.py",
     "backend/tests/unit/test_page_performance_projections.py",
     "backend/tests/unit/test_header_topology_alignment.py",
+    "backend/tests/unit/test_modernization_printed_header_boundaries.py",
     *{"agent_runtime/native/shift/backend/shift_scheduler_backend/" + name for name in (
         "main.py", "schedule_selection.py", "operational_constraints.py", "solver.py", "candidate_validation.py")},
 }

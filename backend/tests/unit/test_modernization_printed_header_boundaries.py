@@ -265,7 +265,11 @@ def test_actual_printed_required_line_loss_or_ambiguous_candidate_stops(form_fac
     assert corrected is None
     assert evidence["used"] is False
     assert evidence["reason"] == "fax_body_header_boundary_unresolved"
+    topology = evidence["header_topology"]
+    assert topology["candidates"] == []
+    assert topology["rejected_body_candidates"]
+    mismatches = topology["rejected_body_candidates"][0]["column_count_mismatches"]
     if damage == "ambiguous-top":
-        assert len(evidence["header_candidates"]) == 2
+        assert any(item["observed"] > item["expected"] for item in mismatches)
     else:
-        assert evidence["header_candidates"] == []
+        assert any(item["observed"] < item["expected"] for item in mismatches)
