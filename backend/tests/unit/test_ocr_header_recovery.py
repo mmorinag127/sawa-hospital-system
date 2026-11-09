@@ -50,7 +50,8 @@ def test_header_failure_routes_to_existing_header_review_action():
         "error_detail": "header_axis_unresolved:header_x_cluster_count_mismatch",
         "processing_stage": "header_boundaries",
         "recovery_action": "review_header_boundaries",
-        "error_user_message": "ヘッダー境界の補正を確認してください。",
+        "result_state": "review_required",
+        "error_user_message": "列の境界を確認してください。原本の縦罫線を指定すると再開できます。",
     }
 
 

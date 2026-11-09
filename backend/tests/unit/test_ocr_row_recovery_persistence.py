@@ -71,12 +71,13 @@ def test_review_returns_image_on_day_validation_failure(repair_order, monkeypatc
         "step2_png": "synthetic", "template_axes_x": [0, 100], "template_axes_y": [0, 600],
         "original_physical_draft": {}, "row_axis_override": None})
     monkeypatch.setattr(batch.cv2, "imread", lambda path: np.zeros((600, 100, 3), dtype=np.uint8))
+    monkeypatch.setattr(order_service, "_geometry_review_canvas", lambda item: np.zeros((600, 100, 3), dtype=np.uint8))
     monkeypatch.setattr(assignment, "_worksheet_for_manifest_structure_template", lambda **kw: object())
     monkeypatch.setattr(batch, "_fax_template_for_manifest_item", lambda *a: {})
     monkeypatch.setattr(master, "validated_body_row_plan", lambda ws: [{"date": "2026-10-07"}])
     monkeypatch.setattr(master, "validated_body_week_value", lambda ws: captured["order"]["week_code"])
     monkeypatch.setattr(batch, "_align_axes", lambda **kw: ([0, 100], [0, 50, 100],
-        {"row_intersection_y_match": {"corrected_ys": [0, 50, 100]}}, Image.new("RGB", (100, 600))))
+        {"row_intersection_y_match": {"corrected_ys": [0, 50, 100]}, "header_intersection_x_match": {"used": True}}, Image.new("RGB", (100, 600))))
     monkeypatch.setattr(batch, "_draw_row_intersections_overlay", lambda **kw: kw["image"])
     def fail(*a):
         raise ValueError("fax_day_boundaries_disagree_with_monthly_menu")

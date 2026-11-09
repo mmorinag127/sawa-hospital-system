@@ -786,6 +786,10 @@ def _serialize_ocr_job(job: OcrJob | None, *, session: Any = None, _analysis=Non
     if job is None:
         return None
     metrics = job.metrics if isinstance(job.metrics, dict) else {}
+    from src.services.ocr_row_recovery_service import failure_details
+    geometry_review = failure_details(job.error_message or "") if job.status == "failed" else None
+    if geometry_review:
+        metrics = {**metrics, **geometry_review}
     diagnostics = {}
     quantity_content_editable = False
     evidence_id = _normalize_id(metrics.get("evidence_run_id"))
@@ -2161,6 +2165,12 @@ def get_header_axis_review(order_id: str, *, document_id: str | None = None) -> 
         result["source_receipt"] = receipt
         return result, None
     except ValueError as exc:
+        from src.services.ocr_row_recovery_service import failure_details
+        details = failure_details(str(exc))
+        if details and details["recovery_action"] == "review_or_edit_quad":
+            return {"order_id": order_id, "status": "needs_correction", "source_receipt": receipt,
+                    "error_detail": str(exc), "prerequisite_action": details["recovery_action"],
+                    "guidance": {"message": details["error_user_message"]}}, None
         return None, str(exc)
     except Exception as exc:  # noqa: BLE001
         return {
@@ -2254,6 +2264,12 @@ def get_row_axis_review(order_id: str, *, document_id: str | None = None) -> tup
         result["source_receipt"] = receipt
         return result, None
     except ValueError as exc:
+        from src.services.ocr_row_recovery_service import failure_details
+        details = failure_details(str(exc))
+        if details and details["recovery_action"] == "review_or_edit_quad":
+            return {"order_id": order_id, "status": "needs_correction", "source_receipt": receipt,
+                    "error_detail": str(exc), "prerequisite_action": details["recovery_action"],
+                    "guidance": {"message": details["error_user_message"]}}, None
         return None, str(exc)
     except Exception as exc:  # noqa: BLE001
         return {
@@ -2539,9 +2555,11 @@ def complete_native_ingest_context(session, order_id, job_id, evidence_id, error
         raise ValueError("native_ingest_workflow_changed")
     token = _expected_workflow_revision.set(original["workflow_revision"])
     try:
+        from src.services.ocr_row_recovery_service import failure_details
+        geometry_review = failure_details(error or "")
         row.state = "ocr_failed" if error else "ocr_completed"
-        row.headline = "OCR停止: " + error if error else "OCR結果が作成されました。正解OCRを一つ選択してください"
-        row.primary_action = "run_ocr" if error else "select_ocr"
+        row.headline = geometry_review["error_user_message"] if geometry_review else "OCR停止: " + error if error else "OCR結果が作成されました。正解OCRを一つ選択してください"
+        row.primary_action = geometry_review["recovery_action"] if geometry_review else "run_ocr" if error else "select_ocr"
         row.blockers_json = [error] if error else []
         row.last_transition_at = _now()
         meta["latest_ocr_result_id"] = evidence_id
@@ -2933,10 +2951,12 @@ def mark_ocr_run_completed(
             if template_error:
                 return stop_with_blocker(template_error)
         if normalized_error:
+            from src.services.ocr_row_recovery_service import failure_details
+            geometry_review = failure_details(normalized_error)
             workflow.state = "ocr_failed"
             detail = _normalize_id((ocr_job.metrics or {}).get("error_detail")) or normalized_error
-            workflow.headline = f"OCR停止: {detail}"
-            workflow.primary_action = "run_ocr"
+            workflow.headline = geometry_review["error_user_message"] if geometry_review else f"OCR停止: {detail}"
+            workflow.primary_action = geometry_review["recovery_action"] if geometry_review else "run_ocr"
             workflow.blockers_json = [normalized_error]
             workflow.warnings_json = []
         else:

@@ -1442,12 +1442,18 @@ export default function OrderWorkflowV2Page() {
       || "",
   ).trim();
   const ocrJobRecoveryAction = quantityContentEditable ? "" : String(workflow?.ocr_job?.recovery_action || "").trim();
+  const geometryReviewStep = ({review_or_edit_quad: 1.5, review_header_boundaries: 1.6, review_row_day_boundaries: 1.7} as Record<string, number>)[ocrJobRecoveryAction];
+  const geometryReviewPending = workflow?.state === "ocr_failed" && Boolean(geometryReviewStep);
+  const visibleWorkflowBlockers = geometryReviewPending
+    ? workflowBlockers.filter((item) => item !== workflow?.ocr_job?.error
+      && item !== workflow?.ocr_job?.error_detail)
+    : workflowBlockers;
   const recognitionReviewPending = workflow?.state === "ocr_failed"
     && workflow?.ocr_job?.result_state === "review_required"
     && ocrJobRecoveryAction === "review_recognition_cells";
   const currentStateLabel = quantityContentEditable && workflow?.state === "ocr_failed"
     ? "Step2: シートを作成できます"
-    : recognitionReviewPending ? "Step2: 読み取り結果の確認待ち" : stateLabel(workflow?.state);
+    : geometryReviewPending ? "原本の位置確認待ち" : recognitionReviewPending ? "Step2: 読み取り結果の確認待ち" : stateLabel(workflow?.state);
   const canReviewQuad = Boolean(orderId && workflowContextConfirmed && workflow?.template_version_id);
   const quadReviewRequired = ocrJobRecoveryAction === "review_or_edit_quad"
     || workflowBlockers.includes("quad_estimation_failed")
@@ -1455,8 +1461,8 @@ export default function OrderWorkflowV2Page() {
   const stepLabels = useMemo(() => {
     const labels = [baseStepLabels[0]];
     if (canReviewQuad || quadReviewRequired || visibleStep === 1.5) labels.push({ step: 1.5, label: "4点確認/補正" });
-    if (visibleStep === 1.6) labels.push({ step: 1.6, label: "ヘッダー補正" });
-    if (visibleStep === 1.7) labels.push({ step: 1.7, label: "行推定補正" });
+    if (canReviewQuad || visibleStep === 1.6) labels.push({ step: 1.6, label: "列の確認" });
+    if (canReviewQuad || visibleStep === 1.7) labels.push({ step: 1.7, label: "行・日付の確認" });
     labels.push(...baseStepLabels.slice(1));
     return labels;
   }, [canReviewQuad, quadReviewRequired, visibleStep]);
@@ -2542,10 +2548,10 @@ export default function OrderWorkflowV2Page() {
 
   useEffect(() => {
     if (workflow?.state) {
-      setVisibleStep(stepIndexForState(workflow.state));
+      setVisibleStep(geometryReviewPending ? geometryReviewStep : stepIndexForState(workflow.state));
       setVisibleStepReady(true);
     }
-  }, [workflow?.state]);
+  }, [workflow?.state, geometryReviewPending, geometryReviewStep]);
 
   useEffect(() => {
     const syncOverlayImageSize = () => {
@@ -3063,7 +3069,7 @@ export default function OrderWorkflowV2Page() {
       const rerunInputVersion={...captured,revision:ownRevision,bootstrap:false};
       if (!current()) return;
       const response=await apiClient.post(`/orders/${own.context.orderId}/workflow-v2/ocr-runs`,
-        {stale_action:"retry",force:true,mode:"hakodate",document_id:own.context.documentId},
+        {stale_action:"retry",force:true,mode:"hakodate",document_id:own.context.documentId,rotation_degrees:effectiveFaxRotation},
         workflowMutationConfig(rerunInputVersion));
       if (!current()) return;
       if (!adoptOwnWorkflowCommandResponse(response.data,rerunInputVersion))
@@ -3148,8 +3154,9 @@ export default function OrderWorkflowV2Page() {
     }
     if (axis==="header") {
       const expectedCount=getHeaderAxisExpectedCount();
-      if (expectedCount>0 && points.length!==expectedCount && typeof window!=="undefined"
-        && !window.confirm(`ヘッダー縦軸の本数がテンプレート期待値と一致しません。期待 ${expectedCount} 本 / 現在 ${points.length} 本です。このまま保存してOCRを再実行しますか？`)) return;
+      if (expectedCount>0 && points.length!==expectedCount) {
+        message(`原本の縦罫線を確認してください。必要な境界 ${expectedCount} 本 / 現在 ${points.length} 本です。`); return;
+      }
     }
     if (!confirmWorkflowReplacement(axis)) return;
     beginWorkflowEditorEdit(axis,true);
@@ -3174,7 +3181,7 @@ export default function OrderWorkflowV2Page() {
       const rerunInputVersion={...captured,revision:ownRevision,bootstrap:false};
       if (!current()) return;
       const rerun=await apiClient.post(`/orders/${own.context.orderId}/workflow-v2/ocr-runs`,
-        {stale_action:"retry",force:true,mode:"hakodate",document_id:own.context.documentId},workflowMutationConfig(rerunInputVersion,{timeout:getHeaderAxisTimeoutMs()}));
+        {stale_action:"retry",force:true,mode:"hakodate",document_id:own.context.documentId,rotation_degrees:effectiveFaxRotation},workflowMutationConfig(rerunInputVersion,{timeout:getHeaderAxisTimeoutMs()}));
       if (!current()) return;
       if (!adoptOwnWorkflowCommandResponse(rerun.data,rerunInputVersion)) throw new Error("OCR再実行中に入力が変更されました。");
       finishWorkflowEditorEdit(axis); delete axisSourceRef.current[axis];
@@ -3324,6 +3331,8 @@ export default function OrderWorkflowV2Page() {
       setSelectedRowAxisIndex(insertedIndex >= 0 ? insertedIndex : null);
       return next;
     });
+    setRowDayBoundaries(current => current.map(() => ""));
+    setRowAxisMessage("横線を追加しました。各日の最初の行と最終日の下端を再確認してください。");
   };
 
   const deleteSelectedRowAxis = () => {
@@ -3333,8 +3342,9 @@ export default function OrderWorkflowV2Page() {
     }
     beginWorkflowEditorEdit("row");
     setRowAxisYs((current) => current.filter((_, idx) => idx !== selectedRowAxisIndex));
+    setRowDayBoundaries(current => current.map(() => ""));
     setSelectedRowAxisIndex(null);
-    setRowAxisMessage("");
+    setRowAxisMessage("横線を削除しました。各日の最初の行と最終日の下端を再確認してください。");
   };
 
   const resetRowAxisYs = () => {
@@ -3343,6 +3353,7 @@ export default function OrderWorkflowV2Page() {
       .filter(Number.isFinite);
     beginWorkflowEditorEdit("row");
     setRowAxisYs(normalizeRowAxisYs(detectedYs));
+    setRowDayBoundaries(Array.from({length: (rowAxisReview?.calendar_days?.length ?? 0) + 1}, (_, index) => rowAxisReview?.body_day_boundary_indexes?.[index]?.toString() ?? ""));
     setSelectedRowAxisIndex(null);
     setRowAxisAddMode(false);
     setRowAxisMessage("");
@@ -4290,7 +4301,11 @@ export default function OrderWorkflowV2Page() {
           {workflow?.recognition_override_invalidation ? <p role="status">
             {({quad: "4点", header_axis: "ヘッダー", row_axis: "行・日境界"} as Record<string, string>)[workflow.recognition_override_invalidation.geometry_kind] ?? "幾何"}補正が変更されたため、以前のセル手入力は履歴に保持し、新しいセルには適用しません。保存済みシートは保持しています。
           </p> : null}
-          {workflow?.state === "ocr_failed" ? <div role="alert">
+          {workflow?.state === "ocr_failed" ? <div role={geometryReviewPending ? "status" : "alert"}>
+            {geometryReviewPending ? <>
+              <p>{ocrJobErrorMessage}</p>
+              <Button disabled={Boolean(busy)} onClick={() => setVisibleStep(geometryReviewStep)}>原本の位置を確認する</Button>
+            </> : <>
             {recognitionReviewPending ? <>
               <p>{ocrJobErrorMessage}</p>
               <p>原画像と読み取り原文を確認し、空欄または数値を指定してください。再実行だけでは同じ箇所で停止する場合があります。</p>
@@ -4309,6 +4324,7 @@ export default function OrderWorkflowV2Page() {
                 <p>{workflow.ocr_job?.processing_stage}: {workflow.ocr_job?.error_detail || workflowBlockers.join(" / ")}</p>
               </details>
             </> : <p>{workflow.ocr_job?.processing_stage}: {workflow.ocr_job?.error_detail || workflowBlockers.join(" / ")}</p>}
+            </>}
             {!recognitionReviewPending && ocrJobRecoveryAction === "review_recognition_cells" ? <Button disabled={Boolean(busy)} onClick={() => openRecognitionResume()}>セル画像を確認・訂正</Button> : null}
             {!recognitionReviewPending && ocrJobRecoveryAction === "review_recognition_cells" ? <Button disabled={Boolean(busy)} onClick={() => openRecognitionResume(undefined, "full_manual/v1")}>すべてのセルを手入力</Button> : null}
             {[
@@ -4359,7 +4375,7 @@ export default function OrderWorkflowV2Page() {
           </Dialog>
           {selectedOcr?.selectable === true && selectedOcr.recognition_acceptance ? <p>読み取り結果は利用者確認済みです。以下は認識実行時のジョブ履歴です。</p> : null}
           {quantityContentEditable && !workflow?.saved_sheet_id ? <Button className="btn ghost workflow-ordinary-control" disabled={Boolean(busy)} onClick={() => setVisibleStep(2)}>Step2でシートを作成</Button> : null}
-          {commonJobStatus ? recognitionReviewPending || quantityContentEditable ? <details><summary>認識ジョブの履歴</summary><JobStatus job={commonJobStatus} showDetails /></details> : <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}
+          {commonJobStatus ? recognitionReviewPending || quantityContentEditable || geometryReviewPending ? <details><summary>認識ジョブの履歴</summary><JobStatus job={commonJobStatus} showDetails /></details> : <JobStatus job={commonJobStatus} showDetails /> : <span>ジョブ記録未取得</span>}
           {workflow?.state === "ocr_running" ? (
             <p className="ocr-progress-inline">OCR進捗: {formatOcrProgress(workflow)}</p>
           ) : null}
@@ -4426,8 +4442,8 @@ export default function OrderWorkflowV2Page() {
       {message ? <div className="notice success">{message}</div> : null}
       {error ? <div className="notice error">{error}</div> : null}
       {ocrJobErrorMessage && (workflow?.ocr_job?.status === "failed" || ocrBindingError) ? (
-        <div className={recognitionReviewPending ? "notice warning" : "notice error"}>
-          {recognitionReviewPending ? <><strong>読み取り結果の確認待ち</strong><details><summary>認識実行時のエラー詳細</summary>{ocrJobErrorMessage}</details></> : <><strong>{ocrBindingError ? "OCR参照エラー:" : "OCR失敗:"}</strong> {ocrJobErrorMessage}</>}
+        <div className={recognitionReviewPending || geometryReviewPending ? "notice warning" : "notice error"}>
+          {geometryReviewPending ? <><strong>原本の位置確認待ち</strong> {ocrJobErrorMessage}</> : recognitionReviewPending ? <><strong>読み取り結果の確認待ち</strong><details><summary>認識実行時のエラー詳細</summary>{ocrJobErrorMessage}</details></> : <><strong>{ocrBindingError ? "OCR参照エラー:" : "OCR失敗:"}</strong> {ocrJobErrorMessage}</>}
           {ocrJobRecoveryAction === "review_or_edit_quad" ? (
             <span>
               {" "}Step1.5で推定4点を確認してください。
@@ -4438,9 +4454,9 @@ export default function OrderWorkflowV2Page() {
           ) : null}
         </div>
       ) : null}
-      {workflowBlockers.length ? (
+      {visibleWorkflowBlockers.length ? (
         <div className="notice error">
-          {workflowBlockers.map(describeWorkflowBlocker).join(" / ")}
+          {visibleWorkflowBlockers.map(describeWorkflowBlocker).join(" / ")}
           {menuAmountResolution?.affected_lines.map((line, index) => (
             <div key={`${line.line_id || "line"}-${index}`}>
               {[line.date, line.daypart, line.menu_name, line.diet_type, line.area_id].filter(Boolean).join(" / ")}
@@ -4971,7 +4987,9 @@ export default function OrderWorkflowV2Page() {
             </Button>
           </header>
           {quadReviewMessage ? <div className="notice error">{quadReviewMessage}</div> : null}
+          {quadReview?.estimate ? <p role="status">{quadReview.estimate.status === "ok" ? "推定した四隅を原本と照合してください。" : "四隅の自動推定を確定できません。表外枠の四隅を指定してください。"}</p> : null}
           {quadReview?.estimate ? (
+            <details><summary>四隅の自動推定の診断詳細</summary>
             <div className="quad-review-summary">
               <div>
                 <span className="field-label">判定</span>
@@ -4993,7 +5011,7 @@ export default function OrderWorkflowV2Page() {
                   hit率下限 {quadReview.tolerance_policy?.hit_rate_min ?? 0.78}
                 </p>
               </div>
-            </div>
+            </div></details>
           ) : null}
           <div className="quad-review-actions">
             <Button
@@ -5079,7 +5097,7 @@ export default function OrderWorkflowV2Page() {
                   className={manualQuadMode ? "quad-clickable-image" : ""}
                 />
                 <svg viewBox={`0 0 ${quadImageWidth} ${quadImageHeight}`} aria-hidden="true">
-                  {suggestedQuad.length === 4 ? (
+                  {!manualQuadMode && suggestedQuad.length === 4 ? (
                     <polygon
                       points={suggestedQuad.map((point) => `${point[0]},${point[1]}`).join(" ")}
                       className="quad-estimate-polygon"
@@ -5108,9 +5126,9 @@ export default function OrderWorkflowV2Page() {
           <p className="step-tag">Step1.6</p>
           <header className="panel-header">
             <div>
-              <h2>ヘッダー交点の手動補正</h2>
+              <h2>列の境界を確認</h2>
               <p className="subtle">
-                2段ヘッダーの縦線判定が手書き訂正線などに引っ張られた場合だけ使います。点を横方向にドラッグして、実FAXのヘッダー交点に合わせてからOCRを再実行します。
+                {headerAxisReview?.guidance?.message || "列の位置を確認しています。"}
               </p>
             </div>
             <div className="row-actions">
@@ -5143,7 +5161,7 @@ export default function OrderWorkflowV2Page() {
               <Button className="btn ghost workflow-ordinary-control" type="button" onClick={resetHeaderAxisXs} disabled={headerAxisLoading || Boolean(busy) || !headerAxisReview}>
                 自動検出に戻す
               </Button>
-              <Button className="btn primary workflow-ordinary-control" type="button" onClick={() => void saveHeaderAxisAndRerun()} disabled={Boolean(busy || headerAxisXs.length < 2)}>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={() => void saveHeaderAxisAndRerun()} disabled={Boolean(busy || !headerAxisImageSrc || headerAxisXs.length < 2 || (headerAxisExpectedCount > 0 && headerAxisXs.length !== headerAxisExpectedCount))}>
                 ヘッダー補正を保存してOCR再実行
               </Button>
             </div>
@@ -5154,16 +5172,21 @@ export default function OrderWorkflowV2Page() {
             縦軸をクリックすると選択、ドラッグで移動、追加モード中は画像上のクリック位置に縦軸を追加します。
           </p>
           {headerAxisMessage ? <div className="notice error">{headerAxisMessage}</div> : null}
-          {headerAxisReview?.error_detail ? <div className="notice error" role="alert">ヘッダー境界の検証停止: {headerAxisReview.error_detail}</div> : null}
+          {headerAxisReview?.error_detail ? <details><summary>列の自動推定の診断詳細</summary>{headerAxisReview.error_detail}</details> : null}
+          {headerAxisReview?.prerequisite_action === "review_or_edit_quad" ? <Button onClick={() => setVisibleStep(1.5)}>先に表の四隅を指定</Button> : null}
+          <label>確認する列境界 <select value={selectedHeaderAxisIndex ?? ""} onChange={event => setSelectedHeaderAxisIndex(event.target.value === "" ? null : Number(event.target.value))}>
+            <option value="">選択してください</option>
+            {headerAxisXs.map((_, index) => <option key={index} value={index}>{index === 0 ? "表の左端" : index === headerAxisXs.length - 1 ? "表の右端" : `${headerAxisReview?.column_labels?.[index - 1] || `列${index}`} と ${headerAxisReview?.column_labels?.[index] || `列${index + 1}`} の間`}</option>)}
+          </select></label>
           <div className="header-axis-canvas-wrap">
             {headerAxisImageSrc ? (
               <div className="header-axis-canvas">
                 <img src={headerAxisImageSrc} alt="ヘッダー交点補正" />
                 <svg
                   viewBox={`0 0 ${headerAxisImageWidth} ${headerAxisImageHeight}`}
-                  onMouseMove={handleHeaderAxisPointerMove}
-                  onMouseUp={() => setDraggingHeaderAxisIndex(null)}
-                  onMouseLeave={() => setDraggingHeaderAxisIndex(null)}
+                  onPointerMove={handleHeaderAxisPointerMove}
+                  onPointerUp={() => setDraggingHeaderAxisIndex(null)}
+                  onPointerCancel={() => setDraggingHeaderAxisIndex(null)}
                   onClick={handleHeaderAxisCanvasClick}
                   aria-label="ヘッダー交点補正"
                 >
@@ -5172,17 +5195,18 @@ export default function OrderWorkflowV2Page() {
                     const selected = selectedHeaderAxisIndex === idx;
                     return (
                       <g key={`header-axis-${idx}`}>
-                        <line x1={displayX} y1={0} x2={displayX} y2={headerAxisImageHeight} className={`header-axis-line ${selected ? "selected" : ""}`} />
-                        {headerAxisDisplayYLevels.map((y, yIdx) => (
+                        <line x1={displayX} y1={0} x2={displayX} y2={headerAxisImageHeight} className={`header-axis-line ${selected ? "selected" : ""}`} onPointerDown={event => {event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); setSelectedHeaderAxisIndex(idx); setDraggingHeaderAxisIndex(idx);}} />
+                        {(selected ? headerAxisDisplayYLevels : headerAxisDisplayYLevels.slice(0, 1)).map((y, yIdx) => (
                           <circle
                             key={`header-axis-${idx}-${yIdx}`}
                             cx={displayX}
                             cy={y - headerAxisCropY0}
                             r="10"
                             className={`header-axis-point ${selected ? "selected" : ""}`}
-                            onMouseDown={(event) => {
+                            onPointerDown={(event) => {
                               event.preventDefault();
                               event.stopPropagation();
+                              event.currentTarget.setPointerCapture(event.pointerId);
                               setSelectedHeaderAxisIndex(idx);
                               setDraggingHeaderAxisIndex(idx);
                             }}
@@ -5225,9 +5249,9 @@ export default function OrderWorkflowV2Page() {
           <p className="step-tag">Step1.7</p>
           <header className="panel-header">
             <div>
-              <h2>行推定の手動補正</h2>
+              <h2>行と日付の境界を確認</h2>
               <p className="subtle">
-                全テーブル交点から推定した行境界を確認します。行の縦幅に外れ値がある場合や、日付・献立行の境界がずれている場合は横線をドラッグして調整します。
+                {rowAxisReview?.guidance?.message || "行の位置を確認しています。"}
               </p>
             </div>
             <div className="row-actions">
@@ -5251,39 +5275,49 @@ export default function OrderWorkflowV2Page() {
               <Button className="btn ghost workflow-ordinary-control" type="button" onClick={resetRowAxisYs} disabled={rowAxisLoading || Boolean(busy) || !rowAxisReview}>
                 自動検出に戻す
               </Button>
-              <Button className="btn primary workflow-ordinary-control" type="button" onClick={() => void saveRowAxisAndRerun()} disabled={Boolean(busy || rowAxisYs.length < 2)}>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={() => void saveRowAxisAndRerun()} disabled={Boolean(busy || !rowAxisImageSrc || rowAxisYs.length < 2 || rowAxisReview?.prerequisite_action)}>
                 行推定補正を保存してOCR再実行
               </Button>
             </div>
           </header>
           {rowAxisWarning ? <div className="notice warning">{rowAxisWarning}</div> : null}
-          {rowAxisReview?.error_detail ? <div className="notice error" role="alert">
-            行・日境界の検証停止: {rowAxisReview.error_detail}
-          </div> : null}
-          {rowAxisReview?.boundary_diagnostics ? <p>
-            日付欄の期待境界: {rowAxisReview.boundary_diagnostics.expected?.join(", ") ?? "未確定"} / 検出境界: {rowAxisReview.boundary_diagnostics.actual?.join(", ") ?? "未検出"}
-          </p> : null}
-          <p className="subtle">本文の先頭境界は0です。ヘッダーは{rowAxisReview?.header_band_count ?? "未確認"}帯。対象外の日も空欄帯を残します。</p>
+          {rowAxisReview?.error_detail ? <details><summary>行の自動推定の診断詳細</summary>{rowAxisReview.error_detail}</details> : null}
+          {rowAxisReview?.prerequisite_action ? <Button onClick={() => setVisibleStep(rowAxisReview.prerequisite_action === "review_or_edit_quad" ? 1.5 : 1.6)}>{rowAxisReview.prerequisite_action === "review_or_edit_quad" ? "先に表の四隅を指定" : "先に列の境界を確認"}</Button> : null}
+          {rowAxisReview?.guidance?.expected_body_count != null ? <p>献立 {rowAxisReview.guidance.expected_body_count} 行 / 検出 {rowAxisReview.guidance.observed_body_count ?? "未確定"} 行</p> : null}
+          {rowAxisReview?.guidance?.missing_boundaries?.length ? <p role="status">未確認の区切り：{rowAxisReview.guidance.missing_boundaries.map(index => index === rowAxisReview.guidance?.expected_body_count ? "表の最下端" : `本文${index + 1}行目の上端`).join("、")}</p> : null}
+          {rowAxisReview?.guidance?.extra_boundaries?.length ? <p role="status">余分な区切り候補：{rowAxisReview.guidance.extra_boundaries.map(index => `本文${index + 1}行目の上端`).join("、")}</p> : null}
+          <label>確認する横線 <select value={selectedRowAxisIndex ?? ""} onChange={event => setSelectedRowAxisIndex(event.target.value === "" ? null : Number(event.target.value))}>
+            <option value="">選択してください</option>
+            {rowAxisYs.map((_, index) => <option key={index} value={index}>{index < (rowAxisReview?.header_band_count ?? 0) ? `見出しの境界${index + 1}` : index === rowAxisYs.length - 1 ? "表の最下端" : `本文${index - (rowAxisReview?.header_band_count ?? 0) + 1}行目の上端`}</option>)}
+          </select></label>
           <div className="row-actions">
             {rowAxisReview?.calendar_days?.map((day, index) => (
               <label key={day.date}>
-                {day.date} 開始境界
-                <input type="number" min={0} step={1} value={rowDayBoundaries[index] ?? ""}
+                {day.date} 最初の行
+                <select value={rowDayBoundaries[index] ?? ""}
                   disabled={Boolean(busy)} onChange={event => {
                     beginWorkflowEditorEdit("row", true);
                     setRowDayBoundaries(current => current.map((value, i) => i === index ? event.target.value : value));
-                  }} />
-                <span>期待 {day.expected_band_count ?? "対象外（原画像で確認）"}帯 / 現在 {
+                    setSelectedRowAxisIndex(event.target.value === "" ? null : Number(event.target.value) + (rowAxisReview?.header_band_count ?? 0));
+                  }}>
+                  <option value="">原本で確認</option>
+                  {rowAxisYs.slice(rowAxisReview.header_band_count ?? 0, -1).map((_, boundary) => <option value={boundary} key={boundary}>本文{boundary + 1}行目</option>)}
+                </select>
+                <span role={day.expected_band_count != null && rowDayBoundaries[index] !== "" && rowDayBoundaries[index + 1] !== "" && Number(rowDayBoundaries[index + 1]) - Number(rowDayBoundaries[index]) !== day.expected_band_count ? "alert" : undefined}>献立 {day.expected_band_count ?? "対象外"}行 / 選択 {
                   rowDayBoundaries[index] !== "" && rowDayBoundaries[index + 1] !== ""
-                    ? Number(rowDayBoundaries[index + 1]) - Number(rowDayBoundaries[index]) : "未指定"}帯</span>
+                    ? Number(rowDayBoundaries[index + 1]) - Number(rowDayBoundaries[index]) : "未指定"}行</span>
               </label>
             ))}
-            <label>最終境界
-              <input type="number" min={0} step={1} value={rowDayBoundaries.at(-1) ?? ""}
+            <label>最終日の下端
+              <select value={rowDayBoundaries.at(-1) ?? ""}
                 disabled={Boolean(busy)} onChange={event => {
                   beginWorkflowEditorEdit("row", true);
                   setRowDayBoundaries(current => current.map((value, i) => i === current.length - 1 ? event.target.value : value));
-                }} />
+                  setSelectedRowAxisIndex(event.target.value === "" ? null : Number(event.target.value) + (rowAxisReview?.header_band_count ?? 0));
+                }}>
+                <option value="">原本で確認</option>
+                {rowAxisYs.slice((rowAxisReview?.header_band_count ?? 0) + 1).map((_, index) => <option value={index + 1} key={index}>本文{index + 1}行目の下端</option>)}
+              </select>
             </label>
           </div>
           <p className="subtle">
@@ -5296,9 +5330,9 @@ export default function OrderWorkflowV2Page() {
                 <img src={rowAxisImageSrc} alt="行推定補正" />
                 <svg
                   viewBox={`0 0 ${rowAxisImageWidth} ${rowAxisImageHeight}`}
-                  onMouseMove={handleRowAxisPointerMove}
-                  onMouseUp={() => setDraggingRowAxisIndex(null)}
-                  onMouseLeave={() => setDraggingRowAxisIndex(null)}
+                  onPointerMove={handleRowAxisPointerMove}
+                  onPointerUp={() => setDraggingRowAxisIndex(null)}
+                  onPointerCancel={() => setDraggingRowAxisIndex(null)}
                   onClick={handleRowAxisCanvasClick}
                   aria-label="行推定補正"
                 >
@@ -5306,15 +5340,16 @@ export default function OrderWorkflowV2Page() {
                     const selected = selectedRowAxisIndex === idx;
                     return (
                       <g key={`row-axis-${idx}`}>
-                        <line x1={0} y1={y} x2={rowAxisImageWidth} y2={y} className={`row-axis-line ${selected ? "selected" : ""}`} />
+                        <line x1={0} y1={y} x2={rowAxisImageWidth} y2={y} className={`row-axis-line ${selected ? "selected" : ""}`} onPointerDown={event => {event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); setSelectedRowAxisIndex(idx); setDraggingRowAxisIndex(idx);}} />
                         <circle
                           cx={28}
                           cy={y}
                           r="10"
                           className={`row-axis-point ${selected ? "selected" : ""}`}
-                          onMouseDown={(event) => {
+                          onPointerDown={(event) => {
                             event.preventDefault();
                             event.stopPropagation();
+                            event.currentTarget.setPointerCapture(event.pointerId);
                             setSelectedRowAxisIndex(idx);
                             setDraggingRowAxisIndex(idx);
                           }}
@@ -5324,7 +5359,7 @@ export default function OrderWorkflowV2Page() {
                             setRowAxisAddMode(false);
                           }}
                         />
-                        <text
+                        {selected ? <text
                           x={42}
                           y={y - 8}
                           className={`row-axis-label ${selected ? "selected" : ""}`}
@@ -5334,11 +5369,11 @@ export default function OrderWorkflowV2Page() {
                             setRowAxisAddMode(false);
                           }}
                         >
-                          {idx < (rowAxisReview?.header_band_count ?? 0) ? `H${idx}` : `本文${idx - (rowAxisReview?.header_band_count ?? 0)}`}
+                          {idx < (rowAxisReview?.header_band_count ?? 0) ? `見出し${idx + 1}` : idx === rowAxisYs.length - 1 ? "表の最下端" : `本文${idx - (rowAxisReview?.header_band_count ?? 0) + 1}行目の上端`}
                           {rowAxisReview?.calendar_days?.map((day, dayIndex) =>
                             rowDayBoundaries[dayIndex] !== "" && Number(rowDayBoundaries[dayIndex]) + (rowAxisReview.header_band_count ?? 0) === idx
                               ? ` ${day.date}` : "").join("")}
-                        </text>
+                        </text> : null}
                       </g>
                     );
                   })}
@@ -7788,10 +7823,12 @@ export default function OrderWorkflowV2Page() {
           position: absolute;
           width: 100%;
           height: 100%;
+          touch-action: none;
         }
         .header-axis-line {
-          stroke: rgba(255, 145, 0, 0.65);
-          stroke-width: 4;
+          stroke: rgba(45, 65, 80, 0.45);
+          stroke-width: 2;
+          cursor: ew-resize;
         }
         .header-axis-line.selected {
           stroke: rgba(0, 104, 255, 0.92);
@@ -7799,7 +7836,7 @@ export default function OrderWorkflowV2Page() {
         }
         .header-axis-point {
           cursor: ew-resize;
-          fill: #ff9100;
+          fill: #475569;
           stroke: #fff;
           stroke-width: 3;
         }
@@ -7841,10 +7878,12 @@ export default function OrderWorkflowV2Page() {
           position: absolute;
           width: 100%;
           height: 100%;
+          touch-action: none;
         }
         .row-axis-line {
-          stroke: rgba(255, 145, 0, 0.65);
-          stroke-width: 4;
+          stroke: rgba(45, 65, 80, 0.45);
+          stroke-width: 2;
+          cursor: ns-resize;
         }
         .row-axis-line.selected {
           stroke: rgba(0, 104, 255, 0.92);
@@ -7852,7 +7891,7 @@ export default function OrderWorkflowV2Page() {
         }
         .row-axis-point {
           cursor: ns-resize;
-          fill: #ff9100;
+          fill: #475569;
           stroke: #fff;
           stroke-width: 3;
         }

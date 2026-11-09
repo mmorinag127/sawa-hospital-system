@@ -14,6 +14,13 @@ BASE = "419046eb02d6c7e758da897fd28bec3656809ca0"
 RUN = 42460685431
 REPOSITORY = "mmorinag127/sawa-hospital-system"
 ALLOWED = {
+    "backend/src/services/ocr_row_recovery_service.py",
+    "backend/tests/unit/test_geometry_review_contract.py",
+    "backend/tests/unit/test_ocr_row_recovery_persistence.py",
+    "backend/tests/unit/test_ocr_header_recovery.py",
+    "backend/tests/unit/test_h2_operator_repair_revision.py",
+    "frontend/tests/workflow-controls-source.test.cjs",
+    "docs/OCR_GEOMETRY_REVIEW_20261109.md",
     "backend/src/api/orders.py", "backend/src/services/order_workflow_v2_service.py",
     "frontend/src/pages/orders/[id]/workflow-v2.tsx", "frontend/src/features/orders/workflowTypes.ts",
     "backend/tests/unit/test_h2_quad_geometry_roundtrip.py",
@@ -66,12 +73,15 @@ PYTEST += ["backend/tests/unit/" + name for name in (
 )]
 PYTEST += ["backend/tests/unit/" + name for name in (
     "test_ocr_header_recovery.py", "test_ocr_row_recovery.py", "test_h2_operator_repair_revision.py",
+    "test_geometry_review_contract.py", "test_ocr_row_recovery_persistence.py",
+    "test_recognition_checkpoint_geometry_invalidation.py",
 )]
 COMMANDS = [
     ("backend", ["python3", "-m", "pytest", *PYTEST, "-q"], "."),
     ("frontend", ["node", "--test", "--test-concurrency=1",
                   "tests/fax-orientation-template.test.cjs", "tests/order-facility-read.test.cjs",
-                  "tests/h2-quad-owner.test.cjs"], "frontend"),
+                  "tests/h2-quad-owner.test.cjs", "tests/workflow-controls-source.test.cjs",
+                  "tests/modernization-workflow-action-dom.test.cjs"], "frontend"),
     ("types", ["node", "node_modules/typescript/bin/tsc", "--noEmit", "--incremental", "false"], "frontend"),
     ("native-shift", ["python3", "-m", "pytest",
                       *["experiments/agent_assistant/tests/" + name for name in (

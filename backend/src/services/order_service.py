@@ -9470,10 +9470,17 @@ def _build_live_hakodate_manifest_item(
         from src.services.workflow_attempt_guard_service import current_workflow_execution
         owner = current_workflow_execution() or {}
         fax_rotation = owner.get("fax_rotation_degrees")
+        if fax_rotation is None and review_start_input is not None:
+            review_job = session.get(OcrJob, workflow_meta.get("ocr_job_id")) if workflow_meta.get("ocr_job_id") else None
+            review_metrics = (review_job.metrics or {}) if review_job is not None else {}
+            if review_metrics.get("selected_pdf_receipt") == verified_input.selected_pdf_receipt:
+                fax_rotation = review_metrics.get("fax_rotation_degrees")
+        if fax_rotation is None:
+            fax_rotation = (workflow_meta.get("quad_override") or {}).get("rotation_degrees", 0)
         if fax_rotation is not None:
             if type(fax_rotation) is not int or fax_rotation not in (0, 180):
                 raise ValueError("fax_rotation_invalid")
-            if owner.get("selected_pdf_receipt") != verified_input.selected_pdf_receipt:
+            if owner and owner.get("selected_pdf_receipt") != verified_input.selected_pdf_receipt:
                 raise ValueError("selected_document_input_changed")
             saved_quad = workflow_meta.get("quad_override") or {}
             if quad_override_px and saved_quad.get("rotation_degrees") == 180:
@@ -9583,6 +9590,7 @@ def _build_live_hakodate_manifest_item(
         "template_axes_y": template_axes_y,
         "quad_px": registration.quad_px,
         "quad_source": registration.quad_source,
+        "fax_rotation_degrees": fax_rotation or 0,
         "quad_override": deepcopy(workflow_meta.get("quad_override")),
         "header_axis_override": header_axis_override,
         "row_axis_override": row_axis_override,
@@ -9591,8 +9599,25 @@ def _build_live_hakodate_manifest_item(
     }
 
 
+def _geometry_review_canvas(item):
+    from src.services.hakodate_fixed_quad_registration_service import render_pdf_page_to_bgr, rectify_fax_to_template_grid
+    import cv2
+    canvas = cv2.imread(item["step2_png"])
+    if canvas is None:
+        raise ValueError("geometry_review_canvas_missing")
+    height, width = canvas.shape[:2]
+    return rectify_fax_to_template_grid(
+        render_pdf_page_to_bgr(item["fax_pdf"], width=1864, page=item["selected_page"]),
+        quad_px=item["quad_px"],
+        table_bbox=[item["template_axes_x"][0], item["template_axes_y"][0], item["template_axes_x"][-1], item["template_axes_y"][-1]],
+        canvas_width=width, canvas_height=height,
+    )
+
+
 def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, start_input: dict) -> dict[str, Any]:
     from src.services import hakodate_cell_ocr_batch_service
+    from src.services import ocr_row_recovery_service
+    from PIL import Image
 
     with session_scope() as session:
         order = session.get(Order, order_id)
@@ -9614,7 +9639,7 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
             configured_input=start_input["configured_input"],
             review_start_input=start_input,
         )
-        rectified_fax = hakodate_cell_ocr_batch_service.cv2.imread(runtime_item["step2_png"])
+        rectified_fax = _geometry_review_canvas(runtime_item)
         if rectified_fax is None:
             raise ValueError("header_axis_review_rectified_canvas_missing")
         template_xs = [int(value) for value in runtime_item.get("template_axes_x") or []]
@@ -9640,10 +9665,7 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
             else None,
             diagnostic_only=True,
         )
-        image = hakodate_cell_ocr_batch_service._draw_header_intersections_overlay(  # noqa: SLF001
-            image=_axis_match_image,
-            axis_evidence=axis_evidence,
-        ).convert("RGB")
+        image = Image.fromarray(hakodate_cell_ocr_batch_service.cv2.cvtColor(rectified_fax, hakodate_cell_ocr_batch_service.cv2.COLOR_BGR2RGB))
         match = axis_evidence.get("header_intersection_x_match") if isinstance(axis_evidence, dict) else {}
         if not isinstance(match, dict):
             match = {}
@@ -9663,11 +9685,8 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
         crop = image.crop(tuple(crop_box))
         buf = io.BytesIO()
         crop.save(buf, format="PNG")
-        corrected_xs = match.get("corrected_xs")
-        if not isinstance(corrected_xs, list) or len(corrected_xs) < 2:
-            clusters = match.get("fax_x_clusters")
-            if isinstance(clusters, list):
-                corrected_xs = [cluster.get("value") for cluster in clusters if isinstance(cluster, dict)]
+        corrected_xs = (match.get("corrected_xs") if runtime_item.get("header_axis_override")
+                        else ocr_row_recovery_service.header_candidates(match))
         if not isinstance(corrected_xs, list):
             corrected_xs = []
         xs: list[float] = []
@@ -9689,6 +9708,10 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
             "order_id": order_id,
             "status": "ready" if match.get("used") else "needs_correction",
             "error_detail": None if match.get("used") else match.get("reason"),
+            "guidance": ocr_row_recovery_service.review_guidance(match.get("reason"), axis="header", match=match),
+            "column_labels": [" / ".join(dict.fromkeys(str(worksheet.cell(row=row, column=column).value)
+                for row in range(7, 11) if worksheet.cell(row=row, column=column).value is not None))
+                for column in range(1, worksheet.max_column + 1)],
             "image_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
             "image_size": [crop.width, crop.height],
             "crop_box": crop_box,
@@ -9710,6 +9733,7 @@ def _load_axis_review_pdf(source_receipt):
 
 def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start_input: dict) -> dict[str, Any]:
     from src.services import hakodate_cell_ocr_batch_service
+    from PIL import Image
 
     with session_scope() as session:
         order = session.get(Order, order_id)
@@ -9731,7 +9755,7 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
             configured_input=start_input["configured_input"],
             review_start_input=start_input,
         )
-        rectified_fax = hakodate_cell_ocr_batch_service.cv2.imread(runtime_item["step2_png"])
+        rectified_fax = _geometry_review_canvas(runtime_item)
         if rectified_fax is None:
             raise ValueError("row_axis_review_rectified_canvas_missing")
         template_xs = [int(value) for value in runtime_item.get("template_axes_x") or []]
@@ -9757,12 +9781,12 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
             else None,
             diagnostic_only=True,
         )
-        image = hakodate_cell_ocr_batch_service._draw_row_intersections_overlay(  # noqa: SLF001
-            image=_axis_match_image,
-            axis_evidence=axis_evidence,
-        ).convert("RGB")
+        image = Image.fromarray(hakodate_cell_ocr_batch_service.cv2.cvtColor(rectified_fax, hakodate_cell_ocr_batch_service.cv2.COLOR_BGR2RGB))
         match = axis_evidence["row_intersection_y_match"]
         diagnostic_error = match.get("reason") if match.get("diagnostic_only") else None
+        header_match = axis_evidence.get("header_intersection_x_match") or {}
+        if not header_match.get("used"):
+            diagnostic_error = "header_axis_unresolved"
         if diagnostic_error is None:
             try:
                 hakodate_cell_ocr_batch_service._validate_menu_day_boundaries(runtime_item["original_physical_draft"], match)
@@ -9782,7 +9806,7 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
             match = {}
         corrected_ys = match.get("corrected_ys")
         if not isinstance(corrected_ys, list) or len(corrected_ys) < 2:
-            corrected_ys = list(aligned_ys)
+            corrected_ys = [cluster["value"] for cluster in match.get("raw_fax_y_clusters", [])]
         ys: list[float] = []
         for raw in corrected_ys:
             try:
@@ -9794,6 +9818,8 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
             "order_id": order_id,
             "status": "needs_correction" if diagnostic_error else "ready",
             "error_detail": diagnostic_error,
+            "guidance": ocr_row_recovery_service.review_guidance(diagnostic_error, axis="row", match=match),
+            "prerequisite_action": None if header_match.get("used") else "review_header_boundaries",
             "calendar_days": days,
             "boundary_diagnostics": {
                 "expected": day_source.get("canonical_date_column_boundary_indexes"),
@@ -9801,7 +9827,7 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
                 "missing": match.get("missing_date_column_boundary_indexes"),
                 "extra": match.get("extra_date_column_boundary_indexes"),
             },
-            "body_day_boundary_indexes": (match.get("structural_match") or {}).get("body_day_boundary_indexes"),
+            "body_day_boundary_indexes": ocr_row_recovery_service.observed_day_candidates(days, match),
             "header_band_count": len(master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS),
             "image_png_base64": base64.b64encode(buf.getvalue()).decode("ascii"),
             "image_size": [image.width, image.height],
@@ -12894,6 +12920,8 @@ def _complete_ocr_rerun_in_session(session, order_id, job_id, evidence, *, error
         "evidence_run_id": evidence_id, "status": job.status, "error": error,
     }
     from src.services.ocr_failure_diagnostics import RECOGNITION_REJECTIONS
+    from src.services.ocr_row_recovery_service import failure_details
+    geometry_review = failure_details(error or "") is not None
     review_failure = (error in RECOGNITION_REJECTIONS and evidence_id
                       and metrics_patch.get("recognition_review")
                       and metrics_patch.get("recovery_action") == "review_recognition_cells")
@@ -12906,7 +12934,7 @@ def _complete_ocr_rerun_in_session(session, order_id, job_id, evidence, *, error
         "evidence_run_id": evidence_id, "adopted": False,
         "status": job.status, "error": error,
         "processing_stage": "rejected_review_saved" if review_failure and not failure_metrics_override else metrics_patch.get("processing_stage", "validation" if error else "evidence_ready"),
-        "result_state": ("review_required" if review_failure and not failure_metrics_override else "hard_failed") if error else metrics_patch.get("result_state", "evidence_ready"),
+        "result_state": ("review_required" if (review_failure or geometry_review) and not failure_metrics_override else "hard_failed") if error else metrics_patch.get("result_state", "evidence_ready"),
         "rerun_terminal_receipt": deepcopy(receipt),
     }
     session.flush()
@@ -13018,8 +13046,11 @@ def _persist_ocr_rerun_completion(
                 _validate_hakodate_owned_artifacts(own_payload,
                     _hakodate_owned_source(processing_start_configured_input(), processing_start_pdf_receipt()), allow_review=True)
             else:
-                native_hard_failure = True
-                metrics_patch = {**(metrics_patch or {}), "processing_stage": "native_ingest_failed", "result_state": "hard_failed"}
+                from src.services.ocr_row_recovery_service import failure_details
+                geometry_review = failure_details(error)
+                native_hard_failure = geometry_review is None
+                metrics_patch = {**(metrics_patch or {}), **(geometry_review or {
+                    "processing_stage": "native_ingest_failed", "result_state": "hard_failed"})}
         receipt = _complete_ocr_rerun_in_session(
             session, order_id, job_id, evidence, error=error,
             metrics_patch=metrics_patch or {},

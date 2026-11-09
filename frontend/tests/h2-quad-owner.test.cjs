@@ -293,6 +293,18 @@ function axisHarness(axis){
   h.saveAxis=()=>actual(axis==='header'?'saveHeaderAxisAndRerun':'saveRowAxisAndRerun',h.context)();
   return h;
 }
+for(const axis of ['header','row'])test(`actual ${axis} correction retains selected 180 degree rotation`,async()=>{
+  const h=axisHarness(axis);h.context.effectiveFaxRotation=180;
+  await h.loadAxis();await h.saveAxis();
+  const rerun=h.state.calls.find(call=>call.method==='POST');
+  assert.equal(rerun.body.rotation_degrees,180);
+  assert.equal(rerun.body.document_id,'pdf-A');
+});
+test('header correction with missing axes does not dispatch or fabricate boundaries',async()=>{
+  const h=axisHarness('header');await h.loadAxis();
+  h.context.headerAxisXs=[0];await h.saveAxis();
+  assert.equal(h.state.calls.length,1);
+});
 for(const axis of ['header','row'])test(`actual ${axis} source receipt and original PDF survive manual correction and own revision chain`,async()=>{
   const h=axisHarness(axis);await h.loadAxis();assert.equal(h.state.calls[0].config.params.document_id,'pdf-A');
   h.context.beginWorkflowEditorEdit(axis);await h.saveAxis();

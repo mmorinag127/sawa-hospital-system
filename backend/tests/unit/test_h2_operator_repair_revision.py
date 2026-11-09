@@ -969,6 +969,7 @@ def _make_connected_physical_pipeline(monkeypatch, tmp_path, *, merged=False, ex
         result["_verified_pdf_bytes"] = load_selected_pdf_bytes(item["fax_pdf"], item["selected_pdf_receipt"])
         return result
     monkeypatch.setattr(order_service, "_build_live_hakodate_manifest_item", manifest)
+    monkeypatch.setattr(order_service, "_geometry_review_canvas", lambda item: image.copy())
     try:
         yield order_id, receipt, start, item, tmp_path
     finally:

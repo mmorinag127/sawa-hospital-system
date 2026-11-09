@@ -19,11 +19,10 @@ def test_outer_frame_identity_cannot_be_skipped_to_improve_gap_score():
     corrected, evidence = subject._structural_match_header_x_clusters(
         template_xs=template, x_clusters=[{"value": x} for x in observed],
     )
-    assert corrected is not None
-    assert evidence["matched_pairs"][0]["template_index"] == 0
-    assert evidence["matched_pairs"][-1]["template_index"] == len(template) - 1
-    assert 0 not in evidence["skipped_template_indexes"]
-    assert len(corrected) == len(template)
+    assert corrected is None
+    assert evidence["reason"] == "header_axis_count_requires_review"
+    assert evidence["template_count"] == len(template)
+    assert evidence["cluster_count"] == len(observed)
 
 
 @pytest.mark.parametrize("offset,scale", [(0, 1), (37, 2.5)])

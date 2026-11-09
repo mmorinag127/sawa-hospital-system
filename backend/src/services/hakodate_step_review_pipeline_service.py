@@ -1682,6 +1682,10 @@ def _detect_header_intersections_for_axis_alignment(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     h_mask, v_mask = _split_line_masks(rectified_bgr)
     x0, y0, x1, y1 = _header_bounds_for_axis_alignment(table_bbox, template_ys)
+    # Use the same observed-frame margin as row detection. FAX curvature can
+    # place real outer-frame ink outside its rectification target coordinate.
+    x0 = max(0, x0 - 14)
+    x1 = min(rectified_bgr.shape[1], x1 + 14)
     # A grid coordinate is inclusive; NumPy's slice stop is exclusive.
     x1 = min(rectified_bgr.shape[1], x1 + 1)
     # Merged header columns may first intersect at the body edge. Locate that
@@ -1816,9 +1820,12 @@ def _structural_match_header_x_clusters(
     template_xs: list[int],
     x_clusters: list[dict[str, Any]],
 ) -> tuple[list[float] | None, dict[str, Any]]:
-    """Align header-derived X clusters to template axes without requiring equal counts."""
+    """Match complete observed axes; missing axes require operator review."""
     n = len(template_xs)
     m = len(x_clusters)
+    if n != m:
+        return None, {"used": False, "reason": "header_axis_count_requires_review",
+                      "template_count": n, "cluster_count": m}
     if n < 2 or m < 2:
         return None, {
             "used": False,
@@ -1897,8 +1904,7 @@ def _structural_match_header_x_clusters(
     corrected: list[float | None] = [None for _ in range(n)]
     for cluster_index, template_index in matched_pairs:
         corrected[template_index] = clusters[cluster_index]
-    corrected[0] = float(template_xs[0])
-    corrected[-1] = float(template_xs[-1])
+    # The outer lines are observed ink, not the ideal rectification rectangle.
 
     known_indexes = [index for index, value in enumerate(corrected) if value is not None]
     if len(known_indexes) < 2:
@@ -1911,8 +1917,6 @@ def _structural_match_header_x_clusters(
     known_corrected = np.array([float(corrected[index]) for index in known_indexes], dtype=np.float32)
     all_template = np.array(template, dtype=np.float32)
     interpolated = np.interp(all_template, known_template, known_corrected).astype(np.float32).tolist()
-    interpolated[0] = float(template_xs[0])
-    interpolated[-1] = float(template_xs[-1])
     if not np.all(np.diff(np.array(interpolated, dtype=np.float32)) > 0):
         return None, {
             "used": False,
@@ -2039,8 +2043,6 @@ def _header_intersection_correct_xs(
             evidence["reason"] = "header_x_cluster_count_mismatch"
             return None, evidence
         corrected = [float(cluster["value"]) for cluster in x_clusters]
-        corrected[0] = float(template_xs[0])
-        corrected[-1] = float(template_xs[-1])
     if not np.all(np.diff(np.array(corrected, dtype=np.float32)) > 0):
         evidence["reason"] = "corrected_x_not_monotonic"
         return None, evidence
@@ -2526,6 +2528,7 @@ def _row_intersection_correct_ys(
         y_clusters=raw_y_clusters,
         corrected_xs=[float(value) for value in corrected_xs],
     )
+    detection["raw_fax_y_clusters"] = voted_y_clusters
     y_clusters = _filter_structural_y_clusters(voted_y_clusters)
     physical_matches, topology = _match_printed_header_topology(voted_y_clusters, header_contract)
     detection["header_topology"] = topology

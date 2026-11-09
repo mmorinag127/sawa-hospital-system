@@ -157,11 +157,14 @@ export type HeaderAxisReviewPayload = {
   source_receipt?: Record<string, unknown> | null;
   status?: string | null;
   error_detail?: string | null;
+  prerequisite_action?: string | null;
+  guidance?: GeometryReviewGuidance;
   image_png_base64?: string | null;
   image_size?: number[] | null;
   crop_box?: number[] | null;
   canvas_size?: number[] | null;
   x_positions?: number[] | null;
+  column_labels?: string[];
   y_levels?: number[] | null;
   saved_override?: {
     source_receipt?: Record<string, unknown> | null;
@@ -187,8 +190,10 @@ export type RowAxisReviewPayload = {
   source_receipt?: Record<string, unknown> | null;
   status?: string | null;
   error_detail?: string | null;
+  prerequisite_action?: string | null;
+  guidance?: GeometryReviewGuidance;
   calendar_days?: Array<{date: string; expected_band_count: number | null}>;
-  body_day_boundary_indexes?: number[] | null;
+  body_day_boundary_indexes?: Array<number | null> | null;
   header_band_count?: number;
   boundary_diagnostics?: {expected?: number[] | null; actual?: number[] | null; missing?: number[] | null; extra?: number[] | null};
   image_png_base64?: string | null;
@@ -214,6 +219,14 @@ export type RowAxisReviewPayload = {
     outliers?: Array<Record<string, unknown>>;
   } | null;
   coordinate_space?: { mode?: string; width?: number; height?: number } | null;
+};
+
+export type GeometryReviewGuidance = {
+  message: string;
+  missing_boundaries?: number[];
+  extra_boundaries?: number[];
+  expected_body_count?: number | null;
+  observed_body_count?: number | null;
 };
 
 export type FacilitySuggestionCandidate = {

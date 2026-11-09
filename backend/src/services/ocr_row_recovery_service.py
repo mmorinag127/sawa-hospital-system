@@ -17,12 +17,54 @@ def failure_details(message):
     if code.startswith("row_axis_") or code in row_codes:
         return {"error": code, "error_detail": message, "processing_stage": "row_day_boundaries",
                 "recovery_action": "review_row_day_boundaries",
-                "error_user_message": "行・日境界で停止しました。原画像と停止理由を確認して補正してください。"}
-    if code.startswith("header_axis_"):
+                "result_state": "review_required",
+                "error_user_message": "行・日付の境界を確認してください。原本の横罫線と日付の開始位置を指定すると再開できます。"}
+    if code.startswith("header_axis_") or code in {"header_boundaries_unresolved", "corrected_x_not_monotonic", "post_menu_boundaries_unresolved"}:
         return {"error": code, "error_detail": message, "processing_stage": "header_boundaries",
                 "recovery_action": "review_header_boundaries",
-                "error_user_message": "ヘッダー境界の補正を確認してください。"}
+                "result_state": "review_required",
+                "error_user_message": "列の境界を確認してください。原本の縦罫線を指定すると再開できます。"}
+    if code == "quad_estimation_failed" or message.startswith("edge locked quad estimation failed"):
+        return {"error": "quad_estimation_failed", "error_detail": message,
+                "processing_stage": "quad_estimation", "result_state": "review_required",
+                "recovery_action": "review_or_edit_quad",
+                "error_user_message": "表の四隅を確認してください。左上・右上・右下・左下を指定すると再開できます。"}
     return None
+
+
+def review_guidance(reason, *, axis, match):
+    """Describe the observed mismatch without inventing missing coordinates."""
+    messages = {
+        "fax_date_column_physical_boundaries_changed": "日付欄の区切りを確認できません。各日の最初の行と、表の最下端を確認してください。",
+        "fax_physical_body_count_changed": "検出した行数が献立の行数と一致しません。一本の罫線が二重になっていないか、抜けた横線がないか確認してください。",
+        "fax_body_header_boundary_unresolved": "見出しと本文の境目を確認できません。表の向き・列境界・最初の献立行の上端を確認してください。",
+        "fax_calendar_day_boundaries_ambiguous": "日付の切り替わりが複数の位置に見つかりました。各日の最初の行を選択してください。",
+        "fax_header_sequence_ambiguous": "見出しと本文の区切りを一意に決められません。本文より上の横線を確認してください。",
+    }
+    source = match.get("canonical_day_source") or (match.get("structural_match") or {}).get("canonical_day_source") or {}
+    return {
+        "message": messages.get(reason, "原本の縦罫線に列境界を合わせてください。" if axis == "header" else "原本の横罫線に行境界を合わせ、各日の最初の行を選択してください。"),
+        "missing_boundaries": match.get("missing_date_column_boundary_indexes") or [],
+        "extra_boundaries": match.get("extra_date_column_boundary_indexes") or [],
+        "expected_body_count": source.get("canonical_physical_row_count"),
+        "observed_body_count": source.get("observed_physical_row_count"),
+    }
+
+
+def observed_day_candidates(days, match):
+    structural = match.get("structural_match") or {}
+    if structural.get("body_day_boundary_indexes"):
+        return structural["body_day_boundary_indexes"]
+    source = match.get("canonical_day_source") or {}
+    if source.get("canonical_physical_row_count") != source.get("observed_physical_row_count"):
+        return None
+    if not days or any(day["expected_band_count"] is None for day in days):
+        return None
+    observed = set(source.get("observed_date_column_boundary_indexes") or [])
+    offsets = [0]
+    for day in days:
+        offsets.append(offsets[-1] + day["expected_band_count"])
+    return [offset if offset in observed else None for offset in offsets]
 
 
 def header_candidates(evidence):
@@ -32,6 +74,8 @@ def header_candidates(evidence):
     clusters = evidence.get("fax_x_clusters")
     if not isinstance(clusters, list):
         clusters = evidence.get("raw_fax_x_clusters")
+    if not isinstance(clusters, list):
+        return []
     candidates = []
     for cluster in clusters:
         if not isinstance(cluster, dict):

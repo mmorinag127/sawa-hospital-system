@@ -18,7 +18,7 @@ test('current mutation, quantity and owner declarations remain exact while reads
     'createActionBoundary', 'saveSheet', 'finalConfirm', 'runOcr', 'selectOcr', 'deleteOcr',
     'saveFacilityTemplateColumns', 'runBagging'];
   assert.deepEqual(declarations(fs.readFileSync(path.join(root, filename), 'utf8'), names),
-    declarations(cp.execFileSync('git', ['show', '1989872c:' + filename], {cwd: root, encoding: 'utf8'}), names));
+    declarations(cp.execFileSync('git', ['show', '16a48d27:' + filename], {cwd: root, encoding: 'utf8'}), names));
   const lineage = [base, migration, '4c33813', 'ded7f15', 'bdbc6de', '91d293c', '3c5a9ca', 'd26febd', 'd4b7d36', '227cae9', '2a180d57', 'HEAD'];
   for (let i = 1; i < lineage.length; i++)
     cp.execFileSync('git', ['merge-base', '--is-ancestor', lineage[i - 1], lineage[i]], { cwd: root });

@@ -390,7 +390,13 @@ def resolve_fixed_quad_px_for_manifest_item(
     estimate = estimate_edge_locked_quad_from_pdf(str(pdf_path), dpi=220, render_width=render_width, page=page)
     if estimate["status"] != "ok":
         raise QuadEstimationError(str(estimate["reasons"]))
-    return estimate["refined_quad_px"], "edge_locked_v4_estimated_from_fax_pdf", estimate
+    rotation = item.get("fax_rotation_degrees", 0)
+    if type(rotation) is not int or rotation not in (0, 180):
+        raise ValueError("fax_rotation_invalid")
+    estimated_quad = estimate["refined_quad_px"]
+    if rotation == 180:
+        estimated_quad = estimated_quad[2:] + estimated_quad[:2]
+    return estimated_quad, "edge_locked_v4_estimated_from_fax_pdf", estimate
 
 
 def load_fixed_quad_manifest_item(
