@@ -27,6 +27,8 @@ ALLOWED = {
     "backend/src/services/workflow_attempt_guard_service.py", "backend/src/services/workflow_ocr_delivery_service.py",
     "backend/tests/unit/test_grouped_quantity_fields.py", "agent_runtime/manifests/shift.json",
     "backend/tests/unit/test_fax_run_orientation.py",
+    "backend/src/services/hakodate_step_review_pipeline_service.py",
+    "backend/tests/unit/test_row_ruling_continuity.py",
     *{"agent_runtime/native/shift/backend/shift_scheduler_backend/" + name for name in (
         "main.py", "schedule_selection.py", "operational_constraints.py", "solver.py", "candidate_validation.py")},
 }
@@ -36,6 +38,9 @@ PYTEST = ["backend/tests/unit/" + name for name in (
     "test_order_workflow_v2_service.py", "test_production_change_receipt.py",
     "test_production_corrective_receipt.py", "test_grouped_quantity_fields.py", "test_fax_run_orientation.py",
     "test_workflow_ocr_delivery_runner_contract.py")]
+PYTEST += ["backend/tests/unit/" + name for name in (
+    "test_row_ruling_continuity.py", "test_modernization_printed_header_boundaries.py",
+    "test_modernization_semantic_day_boundaries.py")]
 PYTEST += ["backend/tests/contract/test_saved_sheet_quantity_schema.py"]
 COMMANDS = [
     ("backend", ["python3", "-m", "pytest", *PYTEST, "-q"], "."),

@@ -2188,6 +2188,83 @@ def _enrich_y_clusters_with_column_votes(
     return enriched
 
 
+def _join_observed_row_ruling_fragments(rectified_fax, points, y_clusters, corrected_xs):
+    """Join disjoint column fragments only across an observed ink ruling."""
+    voted = _enrich_y_clusters_with_column_votes(
+        points=points, y_clusters=y_clusters, corrected_xs=corrected_xs,
+    )
+    gray = cv2.cvtColor(rectified_fax, cv2.COLOR_BGR2GRAY)
+    _, ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    ink = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, np.ones((1, 3), dtype=np.uint8))
+    links = []
+    for left, right in zip(voted, voted[1:]):
+        a_columns, b_columns = set(left["column_votes"]), set(right["column_votes"])
+        if min(len(a_columns), len(b_columns)) < 2 or a_columns & b_columns:
+            continue
+        observed = False
+        for ai in left["point_indexes"]:
+            for bi in right["point_indexes"]:
+                a, b = points[ai], points[bi]
+                ac = min(range(len(corrected_xs)), key=lambda i: abs(corrected_xs[i] - a["x"]))
+                bc = min(range(len(corrected_xs)), key=lambda i: abs(corrected_xs[i] - b["x"]))
+                if abs(ac - bc) != 1:
+                    continue
+                if a["x"] > b["x"]:
+                    a, b = b, a
+                width = float(b["x"]) - float(a["x"])
+                if width <= 0 or abs(float(b["y"]) - float(a["y"])) >= width:
+                    continue
+                if any(not isinstance(point.get("bbox"), (list, tuple)) or len(point["bbox"]) != 4
+                       for point in (a, b)):
+                    continue
+                xs = np.arange(int(np.ceil(a["x"])), int(np.floor(b["x"])) + 1)
+                ys = np.rint(a["y"] + (xs - a["x"]) * (b["y"] - a["y"]) / width).astype(int)
+                radius = max(2, min(a["bbox"][3], b["bbox"][3]) // 2)
+                supported = np.zeros(xs.size, dtype=bool)
+                for offset in range(-radius, radius + 1):
+                    valid = (xs >= 0) & (xs < ink.shape[1]) & (ys + offset >= 0) & (ys + offset < ink.shape[0])
+                    supported[valid] |= ink[ys[valid] + offset, xs[valid]] > 0
+                if xs.size and supported.all():
+                    x0, x1 = int(xs[0]), int(xs[-1]) + 1
+                    y0, y1 = max(0, int(ys.min()) - radius), min(ink.shape[0], int(ys.max()) + radius + 1)
+                    corridor = np.abs(np.arange(y0, y1)[:, None] - ys[None, :]) <= radius
+                    _, labels = cv2.connectedComponents(
+                        ((ink[y0:y1, x0:x1] > 0) & corridor).astype(np.uint8), connectivity=8,
+                    )
+                    common = set(labels[:, 0]) & set(labels[:, -1]) - {0}
+                    if common:
+                        observed = True
+                        break
+            if observed:
+                break
+        if observed:
+            links.append((left["cluster_index"], right["cluster_index"]))
+    groups = [{i} for i in range(len(voted))]
+    for a, b in links:
+        ga = next(group for group in groups if a in group)
+        gb = next(group for group in groups if b in group)
+        if ga is not gb:
+            ga.update(gb)
+            groups.remove(gb)
+    joined, merges = [], []
+    for group in groups:
+        columns = [column for i in group for column in voted[i]["column_votes"]]
+        # Conflicting alternatives stay separate: a ruling cannot cross the
+        # same vertical axis twice. Do not choose a fit using expected row count.
+        if len(columns) != len(set(columns)):
+            joined.extend(y_clusters[i] for i in sorted(group))
+            continue
+        indexes = sorted({index for i in group for index in voted[i]["point_indexes"]})
+        joined.append({"value": round(float(np.median([points[i]["y"] for i in indexes])), 2),
+                       "count": len(indexes), "point_indexes": indexes})
+        if len(group) > 1:
+            merges.append(sorted(group))
+    joined.sort(key=lambda cluster: cluster["value"])
+    return [{**cluster, "cluster_index": i} for i, cluster in enumerate(joined)], {
+        "method": "observed_ink_between_adjacent_column_intersections", "joined_clusters": merges,
+    }
+
+
 def _filter_structural_y_clusters(y_clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
     accepted: list[dict[str, Any]] = []
     for cluster in y_clusters:
@@ -2345,6 +2422,10 @@ def _row_intersection_correct_ys(
         template_ys=template_ys,
     )
     raw_y_clusters = _cluster_header_axis_values(points, "y", tolerance_px=18.0)
+    raw_y_clusters, continuity = _join_observed_row_ruling_fragments(
+        rectified_fax, points, raw_y_clusters, corrected_xs,
+    )
+    detection["ruling_continuity"] = continuity
     voted_y_clusters = _enrich_y_clusters_with_column_votes(
         points=points,
         y_clusters=raw_y_clusters,
