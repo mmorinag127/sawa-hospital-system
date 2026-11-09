@@ -2196,10 +2196,10 @@ def _join_observed_row_ruling_fragments(rectified_fax, points, y_clusters, corre
     gray = cv2.cvtColor(rectified_fax, cv2.COLOR_BGR2GRAY)
     _, ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     ink = cv2.morphologyEx(ink, cv2.MORPH_CLOSE, np.ones((1, 3), dtype=np.uint8))
-    links = []
+    links, segment_links = [], []
     for left, right in zip(voted, voted[1:]):
         a_columns, b_columns = set(left["column_votes"]), set(right["column_votes"])
-        if min(len(a_columns), len(b_columns)) < 2 or a_columns & b_columns:
+        if not a_columns or not b_columns or a_columns & b_columns:
             continue
         observed = False
         for ai in left["point_indexes"]:
@@ -2227,8 +2227,6 @@ def _join_observed_row_ruling_fragments(rectified_fax, points, y_clusters, corre
                 # Follow the observed ruling, including fax curvature, rather
                 # than requiring every pixel to lie on a straight fitted ray.
                 window = ink[y0:y1, x0:x1] > 0
-                if not np.any(window, axis=0).all():
-                    continue
                 _, labels = cv2.connectedComponents(window.astype(np.uint8), connectivity=8)
                 ends = []
                 for point, column in ((a, 0), (b, -1)):
@@ -2236,6 +2234,29 @@ def _join_observed_row_ruling_fragments(rectified_fax, points, y_clusters, corre
                     ends.append(set(labels[max(0, center-radius):center+radius+1, column]))
                 if (ends[0] & ends[1]) - {0}:
                     observed = True
+                    break
+                # A fax dropout can disconnect a printed ruling. Require a
+                # long observed segment reaching both intersection endpoints;
+                # use the detector's existing horizontal feature width as its
+                # maximum gap, never the template row count or row spacing.
+                minimum_span = max(1, xs.size - radius * 2)
+                segments = cv2.HoughLinesP(
+                    window.astype(np.uint8) * 255, 1, np.pi / 720,
+                    threshold=max(2, xs.size // 2), minLineLength=minimum_span,
+                    maxLineGap=max(18, rectified_fax.shape[1] // 55),
+                )
+                for segment in ([] if segments is None else segments.reshape(-1, 4)):
+                    sx0, sy0, sx1, sy1 = map(float, segment)
+                    if abs(sx1 - sx0) < minimum_span:
+                        continue
+                    slope = (sy1 - sy0) / (sx1 - sx0)
+                    if all(abs(sy0 + (point["x"] - x0 - sx0) * slope - (point["y"] - y0)) <= radius
+                           for point in (a, b)):
+                        observed = True
+                        segment_links.append({"clusters": [left["cluster_index"], right["cluster_index"]],
+                                              "segment": [int(sx0+x0), int(sy0+y0), int(sx1+x0), int(sy1+y0)]})
+                        break
+                if observed:
                     break
             if observed:
                 break
@@ -2263,7 +2284,8 @@ def _join_observed_row_ruling_fragments(rectified_fax, points, y_clusters, corre
             merges.append(sorted(group))
     joined.sort(key=lambda cluster: cluster["value"])
     return [{**cluster, "cluster_index": i} for i, cluster in enumerate(joined)], {
-        "method": "observed_ink_between_adjacent_column_intersections", "joined_clusters": merges,
+        "method": "observed_ruling_between_adjacent_column_intersections", "joined_clusters": merges,
+        "long_observed_segments": segment_links,
     }
 
 

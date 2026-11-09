@@ -76,6 +76,30 @@ def test_connected_curved_ruling_is_not_required_to_follow_a_straight_ray():
     assert evidence["joined_clusters"]
 
 
+@pytest.mark.parametrize("gap,joins", [(8, True), (48, False)])
+def test_only_bounded_dropout_in_a_long_observed_ruling_can_join(gap,joins):
+    image = np.full((180,320,3),255,np.uint8)
+    xs = [10,40,70,250,280,310]
+    points = [point(x,120 if i<3 else 94) for i,x in enumerate(xs)]
+    cv2.polylines(image,[np.array([[10,120],[70,120],[250,94],[310,94]])],False,(0,0,0),2)
+    image[:,160-gap//2:160+gap//2] = 255
+    merged,evidence=join(image,points,xs)
+    assert len(merged) == (1 if joins else 2)
+    assert bool(evidence["long_observed_segments"]) == joins
+
+
+@pytest.mark.parametrize("connected",[False,True])
+def test_single_date_column_intersection_requires_the_same_observed_ruling(connected):
+    image=np.full((180,320,3),255,np.uint8)
+    xs=[10,250,280,310]
+    points=[point(10,120),point(250,94),point(280,94),point(310,94)]
+    cv2.line(image,(250,94),(310,94),(0,0,0),2)
+    if connected:
+        cv2.line(image,(10,120),(250,94),(0,0,0),2)
+    merged,_=join(image,points,xs)
+    assert len(merged)==(1 if connected else 2)
+
+
 def test_ambiguous_connected_alternatives_are_not_fitted_to_one_row():
     image = np.full((180,320,3),255,np.uint8)
     xs = [10,40,250,280]
@@ -118,6 +142,10 @@ def test_reported_pdf_geometry_when_private_fixture_is_available():
     observed = subject._filter_structural_y_clusters(subject._enrich_y_clusters_with_column_votes(
         points=points,y_clusters=merged,corrected_xs=diag["x_levels"]))
     assert len(observed)-3 == diag["axis_evidence"]["canonical_day_source"]["canonical_physical_row_count"] == 56
-    assert len(evidence["joined_clusters"]) == 2
+    joined_values=[[raw[i]["value"] for i in group] for group in evidence["joined_clusters"]]
+    assert any(2761.5 in values and 2787.0 in values for values in joined_values)
+    assert any(2830.0 in values and 2850.0 in values for values in joined_values)
+    expected_days=[0,*np.cumsum([day["expected_band_count"] for day in diag["calendar_days"]]).tolist()]
+    assert [i-2 for i,c in enumerate(observed) if i>=2 and 0 in c["column_votes"]] == expected_days
     assert sorted(i for c in merged for i in c["point_indexes"]) == list(range(len(points)))
     assert hashlib.sha256((root / "original.pdf").read_bytes()).hexdigest() == expected
