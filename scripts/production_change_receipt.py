@@ -14,6 +14,7 @@ BASE = "419046eb02d6c7e758da897fd28bec3656809ca0"
 RUN = 42460685431
 REPOSITORY = "mmorinag127/sawa-hospital-system"
 ALLOWED = {
+    "backend/src/services/hakodate_cell_ocr_batch_service.py",
     "backend/tests/unit/test_ruling_slant_before_detection.py",
     "docs/OCR_RULING_SLANT_20261110.md",
     "backend/tests/unit/test_ocr_row_recovery.py",
