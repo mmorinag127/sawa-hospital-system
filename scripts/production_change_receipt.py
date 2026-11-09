@@ -31,6 +31,7 @@ ALLOWED = {
     "backend/tests/unit/test_row_ruling_continuity.py",
     "backend/src/services/workflow_display_read_service.py",
     "backend/tests/unit/test_page_performance_projections.py",
+    "backend/tests/unit/test_header_topology_alignment.py",
     *{"agent_runtime/native/shift/backend/shift_scheduler_backend/" + name for name in (
         "main.py", "schedule_selection.py", "operational_constraints.py", "solver.py", "candidate_validation.py")},
 }
@@ -45,6 +46,7 @@ PYTEST += ["backend/tests/unit/" + name for name in (
     "test_modernization_semantic_day_boundaries.py")]
 PYTEST += ["backend/tests/contract/test_saved_sheet_quantity_schema.py"]
 PYTEST += ["backend/tests/unit/test_page_performance_projections.py"]
+PYTEST += ["backend/tests/unit/test_header_topology_alignment.py"]
 COMMANDS = [
     ("backend", ["python3", "-m", "pytest", *PYTEST, "-q"], "."),
     ("frontend", ["node", "--test", "--test-concurrency=1",

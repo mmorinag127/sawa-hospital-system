@@ -1682,6 +1682,27 @@ def _detect_header_intersections_for_axis_alignment(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     h_mask, v_mask = _split_line_masks(rectified_bgr)
     x0, y0, x1, y1 = _header_bounds_for_axis_alignment(table_bbox, template_ys)
+    # Merged header columns may first intersect at the body edge. Locate that
+    # edge in the observed table instead of clipping it at template pixel height.
+    vertical_axes = _detect_vertical_candidates(rectified_bgr, table_bbox)
+    header_extent = None
+    if len(vertical_axes) >= 2:
+        table_points, _ = _detect_table_intersections_for_row_axis(
+            rectified_bgr, corrected_xs=vertical_axes, template_ys=template_ys,
+        )
+        levels = _cluster_header_axis_values(table_points, "y")
+        levels, _ = _join_observed_row_ruling_fragments(
+            rectified_bgr, table_points, levels, vertical_axes,
+        )
+        voted = _enrich_y_clusters_with_column_votes(
+            points=table_points, y_clusters=levels, corrected_xs=vertical_axes,
+        )
+        for level in voted[1:]:
+            if level["column_votes"] == list(range(len(vertical_axes))):
+                boxes = [table_points[index]["bbox"] for index in level["point_indexes"]]
+                header_extent = max(box[1] + box[3] for box in boxes)
+                y1 = max(y1, header_extent)
+                break
     h = h_mask[y0:y1, x0:x1]
     v = v_mask[y0:y1, x0:x1]
     if h.size == 0 or v.size == 0:
@@ -1700,6 +1721,7 @@ def _detect_header_intersections_for_axis_alignment(
         "horizontal_pixels": int(np.count_nonzero(h)),
         "vertical_pixels": int(np.count_nonzero(v)),
         "intersection_count": len(points),
+        "observed_header_extent": header_extent,
     }
 
 
@@ -1824,6 +1846,9 @@ def _structural_match_header_x_clusters(
         cluster_span = max(1.0, float(cluster_values[-1] - cluster_values[0]))
         cluster_gaps = np.diff(cluster_values) / cluster_span
         for template_indexes in template_index_sets:
+            if (cluster_indexes[0] != 0 or cluster_indexes[-1] != m - 1
+                    or template_indexes[0] != 0 or template_indexes[-1] != n - 1):
+                continue
             checked += 1
             if checked > max_combinations:
                 break
@@ -1997,7 +2022,7 @@ def _header_intersection_correct_xs(
         "fax_x_clusters": x_clusters,
         "rejected_fax_x_clusters": rejected_x_clusters,
     }
-    if len(y_clusters) != min(3, len(template_ys)):
+    if len(y_clusters) < 2:
         evidence["reason"] = "header_y_cluster_count_mismatch"
         return None, evidence
     structural_corrected, structural_evidence = _structural_match_header_x_clusters(
@@ -2412,6 +2437,41 @@ def _row_height_outlier_evidence(row_edges: list[float]) -> dict[str, Any]:
     }
 
 
+def _match_printed_header_topology(
+    clusters: list[dict[str, Any]], contract: list[dict[str, Any]],
+) -> tuple[dict[int, list[int]] | None, dict[str, Any]]:
+    """Match per-column printed edges, allowing staggered merged group heights."""
+    expected = {
+        column: [index for index, edge in enumerate(contract) if column in edge["column_votes"]]
+        for column in contract[-1]["column_votes"]
+    }
+    candidates = []
+    for end, cluster in enumerate(clusters):
+        if not set(expected).issubset(cluster.get("column_votes", [])):
+            continue
+        actual = {
+            column: [index for index, level in enumerate(clusters[:end + 1])
+                     if column in level.get("column_votes", [])]
+            for column in expected
+        }
+        if any(len(actual[column]) != len(edges) for column, edges in expected.items()):
+            continue
+        matches: dict[int, list[int]] = {}
+        for column, edges in expected.items():
+            for edge, observed in zip(edges, actual[column], strict=True):
+                matches.setdefault(edge, []).append(observed)
+        matches = {edge: sorted(set(indexes)) for edge, indexes in matches.items()}
+        # Table top and body start are common physical boundaries. Internal
+        # group edges can be at different heights in different column branches.
+        if len(matches.get(0, [])) != 1 or matches.get(len(contract) - 1) != [end]:
+            continue
+        candidates.append({"body_cluster": end, "matches": matches})
+    evidence = {"method": "printed_header_column_topology", "candidates": candidates}
+    if len(candidates) != 1:
+        return None, evidence
+    return candidates[0]["matches"], evidence
+
+
 def _row_intersection_correct_ys(
     *,
     rectified_fax: np.ndarray,
@@ -2435,7 +2495,9 @@ def _row_intersection_correct_ys(
         return None, {"used": False, "reason": "fax_row_canonical_axes_mismatch"}
     header_contract = workbook_pdf_renderer.worksheet_header_boundary_contract(
         worksheet,
-        header_edge_rows=master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS,
+        header_edge_rows=tuple(range(
+            master_order_form_template_service.HEADER_TOP_ROW, STEP_REVIEW_BODY_START_ROW,
+        )),
         body_start_row=STEP_REVIEW_BODY_START_ROW,
     )
     if len(corrected_xs) < 2 or len(template_ys) < 2:
@@ -2456,45 +2518,31 @@ def _row_intersection_correct_ys(
         corrected_xs=[float(value) for value in corrected_xs],
     )
     y_clusters = _filter_structural_y_clusters(voted_y_clusters)
-    # Match printed header intersections before the generic body filter: a
-    # partial group-header ruling can have fewer votes than a body boundary.
-    physical_matches = []
-    for logical_index, boundary in enumerate(header_contract):
-        if not boundary["column_votes"]:
-            continue
-        candidates = [
-            index for index, cluster in enumerate(voted_y_clusters)
-            if (partial_period or all(
-                abs(float(cluster["value"]) - float(template_ys[logical_index]))
-                < abs(float(cluster["value"]) - float(other_y))
-                for other_index, other_y in enumerate(template_ys) if other_index != logical_index
-            ))
-            and set(boundary["column_votes"]).issubset(cluster.get("column_votes", []))
-        ]
-        if partial_period:
-            previous = physical_matches[-1][1] if physical_matches else -1
-            # Printed header edges form the table's ordered prefix, before any body day.
-            following = [index for index in candidates if index > previous]
-            candidates = following[:1]
-        if len(candidates) != 1:
-            return None, {"used": False, "reason": "fax_body_header_boundary_unresolved",
-                          "header_boundary_contract": header_contract, "header_candidates": candidates, **detection}
-        physical_matches.append((logical_index, candidates[0]))
-    matched_indexes = [index for _, index in physical_matches]
-    if any(right <= left for left, right in zip(matched_indexes, matched_indexes[1:])):
-        return None, {"used": False, "reason": "fax_body_header_boundary_unresolved", **detection}
-    body_cluster = voted_y_clusters[matched_indexes[-1]]
+    physical_matches, topology = _match_printed_header_topology(voted_y_clusters, header_contract)
+    detection["header_topology"] = topology
+    if physical_matches is None:
+        return None, {"used": False, "reason": "fax_body_header_boundary_unresolved",
+                      "header_boundary_contract": header_contract, **detection}
+    matched_indexes = sorted({index for indexes in physical_matches.values() for index in indexes})
+    body_cluster = voted_y_clusters[physical_matches[len(header_contract) - 1][0]]
     body_y = float(body_cluster["value"])
     matched_clusters = [voted_y_clusters[index] for index in matched_indexes]
     if any(float(cluster["value"]) < body_y and cluster not in matched_clusters for cluster in y_clusters):
         return None, {"used": False, "reason": "fax_body_header_boundary_unresolved" if partial_period else "fax_header_sequence_ambiguous", **detection}
-    observed_header = {logical: float(voted_y_clusters[index]["value"]) for logical, index in physical_matches}
+    observed_header = {
+        logical: float(np.median([voted_y_clusters[index]["value"] for index in indexes]))
+        for logical, indexes in physical_matches.items()
+    }
     logical_header = []
     header_sources = []
     for logical_index, boundary in enumerate(header_contract[:-1]):
+        if boundary["worksheet_row"] not in master_order_form_template_service.TEMPLATE_HEADER_EDGE_ROWS:
+            continue
         if logical_index in observed_header:
             value = observed_header[logical_index]
             source = "observed_printed_header_intersections"
+            if len(physical_matches[logical_index]) > 1:
+                source = "observed_staggered_column_header_median"
         else:
             before = max(index for index in observed_header if index < logical_index)
             after = min(index for index in observed_header if index > logical_index)
