@@ -204,6 +204,69 @@ def dewarp_rectified_y_to_template_rows(
     }
 
 
+def prepare_rectified_ruling_canvas(rectified, *, table_bbox, row_axis_override=None):
+    """Remove observed ruling slant before intersections are grouped by Y.
+
+    Long ink segments provide the displacement field, independently of any
+    menu row count. Legacy operator Y coordinates retain their original canvas.
+    """
+    if isinstance(row_axis_override, dict) and row_axis_override.get("coordinate_space", {}).get("ruling_slant_version") != 1:
+        return rectified, {"applied": False, "reason": "legacy_operator_canvas_preserved"}
+    height, width = rectified.shape[:2]
+    x0, y0, x1, y1 = [int(round(float(v))) for v in table_bbox]
+    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(width, x1), min(height, y1)
+    span = x1 - x0
+    if span <= 0 or y1 <= y0:
+        return rectified, {"applied": False, "reason": "ruling_slant_empty_table"}
+    gray = cv2.cvtColor(rectified[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    _, ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    segments = cv2.HoughLinesP(ink, 1, np.pi / 1800, threshold=max(2, span // 20),
+                               minLineLength=max(2, span // 3), maxLineGap=max(18, width // 55))
+    center = (x0 + x1 - 1) / 2.0
+    observations = []
+    for segment in ([] if segments is None else segments.reshape(-1, 4)):
+        ax, ay, bx, by = map(float, segment)
+        if ax == bx:
+            continue
+        slope = (by - ay) / (bx - ax)
+        # Reuse the bounded-slant safety envelope, not an expected row spacing.
+        if abs(slope) > 0.070 or abs(slope * span) > 110:
+            continue
+        cy = y0 + ay + (center - x0 - ax) * slope
+        observations.append((cy, slope, abs(bx - ax)))
+    observations.sort()
+    bands = []
+    for observation in observations:
+        if not bands or observation[0] - np.median([v[0] for v in bands[-1]]) > 18:
+            bands.append([])
+        bands[-1].append(observation)
+    if len(bands) < 3:
+        return rectified, {"applied": False, "reason": "ruling_slant_insufficient_observed_lines"}
+    anchors = []
+    for band in bands:
+        slopes = sorted(band, key=lambda v: v[1])
+        half = sum(v[2] for v in slopes) / 2
+        cumulative = 0.0
+        for _, slope, length in slopes:
+            cumulative += length
+            if cumulative >= half:
+                break
+        anchors.append((float(np.median([v[0] for v in band])), slope))
+    ys = np.arange(height, dtype=np.float32)
+    slopes = np.interp(ys, [a[0] for a in anchors], [a[1] for a in anchors]).astype(np.float32)
+    offsets = np.arange(width, dtype=np.float32) - center
+    map_y = ys[:, None] + slopes[:, None] * offsets[None, :]
+    if np.any(np.diff(map_y, axis=0) <= 0):
+        return rectified, {"applied": False, "reason": "ruling_slant_nonmonotonic_map_rejected"}
+    map_x = np.broadcast_to(np.arange(width, dtype=np.float32), (height, width)).copy()
+    corrected = cv2.remap(rectified, map_x, map_y, cv2.INTER_CUBIC,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
+    return corrected, {"applied": True, "method": "observed_ruling_slant_before_axis_detection",
+                       "coordinate_version": 1, "observed_line_count": len(anchors),
+                       "anchors": [[round(y, 3), round(s, 7)] for y, s in anchors],
+                       "max_abs_shift": float(np.max(np.abs(map_y - ys[:, None])))}
+
+
 def dewarp_rectified_rows_by_bounded_slant(
     rectified: np.ndarray,
     *,
@@ -3891,6 +3954,9 @@ def build_hakodate_step_review_for_manifest_item(
         canvas_width=canvas_width,
         canvas_height=canvas_height,
     )
+    raw_rectified, ruling_slant = prepare_rectified_ruling_canvas(
+        raw_rectified, table_bbox=table_bbox, row_axis_override=item.get("row_axis_override"),
+    )
     horizontal_line_mask, _vertical_line_mask = _split_line_masks(raw_rectified)
     line_extraction, line_evidence = _draw_line_extraction(raw_rectified)
     aligned_xs, aligned_ys, axis_evidence, axis_match_image = _align_axes(
@@ -3927,6 +3993,7 @@ def build_hakodate_step_review_for_manifest_item(
     source_template = _source_template_name(facility_code, configured_input=item["configured_input"])
     axis_evidence = {
         **axis_evidence,
+        "ruling_slant_before_detection": ruling_slant,
         "line_extraction": line_evidence,
         "merge": merge_evidence,
         "target": target_evidence,

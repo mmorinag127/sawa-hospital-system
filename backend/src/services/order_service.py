@@ -9601,17 +9601,24 @@ def _build_live_hakodate_manifest_item(
 
 def _geometry_review_canvas(item):
     from src.services.hakodate_fixed_quad_registration_service import render_pdf_page_to_bgr, rectify_fax_to_template_grid
+    from src.services.hakodate_step_review_pipeline_service import prepare_rectified_ruling_canvas
     import cv2
     canvas = cv2.imread(item["step2_png"])
     if canvas is None:
         raise ValueError("geometry_review_canvas_missing")
     height, width = canvas.shape[:2]
-    return rectify_fax_to_template_grid(
+    table_bbox = [item["template_axes_x"][0], item["template_axes_y"][0], item["template_axes_x"][-1], item["template_axes_y"][-1]]
+    raw = rectify_fax_to_template_grid(
         render_pdf_page_to_bgr(item["fax_pdf"], width=1864, page=item["selected_page"]),
         quad_px=item["quad_px"],
-        table_bbox=[item["template_axes_x"][0], item["template_axes_y"][0], item["template_axes_x"][-1], item["template_axes_y"][-1]],
+        table_bbox=table_bbox,
         canvas_width=width, canvas_height=height,
     )
+    corrected, evidence = prepare_rectified_ruling_canvas(
+        raw, table_bbox=table_bbox, row_axis_override=item.get("row_axis_override"),
+    )
+    item["ruling_slant_before_detection"] = evidence
+    return corrected
 
 
 def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, start_input: dict) -> dict[str, Any]:
@@ -9720,7 +9727,8 @@ def build_hakodate_header_axis_review(order_id: str, *, source_receipt: dict, st
             "y_levels": y_levels,
             "axis_evidence": match,
             "saved_override": runtime_item.get("header_axis_override"),
-            "coordinate_space": {"mode": "template_canvas", "width": image.width, "height": image.height},
+            "coordinate_space": {"mode": "template_canvas", "width": image.width, "height": image.height,
+                "ruling_slant_version": runtime_item.get("ruling_slant_before_detection", {}).get("coordinate_version")},
             "source": "hakodate_header_axis_review",
         }
 
@@ -9837,7 +9845,8 @@ def build_hakodate_row_axis_review(order_id: str, *, source_receipt: dict, start
             "axis_evidence": match,
             "row_height_quality": match.get("row_height_quality") if isinstance(match.get("row_height_quality"), dict) else None,
             "saved_override": runtime_item.get("row_axis_override"),
-            "coordinate_space": {"mode": "template_canvas", "width": image.width, "height": image.height},
+            "coordinate_space": {"mode": "template_canvas", "width": image.width, "height": image.height,
+                "ruling_slant_version": runtime_item.get("ruling_slant_before_detection", {}).get("coordinate_version")},
             "source": "hakodate_row_axis_review",
         }
 

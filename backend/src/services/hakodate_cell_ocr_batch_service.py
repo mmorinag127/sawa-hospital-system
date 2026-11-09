@@ -1271,6 +1271,10 @@ def _build_preprocess_for_ocr(
         canvas_width=canvas_width,
         canvas_height=canvas_height,
     )
+    from src.services.hakodate_step_review_pipeline_service import prepare_rectified_ruling_canvas
+    raw_rectified, ruling_slant = prepare_rectified_ruling_canvas(
+        raw_rectified, table_bbox=table_bbox, row_axis_override=item.get("row_axis_override"),
+    )
     mark_timing("rectify_fax_seconds", step_t0)
     step_t0 = time.perf_counter()
     horizontal_line_mask, _vertical_line_mask = _split_line_masks(raw_rectified)
@@ -1284,6 +1288,7 @@ def _build_preprocess_for_ocr(
         row_axis_override=item.get("row_axis_override") if isinstance(item.get("row_axis_override"), dict) else None,
     )
     mark_timing("align_axes_seconds", step_t0)
+    axis_evidence["ruling_slant_before_detection"] = ruling_slant
     row_axis_ys = [float(value) for value in aligned_ys]
     detected_body_count = len(row_axis_ys) - STEP_REVIEW_HEADER_BANDS - 1
     if detected_body_count < target_body_count:

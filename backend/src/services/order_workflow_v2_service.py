@@ -2345,7 +2345,8 @@ def save_row_axis_review_decision(
             "corrected_ys": normalized_ys,
             "body_day_boundary_indexes": copy.deepcopy(body_day_boundary_indexes),
             "day_labels": copy.deepcopy(day_labels),
-            "coordinate_space": {"mode": "template_canvas", "width": width, "height": height},
+            "coordinate_space": {"mode": "template_canvas", "width": width, "height": height,
+                "ruling_slant_version": review.get("coordinate_space", {}).get("ruling_slant_version")},
             "source": "operator_row_axis_override",
             "created_at": _now().isoformat(),
         }

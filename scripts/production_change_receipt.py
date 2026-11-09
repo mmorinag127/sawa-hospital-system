@@ -14,6 +14,8 @@ BASE = "419046eb02d6c7e758da897fd28bec3656809ca0"
 RUN = 42460685431
 REPOSITORY = "mmorinag127/sawa-hospital-system"
 ALLOWED = {
+    "backend/tests/unit/test_ruling_slant_before_detection.py",
+    "docs/OCR_RULING_SLANT_20261110.md",
     "backend/tests/unit/test_ocr_row_recovery.py",
     "backend/tests/unit/test_observed_ruling_junctions.py",
     "docs/OCR_AUTOMATIC_JUNCTIONS_20261109.md",
@@ -79,6 +81,7 @@ PYTEST += ["backend/tests/unit/" + name for name in (
     "test_geometry_review_contract.py", "test_ocr_row_recovery_persistence.py",
     "test_recognition_checkpoint_geometry_invalidation.py",
     "test_observed_ruling_junctions.py",
+    "test_ruling_slant_before_detection.py",
 )]
 COMMANDS = [
     ("backend", ["python3", "-m", "pytest", *PYTEST, "-q"], "."),
