@@ -579,6 +579,7 @@ def persist_evidence_run(
         return None
     if isinstance(payload, dict) and workflow_job_id:
         from src.services.workflow_attempt_guard_service import processing_start_read_input, processing_start_pdf_receipt
+        from src.services.workflow_ocr_delivery_service import archived_processing_input
         execution_input = current_nonworkflow_execution()
         payload["_ocr_execution"] = {
             "job_id": workflow_job_id,
@@ -588,7 +589,8 @@ def persist_evidence_run(
             "disposition": result_disposition or "pipeline_result",
             "nonworkflow_execution_id": execution_input.get("execution_id") if execution_input is not None else None,
             "processing_start_input": (
-                processing_start_read_input()
+                archived_processing_input(processing_start_read_input(), job_id=workflow_job_id,
+                    attempt=workflow_attempt_id, revision=expected_workflow_revision)
             ),
             "selected_pdf_receipt": processing_start_pdf_receipt(),
         }

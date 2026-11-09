@@ -35,6 +35,12 @@ ALLOWED = {
     "backend/tests/unit/test_modernization_printed_header_boundaries.py",
     "backend/src/services/hakodate_assignment_service.py",
     "backend/tests/unit/test_hakodate_generated_metadata.py",
+    "backend/src/models/ocr_display_projection_v2.py", "backend/src/models/ocr_job.py",
+    "backend/migrations/0039_bounded_ocr_display_json.py",
+    "backend/src/services/ocr_evidence_service.py",
+    "backend/src/services/ocr_recognition_recovery_service.py",
+    "backend/src/services/workflow_ocr_delivery_service.py",
+    "backend/tests/unit/test_bounded_ocr_execution_json.py",
     *{"agent_runtime/native/shift/backend/shift_scheduler_backend/" + name for name in (
         "main.py", "schedule_selection.py", "operational_constraints.py", "solver.py", "candidate_validation.py")},
 }
@@ -53,6 +59,10 @@ PYTEST += ["backend/tests/unit/test_header_topology_alignment.py"]
 PYTEST += ["backend/tests/unit/test_hakodate_generated_metadata.py",
            "backend/tests/unit/test_hakodate_assignment_service.py",
            "backend/tests/unit/test_hakodate_order_sheet_evidence_projection.py"]
+PYTEST += ["backend/tests/unit/" + name for name in (
+    "test_bounded_ocr_execution_json.py", "test_native_recognition_recovery.py",
+    "test_recognition_recovery_warning_lifecycle.py", "test_live_schema_adoption_plan.py",
+)]
 PYTEST += ["backend/tests/unit/" + name for name in (
     "test_ocr_header_recovery.py", "test_ocr_row_recovery.py", "test_h2_operator_repair_revision.py",
 )]

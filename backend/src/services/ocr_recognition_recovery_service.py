@@ -11,6 +11,7 @@ from src.services import hakodate_cell_ocr_batch_service as batch
 from src.services import hakodate_ocr_checkpoint_service as checkpoints
 from src.services import order_workflow_v2_service as workflow
 from src.services import hakodate_step_review_pipeline_service as geometry
+from src.services.workflow_ocr_delivery_service import archived_processing_input_matches
 
 
 DIAGNOSTIC_SUBSET = "diagnostic_subset/v1"
@@ -103,7 +104,7 @@ def _diagnostic_source(session, order, job, evidence_id, *, checkpoint, item, lo
         owner = _workflow_terminal_owner(session, order, job, item["selected_pdf_receipt"])
         if (execution.get("workflow_attempt_id") != owner.workflow_attempt_id
                 or execution.get("workflow_revision") != owner.workflow_revision
-                or execution.get("processing_start_input") != owner.request_identity["reparse_read_input"]):
+                or not archived_processing_input_matches(execution.get("processing_start_input"), owner)):
             raise ValueError("recognition_review_result_changed")
     records = diagnostic_records(payload, checkpoint=checkpoint, item=item, loaded=loaded, captured=captured)
     review = payload["hakodate_recognition_review"]
@@ -203,7 +204,7 @@ def validate_manual_resume(override, *, item):
                     raise ValueError("recognition_native_owner_changed")
             elif (execution.get("workflow_attempt_id") != owner.workflow_attempt_id
                     or execution.get("workflow_revision") != owner.workflow_revision
-                    or execution.get("processing_start_input") != owner.request_identity["reparse_read_input"]):
+                    or not archived_processing_input_matches(execution.get("processing_start_input"), owner)):
                 raise ValueError("recognition_review_result_changed")
 
 

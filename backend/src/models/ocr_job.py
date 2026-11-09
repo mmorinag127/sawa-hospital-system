@@ -5,8 +5,10 @@ from sqlalchemy.ext.hybrid import hybrid_property
 
 from src.db import Base
 from src.models.generated_json import GeneratedJSON
-from src.models.ocr_display_projection_v1 import DisplayProjection
 from src.models.ocr_metrics_v1 import MergeMetrics, split_metrics
+from src.models.ocr_display_projection_v2 import DisplayProjection, install_for_metadata
+
+install_for_metadata(Base.metadata)
 
 
 class OcrJob(Base):

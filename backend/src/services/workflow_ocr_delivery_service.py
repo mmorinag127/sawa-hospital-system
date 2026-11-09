@@ -41,6 +41,44 @@ def _digest(value):
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def archived_processing_input(captured, *, job_id, attempt, revision):
+    """Keep the full immutable snapshot in its delivery, not inside every descendant."""
+    claim = _claim_context.get()
+    if claim is None:
+        return deepcopy(captured)
+    if (claim.get("job_id") != job_id or claim.get("workflow_attempt_id") != attempt
+            or claim.get("workflow_revision") != revision
+            or _digest(claim.get("request_identity", {}).get("reparse_read_input")) != _digest(captured)):
+        raise ValueError("workflow_ocr_delivery_captured_source_changed")
+    return _archived_input_for_claim(captured, claim)
+
+
+def _archived_input_for_claim(captured, claim):
+    historical = {key: value for key, value in captured.items()
+                  if key in {"evidence", "cache", "draft", "workflow"}}
+    result = deepcopy({key: value for key, value in captured.items() if key not in historical})
+    result["archived_input_reference"] = {
+        "contract": "workflow_ocr_delivery_processing_input/v1",
+        "delivery_id": claim["delivery_id"], "order_id": claim["order_id"],
+        "job_id": claim["job_id"], "workflow_attempt_id": claim["workflow_attempt_id"],
+        "workflow_revision": claim["workflow_revision"],
+        "input_sha256": _digest(captured),
+        "historical_inputs": {key: {"sha256": _digest(value),
+            "id": value.get("id") if isinstance(value, dict) else None}
+            for key, value in historical.items()},
+    }
+    return result
+
+
+def archived_processing_input_matches(archived, owner):
+    captured = owner.request_identity["reparse_read_input"]
+    expected = _archived_input_for_claim(captured, {
+        "delivery_id": owner.id, "order_id": owner.order_id, "job_id": owner.job_id,
+        "workflow_attempt_id": owner.workflow_attempt_id, "workflow_revision": owner.workflow_revision,
+    })
+    return _digest(archived) in {_digest(captured), _digest(expected)}
+
+
 def _positive(value):
     return type(value) is int and value > 0
 
