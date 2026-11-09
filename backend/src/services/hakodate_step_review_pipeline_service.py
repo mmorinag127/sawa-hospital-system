@@ -2335,7 +2335,8 @@ def _restore_supported_ruling_junctions(inv, horizontal, vertical, *, opening_wi
     """Restore observed short arms lost by opening, not pixels in a missing gap.
 
     Both a vertical ruling and a surviving collinear horizontal ruling must
-    support the arm. The interruption cannot exceed the local ruling thickness.
+    support the arm. Dropouts require observed runs on both sides; line
+    thickness does not describe the length of a horizontal scanning dropout.
     """
     restored = horizontal.copy()
     for y in np.flatnonzero(np.any(horizontal > 0, axis=1)):
@@ -2352,15 +2353,26 @@ def _restore_supported_ruling_junctions(inv, horizontal, vertical, *, opening_wi
                 if not hits.size:
                     continue
                 stop = int(hits[0])
-                raw = inv[y, ray[:stop]] > 0
+                support = inv[y, ray] > 0
+                raw = support[:stop]
                 gaps = np.flatnonzero(~raw)
-                if not gaps.size or gaps[0] < thickness * 2:
-                    continue
-                interruptions = np.split(gaps, np.flatnonzero(np.diff(gaps) > 1) + 1)
-                if (any(len(gap) > thickness for gap in interruptions)
-                        or any(right[0] - left[-1] - 1 < thickness * 2
-                               for left, right in zip(interruptions, interruptions[1:]))):
-                    continue
+                if gaps.size:
+                    if gaps[0] < thickness * 2:
+                        continue
+                    interruptions = np.split(gaps, np.flatnonzero(np.diff(gaps) > 1) + 1)
+                    supported = True
+                    previous_end = -1
+                    for gap in interruptions:
+                        left_run = int(gap[0]) - previous_end - 1
+                        following = support[int(gap[-1]) + 1:]
+                        next_gap = np.flatnonzero(~following)
+                        right_run = int(next_gap[0]) if next_gap.size else len(following)
+                        if len(gap) > min(left_run, right_run):
+                            supported = False
+                            break
+                        previous_end = int(gap[-1])
+                    if not supported:
+                        continue
                 # Copy only existing ink. A disconnected mark or absent arm is
                 # never promoted into a date boundary.
                 restored[y, ray[:stop][raw]] = inv[y, ray[:stop][raw]]
