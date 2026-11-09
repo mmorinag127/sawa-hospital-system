@@ -276,6 +276,36 @@ def test_saved_output_display_does_not_materialize_and_sheet_scope_preserves_edi
     assert all(row["detail_state"] == "not_loaded" for row in saved["ocr_candidates"]["results"])
 
 
+@pytest.mark.parametrize("scope", ["sheet", "inspection"])
+@pytest.mark.parametrize("anomaly,sheet_review", [(False, False), (True, False), (False, True), (True, True)])
+def test_unsaved_display_preserves_actual_pre_save_checks(history_case, scope, anomaly, sheet_review):
+    from src.db import session_scope
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.services import order_workflow_v2_service as workflow
+    from src.services import workflow_display_read_service as display
+
+    case = history_case()
+    source = case.produce(cell_values="5")
+    sheet_hash = workflow._stable_json_hash(source["sheet"])
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, case.id)
+        assert state.draft_id is None
+        meta = workflow._workflow_meta(state)
+        for key, confirmed in (("anomaly_review", anomaly), ("sheet_review", sheet_review)):
+            if confirmed:
+                workflow._set_pre_save_check(meta, key, sheet_hash=sheet_hash)
+        workflow._write_workflow_meta(state, meta)
+        expected = workflow._workflow_pre_save_checks(meta)
+    with case.readonly():
+        result, error = display.get_display(case.id, scope=scope)
+    assert error is None
+    assert result["saved_sheet"] is None
+    assert result["pre_save_checks"] == expected
+    assert result["pre_save_status"]["anomaly_review_confirmed"] is anomaly
+    assert result["pre_save_status"]["sheet_review_confirmed"] is sheet_review
+    assert result["pre_save_status"]["ready"] is (anomaly and sheet_review)
+
+
 def test_initial_display_loads_only_current_scope_with_one_master_snapshot(history_case, monkeypatch):
     from src.services import workflow_display_read_service as display
     from src.services import facility_master_service
