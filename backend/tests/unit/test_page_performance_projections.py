@@ -276,7 +276,7 @@ def test_saved_output_display_does_not_materialize_and_sheet_scope_preserves_edi
     assert all(row["detail_state"] == "not_loaded" for row in saved["ocr_candidates"]["results"])
 
 
-@pytest.mark.parametrize("scope", ["sheet", "inspection"])
+@pytest.mark.parametrize("scope", ["initial", "sheet", "inspection"])
 @pytest.mark.parametrize("anomaly,sheet_review", [(False, False), (True, False), (False, True), (True, True)])
 def test_unsaved_display_preserves_actual_pre_save_checks(history_case, scope, anomaly, sheet_review):
     from src.db import session_scope
@@ -300,6 +300,10 @@ def test_unsaved_display_preserves_actual_pre_save_checks(history_case, scope, a
         result, error = display.get_display(case.id, scope=scope)
     assert error is None
     assert result["saved_sheet"] is None
+    if scope == "initial":
+        assert result["display_scope"] == "sheet"
+        assert result["loaded_sections"] == ["ocr", "sheet"]
+        assert any(row["selected"] for row in result["ocr_results"])
     assert result["pre_save_checks"] == expected
     assert result["pre_save_status"]["anomaly_review_confirmed"] is anomaly
     assert result["pre_save_status"]["sheet_review_confirmed"] is sheet_review

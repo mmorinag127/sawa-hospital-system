@@ -346,8 +346,11 @@ def get_display(order_id, *, scope="summary", history_before_id=None, selected_d
         if state:
             if not workflow._workflow_meta_has_confirmed_context(meta) and not serialized.get("context_suggestion"):
                 serialized["context_suggestion"] = workflow._order_context_suggestion(order)
+            needs_overlay = scope in {"sheet", "inspection"} or (
+                scope == "initial" and workflow._canonical_workflow_v2_state(state, meta) == "ocr_selected"
+            )
             error = workflow._inspection_call("display_references", _reference_error, session, order, state, meta,
-                                              reads=reads, include_overlay=scope in {"sheet", "inspection"})
+                                              reads=reads, include_overlay=needs_overlay)
             serialized = (workflow._workflow_blocker_projection(serialized, error) if error else
                           workflow._apply_canonical_workflow_state_projection(serialized, row=state, meta=meta,
                             state=workflow._canonical_workflow_v2_state(state, meta)))
