@@ -4297,7 +4297,7 @@ export default function OrderWorkflowV2Page() {
         <div className="state-panel-main">
           <p className="eyebrow">注文情報 / 現在状態</p>
           <h2>{currentStateLabel}</h2>
-          <p className="subtle">{quantityContentEditable && !workflow?.saved_sheet_id ? "読み取りは完了しています。Step2で読み取り結果を選び、シートを作成して数量を手動修正してください。" : recognitionReviewPending ? "要確認セルの原画像と読み取り原文をStep2で確認し、空欄または数値を指定してください。" : workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
+          <p className="subtle">{quantityContentEditable && !workflow?.saved_sheet_id ? "読み取りは完了しています。Step2で読み取り結果を選び、シートを作成して数量を手動修正してください。" : geometryReviewPending ? ocrJobErrorMessage : recognitionReviewPending ? "要確認セルの原画像と読み取り原文をStep2で確認し、空欄または数値を指定してください。" : workflow?.headline || "workflow-v2 を読み込み中です。"}</p>
           {workflow?.recognition_override_invalidation ? <p role="status">
             {({quad: "4点", header_axis: "ヘッダー", row_axis: "行・日境界"} as Record<string, string>)[workflow.recognition_override_invalidation.geometry_kind] ?? "幾何"}補正が変更されたため、以前のセル手入力は履歴に保持し、新しいセルには適用しません。保存済みシートは保持しています。
           </p> : null}
@@ -5176,7 +5176,7 @@ export default function OrderWorkflowV2Page() {
           {headerAxisReview?.prerequisite_action === "review_or_edit_quad" ? <Button onClick={() => setVisibleStep(1.5)}>先に表の四隅を指定</Button> : null}
           <label>確認する列境界 <select value={selectedHeaderAxisIndex ?? ""} onChange={event => setSelectedHeaderAxisIndex(event.target.value === "" ? null : Number(event.target.value))}>
             <option value="">選択してください</option>
-            {headerAxisXs.map((_, index) => <option key={index} value={index}>{index === 0 ? "表の左端" : index === headerAxisXs.length - 1 ? "表の右端" : `${headerAxisReview?.column_labels?.[index - 1] || `列${index}`} と ${headerAxisReview?.column_labels?.[index] || `列${index + 1}`} の間`}</option>)}
+            {headerAxisXs.map((_, index) => <option key={index} value={index}>{headerAxisXs.length !== headerAxisExpectedCount ? `境界候補${index + 1}（列の対応は未確定）` : index === 0 ? "表の左端" : index === headerAxisXs.length - 1 ? "表の右端" : `${headerAxisReview?.column_labels?.[index - 1] || `列${index}`} と ${headerAxisReview?.column_labels?.[index] || `列${index + 1}`} の間`}</option>)}
           </select></label>
           <div className="header-axis-canvas-wrap">
             {headerAxisImageSrc ? (
