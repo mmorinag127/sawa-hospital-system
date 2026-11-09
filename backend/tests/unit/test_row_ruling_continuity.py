@@ -65,6 +65,17 @@ def test_two_real_close_rows_and_diagonal_cancellation_marks_remain_distinct():
     assert evidence["joined_clusters"] == []
 
 
+def test_connected_curved_ruling_is_not_required_to_follow_a_straight_ray():
+    image = np.full((180,320,3),255,np.uint8)
+    xs = [10,40,70,250,280,310]
+    points = [point(x,120 if i<3 else 94) for i,x in enumerate(xs)]
+    cv2.polylines(image,[np.array([[10,120],[70,120],[90,110],[145,112],[250,94],[310,94]])],
+                  False,(0,0,0),2)
+    merged,evidence=join(image,points,xs)
+    assert len(merged) == 1
+    assert evidence["joined_clusters"]
+
+
 def test_ambiguous_connected_alternatives_are_not_fitted_to_one_row():
     image = np.full((180,320,3),255,np.uint8)
     xs = [10,40,250,280]
@@ -100,7 +111,9 @@ def test_reported_pdf_geometry_when_private_fixture_is_available():
     points, _ = subject._detect_table_intersections_for_row_axis(image,
         corrected_xs=diag["x_levels"],template_ys=[447,4182])
     raw = subject._cluster_header_axis_values(points,"y",tolerance_px=18)
-    assert len(raw) == 61
+    old_observed = subject._filter_structural_y_clusters(subject._enrich_y_clusters_with_column_votes(
+        points=points,y_clusters=raw,corrected_xs=diag["x_levels"]))
+    assert len(old_observed)-3 == diag["axis_evidence"]["canonical_day_source"]["observed_physical_row_count"] == 58
     merged, evidence = join(image,points,diag["x_levels"])
     observed = subject._filter_structural_y_clusters(subject._enrich_y_clusters_with_column_votes(
         points=points,y_clusters=merged,corrected_xs=diag["x_levels"]))

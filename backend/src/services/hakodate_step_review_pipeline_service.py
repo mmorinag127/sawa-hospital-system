@@ -2218,23 +2218,25 @@ def _join_observed_row_ruling_fragments(rectified_fax, points, y_clusters, corre
                        for point in (a, b)):
                     continue
                 xs = np.arange(int(np.ceil(a["x"])), int(np.floor(b["x"])) + 1)
-                ys = np.rint(a["y"] + (xs - a["x"]) * (b["y"] - a["y"]) / width).astype(int)
                 radius = max(2, min(a["bbox"][3], b["bbox"][3]) // 2)
-                supported = np.zeros(xs.size, dtype=bool)
-                for offset in range(-radius, radius + 1):
-                    valid = (xs >= 0) & (xs < ink.shape[1]) & (ys + offset >= 0) & (ys + offset < ink.shape[0])
-                    supported[valid] |= ink[ys[valid] + offset, xs[valid]] > 0
-                if xs.size and supported.all():
-                    x0, x1 = int(xs[0]), int(xs[-1]) + 1
-                    y0, y1 = max(0, int(ys.min()) - radius), min(ink.shape[0], int(ys.max()) + radius + 1)
-                    corridor = np.abs(np.arange(y0, y1)[:, None] - ys[None, :]) <= radius
-                    _, labels = cv2.connectedComponents(
-                        ((ink[y0:y1, x0:x1] > 0) & corridor).astype(np.uint8), connectivity=8,
-                    )
-                    common = set(labels[:, 0]) & set(labels[:, -1]) - {0}
-                    if common:
-                        observed = True
-                        break
+                if not xs.size:
+                    continue
+                x0, x1 = int(xs[0]), int(xs[-1]) + 1
+                y0 = max(0, int(np.floor(min(a["y"], b["y"]))) - radius)
+                y1 = min(ink.shape[0], int(np.ceil(max(a["y"], b["y"]))) + radius + 1)
+                # Follow the observed ruling, including fax curvature, rather
+                # than requiring every pixel to lie on a straight fitted ray.
+                window = ink[y0:y1, x0:x1] > 0
+                if not np.any(window, axis=0).all():
+                    continue
+                _, labels = cv2.connectedComponents(window.astype(np.uint8), connectivity=8)
+                ends = []
+                for point, column in ((a, 0), (b, -1)):
+                    center = int(round(point["y"])) - y0
+                    ends.append(set(labels[max(0, center-radius):center+radius+1, column]))
+                if (ends[0] & ends[1]) - {0}:
+                    observed = True
+                    break
             if observed:
                 break
         if observed:
