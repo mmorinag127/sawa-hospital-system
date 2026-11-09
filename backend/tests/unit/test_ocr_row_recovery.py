@@ -204,7 +204,7 @@ def test_error_action_only_routes_known_geometry_failures(message, stage):
 
 
 @pytest.mark.parametrize("gap,arm,continuation,restored", [(3, True, True, True), (4, True, True, True),
-    (8, True, True, False), (3, False, True, False), (3, True, False, False)])
+    (8, True, True, True), (24, True, True, False), (3, False, True, False), (3, True, False, False)])
 def test_supported_short_ruling_not_threshold_only(gap, arm, continuation, restored):
     cv2 = pipeline.cv2
     ink = np.zeros((200, 2362), dtype=np.uint8)

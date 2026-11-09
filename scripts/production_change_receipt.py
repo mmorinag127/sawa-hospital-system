@@ -14,6 +14,7 @@ BASE = "419046eb02d6c7e758da897fd28bec3656809ca0"
 RUN = 42460685431
 REPOSITORY = "mmorinag127/sawa-hospital-system"
 ALLOWED = {
+    "backend/tests/unit/test_ocr_row_recovery.py",
     "backend/tests/unit/test_observed_ruling_junctions.py",
     "docs/OCR_AUTOMATIC_JUNCTIONS_20261109.md",
     "backend/src/services/ocr_row_recovery_service.py",
