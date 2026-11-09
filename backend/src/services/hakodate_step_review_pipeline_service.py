@@ -1682,6 +1682,8 @@ def _detect_header_intersections_for_axis_alignment(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     h_mask, v_mask = _split_line_masks(rectified_bgr)
     x0, y0, x1, y1 = _header_bounds_for_axis_alignment(table_bbox, template_ys)
+    # A grid coordinate is inclusive; NumPy's slice stop is exclusive.
+    x1 = min(rectified_bgr.shape[1], x1 + 1)
     # Merged header columns may first intersect at the body edge. Locate that
     # edge in the observed table instead of clipping it at template pixel height.
     vertical_axes = _detect_vertical_candidates(rectified_bgr, table_bbox)

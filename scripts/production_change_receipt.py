@@ -48,6 +48,9 @@ PYTEST += ["backend/tests/unit/" + name for name in (
 PYTEST += ["backend/tests/contract/test_saved_sheet_quantity_schema.py"]
 PYTEST += ["backend/tests/unit/test_page_performance_projections.py"]
 PYTEST += ["backend/tests/unit/test_header_topology_alignment.py"]
+PYTEST += ["backend/tests/unit/" + name for name in (
+    "test_ocr_header_recovery.py", "test_ocr_row_recovery.py", "test_h2_operator_repair_revision.py",
+)]
 COMMANDS = [
     ("backend", ["python3", "-m", "pytest", *PYTEST, "-q"], "."),
     ("frontend", ["node", "--test", "--test-concurrency=1",
