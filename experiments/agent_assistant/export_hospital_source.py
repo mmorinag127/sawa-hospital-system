@@ -104,7 +104,8 @@ def build(connection, baseline, master, sources, assets, output):
                 (source['source_template_version_id'],))
             template = cursor.fetchone()
             if (not template or template[0] != source['facility_id']
-                    or (template[1] or {}).get('canonical_lineage',{}).get('authored_version_id') != source['authored_version_id']):
+                    or (template[1] or {}).get('canonical_lineage',{}).get('authored_version_id') != source['authored_version_id']
+                    or (template[1] or {}).get('canonical_lineage',{}).get('snapshot_digest') != source['source_template_digest']):
                 raise ValueError('source_template_lineage_changed')
         with TemporaryDirectory(prefix='hospital-export-',dir=Path(output).parent) as temporary:
             root = Path(temporary)

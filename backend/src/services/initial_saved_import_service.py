@@ -477,7 +477,7 @@ def reopen_reset_binding(session, order_id, audit):
     actions.pop(TRANSPORT,None)
     row.secondary_actions_json = actions
     session.flush()
-    actions[TRANSPORT] = {'root_source_sha256':root,'receipt':source_receipt(capture_saved_source(session,order_id))}
+    actions = {**actions, TRANSPORT:{'root_source_sha256':root,'receipt':source_receipt(capture_saved_source(session,order_id))}}
     row.secondary_actions_json = actions
     session.flush()
     session.info.setdefault(OWNED,{})[order_id] = {

@@ -737,7 +737,7 @@ export default function OrderWorkflowV2Page() {
   const activeOrderIdRef = useRef(orderId);
   activeOrderIdRef.current = orderId;
   const [workflow, setWorkflow] = useState<WorkflowV2 | null>(null);
-  const [ocrResetPrompt, setOcrResetPrompt] = useState<{orderId:string;revision:number;auth:string|null}|null>(null);
+  const [ocrResetPrompt, setOcrResetPrompt] = useState<{orderId:string;revision:WorkflowRevisionToken;auth:string|null}|null>(null);
   const workflowJobRef = useRef<{orderId:string;workflowOrderId?:string;jobOrderId?:string|null;jobId:string|null;attemptId:string|null;state?:string;native_ingest?:unknown}>({orderId,jobId:null,attemptId:null});
   workflowJobRef.current={orderId,workflowOrderId:workflow?.order_id,jobOrderId:workflow?.ocr_job?.order_id ?? null,
     jobId:workflow?.ocr_job?.ocr_job_id ?? null,attemptId:workflow?.ocr_job?.workflow_attempt_id ?? null,state:workflow?.state,

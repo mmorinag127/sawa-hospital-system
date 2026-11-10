@@ -92,6 +92,7 @@ def capture(args):
                         raise ValueError('original_pdf_digest_changed:'+identity)
                     sources.append({'source_order_id':identity,'source_document_id':document,
                         'source_template_version_id':template,'authored_version_id':validation['canonical_lineage']['authored_version_id'],
+                        'source_template_digest':validation['canonical_lineage']['snapshot_digest'],
                         'facility_id':facility,'week':week,'source_uri':uri,'sha256':sha,'content':body,
                         'received_at':received.isoformat(),'service_date':week.split('@',1)[1].split('~',1)[0],
                         'message_id':'agent-copy:'+identity+':'+sha,'fax_rotation_degrees':rotation})

@@ -73,7 +73,7 @@ async function mount(file, { api, props = {}, probe, route, routerState, compone
     if (!saved.has(key)) saved.set(key, Object.getOwnPropertyDescriptor(object, key));
     Object.defineProperty(object, key, { configurable: true, writable: true, value });
   }
-  for (const key of ['window', 'document', 'navigator', 'Node', 'Element', 'HTMLElement', 'HTMLInputElement',
+  for (const key of ['window', 'document', 'navigator', 'Node', 'Element', 'ShadowRoot', 'HTMLElement', 'HTMLInputElement',
     'HTMLSelectElement', 'DocumentFragment', 'MutationObserver', 'Event', 'MouseEvent', 'File', 'FormData',
     'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
     const value = ['getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame'].includes(key)

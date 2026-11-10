@@ -49,7 +49,8 @@ def initialize(data):
         if not facility:
             raise ValueError('trial_declared_facility_unresolved')
         if authoritative and (source['source_order_id'] not in manifest['authority']['order_ids']
-                or facility['canonical_lineage']['authored_version_id'] != source['authored_version_id']):
+                or facility['canonical_lineage']['authored_version_id'] != source['authored_version_id']
+                or facility['canonical_lineage']['snapshot_digest'] != source['source_template_digest']):
             raise ValueError('trial_authoritative_facility_source_changed')
         selection=capture_selection(source['facility_id'],source['service_date'],snapshot.revision,
             facility['canonical_lineage']['authored_version_id'],source['week'])

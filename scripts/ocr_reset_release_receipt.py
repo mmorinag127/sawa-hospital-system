@@ -42,6 +42,7 @@ ALLOWED = {
     'experiments/agent_assistant/store.py','experiments/agent_assistant/task_flow.py',
     'experiments/agent_assistant/tests/test_hospital_source.py',
     'frontend/src/pages/assistant.tsx','scripts/prepare_hospital_trial_source.py',
+    'frontend/tests/helpers/modernization-react-dom.cjs',
 }
 BACKEND = ['backend/tests/unit/' + name for name in (
     'test_workflow_ocr_reset.py', 'test_order_workflow_v2_service.py',

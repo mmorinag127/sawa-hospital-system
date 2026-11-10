@@ -25,6 +25,7 @@ def bundle(tmp_path,monkeypatch,*,extra_row=False):
             'order_ids':['ORDabcdef'],'captured_at':'2026-11-11T00:00:00Z'},
         'pending_sources':[{'source_order_id':'ORDabcdef','source_document_id':'document',
             'source_template_version_id':'template','authored_version_id':'authored','facility_id':'facility',
+            'source_template_digest':'a'*64,
             'week':'2026-11@2026-11-15~2026-11-21','path':'originals/ORDabcdef.pdf',
             'sha256':sha(files['originals/ORDabcdef.pdf']),'fax_rotation_degrees':180}],
         'files':{name:sha(body) for name,body in files.items()}}

@@ -94,6 +94,7 @@ def unpack(content, target, value):
                 if (not re.fullmatch(r'ORD[0-9a-f]+', item['source_order_id'])
                         or not item.get('source_document_id') or not item.get('source_template_version_id')
                         or not item.get('authored_version_id') or not item.get('facility_id') or not item.get('week')
+                        or not re.fullmatch(r'[0-9a-f]{64}', str(item.get('source_template_digest','')))
                         or files.get(item['path']) != item['sha256']
                         or type(item.get('fax_rotation_degrees')) is not int
                         or item['fax_rotation_degrees'] not in (0, 180)):
