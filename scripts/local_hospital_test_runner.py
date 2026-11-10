@@ -144,6 +144,10 @@ def require_frontend_dependencies() -> None:
 
 
 def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash: str, *, require_full: bool = False) -> None:
+    if isinstance(receipt, dict) and receipt.get('receipt_version') == 9:
+        from production_display_delta_receipt import validate
+        validate(receipt, expected_sha, expected_definition_hash)
+        return
     if isinstance(receipt, dict) and receipt.get('receipt_version') == 8:
         if require_full:
             raise ValueError('Staging orientation delta is not a full production proof')
