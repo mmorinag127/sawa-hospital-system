@@ -16,6 +16,20 @@ OWNED = "initial_saved_import_owned"
 RETIRED = "_initial_saved_import_retired"
 
 
+def _audited_reset(session, order_id, actions):
+    from src.models.user import AuditLog
+    meta = actions.get("workflow_v2") if isinstance(actions, dict) else None
+    reset = meta.get("ocr_reset") if isinstance(meta, dict) else None
+    if not isinstance(reset, dict) or not isinstance(reset.get("audit_id"), str):
+        return None
+    audit = session.get(AuditLog, reset["audit_id"])
+    if (audit is None or audit.target != order_id or audit.action != "workflow_ocr_selection_reset"
+            or not isinstance(audit.metadata_json, dict)
+            or audit.metadata_json.get("history_preserved") is not True):
+        return None
+    return audit
+
+
 def _transaction(session):
     return session.get_nested_transaction() or session.get_transaction()
 
@@ -122,6 +136,10 @@ def get_binding(session, order_id, *, template_version_id=None, master=None):
     actions = workflow["secondary_actions_json"]
     transport = actions.get(TRANSPORT) if isinstance(actions, dict) else None
     if isinstance(actions, dict) and RETIRED in actions:
+        audit = _audited_reset(session, order_id, actions)
+        if (audit is not None and audit.metadata_json.get("retired_import_source_sha256")
+                == actions[RETIRED] == record["receipt"].get("source_sha256")):
+            return None
         raise ValueError("initial_saved_import_retired")
     root = record["receipt"]
     receipt = root
@@ -378,9 +396,16 @@ def finish_owned_import(session, order_id, *, expected_revision=None):
     order_table = Order.__table__
     template_id = session.execute(select(order_table.c.template_version_id).where(order_table.c.id == order_id)).scalar_one()
     actions = deepcopy(workflow["secondary_actions_json"]) if isinstance(workflow["secondary_actions_json"], dict) else {}
-    if _canonical_selection(session, template_id):
+    reset_audit = _audited_reset(session, order_id, actions)
+    reset_retirement = (reset_audit is not None
+        and reset_audit.metadata_json.get("previous", {}).get("revision") == workflow["revision"] - 1
+        and all(workflow[key] is None for key in ("draft_id", "evidence_run_id", "confirmed_snapshot_id")))
+    if _canonical_selection(session, template_id) or reset_retirement:
         actions.pop(TRANSPORT, None)
         actions[RETIRED] = owned["record"]["receipt"]["source_sha256"]
+        if reset_retirement:
+            reset_audit.metadata_json = {**reset_audit.metadata_json,
+                "retired_import_source_sha256": actions[RETIRED]}
     else:
         snapshot = capture_saved_source(session, order_id)
         actions[TRANSPORT] = {"root_source_sha256": owned["record"]["receipt"]["source_sha256"],

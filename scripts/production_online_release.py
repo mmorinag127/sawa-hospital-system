@@ -61,7 +61,7 @@ def identity(service):
                 images=[resolve_image_digest(v) for v in revision_images(revision)])
 
 
-def replacement(service, image, name, tag, source_sha):
+def replacement(service, image, name, tag, source_sha, *, agent_image=None):
     spec = copy.deepcopy(service['spec'])
     template = spec['template']
     template['metadata']['name'] = name
@@ -77,6 +77,11 @@ def replacement(service, image, name, tag, source_sha):
             require(not any(v.get('name') == 'SAWA_RELEASE_READ_ONLY' and v.get('value') == '1'
                             for v in container.get('env', [])), 'unfinished read-only release rejected')
     containers[0]['image'] = image
+    if agent_image is not None:
+        require(service['metadata']['name'] == 'web-prod', 'agent image is only valid for web')
+        agents = [container for container in containers if container.get('name') == 'agent-runtime']
+        require(len(agents) == 1, 'exact existing agent container required')
+        agents[0]['image'] = agent_image
     spec['traffic'] = [dict(revisionName=serving(service), percent=100),
                        dict(revisionName=name, percent=0, tag=tag)]
     metadata = {k:copy.deepcopy(v) for k,v in service['metadata'].items()
@@ -119,6 +124,7 @@ def run():
     require(set(expected) == set(SERVICES), 'exact original production identities required')
     images = {key:resolve_image_digest(os.environ[key]) for key in
               ('ONLINE_BACKEND_IMAGE','ONLINE_FRONTEND_IMAGE','ONLINE_RECOVERY_IMAGE')}
+    agent_image = resolve_image_digest(os.environ['ONLINE_AGENT_IMAGE'])
     token = os.environ['VERIFICATION_TOKEN']
     order = os.environ['ORDER_ID']
     require(re.fullmatch(r'ORD[0-9a-fA-F]+',order), 'exact smoke order required')
@@ -163,7 +169,8 @@ def run():
         require(set(tags) <= {v['tag'] for v in record['candidates'] if v['service']==service},
                 'unreviewed tagged route appeared')
         prepared_source['status']['traffic'] = [dict(revisionName=original,percent=100)]
-        replacement_data = replacement(prepared_source,image,name,tag,os.environ['GITHUB_SHA'])
+        replacement_data = replacement(prepared_source,image,name,tag,os.environ['GITHUB_SHA'],
+            agent_image=agent_image if service == 'web-prod' else None)
         # Preserve prior recovery routes while adding the next verified candidate.
         replacement_data['spec']['traffic'].extend(dict(revisionName=v['revision'],percent=0,tag=v['tag'])
             for v in record['candidates'] if v['service']==service)
@@ -176,6 +183,11 @@ def run():
         require(any(v.get('type')=='Ready' and v.get('status')=='True' for v in revision['status']['conditions']),
                 'candidate is not ready')
         require(resolve_image_digest(revision_images(revision)[0]) == image, 'candidate image mismatch')
+        if service == 'web-prod':
+            agents = [container for container in revision['spec']['containers']
+                      if container.get('name') == 'agent-runtime']
+            require(len(agents) == 1 and resolve_image_digest(agents[0]['image']) == agent_image,
+                    'candidate agent image mismatch')
         require([c.get('env',[]) for c in revision['spec']['containers']] ==
                 [c.get('env',[]) for c in current['spec']['template']['spec']['containers']],
                 'candidate changed runtime environment')

@@ -552,9 +552,16 @@ def cloud_store(root):
     required = ('DB_HOST','DB_NAME','DB_USER','DB_PASSWORD')
     if any(not os.environ.get(name) for name in required):
         raise RuntimeError('stg実行履歴のCloud SQL設定が不足しています')
-    if (os.environ['DB_HOST'] != '/cloudsql/sawahospitalsystem:asia-northeast2:orders-stg'
+    targets = {
+        '/cloudsql/sawahospitalsystem:asia-northeast2:orders-stg':
+            'https://worker-stg-avlnzjjrca-dt.a.run.app/portal/auth/me',
+        '/cloudsql/sawahospitalsystem:asia-northeast2:orders-prod':
+            'https://worker-prod-avlnzjjrca-dt.a.run.app/portal/auth/me',
+    }
+    auth_url = targets.get(os.environ['DB_HOST'])
+    if (not auth_url or os.environ.get('PORTAL_AUTH_ME_URL') != auth_url
             or os.environ['DB_NAME'] != 'orders' or os.environ['DB_USER'] != 'orders_app'):
-        raise RuntimeError('試用エージェントの永続化先はorders-stg専用です')
+        raise RuntimeError('試用エージェントの認証先と永続化先の環境が一致しません')
     connect = _PooledConnections(host=os.environ['DB_HOST'], dbname=os.environ['DB_NAME'],
         user=os.environ['DB_USER'], password=os.environ['DB_PASSWORD'], connect_timeout=10,
         application_name='sawa-agent-isolated-trial')

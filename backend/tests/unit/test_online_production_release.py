@@ -22,7 +22,7 @@ def service():
         spec=dict(template=dict(metadata=dict(name='old',annotations={'retained':'yes'}),
             spec=dict(serviceAccountName='existing',containers=[
                 dict(image='old',ports=[dict(containerPort=8080)],env=[dict(name='SECRET',value='kept')]),
-                dict(image='sidecar',env=[dict(name='OTHER',value='retained')])])),
+                dict(name='agent-runtime',image='sidecar',env=[dict(name='OTHER',value='retained')])])),
             traffic=[dict(revisionName='old',percent=100)]),
         status=dict(traffic=[dict(revisionName='old',percent=100)]))
 
@@ -74,7 +74,9 @@ def test_online_workflow_preserves_approval_and_never_calls_maintenance():
     online=jobs['online-production']
     assert online['environment']=='production'
     assert online['permissions']['id-token']=='write'
-    assert online['needs']==['source-gate','build-backend','build-frontend']
+    assert online['needs']==['source-gate','build-backend','build-frontend','build-agent']
+    assert 'ONLINE_AGENT_IMAGE' in str(online)
+    assert 'if' not in jobs['build-agent']
     text=str(online)
     assert 'production_online_release.py' in text
     assert 'production_maintenance.py' not in text
@@ -112,7 +114,7 @@ def test_rollout_serves_bridge_during_ddl_and_failure_restores_compatible_runtim
         value['status']['url']='https://'+name
     originals={name:dict(revision='old',uid='uid',images=['old']) for name in state}
     for key,value in dict(ONLINE_EXPECTED_LIVE=json.dumps(originals),ONLINE_BACKEND_IMAGE='backend',
-        ONLINE_FRONTEND_IMAGE='frontend',ONLINE_RECOVERY_IMAGE='recovery',VERIFICATION_TOKEN='token',
+        ONLINE_FRONTEND_IMAGE='frontend',ONLINE_AGENT_IMAGE='agent',ONLINE_RECOVERY_IMAGE='recovery',VERIFICATION_TOKEN='token',
         ORDER_ID='ORD123',RUNNER_TEMP=str(tmp_path),GITHUB_SHA='a'*40,GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1').items():
         monkeypatch.setenv(key,value)
     monkeypatch.setattr(release,'context',lambda:None)
@@ -167,4 +169,16 @@ def test_rollout_serves_bridge_during_ddl_and_failure_restores_compatible_runtim
         release.run()
         assert release.serving(state['worker-prod']).endswith('candidate')
         assert release.serving(state['web-prod']).endswith('candidate')
+        assert state['web-prod']['spec']['template']['spec']['containers'][1]['image']=='agent'
     assert not any(v.get('tag') for s in state.values() for v in s['status']['traffic'])
+
+
+def test_online_agent_image_replaces_only_the_named_existing_sidecar():
+    original=service()
+    result=release.replacement(original,'frontend','new','tag','a'*40,agent_image='new-agent')
+    assert original==service()
+    assert result['spec']['template']['spec']['containers'][1]=={
+        **original['spec']['template']['spec']['containers'][1],'image':'new-agent'}
+    original['spec']['template']['spec']['containers'][1]['name']='different-sidecar'
+    with pytest.raises(RuntimeError,match='exact existing agent'):
+        release.replacement(original,'frontend','new','tag','a'*40,agent_image='new-agent')

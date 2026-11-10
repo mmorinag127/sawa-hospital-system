@@ -553,6 +553,37 @@ def test_canonical_transition_retires_old_receipt_without_relabeling_old_rows(im
     session.rollback()
 
 
+def test_ocr_reset_retires_import_binding_without_deleting_saved_history(imported, monkeypatch):
+    session, master, original = imported
+    @contextmanager
+    def scope():
+        try:
+            yield session
+            session.commit()
+        except BaseException:
+            session.rollback()
+            raise
+    monkeypatch.setattr(workflow, "session_scope", scope)
+    from src.models.user import AuditLog
+    result, error = workflow.reset_ocr_selection("O", actor="reset-operator",
+        expected_revision=original["workflow"]["revision"])
+    assert error is None
+    assert result["selected_ocr_result_id"] is None
+    assert result["saved_sheet_id"] is None
+    assert result["confirmed_snapshot_id"] is None
+    assert service.get_binding(session, "O") is None
+    assert session.get(OrderSheetDraft, "D").draft_sheet_json == original["draft"]["draft_sheet_json"]
+    assert session.get(OrderSheetDraft, "D").template_version_id == original["draft"]["template_version_id"]
+    audit = session.get(AuditLog, result["ocr_reset"]["audit_id"])
+    assert audit.metadata_json["retired_import_source_sha256"] == master[service.IMPORTS]["O"]["receipt"]["source_sha256"]
+    assert workflow.get_saved_sheet("O") == (None, "saved_sheet_missing")
+    audit.metadata_json = {**audit.metadata_json, "retired_import_source_sha256": "tampered"}
+    session.flush()
+    with pytest.raises(ValueError, match="retired"):
+        service.get_binding(session, "O")
+    session.rollback()
+
+
 @pytest.mark.parametrize("owner_order,job,attempt,revision", [
     ("OTHER", "missing", "attempt", 1), ("O", None, "attempt", 1),
     ("O", "missing", None, 1), ("O", "missing", "attempt", 1),

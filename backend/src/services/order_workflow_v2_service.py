@@ -37,6 +37,7 @@ from src.services import workflow_ocr_delivery_service
 from src.services.ocr_history_read import read_history, read_history_summary
 from src.models.output import Bag, DeliveryNote, LabelRow, ManufacturingAggregateRow
 from src.models.ocr_job import OcrJob
+from src.models.user import AuditLog
 from src.services import config_service, facility_template_version_service, ocr_job_service, sheet_week_service, workflow_v2_sheet_review_service
 from src.services import order_output_artifact_service, ocr_evidence_service
 from src.services.canonical_facility_store import CanonicalStoreError
@@ -1105,6 +1106,7 @@ def _serialize_workflow(
         "primary_action": row.primary_action,
         "selected_ocr_result_id": row.evidence_run_id,
         "saved_sheet_id": row.draft_id,
+        "ocr_reset": copy.deepcopy(meta.get("ocr_reset")),
         "confirmed_snapshot_id": confirmed_snapshot_id,
         "facility_id": meta.get("facility_id"),
         "week_start": meta.get("week_start"),
@@ -3470,6 +3472,66 @@ def select_ocr_result(
         if revision_error:
             return _serialize_workflow(workflow), revision_error
         return _serialize_workflow(workflow), None
+
+
+@workflow_command
+def reset_ocr_selection(order_id: str, *, actor: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Retire current input/output references, preserving every immutable history row."""
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        active = session.query(OcrJob.id).filter(
+            OcrJob.order_id == order.id,
+            or_(OcrJob.status.is_(None), OcrJob.status.notin_(
+                ("done", "completed", "success", "failed", "error", "cancelled", "canceled", "stopped"))),
+        ).first()
+        if active or workflow.state == "ocr_running":
+            return None, "ocr_reset_execution_active"
+        meta = _workflow_meta(workflow)
+        if (meta.get("ocr_reset") and not _workflow_has_downstream_lineage(workflow)
+                and not meta.get("ocr_job_id")):
+            return _serialize_workflow(workflow), None
+        audit_id, reset_at = "AUD" + uuid4().hex, _now()
+        current = session.get(OrderCurrentState, order.id)
+        previous = {
+            "revision": _workflow_revision(workflow), "state": workflow.state,
+            "evidence_run_id": workflow.evidence_run_id, "draft_id": workflow.draft_id,
+            "confirmed_snapshot_id": workflow.confirmed_snapshot_id,
+            "ocr_job_id": meta.get("ocr_job_id"), "ocr_job_attempt_id": meta.get("ocr_job_attempt_id"),
+            "latest_ocr_result_id": meta.get("latest_ocr_result_id"),
+            "bagging_result_id": meta.get("bagging_result_id"), "output_bundle_id": meta.get("output_bundle_id"),
+            "current_draft_id": current.draft_id if current else None,
+            "current_evidence_run_id": current.evidence_run_id if current else None,
+        }
+        session.add(AuditLog(id=audit_id, actor=actor, action="workflow_ocr_selection_reset",
+            target=order.id, fac=order.facility_code, wek=order.week_code,
+            metadata_json={"previous": previous, "history_preserved": True}, created_at=reset_at))
+        for key in ("ocr_job_id", "ocr_job_attempt_id", "latest_ocr_result_id", "bagging_input_proof",
+                    "pre_save_checks", "pre_save_status"):
+            meta.pop(key, None)
+        _clear_step4_meta_references(meta)
+        meta["ocr_reset"] = {"audit_id": audit_id, "at": reset_at.isoformat(),
+                             "retained_sheet_id": workflow.draft_id}
+        workflow.evidence_run_id = None
+        workflow.draft_id = None
+        workflow.confirmed_snapshot_id = None
+        workflow.state = "context_confirmed" if _workflow_meta_has_confirmed_context(meta) else "uploaded"
+        workflow.headline = "履歴を保持してOCR選択を解除しました。OCRを再実行してください"
+        workflow.primary_action = "run_ocr" if workflow.state == "context_confirmed" else "confirm_context"
+        workflow.blockers_json = []
+        workflow.warnings_json = []
+        workflow.confidence_band = None
+        workflow.last_transition_at = reset_at
+        order.status = "要確認"
+        if current is not None:
+            # Preserve cached content too; its old revision receipt is no longer executable.
+            current.draft_id = None
+            current.evidence_run_id = None
+        _write_workflow_meta(workflow, meta)
+        revision_error = _finalize_workflow_mutation(session, workflow)
+        return _serialize_workflow(workflow), revision_error
 
 
 @workflow_command

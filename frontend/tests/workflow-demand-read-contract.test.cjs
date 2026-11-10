@@ -47,6 +47,42 @@ test('saved sheet display does not fetch strict OCR details',async()=>{
     assert.equal(f.probe.current.ocrResults[0].detail_state,'not_loaded');
   } finally {await f.h.close();}
 });
+test('OCR reset cancellation leaves the selected sheet and revision untouched',async()=>{
+  const f=await setup(false,{state:'sheet_saved',saved_sheet_id:'saved',selected_ocr_result_id:'evidence'});
+  try {
+    window.confirm=()=>false;
+    await f.h.settle(()=>f.probe.current.setVisibleStep(1));
+    const button=[...f.h.document.querySelectorAll('button')].find(b=>b.textContent==='OCR選択を解除');
+    assert.ok(button);
+    await f.h.click(button);
+    assert.equal(f.t.calls.filter(c=>c.url===`${BASE}/ocr-reset`).length,0);
+    assert.equal(f.probe.current.workflow.saved_sheet_id,'saved');
+    assert.equal(f.probe.current.workflow.revision,7);
+  } finally {await f.h.close();}
+});
+test('OCR reset sends the current revision and displays the retained-history receipt',async()=>{
+  const f=await setup(false,{state:'sheet_saved',saved_sheet_id:'saved',selected_ocr_result_id:'evidence'});
+  try {
+    window.confirm=()=>true;
+    f.t.on('post',`${BASE}/ocr-reset`,()=>{
+      f.state.workflow={...f.state.workflow,revision:8,state:'context_confirmed',primary_action:'run_ocr',
+        selected_ocr_result_id:null,saved_sheet_id:null,ocr_job:null,
+        ocr_reset:{audit_id:'audit',at:'2026-11-11T00:00:00Z',retained_sheet_id:'saved'}};
+      return {data:structuredClone(f.state.workflow)};
+    });
+    await f.h.settle(()=>f.probe.current.setVisibleStep(1));
+    const button=[...f.h.document.querySelectorAll('button')].find(b=>b.textContent==='OCR選択を解除');
+    assert.ok(button);
+    await f.h.click(button);
+    await f.h.waitFor(()=>f.probe.current.workflow.revision===8);
+    const calls=f.t.calls.filter(c=>c.url===`${BASE}/ocr-reset`);
+    assert.equal(calls.length,1);
+    assert.ok(Object.entries(calls[0].config.headers).some(([key,value])=>
+      key.toLowerCase()==='if-match'&&String(value).includes('7')));
+    assert.equal(f.probe.current.workflow.saved_sheet_id,null);
+    assert.match(f.h.document.body.textContent,/以前のOCR候補と保存済みシートは履歴に保持/);
+  } finally {await f.h.close();}
+});
 test('summary detail button restores exact warning and blocked selection',async()=>{
   const f=await setup();
   try {

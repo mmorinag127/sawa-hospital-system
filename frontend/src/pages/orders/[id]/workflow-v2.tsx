@@ -413,6 +413,7 @@ const describeWorkflowBlocker = (code: string) => {
     menu_amount_unresolved: "月次メニューの一人量または単位を確認してください。確定するまで量計算と出力はできません。",
     selected_pdf_document_required: "注文に紐づくFAX PDFを確認してください。",
     ocr_result_saved_history_conflict: "このOCR結果に紐づく保存済みシート・修正候補・出力の履歴があるため、削除できません。現在選択中のOCRと保存内容は保持しています。",
+    ocr_reset_execution_active: "実行中または受付済みのOCRがあるため、選択を解除できません。処理完了後に再確認してください。",
     selected_pdf_input_mismatch: "選択したFAX PDFが注文の参照元と一致していません。",
     selected_pdf_digest_required: "FAX PDFの照合情報が不足しているため、処理を停止しています。",
     selected_pdf_generation_required: "FAX PDFの保存版を特定できないため、処理を停止しています。",
@@ -1258,7 +1259,7 @@ export default function OrderWorkflowV2Page() {
       if (!adoptOwnWorkflowCommandResponse(response.data, captured)) {
         throw new Error("workflow command の処理中に注文または入力が変更されました。再読込してから操作してください。");
       }
-      if (["ocrRun", "ocrSelection", "ocrDelete", "templateColumns"].includes(editor)) {
+      if (["ocrRun", "ocrSelection", "ocrDelete", "ocrReset", "templateColumns"].includes(editor)) {
         retireReplacedWorkflowInput(editor);
       }
       if (preservedSheet) {
@@ -3424,6 +3425,14 @@ export default function OrderWorkflowV2Page() {
       await executeWorkflowMutation("ocrDelete", (config) => apiClient.delete(`/orders/${orderId}/workflow-v2/ocr-results/${ocrResultId}`, config), adopt);
     }, { replacesInput: true });
 
+  const resetOcrSelection = () => {
+    if (!window.confirm("現行のOCR・シート・出力の選択を解除し、要確認に戻します。原本、OCR履歴、保存済みシート、手動編集は削除しません。実行しますか？")) return;
+    void runAction("OCR selection reset", async ({adopt}) => {
+      await executeWorkflowMutation("ocrReset", config => apiClient.post(
+        `/orders/${orderId}/workflow-v2/ocr-reset`, undefined, config), adopt);
+    }, {replacesInput:true, nextStep:1, successMessage:"履歴を保持してOCR選択を解除し、要確認に戻しました"});
+  };
+
   const generateSheetFromSelectedOcr = () =>
     runAction("Step3 sheet source", async ({ adopt }) => {
       const response = await apiClient.get<{
@@ -4716,7 +4725,15 @@ export default function OrderWorkflowV2Page() {
               >
                 OCRを実行
               </Button>
+              <Button type="button" className="btn ghost workflow-ordinary-control"
+                disabled={Boolean(busy) || !workflow?.revision || workflow?.state === "ocr_running"}
+                onClick={resetOcrSelection}>OCR選択を解除</Button>
             </div>
+            {workflow?.ocr_reset && !workflow.selected_ocr_result_id ? (
+              <p role="status">OCR選択を解除済みです。以前のOCR候補と保存済みシートは履歴に保持しています。
+                <Link href={`/orders/${orderId}/inspection-v2`}>OCR履歴を確認</Link>
+              </p>
+            ) : null}
             {!facilityTemplateReadyForOcr && contextForm.facility_id ? (
               <p className="workflow-warning">
                 {facilityTemplateMissing

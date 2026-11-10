@@ -11,6 +11,7 @@ export type WorkflowV2 = {
   primary_action?: string | null;
   selected_ocr_result_id?: string | null;
   saved_sheet_id?: string | null;
+  ocr_reset?: {audit_id: string; at: string; retained_sheet_id?: string | null} | null;
   confirmed_snapshot_id?: string | null;
   facility_id?: string | null;
   week_start?: string | null;

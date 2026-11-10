@@ -1312,7 +1312,7 @@ def _workflow_v2_or_404(result: tuple[dict | None, str | None]) -> dict:
         raise HTTPException(status_code=422, detail={"error": error, "workflow": payload or {}})
     if error == order_workflow_v2_service.WORKFLOW_REVISION_CONFLICT:
         raise HTTPException(status_code=409, detail={"error": error, "workflow": payload or {}})
-    if error in {"ocr_rerun_in_progress", "ocr_rerun_stale_wait"}:
+    if error in {"ocr_rerun_in_progress", "ocr_rerun_stale_wait", "ocr_reset_execution_active"}:
         raise HTTPException(status_code=409, detail={"error": error, "workflow": payload or {}})
     if error:
         raise HTTPException(status_code=400, detail=error)
@@ -1740,6 +1740,15 @@ def select_order_workflow_v2_ocr_result(
 @router.delete("/{order_id}/workflow-v2/ocr-results/{ocr_result_id}", dependencies=[Depends(require_role("operator"))])
 def delete_order_workflow_v2_ocr_result(order_id: str, ocr_result_id: str, expected_revision: int = Depends(_require_workflow_if_match)):
     return _workflow_v2_or_404(order_workflow_v2_service.delete_ocr_result(order_id, ocr_result_id, expected_revision=expected_revision))
+
+
+@router.post("/{order_id}/workflow-v2/ocr-reset")
+def reset_order_workflow_v2_ocr(
+    order_id: str, expected_revision: int = Depends(_require_workflow_if_match),
+    user=Depends(require_role("operator")),
+):
+    return _workflow_v2_or_404(order_workflow_v2_service.reset_ocr_selection(
+        order_id, actor=user.account, expected_revision=expected_revision))
 
 
 @router.get("/{order_id}/workflow-v2/sheet", dependencies=[Depends(require_role("operator"))])

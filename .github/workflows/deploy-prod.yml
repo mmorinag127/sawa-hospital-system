@@ -408,7 +408,7 @@ jobs:
 
   online-production:
     if: inputs.online_release && inputs.rollback_run == ''
-    needs: [source-gate, build-backend, build-frontend]
+    needs: [source-gate, build-backend, build-frontend, build-agent]
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -436,6 +436,7 @@ jobs:
           ONLINE_EXPECTED_LIVE: ${{ inputs.online_expected_live }}
           ONLINE_BACKEND_IMAGE: ${{ needs.build-backend.outputs.image }}
           ONLINE_FRONTEND_IMAGE: ${{ needs.build-frontend.outputs.image }}
+          ONLINE_AGENT_IMAGE: ${{ needs.build-agent.outputs.image }}
           ONLINE_RECOVERY_IMAGE: ${{ needs.build-backend.outputs.recovery_image }}
           VERIFICATION_TOKEN: ${{ steps.auth.outputs.id_token }}
           ORDER_ID: ${{ needs.source-gate.outputs.order_id }}
@@ -1089,7 +1090,6 @@ jobs:
           if-no-files-found: ignore
 
   build-agent:
-    if: ${{ !inputs.online_release }}
     needs: [source-gate, build-backend]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
