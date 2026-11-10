@@ -16,7 +16,9 @@ from src.models.order_ocr_evidence_run import OrderOcrEvidenceRun
 from src.services.ocr_history_read import read_history
 
 
-def test_postgresql_job_display_extracts_small_native_and_workflow_references():
+@pytest.mark.parametrize('status', ['running', 'failed', 'done'])
+@pytest.mark.parametrize('rotation', [None, 0, 180])
+def test_postgresql_job_display_extracts_small_native_and_workflow_references(status, rotation):
     from types import SimpleNamespace
     from src.models.ocr_job import OcrJob
     from src.models.document import OrderDocument
@@ -52,8 +54,10 @@ def test_postgresql_job_display_extracts_small_native_and_workflow_references():
                 ('native-job', {'nonworkflow_execution': native}, None),
                 ('workflow-job', {'workflow_attempt_id': 'display-attempt', 'reparse_read_input': captured,
                     'selected_pdf_receipt': pdf}, 'display-template')]:
+                if rotation is not None:
+                    metrics.update(fax_rotation_degrees=rotation, selected_document_id='display-doc')
                 connection.execute(tables[OcrJob].insert().values(id=identity, order_id='display-order',
-                    status='done', input_reference=pdf['storage_uri'], order_document_id='display-doc',
+                    status=status, input_reference=pdf['storage_uri'], order_document_id='display-doc',
                     uploaded_pdf_id='display-upload', input_artifact_digest=pdf['sha256'],
                     template_version_id=template, metrics=metrics))
             with Session(bind=connection) as session:
@@ -77,7 +81,9 @@ def test_postgresql_job_display_extracts_small_native_and_workflow_references():
                     job, error, common = _job_summary(session, order, state,
                         {'ocr_job_id': identity, 'ocr_job_attempt_id': attempt}, _rows=rows)
                     assert error is None
-                    assert job['recorded_state'] == 'done'
+                    assert job['recorded_state'] == status
+                    assert job['fax_rotation_degrees'] == rotation
+                    assert job['selected_document_id'] == ('display-doc' if rotation is not None else None)
                     assert common['jobId'] == identity
                 assert not session.new and not session.dirty
             for index, malformed in enumerate((None, [], 'text', False, 9,

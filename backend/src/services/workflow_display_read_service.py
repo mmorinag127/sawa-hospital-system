@@ -101,14 +101,15 @@ def _reference_error(session, order, state, meta, *, reads=None, include_overlay
     return None
 
 
-_JOB_KEYS = JOB_KEYS
+_ORIENTATION_KEYS = ("fax_rotation_degrees", "selected_document_id")
+_JOB_KEYS = (*JOB_KEYS, *_ORIENTATION_KEYS)
 _VERSION_KEYS = VERSION_KEYS
 
 
 def read_recorded_job_values(session, identities):
     if not identities:
         return {}
-    keys = _JOB_KEYS
+    keys = JOB_KEYS
     metrics = (cast(OcrJob.display_read_json, JSON) if session.get_bind().dialect.name == "postgresql"
                else type_coerce(OcrJob.display_read_json, JSON))
     fields = [
@@ -168,6 +169,7 @@ def read_recorded_job_values(session, identities):
         receipt = metrics["selected_pdf_receipt"]
         statement = statement.select_from(OcrJob)
     statement = statement.add_columns(
+        *(OcrJob.evidence_metrics[key].label(key) for key in _ORIENTATION_KEYS),
         native_pdf.label("native_pdf"), version_kind.label("version_kind"),
         generation.label("native_generation"),
         OcrJob.display_current_document_json.label("current_document"),
