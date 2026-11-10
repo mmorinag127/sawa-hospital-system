@@ -19,6 +19,7 @@ from src.services import order_workflow_v2_service as service, workflow_state_se
 from test_order_workflow_v2_service import (
     _create_order_with_evidence, _current_workflow_revision, _stamp_evidence_with_workflow_template,
     authored_april_context,
+    _standard_active_template_for_workflow_tests,
 )
 
 MODELS=(OrderOcrEvidenceRun,OrderSheetDraft,OrderSheetPatchCandidate,
