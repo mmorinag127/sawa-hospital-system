@@ -132,6 +132,7 @@ def main():
         require_local_postgres(os.environ['SAWA_AGENT_TEST_POSTGRES_DSN'])
         environment = dict(os.environ, DB_URI='sqlite:///:memory:', PYTHONPATH=str(ROOT/'backend'))
         records = []
+        failed = []
         for name, argv, directory in COMMANDS:
             actual = [sys.executable if argv[0] == 'python' else argv[0], *argv[1:]]
             if name in ('backend', 'agent'):
@@ -140,15 +141,19 @@ def main():
             with log.open('wb') as stream:
                 run = subprocess.run(actual, cwd=ROOT/directory, env=environment, stdout=stream, stderr=subprocess.STDOUT)
             if run.returncode:
-                raise ValueError(name+' failed; no success receipt issued')
+                failed.append(name)
             junit = None
             if name in ('backend', 'agent'):
                 path = args.output/(name+'.xml')
-                suites = list(ET.parse(path).getroot().iter('testsuite'))
-                junit = {key: sum(int(s.get(key, '0')) for s in suites) for key in ('tests', 'failures', 'errors', 'skipped')}
-                junit['sha256'] = digest(path.read_bytes())
+                if path.exists():
+                    suites = list(ET.parse(path).getroot().iter('testsuite'))
+                    junit = {key: sum(int(s.get(key, '0')) for s in suites) for key in ('tests', 'failures', 'errors', 'skipped')}
+                    junit['sha256'] = digest(path.read_bytes())
             records.append(dict(name=name, command_sha256=digest(json.dumps([argv, directory]).encode()),
                 log_sha256=digest(log.read_bytes()), exit_code=run.returncode, junit=junit))
+        (args.output/'commands.json').write_text(json.dumps(records, indent=2)+'\n')
+        if failed:
+            raise ValueError(', '.join(failed)+' failed; no success receipt issued')
         proof = dict(receipt_version=11, source_sha=source, definition_sha256=definition,
             baseline=json.loads(args.baseline.read_text()), changed_files=git('diff', '--name-only', BASE, source).splitlines(),
             commands=records, clean_before=True, clean_after=True, staging_run=None)
