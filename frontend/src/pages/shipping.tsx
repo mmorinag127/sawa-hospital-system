@@ -255,7 +255,7 @@ export default function ShippingPage() {
             </Link>
           </p>
         </div>
-        <TopNav />
+        <TopNav compact />
       </header>
 
       <section className="panel">

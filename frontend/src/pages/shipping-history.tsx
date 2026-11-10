@@ -617,9 +617,9 @@ const buildCalendarMonth = (params: {
 export default function ShippingHistoryPage() {
   const { isAdmin } = useCurrentUserRole();
   const defaultRange = buildDefaultRange();
-  const [activeTab, setActiveTab] = useState<HistoryTab>("recent");
+  const [activeTab, setActiveTab] = useState<HistoryTab>("active");
   const [limit, setLimit] = useState<number>(200);
-  const [selectedMonth, setSelectedMonth] = useState<string>(toMonthInput(new Date()));
+  const [selectedMonth, setSelectedMonth] = useState<string | undefined>(undefined);
   const [baseDate, setBaseDate] = useState<string>(monthCenterDate(toMonthInput(new Date())));
   const [windowDays, setWindowDays] = useState<number>(31);
   const [facilityFilter, setFacilityFilter] = useState<string>("");
@@ -692,10 +692,10 @@ export default function ShippingHistoryPage() {
   const loadSelectedMonth = async (monthValue: string) => {
     const nextBaseDate = monthCenterDate(monthValue);
     setSelectedMonth(monthValue);
-    setActiveTab("recent");
+    setSelectedDateGroupKey(null);
+    if (activeTab !== "recent") return;
     setBaseDate(nextBaseDate);
     setWindowDays(31);
-    setSelectedDateGroupKey(null);
     await loadLatest("recent", {
       baseDate: nextBaseDate,
       windowDays: 31,
@@ -974,7 +974,7 @@ export default function ShippingHistoryPage() {
             伝票番号ごとの最新状態を中心に表示し、履歴は「佐川履歴」があれば下部に表示します。
           </p>
         </div>
-        <TopNav />
+        <TopNav compact />
       </header>
 
       <section className="panel">
@@ -999,7 +999,11 @@ export default function ShippingHistoryPage() {
               key={tab.id}
               type="button"
               className={`tab ${activeTab === tab.id ? "active" : ""} shipping-ordinary-control`}
-              onClick={() => setActiveTab(tab.id as HistoryTab)}
+              onClick={() => {
+                setSelectedMonth(tab.id === "recent" ? toMonthInput(parseDateKey(baseDate) || new Date()) : undefined);
+                setSelectedDateGroupKey(null);
+                setActiveTab(tab.id as HistoryTab);
+              }}
             >
               {tab.label}
             </Button>

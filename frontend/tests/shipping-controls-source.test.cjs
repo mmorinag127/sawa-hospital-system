@@ -37,10 +37,17 @@ function controls(source) {
   return result;
 }
 
-function nonrender(source) {
+function nonrender(source, calendarSelection = false) {
   const ast = parse(source);
   const edits = [];
   function visit(node) {
+    if (calendarSelection && ts.isVariableDeclaration(node) && node.initializer) {
+      const name = ts.isArrayBindingPattern(node.name) ? node.name.elements[0].getText(ast) : node.name.getText(ast);
+      if (['activeTab', 'selectedMonth', 'loadSelectedMonth'].includes(name)) {
+        edits.push([node.initializer.getStart(ast), node.initializer.end, 'CALENDAR_SELECTION']);
+        return;
+      }
+    }
     if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || ts.isJsxFragment(node)) {
       edits.push([node.getStart(ast), node.end, 'RENDER']);
       return;
@@ -93,8 +100,8 @@ for (const [name, counts] of Object.entries(expected)) {
   const original = execFileSync('git', ['show', base + ':' + file], { cwd: root, encoding: 'utf8' });
   const current = fs.readFileSync(path.join(root, file), 'utf8');
 
-  test(name + ' exact non-rendered source, hooks/auth/API/constants unchanged', () => {
-    assert.equal(nonrender(current), nonrender(original));
+  test(name + ' preserves non-rendered behavior except separately tested calendar selection', () => {
+    assert.equal(nonrender(current, name === 'shipping-history'), nonrender(original, name === 'shipping-history'));
     assert.equal((current.match(/<ThemeProvider theme=\{sawaTheme\}>/g) || []).length, 1);
     assert.equal(/SawaProvider|sessionKey|QueryClient/.test(current), false);
     assert.ok(current.includes('import { sawaTheme } from "@sawa/ui";'));
@@ -128,6 +135,11 @@ for (const [name, counts] of Object.entries(expected)) {
       }
       assert.deepEqual([...newProps.keys()].sort(), [...oldProps.keys()].sort());
       for (const [key, value] of oldProps) {
+        if (name === 'shipping-history' && key === 'onClick' && value.includes('setActiveTab(tab.id')) {
+          assert.ok(newProps.get(key).includes('setSelectedMonth('));
+          assert.ok(newProps.get(key).includes('setActiveTab(tab.id'));
+          continue;
+        }
         assert.equal(emit('const value = ' + newProps.get(key)), emit('const value = ' + value),
           name + ' control ' + index + ' ' + key);
       }

@@ -26,7 +26,24 @@ const normalizePath = (path: string) => {
 
 const hospitalHref = (href: string) => (href === "/" ? "/hospital" : `/hospital${href}`);
 
-export default function TopNav() {
+export default function TopNav({ compact = false }: { compact?: boolean }) {
+  if (!compact) return <FullTopNav />;
+  return (
+    <details className="compact-navigation">
+      <summary>業務メニュー</summary>
+      <FullTopNav />
+      <style jsx>{`
+        .compact-navigation { width: 100%; min-width: 0; }
+        summary { width: fit-content; padding: 8px 12px; border: 1px solid #cbd5d1;
+          border-radius: 6px; color: #17302c; background: #fff; cursor: pointer; font-weight: 600; }
+        summary:focus-visible { outline: 2px solid #376e63; outline-offset: 3px; }
+        .compact-navigation[open] summary { margin-bottom: 12px; }
+      `}</style>
+    </details>
+  );
+}
+
+function FullTopNav() {
   const currentPath = normalizePath(useHydratedPath());
   const navigation = useNavigationBoundary();
   const { role } = useCurrentUserRole();
