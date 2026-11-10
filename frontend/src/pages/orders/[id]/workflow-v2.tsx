@@ -3426,6 +3426,10 @@ export default function OrderWorkflowV2Page() {
     }, { replacesInput: true });
 
   const resetOcrSelection = () => {
+    if (hasUnsavedWorkflowInput()) {
+      setError("未保存の編集があります。保存してからOCR選択を解除してください。");
+      return;
+    }
     if (!window.confirm("現行のOCR・シート・出力の選択を解除し、要確認に戻します。原本、OCR履歴、保存済みシート、手動編集は削除しません。実行しますか？")) return;
     void runAction("OCR selection reset", async ({adopt}) => {
       await executeWorkflowMutation("ocrReset", config => apiClient.post(

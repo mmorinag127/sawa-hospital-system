@@ -26,7 +26,7 @@ async function setup(running = false, overrides = {}) {
   t.on('get','/orders/demand/week-options',()=>({data:{options:[]}}));
   const probe={component:'OrderWorkflowV2Page',bindings:['workflow','ocrResults','refreshAll','loadOcrResultDetail',
     'loadRawInspection','rawInspection','workflowRevisionRef','setVisibleStep','error','adoptReadWorkflow',
-    'setError','setSelectedDocumentId','applyWeekValue','inspection']};
+    'setError','setSelectedDocumentId','applyWeekValue','inspection','beginWorkflowEditorEdit']};
   const h=await mount(PAGE,{api:t.api,probe,route:'/orders/demand/workflow-v2',routerState:{isReady:true,query:{id:'demand'}},component(loader){
     window.setInterval=(fn)=>{timers.set(1,fn);return 1;}; window.clearInterval=id=>timers.delete(id);
     return loader.load(PAGE,probe).default;
@@ -58,6 +58,25 @@ test('OCR reset cancellation leaves the selected sheet and revision untouched',a
     assert.equal(f.t.calls.filter(c=>c.url===`${BASE}/ocr-reset`).length,0);
     assert.equal(f.probe.current.workflow.saved_sheet_id,'saved');
     assert.equal(f.probe.current.workflow.revision,7);
+  } finally {await f.h.close();}
+});
+test('OCR reset never offers discarding unsaved operator edits',async()=>{
+  const f=await setup(false,{state:'sheet_saved',saved_sheet_id:'saved',selected_ocr_result_id:'evidence'});
+  try {
+    let confirmations=0;
+    window.confirm=()=>{confirmations++;return true;};
+    await f.h.settle(()=>{
+      f.probe.current.setVisibleStep(1);
+      f.probe.current.beginWorkflowEditorEdit('sheet');
+    });
+    const button=[...f.h.document.querySelectorAll('button')].find(b=>b.textContent==='OCR選択を解除');
+    assert.ok(button);
+    await f.h.click(button);
+    assert.equal(confirmations,0);
+    assert.equal(f.t.calls.filter(c=>c.url===`${BASE}/ocr-reset`).length,0);
+    assert.equal(f.probe.current.workflow.saved_sheet_id,'saved');
+    assert.equal(f.probe.current.workflow.revision,7);
+    assert.match(f.h.document.body.textContent,/未保存の編集があります。保存してからOCR選択を解除/);
   } finally {await f.h.close();}
 });
 test('OCR reset sends the current revision and displays the retained-history receipt',async()=>{
