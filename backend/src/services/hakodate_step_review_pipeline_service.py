@@ -1744,6 +1744,11 @@ def _detect_header_intersections_for_axis_alignment(
     template_ys: list[int],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     h_mask, v_mask = _split_line_masks(rectified_bgr)
+    gray = cv2.cvtColor(rectified_bgr, cv2.COLOR_BGR2GRAY)
+    _, ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    h_mask = _restore_supported_ruling_junctions(
+        ink, h_mask, v_mask, opening_width=max(18, ink.shape[1] // 55),
+    )
     x0, y0, x1, y1 = _header_bounds_for_axis_alignment(table_bbox, template_ys)
     # Use the same observed-frame margin as row detection. FAX curvature can
     # place real outer-frame ink outside its rectification target coordinate.
@@ -2394,6 +2399,59 @@ def _filter_structural_y_clusters(y_clusters: list[dict[str, Any]]) -> list[dict
     return accepted
 
 
+def _restore_connected_ruling_arms(inv, horizontal, vertical, *, opening_width):
+    """Trace observed endpoint ink to a nearby vertical, including stepped joins.
+
+    Opening supplies long-line seeds, not the final connectivity evidence. The
+    search height follows the seed's measured stroke width; a disconnected
+    nearby mark or another row is never joined by painting pixels.
+    """
+    restored = horizontal.copy()
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(horizontal, connectivity=8)
+    height, width = inv.shape
+    for label in range(1, count):
+        x, y, w, h, _ = map(int, stats[label])
+        if w < opening_width:
+            continue
+        for direction, edge in ((-1, x), (1, x + w - 1)):
+            sample_left = max(x, edge - opening_width + 1) if direction == 1 else x
+            sample_right = min(x + w, edge + opening_width) if direction == -1 else x + w
+            sample = labels[y:y + h, sample_left:sample_right] == label
+            thicknesses = np.count_nonzero(sample, axis=0)
+            stroke = max(1, int(round(float(np.median(thicknesses[thicknesses > 0])))))
+            seed_left = max(x, edge - stroke + 1) if direction == 1 else edge
+            seed_right = edge + 1 if direction == 1 else min(x + w, edge + stroke)
+            seed_y = np.flatnonzero(np.any(labels[y:y + h, seed_left:seed_right] == label, axis=1))
+            top = max(0, y + int(seed_y[0]) - stroke)
+            bottom = min(height, y + int(seed_y[-1]) + stroke + 1)
+            left = max(0, edge - opening_width) if direction == -1 else seed_left
+            right = seed_right if direction == -1 else min(width, edge + opening_width + 1)
+            vertical_roi = vertical[top:bottom, left:right] > 0
+            columns = np.flatnonzero(np.any(vertical_roi, axis=0)) + left
+            outward = columns[columns < edge] if direction == -1 else columns[columns > edge]
+            if not outward.size:
+                continue
+            # Stop at the first vertical axis, rather than traversing a cell or
+            # selecting a more distant axis that happens to yield a match.
+            target = int(outward[-1] if direction == -1 else outward[0])
+            if direction == -1:
+                left = target
+            else:
+                right = target + 1
+            ink = (inv[top:bottom, left:right] > 0).astype(np.uint8)
+            _, components = cv2.connectedComponents(ink, connectivity=8)
+            seed = labels[top:bottom, left:right] == label
+            targets = vertical[top:bottom, left:right] > 0
+            supported = np.intersect1d(np.unique(components[seed]), np.unique(components[targets]))
+            supported = supported[supported != 0]
+            if len(supported) != 1:
+                continue
+            connected = components == supported[0]
+            destination = restored[top:bottom, left:right]
+            destination[connected] = inv[top:bottom, left:right][connected]
+    return restored
+
+
 def _restore_supported_ruling_junctions(inv, horizontal, vertical, *, opening_width):
     """Restore observed short arms lost by opening, not pixels in a missing gap.
 
@@ -2401,7 +2459,7 @@ def _restore_supported_ruling_junctions(inv, horizontal, vertical, *, opening_wi
     support the arm. Dropouts require observed runs on both sides; line
     thickness does not describe the length of a horizontal scanning dropout.
     """
-    restored = horizontal.copy()
+    restored = _restore_connected_ruling_arms(inv, horizontal, vertical, opening_width=opening_width)
     for y in np.flatnonzero(np.any(horizontal > 0, axis=1)):
         columns = np.flatnonzero(vertical[y] > 0)
         if not columns.size:

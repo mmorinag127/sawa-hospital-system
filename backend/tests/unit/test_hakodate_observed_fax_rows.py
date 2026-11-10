@@ -270,9 +270,17 @@ def test_missing_monthly_day_blocks_mapping(monkeypatch, target_worksheet):
 def test_broken_thin_fax_rulings_preserve_leading_blank_cells(target_worksheet):
     xs = [float(value) for value in range(50, 851, 100)]
     ys = [50 + 32 * index for index in range(59)]
+    worksheet = target_worksheet(_sheet([(2, 3, 3)] * 3, date(2026, 10, 1)), thin_fax=True)
+    header = renderer.worksheet_header_boundary_contract(
+        worksheet, header_edge_rows=master.TEMPLATE_HEADER_EDGE_ROWS,
+        body_start_row=pipeline.STEP_REVIEW_BODY_START_ROW,
+    )
     image = np.full((1950, 901, 3), 255, dtype=np.uint8)
-    for x in xs:
-        cv2.line(image, (int(x), ys[0]), (int(x), ys[-1]), (0, 0, 0), 2)
+    for column, x in enumerate(xs):
+        # Leaf separators start below merged headers, as on the canonical
+        # worksheet; drawing every axis through the top creates false edges.
+        first_edge = next(index for index, boundary in enumerate(header) if column in boundary["column_votes"])
+        cv2.line(image, (int(x), ys[first_edge]), (int(x), ys[-1]), (0, 0, 0), 2)
     for index, y in enumerate(ys):
         if index in (0, 2) or (index > 2 and (index - 2) % 8 == 0):
             cv2.line(image, (50, y), (850, y), (0, 0, 0), 2)
@@ -284,7 +292,7 @@ def test_broken_thin_fax_rulings_preserve_leading_blank_cells(target_worksheet):
                 cv2.line(image, (x, y), (x + 4, y), (0, 0, 0), 1)
     corrected, evidence = pipeline._row_intersection_correct_ys(
         rectified_fax=image, corrected_xs=xs, template_ys=np.linspace(ys[0], ys[-1], 27).astype(int).tolist(),
-        worksheet=target_worksheet(_sheet([(2, 3, 3)] * 3, date(2026, 10, 1)), thin_fax=True),
+        worksheet=worksheet,
     )
     assert len(corrected) == len(ys)
     assert evidence["structural_match"]["body_day_boundary_indexes"] == list(range(0, 57, 8))
