@@ -81,7 +81,7 @@ def test_postgresql_job_display_extracts_small_native_and_workflow_references(st
                     job, error, common = _job_summary(session, order, state,
                         {'ocr_job_id': identity, 'ocr_job_attempt_id': attempt}, _rows=rows)
                     assert error is None
-                    assert job['recorded_state'] == status
+                    assert job['recorded_state'] == ('hard_failed' if status == 'failed' else status)
                     assert job['fax_rotation_degrees'] == rotation
                     assert job['selected_document_id'] == ('display-doc' if rotation is not None else None)
                     assert common['jobId'] == identity
