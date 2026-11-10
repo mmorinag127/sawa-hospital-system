@@ -25,6 +25,7 @@ ALLOWED = {
     'experiments/agent_assistant/durable.py',
     'experiments/agent_assistant/tests/test_cloud_store_target.py',
     'frontend/src/features/orders/workflowTypes.ts',
+    'frontend/next-env.d.ts',
     'frontend/src/pages/orders/[id]/workflow-v2.tsx',
     'frontend/tests/workflow-demand-read-contract.test.cjs',
     'scripts/production_online_release.py', 'scripts/local_hospital_test_runner.py',
