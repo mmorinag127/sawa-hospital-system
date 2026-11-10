@@ -45,9 +45,18 @@ def test_invalid_live_state_rejected(bad):
     if bad=='tag': value['status']['traffic'][0]['tag']='unknown'
     if bad=='split': value['status']['traffic'][0]['percent']=50
     if bad=='maintenance': value['metadata']['labels']={'sawa-maintenance-run':'123'}
-    if bad=='read-only': value['spec']['template']['spec']['containers'][0]['env'].append(dict(name='SAWA_RELEASE_READ_ONLY',value='1'))
+    if bad=='read-only':
+        value['metadata']['name']='worker-prod'
+        value['spec']['template']['spec']['containers'][0]['env'].append(dict(name='SAWA_RELEASE_READ_ONLY',value='1'))
     if bad=='ingress': value['spec']['template']['spec']['containers'][1]['ports']=[dict(containerPort=80)]
     with pytest.raises(RuntimeError): release.replacement(value,'image','new','tag','a'*40)
+
+
+def test_web_candidate_write_protection_is_preserved():
+    value=service()
+    value['spec']['template']['spec']['containers'][0]['env'].append(dict(name='SAWA_RELEASE_READ_ONLY',value='1'))
+    updated=release.replacement(value,'image','new','tag','a'*40)
+    assert updated['spec']['template']['spec']['containers'][0]['env']==value['spec']['template']['spec']['containers'][0]['env']
 
 
 def test_recovery_recipe_old_business_byte_identity(tmp_path):

@@ -70,9 +70,12 @@ def replacement(service, image, name, tag, source_sha):
     require(containers and (len(containers) == 1 or
             containers[0].get('ports') and not any(c.get('ports') for c in containers[1:])),
             'unambiguous primary container required')
-    for container in containers:
-        require(not any(v.get('name') == 'SAWA_RELEASE_READ_ONLY' and v.get('value') == '1'
-                        for v in container.get('env', [])), 'unfinished read-only release rejected')
+    # Web's existing flag protects noncanonical candidate URLs only; its public
+    # canonical host remains writable. Preserve that protection byte-for-byte.
+    if service['metadata']['name'] != 'web-prod':
+        for container in containers:
+            require(not any(v.get('name') == 'SAWA_RELEASE_READ_ONLY' and v.get('value') == '1'
+                            for v in container.get('env', [])), 'unfinished read-only release rejected')
     containers[0]['image'] = image
     spec['traffic'] = [dict(revisionName=serving(service), percent=100),
                        dict(revisionName=name, percent=0, tag=tag)]
