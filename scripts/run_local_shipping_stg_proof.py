@@ -16,6 +16,7 @@ ALLOWED = {
     'frontend/src/pages/shipping-history.tsx', 'frontend/tests/shipping-controls-source.test.cjs',
     'frontend/tests/e2e/shipping_visibility.spec.ts',
     'scripts/run_local_shipping_stg_proof.py', 'scripts/local_hospital_test_runner.py',
+    'scripts/run_local_frontend_e2e.py',
     'backend/tests/unit/test_shipping_staging_receipt.py',
 }
 COMMANDS = [

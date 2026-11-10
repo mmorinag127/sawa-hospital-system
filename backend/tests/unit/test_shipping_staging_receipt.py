@@ -37,3 +37,18 @@ def test_staging_frontend_proof_is_exact_signed_and_scope_limited(monkeypatch,ba
 def test_shipping_proof_never_authorizes_production():
     with pytest.raises(ValueError,match='staging only'):
         runner.validate_receipt(dict(receipt_version=7),'a'*40,'b'*64,require_full=True)
+
+def test_browser_copy_resolves_shared_dependency_root_but_remains_independent(tmp_path):
+    from run_local_frontend_e2e import copy_dependencies
+    installed=tmp_path/'installed'
+    installed.mkdir()
+    (installed/'module.js').write_text('original')
+    (installed/'alias.js').symlink_to('module.js')
+    shared=tmp_path/'node_modules'
+    shared.symlink_to(installed,target_is_directory=True)
+    copied=tmp_path/'isolated'
+    copy_dependencies(shared,copied)
+    assert copied.is_dir() and not copied.is_symlink()
+    assert (copied/'alias.js').resolve()==copied/'module.js'
+    (copied/'module.js').write_text('isolated')
+    assert (installed/'module.js').read_text()=='original'

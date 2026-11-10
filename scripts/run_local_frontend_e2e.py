@@ -13,6 +13,7 @@ from local_hospital_test_runner import ROOT, clean_tree, frontend_scope, git, re
 
 
 def copy_dependencies(source, target):
+    source = source.resolve(strict=True)
     command = (['cp', '-cR', str(source), str(target)] if sys.platform == 'darwin' else
                ['cp', '--reflink=auto', '-a', str(source), str(target)] if sys.platform.startswith('linux') else None)
     if command is not None:
