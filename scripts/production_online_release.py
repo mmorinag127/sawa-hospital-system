@@ -147,9 +147,8 @@ def run():
         current = cloud('run','services','describe',service,'--region='+REGION)
         # Original public traffic must still be intact when preparing a candidate.
         active = [v for v in current['status']['traffic'] if v.get('percent')]
-        original = record['services'][service]['revision']
-        require(active == [dict(percent=100,revisionName=original)] or
-                len(active) == 1 and active[0].get('percent') == 100 and active[0].get('revisionName') == original,
+        original = record.get('active_revisions', {}).get(service, record['services'][service]['revision'])
+        require(len(active) == 1 and active[0].get('percent') == 100 and active[0].get('revisionName') == original,
                 'serving traffic changed before candidate')
         tag = 'online-'+role+'-'+os.environ['GITHUB_RUN_ID']+'-'+os.environ['GITHUB_RUN_ATTEMPT']
         name = service+'-r'+os.environ['GITHUB_RUN_ID']+'-'+os.environ['GITHUB_RUN_ATTEMPT']+'-'+role
@@ -187,12 +186,16 @@ def run():
         cloud('run','services','update-traffic',entry['service'],'--region='+REGION,
               '--to-revisions='+entry['revision']+'=100','--quiet')
         record['promoted'].append(entry['service']); save()
+        record.setdefault('active_revisions', {})[entry['service']] = entry['revision']; save()
 
     recovery = None
     try:
         # A cold-started old-business bridge exists before any production DDL.
         recovery = candidate('worker-prod',images['ONLINE_RECOVERY_IMAGE'],'recovery38')
         verify_worker(recovery['url'],token,order)
+        # The public old-business runtime must tolerate either side of the DDL,
+        # including a cold restart between migration and the new app promotion.
+        promote(recovery)
         description = 'online-'+os.environ['GITHUB_SHA']+'-'+os.environ['GITHUB_RUN_ID']
         cloud('sql','backups','create','--instance=orders-prod','--description='+description)
         backups = cloud('sql','backups','list','--instance=orders-prod')
