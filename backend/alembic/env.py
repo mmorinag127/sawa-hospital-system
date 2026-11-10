@@ -63,12 +63,19 @@ def apply_on_connection(connection):
             else:
                 raise RuntimeError("formal migration blocked: unsupported dialect")
             _require_safe_database_state(connection)
+            online_before = None
+            if config.attributes.get('online_projection_only'):
+                from online_projection_guard import begin_projection_upgrade
+                online_before = begin_projection_upgrade(connection)
             context.configure(connection=connection, transactional_ddl=True)
             context.run_migrations()
             revisions = list(connection.execute(text("SELECT version_num FROM alembic_version")).scalars())
             if len(revisions) != 1:
                 raise RuntimeError("alembic_version must contain exactly one revision after migration")
             require_revision_catalog(connection, revisions[0])
+            if online_before is not None:
+                from online_projection_guard import finish_projection_upgrade
+                config.attributes['online_projection_receipt'] = finish_projection_upgrade(connection, online_before)
     finally:
         if cursor is not None:
             try:

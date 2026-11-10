@@ -22,12 +22,14 @@ from src.maintenance.formal_migration_schema import require_formal_head
 from stg_replay_schema_targets import service_configuration, migration_configuration, replay_environment, registered_databases
 
 
-def upgrade_connection(connection, *, environment="staging"):
+def upgrade_connection(connection, *, environment="staging", online_projection_only=False):
     global _PHASE
     _PHASE = "inspect_schema"
     tracked = inspect(connection).has_table("alembic_version")
     empty = not inspect(connection).get_table_names()
     connection.rollback()
+    if online_projection_only and not tracked:
+        raise RuntimeError('online projection requires existing formal revision; adoption forbidden')
     if not tracked and not empty:
         _PHASE = "adopt_existing_schema"
         receipt = adopt(connection)
@@ -39,6 +41,7 @@ def upgrade_connection(connection, *, environment="staging"):
             _PHASE = "formal_upgrade"
             config = Config(str(ROOT / "backend/alembic.ini"))
             config.attributes["connection"] = connection
+            config.attributes['online_projection_only'] = online_projection_only
             command.upgrade(config, "head")
         finally:
             if previous is None:
@@ -47,6 +50,7 @@ def upgrade_connection(connection, *, environment="staging"):
                 os.environ["ALEMBIC_DB_URI"] = previous
     _PHASE = "verify_formal_head"
     require_formal_head(connection)
+    return config.attributes.get('online_projection_receipt') if online_projection_only else None
 
 
 def run():

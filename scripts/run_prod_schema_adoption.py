@@ -82,7 +82,7 @@ def production_database():
     return configs[0]
 
 
-def run(*, verify_only=False):
+def run(*, verify_only=False, online_projection_only=False):
     if require_context(os.environ) != "prod":
         raise RuntimeError("production release context required")
     if (os.environ.get("WEB_SERVICE"), os.environ.get("WORKER_SERVICE")) != ("web-prod", "worker-prod"):
@@ -94,6 +94,7 @@ def run(*, verify_only=False):
     engine = create_engine(URL.create("postgresql+psycopg2", username=config.db_user,
         password=config.db_password, host="127.0.0.1", port=5432, database=config.db_name),
         hide_parameters=True, connect_args={"options": "-c lock_timeout=5000 -c statement_timeout=300000"})
+    receipt = None
     try:
         with engine.connect() as connection:
             if tuple(connection.execute(text("SELECT current_database(), current_user")).one()) != ("orders", "orders_app"):
@@ -101,11 +102,13 @@ def run(*, verify_only=False):
             connection.rollback()
             if not verify_only:
                 with migration_import_target(connection):
-                    upgrade_connection(connection, environment="production")
+                    receipt = upgrade_connection(connection, environment="production",
+                                       online_projection_only=online_projection_only)
             connection.rollback()
             with connection.begin():
                 connection.execute(text("SET TRANSACTION READ ONLY"))
                 require_formal_head(connection)
+        return receipt
     finally:
         engine.dispose()
 
@@ -114,9 +117,10 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--online-projection-only', action='store_true')
     args = parser.parse_args()
     try:
-        run(verify_only=args.verify_only)
+        run(verify_only=args.verify_only, online_projection_only=args.online_projection_only)
     except Exception:
         print("production schema preparation failed; database details suppressed", file=sys.stderr)
         raise SystemExit(1)

@@ -15,6 +15,13 @@ on:
         description: "Production smoke order id"
         required: false
         default: "ORDedee3bb3"
+      online_release:
+        description: "Reviewed 0038/0039 rolling release without maintenance display"
+        type: boolean
+        default: false
+      online_expected_live:
+        description: "Owner-reviewed exact revision, UID and images for all three production services"
+        type: string
       production_confirmation:
         description: "Enter DEPLOY_PRODUCTION"
         required: true
@@ -144,11 +151,20 @@ jobs:
           ACTOR: ${{ github.actor }}
           OWNER: ${{ github.repository_owner }}
           PRODUCTION_CONFIRMATION: ${{ inputs.production_confirmation }}
+          ONLINE_RELEASE: ${{ inputs.online_release }}
+          ONLINE_EXPECTED_LIVE: ${{ inputs.online_expected_live }}
+          ROLLBACK_RUN: ${{ inputs.rollback_run }}
+          MAINTENANCE_RESUME_RUN: ${{ inputs.maintenance_resume_run }}
+          MIGRATED_CONTINUATION: ${{ inputs.migrated_continuation }}
         run: |
           set -euo pipefail
           test "$EVENT_NAME" = "workflow_dispatch"
           test "$ACTOR" = "$OWNER"
           test "$PRODUCTION_CONFIRMATION" = "DEPLOY_PRODUCTION"
+          if [[ "$ONLINE_RELEASE" == true ]]; then
+            test -n "$ONLINE_EXPECTED_LIVE"
+            test -z "$ROLLBACK_RUN$MAINTENANCE_RESUME_RUN$MIGRATED_CONTINUATION"
+          fi
       - name: Validate canonical facility runtime source
         run: PYTHONPATH=backend python3 scripts/check_canonical_facility_deploy.py
       - name: Assert production release source
@@ -203,6 +219,7 @@ jobs:
     outputs:
       image: ${{ steps.build.outputs.image }}
       producer_image: ${{ steps.producer.outputs.image }}
+      recovery_image: ${{ steps.recovery.outputs.image }}
     steps:
       - name: Update TLS trust stores
         shell: bash
@@ -284,6 +301,7 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       - id: producer
+        if: ${{ !inputs.online_release }}
         name: Build and push same-source OCR producer
         run: |
           set -euo pipefail
@@ -293,6 +311,28 @@ jobs:
           docker push "$image"
           digest_image="$(docker image inspect "$image" --format '{{index .RepoDigests 0}}')"
           echo "image=$digest_image" >> "$GITHUB_OUTPUT"
+
+      - id: recovery
+        if: inputs.online_release
+        name: Build immutable old-business schema-compatible recovery image
+        run: |
+          set -euo pipefail
+          git fetch origin 9a2b8a63c07aeeef9407ca93069812d5d6664323
+          git fetch --unshallow || test "$(git rev-parse --is-shallow-repository)" = false
+          deploy_dir="$(python3 scripts/prepare_online_recovery_source.py "$RUNNER_TEMP/online-recovery")"
+          image="${REGION}-docker.pkg.dev/${PROJECT_ID}/backend/backend:prod-recovery-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker build --build-arg "BASE_IMAGE=${{ steps.base.outputs.image }}" \
+            --label "sawa.git_sha=${GITHUB_SHA}" \
+            --label "sawa.business_source_sha=9a2b8a63c07aeeef9407ca93069812d5d6664323" \
+            -t "$image" "$deploy_dir"
+          docker push "$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: inputs.online_release
+        with:
+          name: online-recovery-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/online-recovery/recovery-source.json
+          if-no-files-found: error
 
   build-frontend:
     if: inputs.rollback_run == ''
@@ -359,10 +399,69 @@ jobs:
           docker push "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
-          maintenance_image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend:${tag}-maintenance"
-          docker build --build-arg "FRONTEND_IMAGE=$image" -t "$maintenance_image" infra/maintenance
-          docker push "$maintenance_image"
-          echo "maintenance_image=$maintenance_image" >> "$GITHUB_OUTPUT"
+          if [[ "${{ inputs.online_release }}" != true ]]; then
+            maintenance_image="asia-northeast2-docker.pkg.dev/${PROJECT_ID}/backend/frontend:${tag}-maintenance"
+            docker build --build-arg "FRONTEND_IMAGE=$image" -t "$maintenance_image" infra/maintenance
+            docker push "$maintenance_image"
+            echo "maintenance_image=$maintenance_image" >> "$GITHUB_OUTPUT"
+          fi
+
+  online-production:
+    if: inputs.online_release && inputs.rollback_run == ''
+    needs: [source-gate, build-backend, build-frontend]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: google-github-actions/auth@v3
+        id: auth
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}
+          token_format: id_token
+          id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
+      - uses: google-github-actions/setup-gcloud@v3
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify and roll out without maintenance
+        env:
+          ONLINE_RELEASE: "true"
+          ONLINE_EXPECTED_LIVE: ${{ inputs.online_expected_live }}
+          ONLINE_BACKEND_IMAGE: ${{ needs.build-backend.outputs.image }}
+          ONLINE_FRONTEND_IMAGE: ${{ needs.build-frontend.outputs.image }}
+          ONLINE_RECOVERY_IMAGE: ${{ needs.build-backend.outputs.recovery_image }}
+          VERIFICATION_TOKEN: ${{ steps.auth.outputs.id_token }}
+          ORDER_ID: ${{ needs.source-gate.outputs.order_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/online-proxy" \
+            "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v${CLOUD_SQL_PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
+          echo "${CLOUD_SQL_PROXY_SHA256}  $RUNNER_TEMP/online-proxy" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/online-proxy"
+          "$RUNNER_TEMP/online-proxy" --address=127.0.0.1 --port=5432 \
+            "$PROJECT_ID:$REGION:orders-prod" > "$RUNNER_TEMP/online-proxy.log" 2>&1 &
+          proxy_pid=$!
+          trap 'kill "$proxy_pid" 2>/dev/null || true; wait "$proxy_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            kill -0 "$proxy_pid"
+            if (echo > /dev/tcp/127.0.0.1/5432) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          uv run --project backend --extra dev --frozen python scripts/production_online_release.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: online-production-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/online-release.json
+          if-no-files-found: warn
 
   rollback-traffic:
     if: inputs.rollback_run != ''
@@ -501,6 +600,7 @@ jobs:
           if-no-files-found: warn
 
   production-approval:
+    if: ${{ !inputs.online_release }}
     needs:
       - source-gate
       - build-backend
@@ -989,6 +1089,7 @@ jobs:
           if-no-files-found: ignore
 
   build-agent:
+    if: ${{ !inputs.online_release }}
     needs: [source-gate, build-backend]
     runs-on: ubuntu-24.04
     timeout-minutes: 45

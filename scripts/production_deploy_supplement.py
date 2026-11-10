@@ -11,6 +11,12 @@ from local_receipt_signing import sign, verify_signed
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED = {
+    'scripts/production_online_release.py', 'scripts/online_projection_guard.py',
+    'scripts/prepare_online_recovery_source.py', 'scripts/run_prod_schema_adoption.py',
+    'scripts/run_stg_schema_adoption.py', 'backend/alembic/env.py',
+    'backend/src/maintenance/online_recovery_schema.py',
+    'backend/tests/unit/test_online_production_release.py',
+    'backend/tests/integration/test_online_projection_upgrade.py',
     '.github/workflows/deploy-prod.yml', 'scripts/deploy_worker_prod_with_checks.sh',
     'scripts/deploy_web_with_checks.sh',
     'scripts/local_hospital_test_runner.py', 'scripts/production_deploy_supplement.py',
@@ -22,6 +28,8 @@ ALLOWED = {
     'backend/tests/unit/test_production_deploy_supplement.py',
 }
 TESTS = [
+    'backend/tests/unit/test_online_production_release.py',
+    'backend/tests/integration/test_online_projection_upgrade.py',
     'scripts/test_local_hospital_test_runner.py',
     'backend/tests/unit/test_registry_image_digest.py',
     'backend/tests/unit/test_registry_platform_digest.py',
@@ -45,9 +53,9 @@ def validate(proof, expected_sha, definition):
                       'base_receipt', 'changed_files', 'regression'}:
         raise ValueError('deployment supplement fields mismatch')
     base = verify_signed(proof['base_receipt'])
-    if base.get('receipt_version') not in (1, 2):
+    if base.get('receipt_version') not in (1, 2, 6):
         raise ValueError('original full receipt required; chained supplements forbidden')
-    old = base['source_sha_end']
+    old = base['source_sha'] if base.get('receipt_version') == 6 else base['source_sha_end']
     validate_receipt(base, old, definition, require_full=True)
     if proof['source_sha'] != expected_sha or proof['clean_before'] is not True or proof['clean_after'] is not True:
         raise ValueError('supplement source or clean state mismatch')
@@ -83,7 +91,8 @@ def main():
     if result.returncode or git('status', '--porcelain') or git('rev-parse', 'HEAD') != sha:
         raise ValueError('deployment regression failed or source changed; no receipt issued')
     proof = {'receipt_version': 4, 'source_sha': sha, 'clean_before': True, 'clean_after': True,
-             'base_receipt': envelope, 'changed_files': git('diff', '--name-only', base['source_sha_end'], sha).splitlines(),
+             'base_receipt': envelope, 'changed_files': git('diff', '--name-only',
+                 base['source_sha'] if base.get('receipt_version') == 6 else base['source_sha_end'], sha).splitlines(),
              'regression': {'command_sha256': COMMAND_HASH, 'log_sha256': hashlib.sha256(log.read_bytes()).hexdigest(), 'exit_code': 0}}
     definition = hashlib.sha256((ROOT / 'scripts/local_hospital_test_manifest.json').read_bytes()).hexdigest()
     validate(proof, sha, definition)
