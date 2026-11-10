@@ -475,11 +475,17 @@ def reopen_reset_binding(session, order_id, audit):
     actions = deepcopy(row.secondary_actions_json)
     actions.pop(RETIRED,None)
     actions.pop(TRANSPORT,None)
-    row.secondary_actions_json = actions
     session.flush()
-    actions = {**actions, TRANSPORT:{'root_source_sha256':root,'receipt':source_receipt(capture_saved_source(session,order_id))}}
-    row.secondary_actions_json = actions
-    session.flush()
+    snapshot = capture_saved_source(session,order_id)
+    snapshot['workflow']['secondary_actions_json'] = deepcopy(actions)
+    actions[TRANSPORT] = {'root_source_sha256':root,'receipt':source_receipt(snapshot)}
+    table = OrderWorkflowState.__table__
+    result = session.execute(update(table).where(table.c.order_id==order_id,
+        table.c.revision==row.revision).values(secondary_actions_json=actions))
+    if result.rowcount != 1:
+        raise ValueError('initial_saved_import_ownership_rejected')
+    from sqlalchemy.orm.attributes import set_committed_value
+    set_committed_value(row,'secondary_actions_json',deepcopy(actions))
     session.info.setdefault(OWNED,{})[order_id] = {
         'transaction':_transaction(session),'owner':deepcopy(_owner(order_id)),
         'record':deepcopy(record),'revision':row.revision,'finished':True,
