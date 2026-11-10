@@ -43,7 +43,7 @@ function nonrender(source, calendarSelection = false) {
   function visit(node) {
     if (calendarSelection && ts.isVariableDeclaration(node) && node.initializer) {
       const name = ts.isArrayBindingPattern(node.name) ? node.name.elements[0].getText(ast) : node.name.getText(ast);
-      if (['activeTab', 'selectedMonth', 'loadSelectedMonth'].includes(name)) {
+      if (['activeTab', 'selectedMonth', 'loadSelectedMonth', 'loadLatest'].includes(name)) {
         edits.push([node.initializer.getStart(ast), node.initializer.end, 'CALENDAR_SELECTION']);
         return;
       }

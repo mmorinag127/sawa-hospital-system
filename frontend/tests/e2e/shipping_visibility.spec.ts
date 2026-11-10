@@ -61,6 +61,10 @@ test('active default and all results reveal their month; month browsing never ch
   await expect(page.getByRole('heading',{name:'2026年8月',exact:true})).toBeVisible();
   await expect(page.getByRole('button',{name:'全件',exact:true})).toHaveClass(/active/);
   expect(calls).toHaveLength(count);
+  await page.getByRole('button',{name:'状態を更新',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'2026年7月',exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'翌月',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'2026年8月',exact:true})).toBeVisible();
   await page.getByRole('button',{name:'前月',exact:true}).click();
   await expect(page.getByTestId('shipping-date-group').filter({hasText:'1件'})).toBeVisible();
   await page.getByRole('button',{name:'直近 ±日数',exact:true}).click();

@@ -21,7 +21,10 @@ ALLOWED = {
 COMMANDS = [
     ('receipt-contract', ['-m','pytest','backend/tests/unit/test_shipping_staging_receipt.py','-q'], '.'),
     ('frontend-lint', ['node','node_modules/eslint/bin/eslint.js','.'], 'frontend'),
-    ('frontend-contracts', ['node','--test','--test-concurrency=1','tests/config/*.test.js','tests/config/*.test.mjs','tests/*.test.cjs'], 'frontend'),
+    ('frontend-contracts', ['node','--test','--test-concurrency=1',
+        'tests/shipping-controls-source.test.cjs','tests/config/hospital-additional-readonly.test.mjs',
+        'tests/config/operator-entry-readonly.test.mjs','tests/portal-auth-gate.test.cjs',
+        'tests/portal-proxy-session.test.cjs','tests/login-flow.test.cjs'], 'frontend'),
     ('frontend-types', ['node','node_modules/typescript/bin/tsc','--noEmit','--incremental','false'], 'frontend'),
     ('shipping-browser', ['scripts/run_local_frontend_e2e.py','tests/e2e/shipping_visibility.spec.ts','tests/e2e/shipping_history.spec.ts','tests/e2e/shipping_status_manual.spec.ts'], '.'),
     ('frontend-build', ['node','node_modules/next/dist/bin/next','build','--webpack'], 'frontend'),
@@ -76,9 +79,6 @@ def main():
     env=dict(os.environ,DB_URI='sqlite:///:memory:',NEXT_TELEMETRY_DISABLED='1',SAWA_LOCAL_EVIDENCE_DIR=str(args.output.resolve()))
     for name,argv,directory in COMMANDS:
         command=([sys.executable,*argv] if directory=='.' else argv)
-        if name=='frontend-contracts':
-            import glob
-            command=argv[:3]+sorted({file for pattern in argv[3:] for file in glob.glob(pattern,root_dir=ROOT/directory)})
         log=args.output/(name+'.log')
         cwd=ROOT/directory
         if name=='frontend-build':

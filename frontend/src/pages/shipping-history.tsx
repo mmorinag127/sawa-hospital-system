@@ -675,6 +675,7 @@ export default function ShippingHistoryPage() {
         window_days: nextWindowDays,
       });
       setLatest(normalized);
+      if (view !== "recent") setSelectedMonth(undefined);
       setMessage(
         view === "recent"
           ? `基準日 ${nextBaseDate} の±${normalized.window_days}日を取得しました。`
