@@ -1,4 +1,5 @@
 import copy
+import ast
 import json
 from pathlib import Path
 import sys
@@ -52,7 +53,10 @@ def test_invalid_live_state_rejected(bad):
 def test_recovery_recipe_old_business_byte_identity(tmp_path):
     result=recovery.prepare(tmp_path/'recovery')
     assert (result.parent/'recovery-source.json').is_file()
-    assert 'recovery_head_revision(connection)' in (result/'src/maintenance/formal_migration_schema.py').read_text()
+    generated=(result/'src/maintenance/formal_migration_schema.py').read_text()
+    original=(ROOT/'backend/src/maintenance/formal_migration_schema.py').read_text()
+    assert generated == original.replace('head = formal_head_revision()', 'head = recovery_head_revision(connection)') + '\nfrom src.maintenance.online_recovery_schema import recovery_head_revision\n'
+    ast.parse(generated, feature_version=(3,11))
 
 
 def test_online_workflow_preserves_approval_and_never_calls_maintenance():

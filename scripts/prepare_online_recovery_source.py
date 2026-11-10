@@ -23,7 +23,7 @@ OVERLAYS = (
 
 def bridge_formal_source(source):
     tree = ast.parse(source)
-    changed = 0
+    selected = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == 'require_formal_head':
             for statement in node.body:
@@ -32,14 +32,18 @@ def bridge_formal_source(source):
                         and isinstance(statement.value, ast.Call)
                         and isinstance(statement.value.func, ast.Name)
                         and statement.value.func.id == 'formal_head_revision'):
-                    statement.value = ast.Call(func=ast.Name(id='recovery_head_revision', ctx=ast.Load()),
-                                               args=[ast.Name(id='connection', ctx=ast.Load())], keywords=[])
-                    changed += 1
-    if changed != 1:
+                    selected.append(statement.value)
+    if len(selected) != 1:
         raise RuntimeError('unique reviewed schema gate required for recovery recipe')
-    tree.body.append(ast.ImportFrom(module='src.maintenance.online_recovery_schema',
-        names=[ast.alias(name='recovery_head_revision')], level=0))
-    return ast.unparse(ast.fix_missing_locations(tree)) + '\n'
+    call = selected[0]
+    if call.lineno != call.end_lineno:
+        raise RuntimeError('reviewed recovery call must occupy one source line')
+    lines = source.encode().splitlines(keepends=True)
+    line = lines[call.lineno - 1]
+    lines[call.lineno - 1] = line[:call.col_offset] + b'recovery_head_revision(connection)' + line[call.end_col_offset:]
+    result = b''.join(lines).decode() + '\nfrom src.maintenance.online_recovery_schema import recovery_head_revision\n'
+    ast.parse(result, feature_version=(3, 11))
+    return result
 
 
 def prepare(destination):
