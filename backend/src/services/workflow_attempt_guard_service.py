@@ -603,6 +603,10 @@ def capture_nonworkflow_execution(
             "selected_pdf_receipt": pdf_receipt,
             "selected_pdf_error": pdf_error,
         }
+        rotation = (ingest_lease or {}).get('payload', {}).get('fax_rotation_degrees')
+        if rotation is not None:
+            from src.workers.ingest_mail_adapter import normalize_fax_rotation
+            boundary['fax_rotation_degrees'] = normalize_fax_rotation(rotation)
         evidence_input = inputs[order_id].get("evidence")
         workflow_input = inputs[order_id].get("workflow")
         boundary["first_pass_source"] = (
@@ -619,6 +623,8 @@ def capture_nonworkflow_execution(
         if ingest_lease is None:
             retained_metrics.pop("ingest_lease", None)
         job.metrics = {**retained_metrics, "nonworkflow_execution": deepcopy(boundary)}
+        if rotation is not None:
+            job.metrics = {**job.metrics, 'fax_rotation_degrees': rotation}
         job.output_reference = None
         return boundary
 

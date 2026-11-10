@@ -553,6 +553,40 @@ def test_canonical_transition_retires_old_receipt_without_relabeling_old_rows(im
     session.rollback()
 
 
+@pytest.mark.parametrize('legacy',[False,True])
+def test_reset_restore_reopens_exact_import_without_rewriting_history(imported,monkeypatch,legacy):
+    session,master,original=imported
+    @contextmanager
+    def scope():
+        try:
+            yield session
+            session.commit()
+        except BaseException:
+            session.rollback()
+            raise
+    monkeypatch.setattr(workflow,'session_scope',scope)
+    from src.models.user import AuditLog
+    reset,error=workflow.reset_ocr_selection('O',actor='operator',expected_revision=original['workflow']['revision'])
+    assert error is None
+    if legacy:
+        audit=session.get(AuditLog,reset['ocr_reset']['audit_id'])
+        metadata=deepcopy(audit.metadata_json)
+        metadata['previous'].pop('workflow')
+        metadata['previous'].pop('order_status')
+        audit.metadata_json=metadata
+        session.commit()
+    restored,error=workflow.restore_ocr_selection('O',actor='operator',expected_revision=reset['revision'])
+    assert error is None
+    assert restored['state']=='confirmed'
+    assert restored['selected_ocr_result_id']=='E' and restored['saved_sheet_id']=='D'
+    assert restored['confirmed_snapshot_id']=='C'
+    assert session.get(OrderSheetDraft,'D').draft_sheet_json==original['draft']['draft_sheet_json']
+    assert service.get_binding(session,'O') is not None
+    saved_sheet,error=workflow.get_saved_sheet('O')
+    assert error is None
+    assert saved_sheet is not None
+
+
 def test_ocr_reset_retires_import_binding_without_deleting_saved_history(imported, monkeypatch):
     session, master, original = imported
     @contextmanager

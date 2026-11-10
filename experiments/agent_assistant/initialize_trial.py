@@ -13,7 +13,8 @@ import sqlite3
 def initialize(data):
     data=Path(data).resolve()
     manifest=json.loads((data/'trial-manifest.json').read_text())
-    if manifest.get('purpose')!='sawa-agent-isolated-trial' or manifest.get('initialization')!='register-declared-pending-faxes-v1':
+    authoritative = manifest.get('initialization') == 'register-authoritative-pending-faxes-v1'
+    if manifest.get('purpose')!='sawa-agent-isolated-trial' or manifest.get('initialization') not in ('register-declared-pending-faxes-v1', 'register-authoritative-pending-faxes-v1'):
         raise ValueError('explicit_trial_initialization_required')
     sources=manifest.get('pending_sources')
     if not isinstance(sources,list) or not sources:
@@ -41,12 +42,15 @@ def initialize(data):
         with fitz.open(pdf) as document:
             text='\n'.join(page.get_text() for page in document)
             pages=len(document)
-        if source['facility_id'] not in text or source['week'] not in text:
+        if not authoritative and (source['facility_id'] not in text or source['week'] not in text):
             raise ValueError('trial_original_facility_week_mismatch')
         snapshot=read_snapshot()
         facility,_=resolve(None,source['facility_id'],source['service_date'])
         if not facility:
             raise ValueError('trial_declared_facility_unresolved')
+        if authoritative and (source['source_order_id'] not in manifest['authority']['order_ids']
+                or facility['canonical_lineage']['authored_version_id'] != source['authored_version_id']):
+            raise ValueError('trial_authoritative_facility_source_changed')
         selection=capture_selection(source['facility_id'],source['service_date'],snapshot.revision,
             facility['canonical_lineage']['authored_version_id'],source['week'])
         saved=ManualUploadSavedFile(message_id=source['message_id'],pdf_uri=name,
@@ -54,7 +58,8 @@ def initialize(data):
             received_at=datetime.fromisoformat(source['received_at']))
         uploaded,duplicate=create_uploaded_pdf_from_upload(saved=saved,facility_hint=source['facility_id'],
             week_hint=source['week'],facility_name=facility['facility_name'],skip_ocr=False,
-            source_kind='manual_upload',page_count=pages,facility_selection=selection,intake_protocol='native_ingest_v2')
+            source_kind='manual_upload',page_count=pages,facility_selection=selection,intake_protocol='native_ingest_v2',
+            **({'fax_rotation_degrees':source['fax_rotation_degrees']} if authoritative else {}))
         if duplicate or uploaded['status']!='pending':
             raise ValueError('trial_pending_registration_not_created')
         receipts.append({'uploaded_pdf_id':uploaded['id'],'message_id':saved.message_id,

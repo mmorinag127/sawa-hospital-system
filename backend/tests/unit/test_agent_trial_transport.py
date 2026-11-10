@@ -1,5 +1,6 @@
 """Local dispatcher boundaries, without PDF intake or OCR acceptance claims."""
 import json
+import hashlib
 import sqlite3
 import time
 
@@ -85,6 +86,23 @@ def test_normal_storage_keeps_absolute_reference(local_root,monkeypatch):
     monkeypatch.delenv('SAWA_AGENT_TRIAL_TRANSPORT')
     path=StorageService(local_root).save_bytes('ordinary.json',b'unchanged')
     assert path==str(local_root/'ordinary.json')
+
+
+def test_captured_workbook_is_read_without_production_fallback(local_root):
+    from src.services.storage_service import load_bytes_from_uri
+    body=b'synthetic workbook'
+    (local_root/'assets').mkdir()
+    (local_root/'assets/workbook').write_bytes(body)
+    uri='gs://source-only/template.xlsx'
+    marker={'purpose':'sawa-agent-isolated-trial','initialization':'register-authoritative-pending-faxes-v1',
+        'source_assets':{uri:{'path':'assets/workbook','sha256':hashlib.sha256(body).hexdigest(),'generation':'1'}}}
+    (local_root/'trial-manifest.json').write_text(json.dumps(marker))
+    assert load_bytes_from_uri(uri)==body
+    with pytest.raises(ValueError,match='not_captured'):
+        load_bytes_from_uri('gs://source-only/not-captured.xlsx')
+    (local_root/'assets/workbook').write_bytes(b'changed')
+    with pytest.raises(ValueError,match='digest_changed'):
+        load_bytes_from_uri(uri)
 
 
 @pytest.mark.parametrize('kind',['ingest','workflow'])

@@ -188,6 +188,10 @@ class TaskFlow:
         run = dict(id=uuid4().hex, domains=[spec['domain']], purpose='target_lookup')
         if source_copy:
             run.update(task_id=task_id,owner=owner,task_inputs={'source_copy':source_copy})
+        elif spec['domain'] == 'hospital':
+            hospital_source = await run_blocking(self.store.hospital_source, owner)
+            if hospital_source:
+                run['task_inputs'] = {'hospital_source':hospital_source}
         self.tools.authorizations[run['id']] = authorization
         try:
             await run_blocking(self.tools.sandbox.prepare, run)
@@ -337,6 +341,8 @@ class TaskFlow:
                        'absence_days':absence_days() if task_id == 'shift_absence' else []}
             if source_copy:
                 payload['source_copy'] = source_copy
+            elif run.get('task_inputs', {}).get('hospital_source'):
+                payload['hospital_source'] = run['task_inputs']['hospital_source']
             def save_selection():
                 with self.store.tx() as db:
                     db.execute('INSERT INTO selections VALUES(?,?,?,?)',(ident,owner,task_id,json.dumps(payload,ensure_ascii=False)))
@@ -387,6 +393,8 @@ class TaskFlow:
         context = {'inputs':inputs,'targets':selected}
         if payload.get('source_copy'):
             context['source_copy'] = payload['source_copy']
+        elif payload.get('hospital_source'):
+            context['hospital_source'] = payload['hospital_source']
         return context
 
     def choose_layout(self, run, layout_id):

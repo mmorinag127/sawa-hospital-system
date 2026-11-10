@@ -22,6 +22,13 @@ class IngestEmailPayload:
     order_document_id: Optional[str] = None
     facility_selection: Optional[dict] = None
     intake_protocol: Optional[str] = None
+    fax_rotation_degrees: Optional[int] = None
+
+
+def normalize_fax_rotation(value):
+    if value is not None and (type(value) is not int or value not in (0, 180)):
+        raise ValueError('fax_rotation_invalid')
+    return value
 
 
 def parse_ingest_payload(data: dict) -> IngestEmailPayload:
@@ -47,6 +54,7 @@ def parse_ingest_payload(data: dict) -> IngestEmailPayload:
         order_document_id=data.get("order_document_id"),
         facility_selection=data.get("facility_selection"),
         intake_protocol=data.get("intake_protocol"),
+        fax_rotation_degrees=normalize_fax_rotation(data.get('fax_rotation_degrees')),
     )
 
 
@@ -54,6 +62,7 @@ def to_job_kwargs(payload: IngestEmailPayload) -> dict:
     """Serialize payload for enqueueing."""
     return {
         **({"intake_protocol": payload.intake_protocol} if payload.intake_protocol is not None else {}),
+        **({'fax_rotation_degrees': normalize_fax_rotation(payload.fax_rotation_degrees)} if payload.fax_rotation_degrees is not None else {}),
         "message_id": payload.message_id,
         "pdf_uri": payload.pdf_uri,
         "received_at": payload.received_at.isoformat(),

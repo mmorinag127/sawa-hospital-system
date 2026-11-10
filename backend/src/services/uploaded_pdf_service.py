@@ -184,11 +184,14 @@ def create_uploaded_pdf_from_upload(
     force: bool = False,
     facility_selection: dict | None = None,
     intake_protocol: str | None = None,
+    fax_rotation_degrees: int | None = None,
 ) -> tuple[dict[str, Any], bool]:
     from src.services.ingest_delivery_dispatch_service import required_config
     from src.services.ingest_delivery_service import transaction
     from src.services.ingest_job_service import create_ingest_receipt
     required_config()
+    from src.workers.ingest_mail_adapter import normalize_fax_rotation
+    normalize_fax_rotation(fax_rotation_degrees)
     week_hint = require_explicit_ingest_week(week_hint)
     from src.services.ingest_facility_selection_service import validate_selection
     facility_selection = validate_selection(facility_selection, facility_hint, week_hint)
@@ -270,14 +273,15 @@ def create_uploaded_pdf_from_upload(
         serialized = _serialize_uploaded_pdf(row)
         if not duplicate_blocked:
             serialized["ingest_receipt"] = create_ingest_receipt(build_ingest_payload(serialized,
-                facility_selection=facility_selection, intake_protocol=intake_protocol),
+                facility_selection=facility_selection, intake_protocol=intake_protocol,
+                fax_rotation_degrees=fax_rotation_degrees),
                 force=force, write_session=session)
         else:
             serialized["ingest_receipt"] = {"id": row.message_id, "enqueued": False}
     return serialized, duplicate_blocked
 
 
-def build_ingest_payload(uploaded_pdf: dict[str, Any], *, facility_selection=None, write_session=None, intake_protocol=None) -> dict[str, Any]:
+def build_ingest_payload(uploaded_pdf: dict[str, Any], *, facility_selection=None, write_session=None, intake_protocol=None, fax_rotation_degrees=None) -> dict[str, Any]:
     if intake_protocol is not None and intake_protocol != "native_ingest_v2":
         raise ValueError("intake_protocol_invalid")
     week_hint = require_explicit_ingest_week(uploaded_pdf.get("week_hint"))
@@ -317,9 +321,16 @@ def build_ingest_payload(uploaded_pdf: dict[str, Any], *, facility_selection=Non
             facility_selection = job["payload"].get("facility_selection")
             if "intake_protocol" in job["payload"]:
                 payload["intake_protocol"] = job["payload"]["intake_protocol"]
+            if 'fax_rotation_degrees' in job['payload']:
+                if fax_rotation_degrees is not None and fax_rotation_degrees != job['payload']['fax_rotation_degrees']:
+                    raise ValueError('uploaded_pdf_rotation_changed')
+                fax_rotation_degrees = job['payload']['fax_rotation_degrees']
     if intake_protocol is not None:
         payload["intake_protocol"] = intake_protocol
     payload["facility_selection"] = validate_selection(facility_selection, payload["facility_hint"], week_hint)
+    if fax_rotation_degrees is not None:
+        from src.workers.ingest_mail_adapter import normalize_fax_rotation
+        payload['fax_rotation_degrees'] = normalize_fax_rotation(fax_rotation_degrees)
     return payload
 
 

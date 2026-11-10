@@ -737,6 +737,7 @@ export default function OrderWorkflowV2Page() {
   const activeOrderIdRef = useRef(orderId);
   activeOrderIdRef.current = orderId;
   const [workflow, setWorkflow] = useState<WorkflowV2 | null>(null);
+  const [ocrResetPrompt, setOcrResetPrompt] = useState<{orderId:string;revision:number;auth:string|null}|null>(null);
   const workflowJobRef = useRef<{orderId:string;workflowOrderId?:string;jobOrderId?:string|null;jobId:string|null;attemptId:string|null;state?:string;native_ingest?:unknown}>({orderId,jobId:null,attemptId:null});
   workflowJobRef.current={orderId,workflowOrderId:workflow?.order_id,jobOrderId:workflow?.ocr_job?.order_id ?? null,
     jobId:workflow?.ocr_job?.ocr_job_id ?? null,attemptId:workflow?.ocr_job?.workflow_attempt_id ?? null,state:workflow?.state,
@@ -1259,7 +1260,7 @@ export default function OrderWorkflowV2Page() {
       if (!adoptOwnWorkflowCommandResponse(response.data, captured)) {
         throw new Error("workflow command の処理中に注文または入力が変更されました。再読込してから操作してください。");
       }
-      if (["ocrRun", "ocrSelection", "ocrDelete", "ocrReset", "templateColumns"].includes(editor)) {
+      if (["ocrRun", "ocrSelection", "ocrDelete", "ocrReset", "ocrRestore", "templateColumns"].includes(editor)) {
         retireReplacedWorkflowInput(editor);
       }
       if (preservedSheet) {
@@ -3430,11 +3431,31 @@ export default function OrderWorkflowV2Page() {
       setError("未保存の編集があります。保存してからOCR選択を解除してください。");
       return;
     }
-    if (!window.confirm("現行のOCR・シート・出力の選択を解除し、要確認に戻します。原本、OCR履歴、保存済みシート、手動編集は削除しません。実行しますか？")) return;
+    if (!orderId || workflowRevisionRef.current === null) return;
+    setOcrResetPrompt({orderId,revision:workflowRevisionRef.current,auth:quadAuth()});
+  };
+  const confirmOcrReset = () => {
+    const prompt = ocrResetPrompt;
+    setOcrResetPrompt(null);
+    if (!prompt || prompt.orderId !== orderId || prompt.revision !== workflowRevisionRef.current || prompt.auth !== quadAuth()) {
+      setError("確認中に注文の状態が変わりました。再読込してから確認してください。");
+      return;
+    }
+    if (hasUnsavedWorkflowInput()) {
+      setError("未保存の編集があります。保存してからOCR選択を解除してください。");
+      return;
+    }
     void runAction("OCR selection reset", async ({adopt}) => {
       await executeWorkflowMutation("ocrReset", config => apiClient.post(
         `/orders/${orderId}/workflow-v2/ocr-reset`, undefined, config), adopt);
     }, {replacesInput:true, nextStep:1, successMessage:"履歴を保持してOCR選択を解除し、要確認に戻しました"});
+  };
+  const restoreOcrSelection = () => {
+    if (hasUnsavedWorkflowInput()) {setError("未保存の編集を保存してから選択を復元してください。");return;}
+    void runAction("OCR selection restore", async ({adopt}) => {
+      await executeWorkflowMutation("ocrRestore", config => apiClient.post(
+        `/orders/${orderId}/workflow-v2/ocr-reset/restore`, undefined, config), adopt);
+    }, {replacesInput:true,successMessage:"履歴に保持したOCRと保存シートの選択を復元しました"});
   };
 
   const generateSheetFromSelectedOcr = () =>
@@ -4351,6 +4372,11 @@ export default function OrderWorkflowV2Page() {
               </Button>
             ))}
           </div> : null}
+          <Dialog open={ocrResetPrompt !== null} onClose={() => setOcrResetPrompt(null)} fullWidth maxWidth="sm" aria-labelledby="ocr-reset-title">
+            <DialogTitle id="ocr-reset-title">OCR選択を解除しますか？</DialogTitle>
+            <DialogContent><p>{ocrResetPrompt?.orderId}</p><p>現行のOCR・シート・出力の選択を解除し、要確認に戻します。原本、OCR履歴、保存済みシート、手動編集は削除しません。</p></DialogContent>
+            <DialogActions><Button onClick={() => setOcrResetPrompt(null)}>キャンセル</Button><Button disabled={Boolean(busy)} onClick={confirmOcrReset}>履歴を保持して解除する</Button></DialogActions>
+          </Dialog>
           <Dialog open={recognitionReview !== null} onClose={closeRecognitionReview} fullWidth maxWidth="md">
             <DialogTitle>{recognitionReviewMode === "adopt" ? "読み取り結果の確認・採用" : "セル画像の確認・訂正"}</DialogTitle>
             <DialogContent>
@@ -4736,6 +4762,7 @@ export default function OrderWorkflowV2Page() {
             {workflow?.ocr_reset && !workflow.selected_ocr_result_id ? (
               <p role="status">OCR選択を解除済みです。以前のOCR候補と保存済みシートは履歴に保持しています。
                 <Link href={`/orders/${orderId}/inspection-v2`}>OCR履歴を確認</Link>
+                <Button disabled={Boolean(busy)} onClick={restoreOcrSelection}>解除を取り消す</Button>
               </p>
             ) : null}
             {!facilityTemplateReadyForOcr && contextForm.facility_id ? (

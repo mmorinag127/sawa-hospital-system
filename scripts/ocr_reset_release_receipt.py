@@ -30,15 +30,28 @@ ALLOWED = {
     'frontend/tests/workflow-demand-read-contract.test.cjs',
     'scripts/production_online_release.py', 'scripts/local_hospital_test_runner.py',
     'scripts/ocr_reset_release_receipt.py', 'docs/ocr-reset-agent-20261111.md',
+    'backend/src/services/agent_trial_transport.py',
+    'backend/src/services/order_service.py', 'backend/src/services/storage_service.py',
+    'backend/src/services/uploaded_pdf_service.py',
+    'backend/src/services/workflow_attempt_guard_service.py',
+    'backend/src/workers/ingest_mail_adapter.py',
+    'backend/tests/unit/test_agent_trial_transport.py',
+    'experiments/agent_assistant/app.py','experiments/agent_assistant/hospital_source.py',
+    'experiments/agent_assistant/export_hospital_source.py',
+    'experiments/agent_assistant/initialize_trial.py','experiments/agent_assistant/sandbox.py',
+    'experiments/agent_assistant/store.py','experiments/agent_assistant/task_flow.py',
+    'experiments/agent_assistant/tests/test_hospital_source.py',
+    'frontend/src/pages/assistant.tsx','scripts/prepare_hospital_trial_source.py',
 }
 BACKEND = ['backend/tests/unit/' + name for name in (
     'test_workflow_ocr_reset.py', 'test_order_workflow_v2_service.py',
     'test_initial_saved_import_service.py', 'test_online_production_release.py',
-    'test_ocr_reset_release_receipt.py')]
+    'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py')]
 AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_cloud_store_target.py', 'test_connection_pool.py', 'test_durable_postgres.py',
     'test_postgres_ledger_contract.py', 'test_ledger_codec.py', 'test_generation_fence.py',
-    'test_fax_workflow.py', 'test_hospital_output_completion.py')]
+    'test_fax_workflow.py', 'test_hospital_output_completion.py',
+    'test_hospital_source.py','test_selected_tasks.py','test_trial.py','test_execution_binding.py')]
 COMMANDS = [
     ('backend', ['python', '-m', 'pytest', '-q', *BACKEND, '--junitxml=backend.xml'], '.'),
     ('agent', ['python', '-m', 'pytest', '-q', *AGENT, '--junitxml=agent.xml'], '.'),

@@ -3505,6 +3505,10 @@ def reset_ocr_selection(order_id: str, *, actor: str) -> tuple[dict[str, Any] | 
             "current_draft_id": current.draft_id if current else None,
             "current_evidence_run_id": current.evidence_run_id if current else None,
         }
+        from src.services.workflow_attempt_guard_service import _json_snapshot
+        previous['workflow'] = _json_snapshot({column.key:copy.deepcopy(getattr(workflow,column.key))
+            for column in workflow.__table__.columns})
+        previous['order_status'] = order.status
         session.add(AuditLog(id=audit_id, actor=actor, action="workflow_ocr_selection_reset",
             target=order.id, fac=order.facility_code, wek=order.week_code,
             metadata_json={"previous": previous, "history_preserved": True}, created_at=reset_at))
@@ -3532,6 +3536,85 @@ def reset_ocr_selection(order_id: str, *, actor: str) -> tuple[dict[str, Any] | 
         _write_workflow_meta(workflow, meta)
         revision_error = _finalize_workflow_mutation(session, workflow)
         return _serialize_workflow(workflow), revision_error
+
+
+@workflow_command
+def restore_ocr_selection(order_id: str, *, actor: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Restore audited retained references only while the reset still owns the current revision."""
+    with session_scope() as session:
+        order, error = _get_order_or_error(session, order_id)
+        if error:
+            return None, error
+        workflow = _get_or_create_workflow(session, order.id)
+        meta = _workflow_meta(workflow)
+        reset = meta.get('ocr_reset')
+        audit = session.get(AuditLog, reset.get('audit_id')) if isinstance(reset, dict) else None
+        previous = (audit.metadata_json or {}).get('previous') if audit is not None else None
+        if (audit is None or audit.target != order.id or audit.action != 'workflow_ocr_selection_reset'
+                or not isinstance(previous, dict) or previous.get('revision') != _workflow_revision(workflow)-1
+                or _workflow_has_downstream_lineage(workflow) or meta.get('ocr_job_id')):
+            return None, 'ocr_reset_restore_conflict'
+        active = session.query(OcrJob.id).filter(OcrJob.order_id==order.id,
+            or_(OcrJob.status.is_(None),OcrJob.status.notin_(('done','completed','success','failed','error','cancelled','canceled','stopped')))).first()
+        if active:
+            return None, 'ocr_reset_execution_active'
+        retained = {}
+        for key, model in (('evidence_run_id',OrderOcrEvidenceRun),('draft_id',OrderSheetDraft),
+                ('confirmed_snapshot_id',OrderConfirmedSnapshot),('bagging_result_id',OrderBaggingResult),
+                ('output_bundle_id',OrderOutputBundle)):
+            identity = previous.get(key)
+            row = session.get(model, identity) if identity else None
+            if identity and (row is None or row.order_id != order.id):
+                return None, 'ocr_reset_restore_conflict'
+            retained[key] = row
+        draft, confirmed = retained['draft_id'], retained['confirmed_snapshot_id']
+        if draft is not None and draft.base_evidence_run_id != previous.get('evidence_run_id'):
+            return None, 'ocr_reset_restore_conflict'
+        if confirmed is not None and (confirmed.draft_id not in (None,previous.get('draft_id'))
+                or confirmed.saved_sheet_id not in (None,previous.get('draft_id'))
+                or confirmed.bagging_result_id != previous.get('bagging_result_id')
+                or confirmed.output_bundle_id != previous.get('output_bundle_id')):
+            return None, 'ocr_reset_restore_conflict'
+        snapshot = previous.get('workflow')
+        if isinstance(snapshot, dict):
+            if snapshot.get('order_id') != order.id or snapshot.get('template_version_id') != workflow.template_version_id:
+                return None, 'ocr_reset_restore_conflict'
+            for key in ('state','headline','primary_action','secondary_actions_json','blockers_json','warnings_json','confidence_band'):
+                setattr(workflow,key,copy.deepcopy(snapshot[key]))
+            meta = _workflow_meta(workflow)
+            order.status = previous['order_status']
+        else:
+            # Version-one audits can restore a frozen confirmed snapshot, not
+            # invent the missing approval/editor state of an unfinished order.
+            if previous.get('state') != 'confirmed' or confirmed is None or draft is None:
+                return None, 'ocr_reset_restore_conflict'
+            workflow.state, workflow.headline, workflow.primary_action = 'confirmed','注文が確定されました',None
+            workflow.blockers_json, workflow.warnings_json = [], []
+            order.status = '確定'
+        for key in ('ocr_job_id','ocr_job_attempt_id','latest_ocr_result_id','bagging_result_id','output_bundle_id'):
+            meta[key] = previous.get(key)
+        meta['bagging_result'] = meta['output_bundle'] = None
+        meta.pop('ocr_reset',None)
+        meta.pop('bagging_input_proof',None)
+        _clear_pre_save_checks(meta)
+        workflow.evidence_run_id = previous.get('evidence_run_id')
+        workflow.draft_id = previous.get('draft_id')
+        workflow.confirmed_snapshot_id = previous.get('confirmed_snapshot_id')
+        workflow.last_transition_at = _now()
+        current = session.get(OrderCurrentState,order.id)
+        if current is not None:
+            current.draft_id = previous.get('current_draft_id')
+            current.evidence_run_id = previous.get('current_evidence_run_id')
+        _write_workflow_meta(workflow,meta)
+        error = _finalize_workflow_mutation(session,workflow)
+        if error:
+            return None,error
+        from src.services.initial_saved_import_service import reopen_reset_binding
+        reopen_reset_binding(session,order.id,audit)
+        session.add(AuditLog(id='AUD'+uuid4().hex,actor=actor,action='workflow_ocr_selection_restored',
+            target=order.id,fac=order.facility_code,wek=order.week_code,
+            metadata_json={'reset_audit_id':audit.id,'restored_revision':_workflow_revision(workflow)},created_at=_now()))
+        return _serialize_workflow(workflow),None
 
 
 @workflow_command

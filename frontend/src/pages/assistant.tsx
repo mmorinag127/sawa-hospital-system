@@ -21,7 +21,7 @@ const assistantApi = {
 
 type Task = { requires_agent?:boolean; id: string; domain: string; label: string; description: string; steps: string[]; target_kind?: string; month?: boolean; date?:boolean; default_month?: string };
 type Fax = { fax_id: string; state: string; snapshot: { name: string; facility: string; week: string }; decision?: { message: string }; review?: { id: string; summary: string; sheet: { header?: any[]; fields?: any[]; rows?: any[][] }; original: { id: string; name: string } } };
-type Selection = { inputs?:Record<string,any>; month_choices?:{month:string;label:string;reason:string}[]; batches?:{label:string;keys:string[];reason:string}[]; absence_days?:{date:string;label:string}[]; selection_id: string; choices: {key:string;label:string;data:Record<string,any>}[]; schools:{id:number;name:string}[]; layouts:{id:number;name:string;version:number}[]; work_days?:{service_date:string;menu_names:string[];menu_count:number;reason:string;missing:string[]}[] };
+type Selection = { hospital_source?:HospitalSource; inputs?:Record<string,any>; month_choices?:{month:string;label:string;reason:string}[]; batches?:{label:string;keys:string[];reason:string}[]; absence_days?:{date:string;label:string}[]; selection_id: string; choices: {key:string;label:string;data:Record<string,any>}[]; schools:{id:number;name:string}[]; layouts:{id:number;name:string;version:number}[]; work_days?:{service_date:string;menu_names:string[];menu_count:number;reason:string;missing:string[]}[] };
 type TaskReview = {id:string;state:string;summary:string;evidence:{operation:string;data:any}[];actions:{operation:string;parameters:any}[];decision?:{approve:boolean;message:string}};
 type ChatMessage = {question_map?:QuestionMap;id:string;role:"assistant"|"user";text:string;question_id?:string;options?:string[];process_context?:{answered:number;total:number;kind?:string}};
 type Run = { business?:BusinessProgress; business_messages?:ChatMessage[]; request_key?:string; provider?:string; usage?:{estimated?:boolean}; lunch_review?:Record<string,string>[]; shift_review?:ShiftReviewData; conversation?:ChatMessage[]; pending_question?:ChatMessage; task_review?:TaskReview; task_inputs?:{inputs?:Record<string,any>;targets?:{label:string;data:Record<string,any>}[]}; task_id?: string; fax_items?: Fax[]; id: string; instruction: string; domains: string[]; status: string; cap: number; spent: number;
@@ -32,7 +32,8 @@ type Run = { business?:BusinessProgress; business_messages?:ChatMessage[]; reque
   artifact_page?:{next_after:number|null};
   artifacts?: { id: string; name: string; size: number }[] };
 type Budget = { monthly_cents: number; spent_cents: number; reserved_cents: number; available_cents: number; notice: string };
-type Configuration = { run_cap_cents?:number; provider_id?:string; provider?:string; providers?:{id:string;label:string;missing:string[]}[]; missing: string[]; domains: Record<string, { configured: boolean; baseline_ready: boolean; data?: string }>; budget: Budget };
+type HospitalSource = {uri:string;sha256:string;captured_at:string;orders:{order_id:string;facility_id:string;week:string}[]};
+type Configuration = { hospital_source?:HospitalSource; run_cap_cents?:number; provider_id?:string; provider?:string; providers?:{id:string;label:string;missing:string[]}[]; missing: string[]; domains: Record<string, { configured: boolean; baseline_ready: boolean; data?: string }>; budget: Budget };
 const labels: Record<string, string> = { hospital: "病院注文", shift: "シフト", "school-lunch": "学校給食" };
 const states: Record<string, string> = { preparing: "準備中", running: "処理中", waiting_input: "確認待ち", completed: "完了", stopping: "停止中", stopped: "停止済み", rolled_back: "元に戻しました", failed: "準備失敗", reconciliation_required: "結果の照合が必要", stop_pending: "業務停止済み・接続先の停止確認中", rollback_stop_pending: "復元済み・接続先の停止確認中", budget_reached: "予算到達" };
 const dollars = (cents: number) => `$${(cents / 100).toFixed(2)}`;
@@ -59,6 +60,8 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [choosingTask,setChoosingTask]=useState(true);
   const [loadingTargets,setLoadingTargets]=useState(false);
   const [config, setConfig] = useState<Configuration | null>(null);
+  const [hospitalSourceUri,setHospitalSourceUri]=useState("");
+  const [hospitalSourceHash,setHospitalSourceHash]=useState("");
   const history=useAssistantHistory();
   const runs=history.items;
   const [selected, setSelected] = useState<Run | null>(null);
@@ -273,7 +276,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       const key = requestKey || crypto.randomUUID(); setRequestKey(key);
       setPendingCreate(key);
       try {
-        const response = await assistantApi.post<Run>("/assistant-trial/runs", { request_key: key, task_id: taskId, ...(runCapUsd ? {cap_cents:cents(runCapUsd)} : {}), ...(taskId === "hospital_pending_faxes" ? {} : {selection_id:selection?.selection_id,target_keys:targetKeys,layout_id:layoutId ? Number(layoutId):null}) });
+        const response = await assistantApi.post<Run>("/assistant-trial/runs", { request_key: key, task_id: taskId, ...(runCapUsd ? {cap_cents:cents(runCapUsd)} : {}), ...(taskId === "hospital_pending_faxes" ? {hospital_source_sha256:selection?.hospital_source?.sha256} : {selection_id:selection?.selection_id,target_keys:targetKeys,layout_id:layoutId ? Number(layoutId):null}) });
         if(selectedId.current!==response.data.id){selectedId.current=response.data.id;setSelected(response.data);}
         setPendingCreate(null);setRequestKey("");await refreshAfterCommand(response.data.id);
       } catch(e:any) {
@@ -423,6 +426,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   return <main className="assistant-page" ref={pageRef}>
     <header className="assistant-heading"><div><p className="eyebrow">業務アシスタント</p><h1>{adminView ? "利用料金の管理" : "AIに依頼"} <span className="trial-tag">試用版</span></h1><p className="assistant-description">{adminView ? "利用金額と上限を確認できます。" : "作業を選んだら、あとは質問に答えるだけ。内容を確認してから保存します。"}</p></div><Link className="quiet-link" href={adminView ? "/assistant" : "/assistant-admin"}>{adminView ? "作業画面へ" : "利用料金・管理"}</Link></header>
     {error && <div role="alert" className="assistant-error">{error}</div>}
+    {adminView && config && <section className="assistant-panel"><h2>病院注文の試用原本</h2>{config.hospital_source && <><p>{config.hospital_source.captured_at}</p><ul>{config.hospital_source.orders.map(order=><li key={order.order_id}>{order.order_id} / {order.facility_id} / {order.week}</li>)}</ul></>}<form onSubmit={event=>{event.preventDefault();void act(async()=>{await apiClient.put("/assistant-trial/hospital-source",{uri:hospitalSourceUri,sha256:hospitalSourceHash},{timeout:BUSINESS_TIMEOUT});resetTargets();await load(selected?.id);});}}><label>原本セットURI<input value={hospitalSourceUri} onChange={event=>setHospitalSourceUri(event.target.value)} required/></label><label>SHA-256<input value={hospitalSourceHash} onChange={event=>setHospitalSourceHash(event.target.value)} pattern="[0-9a-f]{64}" required/></label><button disabled={busy}>原本セットを登録する</button></form></section>}
     {pollNotice && <p role="status" className="muted">{pollNotice}</p>}
     {pendingCreate && <p className="assistant-notice">依頼の受付を確認しています。同じ依頼は再送していません。</p>}
     {replyPending && <p className="assistant-notice">回答の反映を確認しています。同じ回答は再送していません。</p>}

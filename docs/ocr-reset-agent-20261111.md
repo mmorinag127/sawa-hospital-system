@@ -29,3 +29,38 @@ An initial-saved import whose original template has not been replaced by a canon
 ## Completion evidence
 
 None yet. No tests, deployments, live state resets or agent runs are claimed successful by this document. No budget, IAM, business quantities or source PDFs have been changed.
+# Real Six-Order Copy And Reset Confirmation
+
+2026-11-11: The operator selected private copies of all six 11/15-week
+production orders, not the packaged synthetic FAX. Production originals,
+saved sheets and manual history must remain unchanged by the agent trial.
+
+Implementation now includes an owner-scoped, content-addressed source bundle,
+frozen source identity in target lookup and task creation, normal pending-FAX
+registration, original orientation propagation and private captured workbook
+resolution. Source DB extraction is a repeatable-read, read-only transaction;
+only supporting facility/menu tables enter the private SQLite database.
+Production saved-order import bindings are excluded from the private master;
+authored facility versions remain unchanged. No real source files enter Git.
+
+The private six-order bundle was prepared locally as
+`tmp/hospital-real-six-20261111.zip`, SHA-256
+`ff5a61281e4daab52a762f0b3cbc224064f410912dbb5fa959f8ea897d21bd02`.
+This is data preparation, not successful agent/OCR execution.
+
+Incident: stg smoke order ORD37344b72 was reset during native confirmation
+verification. Audit AUDd87f48731479454692f4d907f2256326 records the prior
+references; retained evidence, saved sheet and confirmed snapshot still exist.
+The precise native-dialog cancellation timing is not established. Production
+six-order resets have not been performed. Restore permission was requested;
+no live restoration is claimed here.
+
+Native confirmation is replaced with an in-page dialog. Opening or cancelling
+must not submit a reset. A revision-bound restore command can restore retained
+references only before an intervening mutation or active OCR, with a new audit
+and monotonic workflow revision. Legacy confirmed imports require their actual
+retained confirmed snapshot and reopen a newly captured import receipt.
+
+Status: implementation and test additions are local; the new source-copy,
+modal and restore changes have not yet passed the combined local batch or been
+deployed. Existing stg 75524611 is not evidence for these new changes.

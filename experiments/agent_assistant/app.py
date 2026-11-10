@@ -51,6 +51,13 @@ class NewRun(BaseModel):
     instruction: str = Field(default="", max_length=20000)
     domains: list[str] = Field(default_factory=list)
     cap_cents: StrictInt | None = Field(default=None, ge=1, le=100000)
+    hospital_source_sha256: str | None = Field(default=None, pattern=r'^[0-9a-f]{64}$')
+
+
+class HospitalSource(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    uri: str = Field(max_length=1024)
+    sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
 
 
 class TargetRequest(BaseModel):
@@ -212,7 +219,15 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             provider = store.provider()
             budget = store.budget()
         return {"trial": True, "provider_id": provider, "provider": LABELS[provider], "providers": managed.choices(), "missing": managed.missing(), "domains": domains,
+                "hospital_source": store.hospital_source(owner),
                 "budget": budget, "run_cap_cents": config.get("run_cap_cents",100), "notice": "専用コピーを使用。既存環境への反映はありません。"}
+
+    @app.put('/hospital-source')
+    async def register_hospital_source(payload: HospitalSource, request: Request):
+        await authorize(request.headers.get('authorization', ''), ['hospital'])
+        from .hospital_source import inspect
+        source = await run_blocking(inspect, payload.model_dump(), Path(root))
+        return await run_blocking(store.hospital_source, owner, source)
 
     @app.put('/provider')
     def select_provider(payload: ProviderChoice):
@@ -324,6 +339,14 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             task_inputs = await asyncio.to_thread(tools.flow.selection, payload.task_id, owner, payload.selection_id, payload.target_keys, payload.layout_id)
         elif payload.selection_id or payload.target_keys or payload.layout_id is not None:
             raise ValueError("この作業では対象一覧の指定は使いません")
+        if payload.task_id == 'hospital_pending_faxes':
+            source = await run_blocking(store.hospital_source, owner)
+            if payload.hospital_source_sha256 != (source or {}).get('sha256'):
+                raise Conflict('病院注文の原本セットが変わりました。対象一覧を再確認してください')
+            if source:
+                task_inputs['hospital_source'] = source
+        elif payload.hospital_source_sha256 is not None:
+            raise ValueError('原本セットの指定は未処理FAXの作業専用です')
         provider = await asyncio.to_thread(store.provider)
         run, fresh = await run_blocking(store.create, owner, payload.request_key, instruction, domains, payload.cap_cents if payload.cap_cents is not None else config.get("run_cap_cents", 100), task_id=payload.task_id, task_inputs=task_inputs, provider=provider)
         if fresh:

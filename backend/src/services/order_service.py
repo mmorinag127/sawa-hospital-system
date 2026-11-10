@@ -9469,6 +9469,8 @@ def _build_live_hakodate_manifest_item(
         )
         from src.services.workflow_attempt_guard_service import current_workflow_execution
         owner = current_workflow_execution() or {}
+        if not owner and 'fax_rotation_degrees' in (current_nonworkflow_execution() or {}):
+            owner = current_nonworkflow_execution()
         fax_rotation = owner.get("fax_rotation_degrees")
         if fax_rotation is None and review_start_input is not None:
             review_job = session.get(OcrJob, workflow_meta.get("ocr_job_id")) if workflow_meta.get("ocr_job_id") else None

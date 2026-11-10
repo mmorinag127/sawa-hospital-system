@@ -461,6 +461,31 @@ def _retired_state_digest(session, order_id):
     return digest(_json_safe(values))
 
 
+def reopen_reset_binding(session, order_id, audit):
+    root = (audit.metadata_json or {}).get('retired_import_source_sha256')
+    if root is None:
+        return
+    from src.services import facility_master_service
+    from src.services.initial_saved_source_service import capture_saved_source, source_receipt
+    record = facility_master_service.get_snapshot().master.get(IMPORTS,{}).get(order_id)
+    if (not isinstance(record,dict) or record.get('receipt',{}).get('source_sha256') != root
+            or _owner(order_id) is None):
+        raise ValueError('initial_saved_import_reset_restore_changed')
+    row = session.get(OrderWorkflowState,order_id)
+    actions = deepcopy(row.secondary_actions_json)
+    actions.pop(RETIRED,None)
+    actions.pop(TRANSPORT,None)
+    row.secondary_actions_json = actions
+    session.flush()
+    actions[TRANSPORT] = {'root_source_sha256':root,'receipt':source_receipt(capture_saved_source(session,order_id))}
+    row.secondary_actions_json = actions
+    session.flush()
+    session.info.setdefault(OWNED,{})[order_id] = {
+        'transaction':_transaction(session),'owner':deepcopy(_owner(order_id)),
+        'record':deepcopy(record),'revision':row.revision,'finished':True,
+        'finished_revision':row.revision,'transport':deepcopy(actions[TRANSPORT])}
+
+
 @event.listens_for(Session, "before_commit")
 def _validate_finished_imports(session):
     if not session.info.get(OWNED) or session.get_nested_transaction() is not None:

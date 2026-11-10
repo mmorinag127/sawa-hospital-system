@@ -42,6 +42,10 @@ class StorageService:
 
 
 def load_bytes_from_uri(uri: str, *, generation: str | None = None, verification: bool = False) -> bytes:
+    from src.services.agent_trial_transport import load_source_asset
+    captured = load_source_asset(uri, generation)
+    if captured is not None:
+        return captured
     def _replace_env_ref(match: re.Match[str]) -> str:
         name = match.group(1)
         value = os.getenv(name)

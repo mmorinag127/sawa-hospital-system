@@ -30,6 +30,34 @@ def configuration():
             "credential_digest": hashlib.sha256(os.environ["SAWA_TRIAL_TOKEN"].encode()).hexdigest()}
 
 
+def load_source_asset(uri, generation=None):
+    """Read an explicitly captured source asset, never a live production fallback."""
+    if not enabled():
+        return None
+    cfg = configuration()
+    root = Path(cfg['root'])
+    marker = json.loads((root/'trial-manifest.json').read_text())
+    if marker.get('initialization') != 'register-authoritative-pending-faxes-v1':
+        return None
+    captured = marker.get('source_assets', {}).get(uri)
+    if captured is not None:
+        unresolved = root/captured['path']
+        path = unresolved.resolve()
+        if (not path.is_relative_to(root) or any(parent.is_symlink() for parent in (unresolved,*unresolved.parents) if parent != root.parent)
+                or generation is not None and str(generation) != str(captured.get('generation'))):
+            raise ValueError('trial_source_asset_identity_changed')
+        body = path.read_bytes()
+        if hashlib.sha256(body).hexdigest() != captured['sha256']:
+            raise ValueError('trial_source_asset_digest_changed')
+        return body
+    if uri.startswith('gs://') or '${' in uri:
+        bucket = os.environ.get('OCR_PIPELINE_BUCKET', '').removeprefix('gs://').rstrip('/')
+        run_id = root.parent.parent.name
+        if len(run_id) != 32 or not uri.startswith(f'gs://{bucket}/agent-trial/{run_id}/'):
+            raise ValueError('trial_source_asset_not_captured')
+    return None
+
+
 def contract(identity, generation, kind):
     cfg = configuration()
     if kind not in {"ingest", "workflow", "auto-llm"} or not identity or type(generation) is not int or generation < 1:

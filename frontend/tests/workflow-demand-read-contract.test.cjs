@@ -50,11 +50,15 @@ test('saved sheet display does not fetch strict OCR details',async()=>{
 test('OCR reset cancellation leaves the selected sheet and revision untouched',async()=>{
   const f=await setup(false,{state:'sheet_saved',saved_sheet_id:'saved',selected_ocr_result_id:'evidence'});
   try {
-    window.confirm=()=>false;
+    window.confirm=()=>{throw new Error('Native dialogs must not be used');};
     await f.h.settle(()=>f.probe.current.setVisibleStep(1));
     const button=[...f.h.document.querySelectorAll('button')].find(b=>b.textContent==='OCR選択を解除');
     assert.ok(button);
     await f.h.click(button);
+    assert.equal(f.t.calls.filter(c=>c.url===`${BASE}/ocr-reset`).length,0);
+    const cancel=[...f.h.document.querySelectorAll('button')].find(b=>b.textContent==='キャンセル');
+    assert.ok(cancel);
+    await f.h.click(cancel);
     assert.equal(f.t.calls.filter(c=>c.url===`${BASE}/ocr-reset`).length,0);
     assert.equal(f.probe.current.workflow.saved_sheet_id,'saved');
     assert.equal(f.probe.current.workflow.revision,7);
@@ -82,7 +86,7 @@ test('OCR reset never offers discarding unsaved operator edits',async()=>{
 test('OCR reset sends the current revision and displays the retained-history receipt',async()=>{
   const f=await setup(false,{state:'sheet_saved',saved_sheet_id:'saved',selected_ocr_result_id:'evidence'});
   try {
-    window.confirm=()=>true;
+    window.confirm=()=>{throw new Error('Native dialogs must not be used');};
     f.t.on('post',`${BASE}/ocr-reset`,()=>{
       f.state.workflow={...f.state.workflow,revision:8,state:'context_confirmed',primary_action:'run_ocr',
         selected_ocr_result_id:null,saved_sheet_id:null,ocr_job:null,
@@ -93,6 +97,10 @@ test('OCR reset sends the current revision and displays the retained-history rec
     const button=[...f.h.document.querySelectorAll('button')].find(b=>b.textContent==='OCR選択を解除');
     assert.ok(button);
     await f.h.click(button);
+    assert.equal(f.t.calls.filter(c=>c.url===`${BASE}/ocr-reset`).length,0);
+    const confirm=[...f.h.document.querySelectorAll('button')].find(b=>b.textContent==='履歴を保持して解除する');
+    assert.ok(confirm);
+    await f.h.click(confirm);
     await f.h.waitFor(()=>f.probe.current.workflow.revision===8);
     const calls=f.t.calls.filter(c=>c.url===`${BASE}/ocr-reset`);
     assert.equal(calls.length,1);

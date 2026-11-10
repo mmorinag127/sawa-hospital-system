@@ -168,6 +168,11 @@ class Sandbox:
                 raise Conflict("試用専用と明示したbaselineが必要です")
             if not (baseline / "database.sqlite3").is_file():
                 raise Conflict("試用DBがありません")
+            hospital_source = run.get('task_inputs', {}).get('hospital_source')
+            if domain == 'hospital' and hospital_source is not None:
+                from .hospital_source import copy_registered
+                copy_registered(before / domain, baseline, hospital_source)
+                continue
             copy_tree(baseline, before / domain)
             # Online SQLite backup includes committed WAL contents, without copying locks.
             for suffix in ("-wal", "-shm"):

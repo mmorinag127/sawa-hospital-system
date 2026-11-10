@@ -126,3 +126,28 @@ def test_api_passes_authenticated_actor_and_revision(authored_april_context):
         user=SimpleNamespace(account='authenticated@example.invalid'))
     with session_scope() as session:
         assert session.get(AuditLog,result['ocr_reset']['audit_id']).actor=='authenticated@example.invalid'
+
+
+@pytest.mark.parametrize('saved',[True,False])
+def test_reset_restore_keeps_history_and_monotonic_revision(authored_april_context,saved):
+    order,evidence,workflow=prepared_order(saved)
+    before=histories(order)
+    reset,error=service.reset_ocr_selection(order,actor='operator',expected_revision=workflow['revision'])
+    assert error is None
+    restored,error=service.restore_ocr_selection(order,actor='operator',expected_revision=reset['revision'])
+    assert error is None
+    assert restored['revision']==workflow['revision']+2
+    assert restored['selected_ocr_result_id']==evidence
+    assert restored['saved_sheet_id']==workflow['saved_sheet_id']
+    assert restored['state']==workflow['state']
+    assert histories(order)==before
+    assert service.restore_ocr_selection(order,actor='operator',expected_revision=restored['revision'])==(None,'ocr_reset_restore_conflict')
+
+
+def test_restore_refuses_active_execution(authored_april_context):
+    order,_,workflow=prepared_order()
+    reset,error=service.reset_ocr_selection(order,actor='operator',expected_revision=workflow['revision'])
+    assert error is None
+    with session_scope() as session:
+        session.add(OcrJob(id='restore-'+order,order_id=order,status='queued',input_reference='synthetic-only.pdf'))
+    assert service.restore_ocr_selection(order,actor='operator',expected_revision=reset['revision'])==(None,'ocr_reset_execution_active')

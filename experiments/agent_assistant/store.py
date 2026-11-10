@@ -66,6 +66,7 @@ class Store:
                 db.execute("ALTER TABLE settings ADD COLUMN provider TEXT NOT NULL DEFAULT 'claude'")
             db.execute("CREATE TABLE IF NOT EXISTS selections(id TEXT PRIMARY KEY,owner TEXT NOT NULL,task_id TEXT NOT NULL,payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS target_lookups(id TEXT PRIMARY KEY,owner TEXT NOT NULL,task_id TEXT NOT NULL,inputs TEXT NOT NULL,state TEXT NOT NULL,payload TEXT)")
+            db.execute("CREATE TABLE IF NOT EXISTS hospital_sources(owner TEXT PRIMARY KEY,descriptor TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS task_reviews(run_id TEXT PRIMARY KEY,payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS fax_batches(run_id TEXT PRIMARY KEY)")
             db.execute("""CREATE TABLE IF NOT EXISTS fax_items(
@@ -130,6 +131,15 @@ class Store:
                     reserved_cents=reserved, available_cents=max(0, limit-spent-reserved),
                     basis="provider_list_cost_or_configured_token_estimate", final_invoice=False,
                     notice="Claudeは接続先の定価換算値、Geminiはトークン数と設定単価による概算です。実行中のモデル要求により上限超過が生じることがあります。請求額・付属クレジット残高とは異なります。")
+
+    def hospital_source(self, owner, value=None):
+        with (self.read() if value is None else self.tx()) as db:
+            if value is not None:
+                db.execute('INSERT INTO hospital_sources(owner,descriptor) VALUES(?,?) '
+                    'ON CONFLICT(owner) DO UPDATE SET descriptor=excluded.descriptor',
+                    (owner,json.dumps(value,ensure_ascii=False)))
+            row = db.execute('SELECT descriptor FROM hospital_sources WHERE owner=?',(owner,)).fetchone()
+            return json.loads(row[0]) if row else None
 
     def set_budget(self, cents):
         if type(cents) is not int or cents < 0:
