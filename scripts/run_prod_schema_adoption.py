@@ -14,9 +14,20 @@ from sqlalchemy.engine import URL
 from hospital_release_context import PROJECT, REGION, require_context
 from scripts import portal_prod_db_bootstrap as transport
 from run_stg_schema_adoption import upgrade_connection
-from src.maintenance.formal_migration_schema import require_formal_head
+from src.maintenance.formal_migration_schema import formal_head_revision, require_formal_head
 
 INSTANCE = PROJECT + ":" + REGION + ":orders-prod"
+
+
+def verified_online_head(connection):
+    """An already migrated catalog needs no DDL or OCR-table write lock."""
+    with connection.begin():
+        connection.execute(text("SET TRANSACTION READ ONLY"))
+        versions = list(connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalars())
+        if versions != [formal_head_revision()]:
+            return False
+        require_formal_head(connection)
+    return True
 
 
 @contextmanager
@@ -100,6 +111,9 @@ def run(*, verify_only=False, online_projection_only=False):
             if tuple(connection.execute(text("SELECT current_database(), current_user")).one()) != ("orders", "orders_app"):
                 raise RuntimeError("connected production database or role mismatch")
             connection.rollback()
+            if online_projection_only and verified_online_head(connection):
+                return {"migration": "not_required", "revision": formal_head_revision(),
+                        "catalog_verified": True}
             if not verify_only:
                 with migration_import_target(connection):
                     receipt = upgrade_connection(connection, environment="production",

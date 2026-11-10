@@ -22,6 +22,8 @@ ALLOWED = {
     'docs/ocr-connected-rulings-local-20261110.md',
     'scripts/connected_ruling_release_receipt.py',
     'scripts/local_hospital_test_runner.py',
+    'scripts/run_prod_schema_adoption.py',
+    'backend/tests/unit/test_production_online_existing_head.py',
 }
 MODULES = ['backend/tests/unit/' + name for name in (
     'test_connected_ruling_arms.py', 'test_observed_ruling_junctions.py',
@@ -31,6 +33,7 @@ MODULES = ['backend/tests/unit/' + name for name in (
     'test_ruling_slant_before_detection.py', 'test_ocr_row_recovery_persistence.py',
     'test_row_ruling_continuity.py', 'test_canonical_saved_projection_regression.py',
     'test_hakodate_observed_fax_rows.py', 'test_connected_ruling_release_receipt.py',
+    'test_production_online_existing_head.py', 'test_online_production_release.py',
 )]
 COMMAND = ['-m', 'pytest', '-q', '--disable-warnings', *MODULES, '--junitxml=results.xml']
 FIXTURES = {
