@@ -27,9 +27,11 @@ ALLOWED = {
     'backend/tests/unit/test_registry_platform_digest.py',
     'backend/tests/unit/test_production_deploy_supplement.py',
 }
-TESTS = [
+ONLINE_TESTS = [
     'backend/tests/unit/test_online_production_release.py',
     'backend/tests/integration/test_online_projection_upgrade.py',
+]
+TESTS = [
     'scripts/test_local_hospital_test_runner.py',
     'backend/tests/unit/test_registry_image_digest.py',
     'backend/tests/unit/test_registry_platform_digest.py',
@@ -39,7 +41,7 @@ TESTS = [
     'backend/tests/unit/test_production_agent_secret.py',
     'backend/tests/unit/test_production_deploy_supplement.py',
 ]
-COMMAND = ['-m', 'pytest', *TESTS, '-q']
+COMMAND = ['-m', 'pytest', *ONLINE_TESTS, *TESTS, '-q']
 COMMAND_HASH = hashlib.sha256(json.dumps(COMMAND).encode()).hexdigest()
 
 
