@@ -84,7 +84,7 @@ def test_browser_history_does_not_return_provider_checkpoints_or_native_payloads
     store.event(run['id'], 'fax_decision', {'fax_id':'fax', 'approve':False, 'message':'原文を保持'})
     before = store.events(run['id'])
     with TestClient(app) as client:
-        response = client.get('/runs/' + run['id'] + suffix)
+        response = client.get('/runs/' + run['id'] + suffix, headers={'x-trial-token':app.state.token})
         assert response.status_code == 200
         assert len(response.content) < 100000
         payload = response.json()
