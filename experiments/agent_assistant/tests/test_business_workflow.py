@@ -121,6 +121,50 @@ def test_binding_drift_blocks_native_restart_before_background_refresh(tmp_path,
     asyncio.run(scenario())
 
 
+def test_early_fax_correction_pauses_at_real_tool_boundary_and_delivers_answer(tmp_path):
+    from experiments.agent_assistant.tests.test_fax_workflow import Native
+    from experiments.agent_assistant.store import Store
+    from experiments.agent_assistant.tools import Tools
+    async def scenario():
+        store=Store(tmp_path/'ledger');store.set_budget(100)
+        run,_=store.create('operator','early-correction','FAX',['hospital'],100,task_id='hospital_pending_faxes')
+        store.update(run['id'],status='running')
+        native=Native(tmp_path/'files');tools=Tools(store,native)
+        engine,run=attach(store,native,tools,store.get(run['id']))
+        native.sources['A']['status']='completed'
+        await tools.faxes.refresh(run)
+        review=(await tools.faxes.submit(run,'A','確認案'))['review']
+        await tools.faxes.decide(run,'A',review['id'],False,'原文を保持してください')
+        assert await engine.pause_model(run['id'],'actual-read-command',{'ok':True}) is True
+        engine.continue_model=AsyncMock()
+        assert await engine.advance(run['id']) is True
+        message=engine.continue_model.await_args.args[1]
+        assert 'A: 原文を保持してください' in message
+        assert tools.faxes.item(run['id'],'A')['state']=='needs_correction'
+        assert not native.writes
+    asyncio.run(scenario())
+
+
+def test_fax_correction_without_pause_uses_verified_provider_recovery(tmp_path):
+    from experiments.agent_assistant.tests.test_fax_workflow import Native
+    from experiments.agent_assistant.store import Store
+    from experiments.agent_assistant.tools import Tools
+    async def scenario():
+        store=Store(tmp_path/'ledger');store.set_budget(100)
+        run,_=store.create('operator','early-recovery','FAX',['hospital'],100,task_id='hospital_pending_faxes')
+        store.update(run['id'],status='running')
+        native=Native(tmp_path/'files');tools=Tools(store,native)
+        engine,run=attach(store,native,tools,store.get(run['id']))
+        engine.providers.resume=AsyncMock(side_effect=Conflict('未確定の更新は再送しません'))
+        with pytest.raises(Conflict,match='未確定の更新'):
+            await engine.continue_model(run,'訂正を保持')
+        engine.providers.resume.assert_awaited_once_with(run['id'])
+        assert store.get(run['id'])['status']=='reconciliation_required'
+        assert not store.events(run['id'],kinds=('business_model_wait','business_model_send'))
+        assert not native.writes
+    asyncio.run(scenario())
+
+
 def test_every_visible_task_has_a_server_contract_and_models_cannot_finalize(tmp_path):
     assert set(CONTRACTS) == {task['id'] for task in public_tasks()}
     assert len(CONTRACTS) == 12

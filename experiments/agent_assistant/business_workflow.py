@@ -240,7 +240,8 @@ class BusinessWorkflow:
         review = await run_blocking(self.tools.flow.review, ident)
         faxes = await run_blocking(self.tools.faxes.items, ident) if self.tools.faxes.active(run) else []
         fax_review_complete = bool(faxes) and all(item['state'] in ('awaiting_approval','approved','completed') for item in faxes)
-        if not (review and review['state'] == 'awaiting_approval') and not fax_review_complete:
+        fax_correction = any(item['state'] == 'needs_correction' for item in faxes)
+        if not (review and review['state'] == 'awaiting_approval') and not fax_review_complete and not fax_correction:
             return False
         await run_blocking(self.store.event, ident, 'business_model_wait', {'command_id': command, 'result': {key: value for key, value in result.items() if key != '_content'}})
         await run_blocking(self.checkpoint, ident, phase='approval', attempts=0)
@@ -259,6 +260,12 @@ class BusinessWorkflow:
     async def continue_model(self, run, message):
         waits = [event for event in await run_blocking(self.store.events, run['id'], kinds=('business_model_wait',))]
         if not waits:
+            if self.tools.faxes.active(run):
+                # An early answer can precede the first provider pause. Recover
+                # its real checkpoint; never invent a custom-tool response.
+                await run_blocking(self.set_status, run, 'reconciliation_required')
+                await self.providers.resume(run['id'])
+                return
             raise Conflict('内容確認の再開位置を照合できません')
         wait = waits[-1]['payload']
         manager = await run_blocking(self.providers.for_run, run['id']) or self.providers
@@ -324,6 +331,11 @@ class BusinessWorkflow:
         if not model_busy and any(item['state'] in ('pending','processing') for item in faxes):
             await self.tools.faxes.refresh(run)
             faxes = await run_blocking(self.tools.faxes.items, ident)
+        corrections = [item for item in faxes if item['state'] == 'needs_correction']
+        if not model_busy and corrections:
+            message = '\n'.join(item['fax_id'] + ': ' + item['decision']['message'] for item in corrections)
+            await self.continue_model(run, '利用者の訂正依頼を反映してください。既存の承認と原本は保持してください。\n' + message)
+            return True
         if (not model_busy and state['phase']=='approval' and any(item['state']=='awaiting_approval' for item in faxes)
                 and any(item['state'] not in ('awaiting_approval','approved','completed') for item in faxes)):
             await self.continue_model(run, '提示済みの確認案と利用者の回答は保持してください。残るFAXの処理状況を取得し、未提示の確認案だけ準備してください。利用者の承認を代行しないでください。')

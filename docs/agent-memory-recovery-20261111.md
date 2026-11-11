@@ -113,6 +113,18 @@ child exit within one MCP wait and revoked authorization without child start.
 The live six-copy run is retained for audited native-only upgrade and recovery;
 it has not been declared saved/reloaded successfully.
 
+The same trial completed all six native OCR deliveries (maximum native-process
+RSS 4,043,210,752 bytes). All six review proposals were prepared, but none were
+approved or saved. An early operator correction exposed another shared recovery
+gap: partial review preparation had no `business_model_wait`, yet the controller
+tried to answer such a wait. The correction now pauses at a real provider tool
+boundary, and its exact saved message takes priority over generic preparation.
+Older checkpoints without a pause use the normal verified provider recovery,
+not a fabricated tool reply or replay of unknown writes. This fix and child
+liveness changes are collected before the next local batch/staging deployment.
+No six-sheet save/reload success is claimed. The trial remains at $2.32 of its
+unchanged $2.50 cap; old unknown provider reservations remain reserved.
+
 The restart transport ID is now independent of the rotating HTTP access token.
 Existing checkpoints adopt their one matching saved delivery ID; ambiguous or
 foreign contracts are refused. A process-owned file lock excludes surviving
