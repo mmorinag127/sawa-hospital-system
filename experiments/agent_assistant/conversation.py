@@ -2,6 +2,33 @@
 from .store import Conflict
 
 
+def display_events(events):
+    """Keep full recovery receipts in the ledger, not in browser responses."""
+    fields = {
+        'agent.message': ('content',),
+        'notice': ('message', 'notice'), 'error': ('message', 'class'),
+        'completion_evidence': ('summary',), 'rollback': ('message', 'notice'),
+        'operator_reply': ('message', 'question_id', 'option'),
+        'task_review': ('summary',), 'fax_review': ('fax_id', 'review_id', 'summary'),
+        'task_decision': ('approve', 'message'),
+        'fax_decision': ('fax_id', 'review_id', 'approve', 'message'),
+        'business_support': ('message', 'class'),
+    }
+    results = ('ok', 'error', 'question', 'options', 'process_choices',
+               'process_context', 'question_map', 'command_id', 'waiting_input',
+               'needs_operator_confirmation')
+    output = []
+    for event in events:
+        payload = event['payload']
+        if event['kind'] == 'tool_result':
+            result = payload.get('result', {})
+            public = {'tool': payload.get('tool'), 'result': {key: result[key] for key in results if key in result}}
+        else:
+            public = {key: payload[key] for key in fields.get(event['kind'], ()) if key in payload}
+        output.append({**event, 'payload': public})
+    return output
+
+
 def question_result(raw, command_id):
     if set(raw) - {"question", "options"} or not isinstance(raw.get("question"), str) or not raw["question"].strip() or len(raw["question"]) > 2000:
         raise ValueError("質問は1〜2000文字で指定してください")

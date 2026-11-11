@@ -414,7 +414,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                         'WHERE run_id=? AND rowid>? ORDER BY rowid LIMIT 51', (ident, artifacts_after)).fetchall()
                     artifacts = [{key: row[key] for key in ('id', 'name', 'sha256', 'size')} for row in artifact_rows[:50]]
                 page = store.event_page(ident, after=events_after)
-                events = page['events']
+                from .conversation import display_events
+                events = display_events(page['events'])
                 from .shift_review import build_shift_review
                 from .lunch_review import build_lunch_review
                 review = tools.flow.review(ident) if current['status'] not in ('rolled_back','rollback_stop_pending') else None
@@ -445,7 +446,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 run = store.get(ident, owner)
                 page = store.event_page(ident, before=before)
                 labels = tools.faxes.labels(ident, page['events'])
-                return {**page, 'conversation': conversation(page['events']),
+                from .conversation import display_events
+                return {**page, 'events': display_events(page['events']), 'conversation': conversation(page['events']),
                         'business_messages': business_conversation(page['events'], labels) if owned(run) else []}
         return await asyncio.to_thread(read_response)
 

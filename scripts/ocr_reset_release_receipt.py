@@ -61,6 +61,8 @@ ALLOWED = {
     'experiments/agent_assistant/tests/test_generation_fence.py',
     'experiments/agent_assistant/workflow_completion.py',
     'experiments/agent_assistant/business_workflow.py',
+    'experiments/agent_assistant/conversation.py',
+    'experiments/agent_assistant/tests/test_bounded_history.py',
     'experiments/agent_assistant/tests/test_business_workflow.py',
     'experiments/agent_assistant/tests/test_workflow_completion.py',
     'experiments/agent_assistant/tests/test_execution_binding.py',
@@ -80,7 +82,7 @@ AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_postgres_ledger_contract.py', 'test_ledger_codec.py', 'test_generation_fence.py',
     'test_fax_workflow.py', 'test_hospital_output_completion.py',
     'test_hospital_source.py','test_selected_tasks.py','test_trial.py','test_execution_binding.py',
-    'test_recovery.py','test_staging_runtime.py','test_native_lifecycle.py','test_workflow_completion.py','test_business_workflow.py','test_native_idle.py','test_gemini.py')]
+    'test_recovery.py','test_staging_runtime.py','test_native_lifecycle.py','test_workflow_completion.py','test_business_workflow.py','test_native_idle.py','test_gemini.py','test_bounded_history.py')]
 COMMANDS = [
     ('backend', ['python', '-m', 'pytest', '-q', *BACKEND, '--junitxml=backend.xml'], '.'),
     ('agent', ['python', '-m', 'pytest', '-q', *AGENT, '--junitxml=agent.xml'], '.'),

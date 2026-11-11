@@ -65,3 +65,32 @@ def test_usage_is_monotonic_and_repeated_receipts_do_not_grow_history(tmp_path):
     assert store.gemini_usage_totals(run['id'], 'turn-1', {key: 0 for key in usage}) == {key: value * 2 for key, value in usage.items()}
     with pytest.raises(Conflict):
         store.gemini_usage_totals(run['id'], 'turn-3', {**usage, 'total_input_tokens': -1})
+
+
+@pytest.mark.parametrize('suffix', ['', '/events'])
+def test_browser_history_does_not_return_provider_checkpoints_or_native_payloads(tmp_path, monkeypatch, suffix):
+    from fastapi.testclient import TestClient
+    from experiments.agent_assistant.app import create_app
+    monkeypatch.setenv('SAWA_TRIAL_OPERATOR_ACCOUNT', 'operator')
+    app = create_app({}, tmp_path)
+    store = app.state.store
+    run = make_run(store)
+    store.update(run['id'], status='completed', reserved=0)
+    large = 'retained-native-evidence-' * 100000
+    store.event(run['id'], 'gemini_state', {'interaction':'known', 'results':[large]})
+    store.event(run['id'], 'tool_result', {'tool':'read_tool_result', 'result':{'ok':True, 'data':large}})
+    store.event(run['id'], 'tool_result', {'tool':'ask_operator', 'result':{
+        'waiting_input':True, 'question':'原文を保持しますか', 'options':['保持'], 'command_id':'question'}})
+    store.event(run['id'], 'fax_decision', {'fax_id':'fax', 'approve':False, 'message':'原文を保持'})
+    before = store.events(run['id'])
+    with TestClient(app) as client:
+        response = client.get('/runs/' + run['id'] + suffix)
+        assert response.status_code == 200
+        assert len(response.content) < 100000
+        payload = response.json()
+        assert [event['id'] for event in payload['events']] == [event['id'] for event in before]
+        assert payload['events'][0]['payload'] == {}
+        assert payload['events'][1]['payload']['result'] == {'ok':True}
+        assert any(item.get('question_id') == 'question' for item in payload['conversation'])
+        assert any('原文を保持' in item['text'] for item in payload['conversation'])
+    assert store.events(run['id']) == before

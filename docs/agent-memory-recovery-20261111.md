@@ -125,6 +125,14 @@ liveness changes are collected before the next local batch/staging deployment.
 No six-sheet save/reload success is claimed. The trial remains at $2.32 of its
 unchanged $2.50 cap; old unknown provider reservations remain reserved.
 
+Staging run 43005646394 deployed `45fc3414` to web 00509-qjv after backend
+301 / agent 419 / frontend 239 tests and types/build passed. The admin detail
+then exceeded the existing 25 MiB proxy response limit: its 200-event page
+returned internal provider checkpoints and complete native results. Both detail
+and history responses now project only fields rendered by the UI. Full ledger
+receipts and recovery checkpoints remain unchanged. API tests cover both routes,
+retained event IDs/cursors, questions/corrections and unchanged raw audit data.
+
 The restart transport ID is now independent of the rotating HTTP access token.
 Existing checkpoints adopt their one matching saved delivery ID; ambiguous or
 foreign contracts are refused. A process-owned file lock excludes surviving
