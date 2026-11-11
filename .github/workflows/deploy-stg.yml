@@ -106,6 +106,7 @@ jobs:
           service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
           token_format: id_token
           id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+          id_token_include_email: true
       - name: Restore only the explicitly approved staging audit
         env:
           STG_ID_TOKEN: ${{ steps.auth.outputs.id_token }}

@@ -31,6 +31,18 @@ def test_exact_context_is_accepted():
     module.require_context(context())
 
 
+def test_recovery_uses_the_existing_authenticated_deploy_identity_contract():
+    import yaml
+    workflow=yaml.safe_load((Path(__file__).resolve().parents[3]/'.github/workflows/deploy-stg.yml').read_text())
+    job=workflow['jobs']['restore-ocr-selection']
+    assert job['needs']=='source-gate'
+    auth=next(step['with'] for step in job['steps'] if step.get('id')=='auth')
+    normal=next(step['with'] for step in workflow['jobs']['deploy-backend']['steps'] if step.get('id')=='auth-backend')
+    for key in ('project_id','workload_identity_provider','service_account','token_format','id_token_audience','id_token_include_email'):
+        assert auth[key]==normal[key]
+    assert auth['id_token_include_email'] is True
+
+
 def test_recovery_calls_normal_api_once_and_checks_readback():
     calls=[]
     before=dict(order_id=module.ORDER,revision=2,ocr_reset={'audit_id':module.AUDIT,
