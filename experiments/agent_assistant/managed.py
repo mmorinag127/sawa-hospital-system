@@ -241,6 +241,11 @@ class Managed:
         try:
             if await self.sandbox.stop(run_id, expected_generation=generation) is not True:
                 raise Conflict('業務APIの停止を確認できません')
+            current = await run_blocking(self.store.get, run_id)
+            if current['generation'] != generation:
+                raise Conflict('業務APIの停止中に依頼が変更されています')
+            await run_blocking(self.store.event, run_id, 'native_stop', {
+                'generation': generation, 'stopped': True, 'scope': 'this_request_sandbox'})
             return True
         except Exception:
             try:

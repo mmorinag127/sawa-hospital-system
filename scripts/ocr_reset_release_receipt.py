@@ -54,6 +54,8 @@ ALLOWED = {
     'experiments/agent_assistant/tests/test_native_lifecycle.py',
     'docs/agent-memory-recovery-20261111.md',
     'experiments/agent_assistant/execution_binding.py',
+    'experiments/agent_assistant/managed.py',
+    'experiments/agent_assistant/tests/test_generation_fence.py',
     'experiments/agent_assistant/tests/test_execution_binding.py',
     'experiments/agent_assistant/tests/test_durable_postgres.py',
     'backend/tests/unit/test_native_ingest_sql_component.py',

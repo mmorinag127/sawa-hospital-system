@@ -185,6 +185,14 @@ class Store:
                         and json.loads(active['task_inputs']).get('business_workflow',{}).get('phase')=='approval'
                         and not db.execute("SELECT 1 FROM commands WHERE run_id=? AND status!='done' LIMIT 1",(active['id'],)).fetchone()):
                     continue
+                if active['status'] == 'stop_pending':
+                    receipt = db.execute("SELECT payload FROM events WHERE run_id=? AND kind='native_stop' ORDER BY id DESC LIMIT 1", (active['id'],)).fetchone()
+                    stopped = json.loads(receipt['payload']) if receipt else {}
+                    if (stopped.get('stopped') is True and stopped.get('scope') == 'this_request_sandbox'
+                            and type(stopped.get('generation')) is int and stopped['generation'] == active['generation']):
+                        # Retain unknown provider spend in the budget total.
+                        # Only the proven-stopped, fenced native copy may coexist.
+                        continue
                 if active['status'] == 'rollback_stop_pending':
                     receipt = db.execute("SELECT payload FROM events WHERE run_id=? AND kind='rollback' ORDER BY id DESC LIMIT 1", (active['id'],)).fetchone()
                     restored = json.loads(receipt['payload']) if receipt else {}

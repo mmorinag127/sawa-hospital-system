@@ -14,6 +14,56 @@ from experiments.agent_assistant.tests.test_selected_tasks import lunch, setup
 from experiments.agent_assistant.tests.test_trial import Event, FakeStream
 
 
+@pytest.mark.parametrize('proof', ['valid', 'missing', 'old_generation', 'foreign_scope', 'not_stopped', 'running'])
+def test_only_proven_fenced_native_stop_allows_next_copy_without_releasing_budget(tmp_path, proof):
+    from experiments.agent_assistant.store import Store
+    store = Store(tmp_path/'state')
+    store.set_budget(1000)
+    original, _ = store.create('operator', 'original', 'trial', ['hospital'], 300, provider='gemini')
+    _, generation = store.fence(original['id'])
+    store.update(original['id'], expected_stop_generation=generation, status='stop_pending')
+    if proof != 'missing':
+        store.event(original['id'], 'native_stop', {
+            'generation': generation-1 if proof=='old_generation' else generation,
+            'stopped': proof!='not_stopped',
+            'scope': 'foreign' if proof=='foreign_scope' else 'this_request_sandbox'})
+    if proof == 'running':
+        store.update(original['id'], status='running')
+    before = store.get(original['id'])
+    if proof == 'valid':
+        next_run, created = store.create('operator', 'next', 'trial', ['hospital'], 300, provider='gemini')
+        assert created and next_run['reserved'] == 300
+        assert store.get(original['id']) == before
+        with pytest.raises(Conflict):
+            store.create('operator', 'too-much', 'trial', ['hospital'], 500, provider='gemini')
+        with pytest.raises(Conflict):
+            store.update(original['id'], expected_generation=original['generation'], status='running')
+    else:
+        with pytest.raises(Conflict, match='他の依頼'):
+            store.create('operator', 'next', 'trial', ['hospital'], 300, provider='gemini')
+    assert store.get(original['id'])['reserved'] == 300
+
+
+@pytest.mark.parametrize('outcome', ['stopped', 'unconfirmed', 'stale'])
+def test_native_stop_receipt_requires_successful_current_generation_stop(tmp_path, outcome):
+    from experiments.agent_assistant.store import Store
+    store = Store(tmp_path/'state')
+    store.set_budget(1000)
+    run, _ = store.create('operator', 'stop', 'trial', ['hospital'], 300, provider='gemini')
+    _, generation = store.fence(run['id'])
+    manager = object.__new__(Managed)
+    manager.store = store
+    manager.sandbox = SimpleNamespace(stop=AsyncMock(return_value=outcome!='unconfirmed'))
+    expected = generation-1 if outcome=='stale' else generation
+    result = asyncio.run(manager.stop_native(run['id'], 'stop_pending', expected))
+    receipt = store.latest_event(run['id'], 'native_stop')
+    assert result is (outcome=='stopped')
+    assert bool(receipt) is (outcome=='stopped')
+    if receipt:
+        assert receipt['payload'] == {'generation':generation,'stopped':True,'scope':'this_request_sandbox'}
+    assert store.get(run['id'])['reserved'] == 300
+
+
 @pytest.mark.parametrize('status', ['completed', 'stopping', 'stopped', 'rolled_back',
                                    'stop_pending', 'rollback_stop_pending'])
 def test_generation_guard_never_changes_terminal_state(tmp_path, status):
