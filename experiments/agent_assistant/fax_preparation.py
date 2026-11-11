@@ -76,7 +76,8 @@ async def content(tools, run):
             raise Conflict('準備後にFAXの確認対象が変更されています')
         blocks.append({'type': 'text', 'text': json.dumps({'fax_id': item['fax_id'],
             'facility': item['snapshot'].get('facility'), 'week': item['snapshot']['week'],
-            'sheet': captured['sheet']}, ensure_ascii=False, separators=(',', ':'))})
+            'sheet': {key: captured['sheet'][key] for key in ('header', 'fields', 'rows')}},
+            ensure_ascii=False, separators=(',', ':'))})
         def pages():
             import fitz
             from pathlib import Path

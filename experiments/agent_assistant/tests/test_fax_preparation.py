@@ -45,13 +45,16 @@ def test_prepared_packet_has_exact_sheets_and_all_pages_without_model_fetches(tm
     async def scenario():
         store,native,tools,run,engine,calls=setup(tmp_path)
         native.sources['A']['status']='pending'
+        native.sheets['OA']['cell_provenance_rows']=['retained-only-in-native-ledger' * 100000]
         assert await prepare(engine,run)
         count=len(calls)
         assert await prepare(engine,run) and len(calls)==count
         blocks=await packet_content(tools,run)
         assert len([block for block in blocks if block['type']=='image'])==2
         sheets=[json.loads(block['text']) for block in blocks[1:] if block['type']=='text']
-        assert [item['sheet'] for item in sheets]==[native.sheets['OA'],native.sheets['OB']]
+        assert [item['sheet'] for item in sheets]==[{key: sheet[key] for key in ('header','fields','rows')} for sheet in native.sheets.values()]
+        assert len(json.dumps(sheets)) < 10000
+        assert 'cell_provenance_rows' in native.sheets['OA']
         assert sum(name=='hospital_start_fax' for name,_,_ in calls)==1
         assert not native.writes
         assert {item['name'] for item in model_definitions(tools,run)}=={'request_fax_approval','ask_operator'}
