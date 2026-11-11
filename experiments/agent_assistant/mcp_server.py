@@ -143,6 +143,11 @@ def build_mcp(tools):
         """OCR完了または利用者回答までモデルを呼ばずに待つ。"""
         return await invoke("wait_for_fax_work", {}, ctx)
 
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))
+    async def wait_for_native_idle(domain: str, ctx: Context):
+        """依頼内の指定業務のローカル保存が完了するまで、更新せずに待つ。"""
+        return await invoke('wait_for_native_idle', {'domain':domain}, ctx)
+
     @server.tool()
     async def ask_operator(question: str, ctx: Context, options: list[str] | None = None):
         """不足する業務入力を利用者へ質問し、確認待ちにする。"""

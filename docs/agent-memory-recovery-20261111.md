@@ -95,6 +95,15 @@ read/write gate and stop/recovery cases require the next aggregate batch.
 The original HTTP 500 command remains unresolved; it was not resent, declared
 successful or directly modified in the ledger.
 
+The first idle-gate deployment (`9f2a8b30`, staging run 42981967135) passed its
+then-selected aggregate but omitted MCP registration for the advertised idle
+helper. Trial `2338d8d7cea24ae7952a2ed8420a2678` consequently failed before the
+helper command reached Tools.execute. This was an implementation/test-selection
+gap, not a successful six-FAX verification. The helper is now registered through
+the same MCP invoke path as both providers. The aggregate includes the existing
+Gemini advertised-tool/schema parity tests, and idle-wait execution tests now
+call the real local MCP bridge instead of only Tools.execute.
+
 The restart transport ID is now independent of the rotating HTTP access token.
 Existing checkpoints adopt their one matching saved delivery ID; ambiguous or
 foreign contracts are refused. A process-owned file lock excludes surviving

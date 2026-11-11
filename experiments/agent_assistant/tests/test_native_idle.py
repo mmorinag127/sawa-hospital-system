@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from experiments.agent_assistant.store import Conflict
+from experiments.agent_assistant.mcp_server import build_mcp, call_local
 from experiments.agent_assistant.tests.test_trial import prepared
 from experiments.agent_assistant.tools import Arguments
 
@@ -43,7 +44,8 @@ def test_native_idle_wait_releases_tool_lock_and_finishes_only_after_writer(tmp_
             started.set()
         monkeypatch.setattr(sandbox,'start',start)
         monkeypatch.setattr(sandbox,'local_jobs',lambda current: jobs)
-        task = asyncio.create_task(tools.execute(run['id'],run['generation'],
+        server = build_mcp(tools)
+        task = asyncio.create_task(call_local(server,tools,run['id'],run['generation'],
             'wait_for_native_idle',{'domain':'hospital'},'synthetic-wait'))
         await asyncio.wait_for(started.wait(),1)
         async with tools.lock(run['id']):
@@ -54,6 +56,15 @@ def test_native_idle_wait_releases_tool_lock_and_finishes_only_after_writer(tmp_
         assert result['native_idle'] and result['ok']
         assert await tools.execute(run['id'],run['generation'],
             'wait_for_native_idle',{'domain':'hospital'},'synthetic-wait') == result
+    asyncio.run(scenario())
+
+
+def test_every_advertised_tool_has_an_mcp_execution_entry(tmp_path):
+    async def scenario():
+        _, _, tools, _ = prepared(tmp_path)
+        registered = {tool.name for tool in await build_mcp(tools).list_tools()}
+        for domain in ('hospital','shift','school-lunch'):
+            assert {tool['name'] for tool in tools.definitions([domain])} <= registered
     asyncio.run(scenario())
 
 
