@@ -23,7 +23,7 @@ const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',ins
 test('native upgrade sends the displayed binding hashes and generation only after owner action',async()=>{
  const initial={...makeRun('reconciliation_required'),generation:7,pending_question:null,native_upgrade:{previous_sha256:'a'.repeat(64),current_sha256:'b'.repeat(64),previous_sources:{hospital:{source_revision:'a'.repeat(40)}},current_sources:{hospital:{source_revision:'c'.repeat(40)}}}};
  const h=await mount({initial,adminView:true,beforePost:async(url,body)=>{
-  if(url.endsWith('/upgrade-native'))return {data:{...initial,status:'running',native_upgrade:null}};
+  if(url.endsWith('/upgrade-native')){h.setRun({...initial,status:'running',native_upgrade:null});return {data:h.run};}
  }});
  try{
   assert.equal(h.calls.filter(c=>c.url.endsWith('/upgrade-native')).length,0);
