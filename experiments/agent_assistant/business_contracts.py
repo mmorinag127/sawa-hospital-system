@@ -59,7 +59,7 @@ def require_server(run, name):
     from .fax_preparation import enabled
     if enabled(run) and name not in ('request_fax_approval', 'ask_operator'):
         from .store import Conflict
-        raise Conflict('FAXの取得・OCR・採用・待機・保存はサーバーが担当します')
+        raise Conflict('FAXの取得・OCR・採用・待機・保存は業務進行サーバーが担当します')
     if name in server_tools(run['task_id']):
         from .store import Conflict
         raise Conflict('承認した内容の保存・確定・帳票出力は業務進行サーバーが実行します')

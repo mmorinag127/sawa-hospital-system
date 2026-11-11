@@ -14,7 +14,10 @@ async def prepare(engine, run):
     if await run_blocking(tools.store.latest_event, run['id'], 'fax_preparation'):
         return True
     await faxes.initialize(run)
-    for item in await run_blocking(faxes.items, run['id']):
+    items = await run_blocking(faxes.items, run['id'])
+    if not items:
+        return True
+    for item in items:
         await engine.call(run, 'wait_for_native_idle', {'domain': 'hospital'}, 'business:fax-idle-before:' + item['fax_id'])
         source = await faxes.current_source(run, item)
         if source['status'] == 'pending':

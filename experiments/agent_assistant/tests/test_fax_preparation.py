@@ -21,6 +21,7 @@ from experiments.agent_assistant.tests.test_gemini import interaction
 def setup(tmp_path):
     import fitz
     native = Native(tmp_path/'native')
+    native.configs = {}
     with fitz.open() as pdf:
         pdf.new_page().insert_text((20, 30), 'Synthetic FAX')
         native.pdf = pdf.tobytes()
@@ -94,7 +95,7 @@ def test_one_provider_request_submits_all_preloaded_fax_reviews(tmp_path,monkeyp
                 (key,'request_fax_approval',{'fax_id':key,'summary':'合成原本照合。数量変更なし'}) for key in ('A','B')]))
         async def pause(*args):
             return all(item['state']=='awaiting_approval' for item in tools.faxes.items(run['id']))
-        tools.business=SimpleNamespace(pause_model=pause)
+        tools.business=SimpleNamespace(pause_model=pause,kick_many=AsyncMock())
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
         agent=Gemini(store,native,tools,build_mcp(tools),{},client=client)
         await agent.consume_gemini(run['id'],run['generation'],None,content(await packet_content(tools,run)))
