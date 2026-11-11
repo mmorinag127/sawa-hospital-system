@@ -1,5 +1,6 @@
 """Synthetic native-writer scheduling; no OCR or live provider calls."""
 import asyncio
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -41,6 +42,8 @@ def test_native_idle_wait_releases_tool_lock_and_finishes_only_after_writer(tmp_
         started = asyncio.Event()
         async def start(current):
             assert current['id'] == run['id']
+            sandbox.urls[(run['id'],'hospital')] = 'http://synthetic-owned'
+            sandbox.children[(run['id'],'hospital')] = SimpleNamespace(returncode=None)
             started.set()
         monkeypatch.setattr(sandbox,'start',start)
         monkeypatch.setattr(sandbox,'local_jobs',lambda current: jobs)
@@ -68,12 +71,63 @@ def test_every_advertised_tool_has_an_mcp_execution_entry(tmp_path):
     asyncio.run(scenario())
 
 
+def test_native_idle_recovers_child_exit_during_the_same_wait(tmp_path, monkeypatch):
+    async def scenario():
+        _, sandbox, tools, run = prepared(tmp_path)
+        jobs = [{'domain':'hospital','state':'accepted'}]
+        first_start, exited = asyncio.Event(), asyncio.Event()
+        starts, http = [], []
+        async def start(current):
+            starts.append((current['id'],current['generation']))
+            sandbox.urls[(run['id'],'hospital')] = 'http://synthetic-owned'
+            sandbox.children[(run['id'],'hospital')] = SimpleNamespace(returncode=None)
+            if exited.is_set():
+                jobs[0]['state'] = 'returned'
+            first_start.set()
+        async def request(*args, **kwargs):
+            http.append(args)
+            raise AssertionError('The business HTTP request must not be replayed')
+        monkeypatch.setattr(sandbox,'start',start)
+        monkeypatch.setattr(sandbox,'request',request)
+        monkeypatch.setattr(sandbox,'local_jobs',lambda current:jobs)
+        task = asyncio.create_task(call_local(build_mcp(tools),tools,run['id'],run['generation'],
+            'wait_for_native_idle',{'domain':'hospital'},'child-exit'))
+        await asyncio.wait_for(first_start.wait(),1)
+        assert not task.done()
+        exited.set()
+        sandbox.children[(run['id'],'hospital')].returncode = 7
+        assert (await asyncio.wait_for(task,2))['native_idle']
+        assert len(starts) >= 2
+        assert set(starts) == {(run['id'],run['generation'])}
+        assert http == []
+    asyncio.run(scenario())
+
+
+def test_native_idle_checks_authorization_before_starting_a_child(tmp_path, monkeypatch):
+    async def scenario():
+        _, sandbox, tools, run = prepared(tmp_path)
+        starts = []
+        async def start(current):
+            starts.append(current['id'])
+        async def authorize(current):
+            raise Conflict('Authorization revoked')
+        tools.authorization_validator = authorize
+        monkeypatch.setattr(sandbox,'start',start)
+        with pytest.raises(Conflict,match='Authorization revoked'):
+            await tools.execute(run['id'],run['generation'],
+                'wait_for_native_idle',{'domain':'hospital'},'revoked')
+        assert starts == []
+    asyncio.run(scenario())
+
+
 def test_native_idle_wait_obeys_stop_and_does_not_wait_for_other_domain(tmp_path, monkeypatch):
     async def scenario():
         store, sandbox, tools, run = prepared(tmp_path,domains=('hospital','shift'))
         jobs = [{'domain':'shift','state':'accepted'}]
         async def start(current):
-            pass
+            for domain in current['domains']:
+                sandbox.urls[(run['id'],domain)] = 'http://synthetic-owned'
+                sandbox.children[(run['id'],domain)] = SimpleNamespace(returncode=None)
         monkeypatch.setattr(sandbox,'start',start)
         monkeypatch.setattr(sandbox,'local_jobs',lambda current:jobs)
         assert (await tools.execute(run['id'],run['generation'],

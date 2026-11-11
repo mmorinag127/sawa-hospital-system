@@ -578,7 +578,7 @@ class Sandbox:
                              "kind": contract.get("kind", "solve"), "generation": contract.get("generation")})
         return jobs
 
-    async def request(self, run, domain, method, path, *, params=None, body=None, authorization=None, files=None, revision=None):
+    async def ensure_domain(self, run, domain):
         key = (run["id"], domain)
         if domain not in run["domains"]:
             raise Conflict("依頼対象の試用APIが起動していません")
@@ -589,6 +589,10 @@ class Sandbox:
             await self.start(run)
         if key not in self.urls:
             raise Conflict("依頼対象の試用APIが起動していません")
+
+    async def request(self, run, domain, method, path, *, params=None, body=None, authorization=None, files=None, revision=None):
+        await self.ensure_domain(run, domain)
+        key = (run['id'], domain)
         headers = {"X-Trial-Token": self.tokens[key], "X-Sawa-Service-Token": self.tokens[key]}
         if authorization:
             headers["Authorization"] = authorization

@@ -104,6 +104,15 @@ the same MCP invoke path as both providers. The aggregate includes the existing
 Gemini advertised-tool/schema parity tests, and idle-wait execution tests now
 call the real local MCP bridge instead of only Tools.execute.
 
+Trial `4b176972a5ba467ea4ffa0a1a87aa577` reached the real registered idle helper,
+completed three idle waits and deferred competing writes without HTTP 500 or
+provider replay. The active-wait review found that child liveness was checked
+only at entry. The same read-only wait now repeats the owned startup check
+outside the tool lock, and checks authorization before any restart. Tests cover
+child exit within one MCP wait and revoked authorization without child start.
+The live six-copy run is retained for audited native-only upgrade and recovery;
+it has not been declared saved/reloaded successfully.
+
 The restart transport ID is now independent of the rotating HTTP access token.
 Existing checkpoints adopt their one matching saved delivery ID; ambiguous or
 foreign contracts are refused. A process-owned file lock excludes surviving

@@ -367,9 +367,6 @@ class Tools:
                 {'name':'wait_for_native_idle','arguments':raw})
             if previous is not None:
                 return previous
-        # Restore only owned saved deliveries after a process restart. No business
-        # HTTP command is repeated, and the tool lock is free during the wait.
-        await self.sandbox.start(run)
         while True:
             async with self.lock(run_id):
                 run = await run_blocking(self.store.get, run_id)
@@ -377,6 +374,13 @@ class Tools:
                     raise Conflict('依頼は停止されました')
                 if self.authorization_validator is not None:
                     await self.authorization_validator(run)
+            # A child may exit while this read-only wait is active. Reuse the
+            # owned startup/recovery path, never repeat the business HTTP input.
+            await self.sandbox.ensure_domain(run, raw['domain'])
+            async with self.lock(run_id):
+                run = await run_blocking(self.store.get, run_id)
+                if run['generation'] != generation or run['status'] != 'running':
+                    raise Conflict('依頼は停止されました')
                 if not await run_blocking(self.pending_native_jobs, run, raw['domain']):
                     result = {'ok':True,'domain':raw['domain'],'native_idle':True,'command_id':command_id}
                     await run_blocking(self.store.finish_command, run_id, command_id, result)
