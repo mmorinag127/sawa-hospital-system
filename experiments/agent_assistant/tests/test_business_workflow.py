@@ -49,6 +49,78 @@ def attach(store, native, tools, run):
     return engine, store.get(run['id'])
 
 
+def test_first_fax_review_does_not_pause_preparation_of_remaining_faxes(tmp_path):
+    from experiments.agent_assistant.tests.test_fax_workflow import Native
+    from experiments.agent_assistant.store import Store
+    from experiments.agent_assistant.tools import Tools
+    async def scenario():
+        store=Store(tmp_path/'ledger');store.set_budget(100)
+        run,_=store.create('operator','fax-progress','FAX',['hospital'],100,task_id='hospital_pending_faxes')
+        store.update(run['id'],status='running')
+        native=Native(tmp_path/'files');tools=Tools(store,native)
+        engine,run=attach(store,native,tools,store.get(run['id']))
+        native.sources['A']['status']='completed'
+        await tools.faxes.refresh(run)
+        first=(await tools.faxes.submit(run,'A','原本を確認してください'))['review']
+        assert await engine.pause_model(run['id'],'first-review',{'queued_for_human':True}) is False
+        native.sources['B']['status']='completed'
+        await tools.faxes.refresh(run)
+        assert await engine.pause_model(run['id'],'other-ready',{'ok':True}) is False
+        await tools.faxes.submit(run,'B','次の原本を確認してください')
+        assert await engine.pause_model(run['id'],'all-reviews',{'queued_for_human':True}) is True
+        for fax in ('A','B'):
+            review=tools.faxes.item(run['id'],fax)['review']
+            await tools.faxes.decide(run,fax,review['id'],True,'合成コピーの承認')
+        assert await engine.pause_model(run['id'],'all-approved',{'ok':True}) is True
+        assert tools.faxes.item(run['id'],'A')['review']['id']==first['id']
+        assert not native.writes
+    asyncio.run(scenario())
+
+
+def test_quiescent_approval_refreshes_background_faxes_and_continues_only_remaining_reviews(tmp_path):
+    from experiments.agent_assistant.tests.test_fax_workflow import Native
+    from experiments.agent_assistant.store import Store
+    from experiments.agent_assistant.tools import Tools
+    async def scenario():
+        store=Store(tmp_path/'ledger');store.set_budget(100)
+        run,_=store.create('operator','fax-refresh','FAX',['hospital'],100,task_id='hospital_pending_faxes')
+        store.update(run['id'],status='running')
+        native=Native(tmp_path/'files');tools=Tools(store,native)
+        engine,run=attach(store,native,tools,store.get(run['id']))
+        native.sources['A']['status']='completed'
+        await tools.faxes.refresh(run)
+        first=(await tools.faxes.submit(run,'A','原本を確認してください'))['review']
+        engine.checkpoint(run['id'],phase='approval')
+        native.sources['B']['status']='completed'
+        engine.continue_model=AsyncMock()
+        assert await engine.advance(run['id']) is True
+        engine.continue_model.assert_awaited_once()
+        assert tools.faxes.item(run['id'],'B')['state']=='ready'
+        assert tools.faxes.item(run['id'],'A')['review']['id']==first['id']
+        assert not native.writes
+    asyncio.run(scenario())
+
+
+def test_binding_drift_blocks_native_restart_before_background_refresh(tmp_path, monkeypatch):
+    from experiments.agent_assistant import execution_binding
+    async def scenario():
+        store,native,tools,run=shift(tmp_path)
+        engine,run=attach(store,native,tools,run)
+        store.event(run['id'],'execution_binding',{'synthetic_previous_binding':True})
+        def changed(*args,**kwargs):
+            raise Conflict('native source changed')
+        monkeypatch.setattr(execution_binding,'record',changed)
+        native.start=AsyncMock()
+        before=store.get(run['id'])
+        with pytest.raises(Conflict,match='native source changed'):
+            await engine.advance(run['id'])
+        assert store.get(run['id'])['status']=='reconciliation_required'
+        assert store.get(run['id'])['generation']==before['generation']
+        native.start.assert_not_awaited()
+        assert not native.writes
+    asyncio.run(scenario())
+
+
 def test_every_visible_task_has_a_server_contract_and_models_cannot_finalize(tmp_path):
     assert set(CONTRACTS) == {task['id'] for task in public_tasks()}
     assert len(CONTRACTS) == 12

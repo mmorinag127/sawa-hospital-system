@@ -18,6 +18,28 @@ def _component_projection_config():
              "diet_type": "regular", "area_id": "X"}]}}
 
 
+@pytest.mark.parametrize('text,score', [('-', 0.0), ('--', 0.2), ('Original note', 0.1)])
+def test_known_note_cell_preserves_low_confidence_text_and_score_for_editing(text, score):
+    config = _component_projection_config()
+    config['fax_template']['columns'].append({'index':4,'source_index':4,'name':'remarks','role':'note'})
+    assignment = _component_assignment(order_id='ORD_TEST',facility_id='FAC_TEST',template_id='tpl-1',
+        facility_config=config,payload={
+            'hakodate_preprocessing':{'target_cell_map':[{'target_cell_id':'F11','sheet_cell':'F11',
+                'worksheet_row':11,'worksheet_col':6,'semantic_field':'remarks','role':'note',
+                'date':'2026-04-26','daypart':'朝','menu_name':'献立A','bbox':[10,10,30,30]}]},
+            'hakodate_ocr_evidence_records':[{'text':text,'center':[20,20],'confidence':score}]})
+    base = {'fields':['date_mmdd','daypart','menu','qty.regular_x','remarks'],
+        'rows':[['04/26','朝','献立A','3','old']],'warnings':[],'blockers':[]}
+    projected = order_service._apply_hakodate_sheet_output_to_sheet_payload(
+        base_sheet=base,assignment=assignment,facility_config=config)
+    assert projected['rows'][0][4] == text
+    assert projected['rows'][0][3] == '3'
+    assert projected['blockers'] == []
+    assert projected['cell_provenance_rows'][0][4] == 'hakodate_ocr_raw_note'
+    assert projected['cell_score_rows'][0][4] == score
+    assert base['rows'][0][4] == 'old'
+
+
 def test_sheet_header_from_template_keeps_header_group_for_area_quantity_columns() -> None:
     template = {
         "columns": [

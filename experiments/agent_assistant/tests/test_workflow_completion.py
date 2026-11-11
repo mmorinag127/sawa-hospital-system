@@ -298,6 +298,42 @@ def test_unknown_native_write_is_never_replayed_by_a_new_helper_call(tmp_path):
     asyncio.run(scenario())
 
 
+def test_all_approved_fax_drafts_are_saved_before_a_final_quantity_rejection(tmp_path):
+    from experiments.agent_assistant.tests.test_fax_workflow import Native
+    from experiments.agent_assistant.store import Store
+    from experiments.agent_assistant.tools import Tools
+    async def scenario():
+        store=Store(tmp_path/'ledger');store.set_budget(100)
+        run,_=store.create('user','drafts-before-confirm','FAX',['hospital'],100,task_id='hospital_pending_faxes')
+        store.update(run['id'],status='running');run=store.get(run['id'])
+        native=Native(tmp_path/'files');tools=Tools(store,native)
+        for source in native.sources.values():source['status']='completed'
+        native.sheets['OA']['rows'][0][1]='-'
+        original=deepcopy(native.sheets)
+        await tools.faxes.refresh(run)
+        for fax in ('A','B'):
+            review=(await tools.faxes.submit(run,fax,'合成コピーの原文を保持して保存'))['review']
+            await tools.faxes.decide(run,fax,review['id'],True,'下書き保存の確認')
+        request=native.request
+        rejected=[]
+        async def transport(*args,**kwargs):
+            if args[3].endswith('/bagging'):
+                assert native.saved=={'OA','OB'}
+                rejected.append(args[3])
+                return httpx.Response(409,json={'detail':'数量の利用者確認が必要です'})
+            return await request(*args,**kwargs)
+        native.request=transport
+        result=await tools.execute(run['id'],0,'complete_fax_work',{},'save-approved-drafts')
+        assert result.get('needs_operator_confirmation')
+        assert rejected and native.saved=={'OA','OB'}
+        assert native.sheets==original
+        assert all(wf['state']!='confirmed' for wf in native.wfs.values())
+        for oid in ('OA','OB'):
+            saved=(await request(run,'hospital','GET',f'/orders/{oid}/workflow-v2/sheet')).json()
+            assert saved['sheet']==original[oid]
+    asyncio.run(scenario())
+
+
 def test_fax_export_retry_does_not_repeat_successful_native_writes(tmp_path):
     from experiments.agent_assistant.tests.test_fax_workflow import Native
     from experiments.agent_assistant.store import Store

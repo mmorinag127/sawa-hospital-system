@@ -23879,7 +23879,9 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
         previous = rows[row_index][col_index]
         confidence = cell.get("assignment_confidence")
         operator_reviewed = bool(cell.get("operator_values"))
-        classification = ("accepted" if role == "quantity" or operator_reviewed
+        # A known cell's contents remain editable; confidence is not a
+        # placement failure for quantities or operator notes.
+        classification = ("accepted" if role in {"quantity", "note"} or operator_reviewed
                           else _hakodate_ocr_classification_for_confidence(confidence))
         confidence_tier = "operator" if operator_reviewed else _hakodate_ocr_confidence_tier(confidence)
         placement_basis = "operator_review" if operator_reviewed else _hakodate_ocr_placement_basis_for_confidence(confidence)
@@ -23922,7 +23924,8 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
             if col_index < len(cell_confidence_rows[row_index]):
                 cell_confidence_rows[row_index][col_index] = confidence_tier
                 cell_score_rows[row_index][col_index] = None if operator_reviewed else confidence
-                cell_provenance_rows[row_index][col_index] = "operator_recognition_review" if operator_reviewed else "hakodate_ocr_strict_threshold"
+                cell_provenance_rows[row_index][col_index] = ("operator_recognition_review" if operator_reviewed
+                    else "hakodate_ocr_raw_note" if role == "note" else "hakodate_ocr_strict_threshold")
             applied.append(
                 {
                     "sheet_cell": sheet_cell,

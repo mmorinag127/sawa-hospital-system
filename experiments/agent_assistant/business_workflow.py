@@ -239,11 +239,22 @@ class BusinessWorkflow:
             return False
         review = await run_blocking(self.tools.flow.review, ident)
         faxes = await run_blocking(self.tools.faxes.items, ident) if self.tools.faxes.active(run) else []
-        if not (review and review['state'] == 'awaiting_approval') and not any(item['state'] == 'awaiting_approval' for item in faxes):
+        fax_review_complete = bool(faxes) and all(item['state'] in ('awaiting_approval','approved','completed') for item in faxes)
+        if not (review and review['state'] == 'awaiting_approval') and not fax_review_complete:
             return False
         await run_blocking(self.store.event, ident, 'business_model_wait', {'command_id': command, 'result': {key: value for key, value in result.items() if key != '_content'}})
         await run_blocking(self.checkpoint, ident, phase='approval', attempts=0)
         return True
+
+    async def require_binding(self, run):
+        from .execution_binding import record
+        from .managed import SYSTEM
+        try:
+            if await run_blocking(self.store.latest_event, run['id'], 'execution_binding'):
+                await run_blocking(record, self.store, self.tools, run, SYSTEM)
+        except Conflict:
+            await run_blocking(self.store.update, run['id'], expected_generation=run['generation'], status='reconciliation_required')
+            raise
 
     async def continue_model(self, run, message):
         waits = [event for event in await run_blocking(self.store.events, run['id'], kinds=('business_model_wait',))]
@@ -251,6 +262,7 @@ class BusinessWorkflow:
             raise Conflict('内容確認の再開位置を照合できません')
         wait = waits[-1]['payload']
         manager = await run_blocking(self.providers.for_run, run['id']) or self.providers
+        await self.require_binding(run)
         await run_blocking(self.store.event, run['id'], 'business_model_send', {'command_id': wait['command_id']})
         await run_blocking(self.activate, run)
         await run_blocking(self.checkpoint, run['id'], phase='analysing')
@@ -292,6 +304,7 @@ class BusinessWorkflow:
         current = await run_blocking(self.store.get, ident)
         if current['generation'] != run['generation'] or current['status'] in ('completed', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending', 'stopping'):
             return False
+        await self.require_binding(run)
         await run_blocking(self.require_copy, run)
         from .native_recovery import reconcile
         def has_pending_native():
@@ -308,6 +321,13 @@ class BusinessWorkflow:
         model_busy = manager_task and not manager_task.done()
         review = (await run_blocking(self.tools.flow.review, ident))
         faxes = (await run_blocking(self.tools.faxes.items, ident)) if self.tools.faxes.active(run) else []
+        if not model_busy and any(item['state'] in ('pending','processing') for item in faxes):
+            await self.tools.faxes.refresh(run)
+            faxes = await run_blocking(self.tools.faxes.items, ident)
+        if (not model_busy and state['phase']=='approval' and any(item['state']=='awaiting_approval' for item in faxes)
+                and any(item['state'] not in ('awaiting_approval','approved','completed') for item in faxes)):
+            await self.continue_model(run, '提示済みの確認案と利用者の回答は保持してください。残るFAXの処理状況を取得し、未提示の確認案だけ準備してください。利用者の承認を代行しないでください。')
+            return True
         if review and review['state']=='needs_correction' and state['phase'] not in ('correction','shift_adjustment','question'):
             if await run_blocking(self.decision_ready, ident, False, schedule=False):
                 await self.kick_many([ident])

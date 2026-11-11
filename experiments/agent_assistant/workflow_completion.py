@@ -171,22 +171,30 @@ class WorkflowCompletion:
         for item in items:
             if not item['decision'] or not item['decision'].get('approve') or item['state'] not in ('approved', 'completed'):
                 raise Conflict('全対象FAXの原本照合・利用者承認が必要です')
+        async def apply_step(item, name, body):
+            oid = item['snapshot']['order_id']
+            # Recovery uses known successful receipts, never repeats known writes.
+            prior = [entry for entry in (await run_blocking(self.tools.flow.commands, ident))
+                     if entry['request']['name'] == name and entry['result'].get('ok')
+                     and entry['request']['arguments'].get('parameters', {}).get('ids') == {'order_id': oid}
+                     and entry['request']['arguments']['parameters'].get('body', {}) == body]
+            if prior:
+                current = await self.tools.faxes.capture(run, item)
+                if current['signature'] != item['decision']['native_signature'] or current['revision'] != item['decision']['approved_revision']:
+                    raise Conflict('承認後にFAXの正本または版が変わりました。再確認が必要です')
+                return
+            wf = await self.call(run, command, str(oid)+':before:'+name, 'hospital_get_workflow', {'ids': {'order_id': oid}})
+            await self.call(run, command, str(oid)+':'+name, name, {'ids': {'order_id': oid}, 'body': body, 'expected_revision': wf['data']['revision'], 'reason': '利用者が原本照合し承認した数量シートをそのまま処理'})
+        # Persist every approved draft before final quantity/confirmation checks.
+        # One order needing correction must not prevent other drafts being saved.
         for item in items:
-            oid = item['snapshot']['order_id']; sheet = item['review']['sheet']
-            for name, body in [('hospital_check_anomalies', {'sheet': sheet, 'use_llm': False}), ('hospital_review_sheet', {'sheet': sheet}), ('hospital_save_sheet', {'sheet': sheet}), ('hospital_bag_order', {}), ('hospital_confirm_order', {})]:
-                # Recovery after an interrupted export/verification resumes from
-                # known successful owned receipts, never repeats known writes.
-                prior = [entry for entry in (await run_blocking(self.tools.flow.commands, ident))
-                         if entry['request']['name'] == name and entry['result'].get('ok')
-                         and entry['request']['arguments'].get('parameters', {}).get('ids') == {'order_id': oid}
-                         and entry['request']['arguments']['parameters'].get('body', {}) == body]
-                if prior:
-                    current = await self.tools.faxes.capture(run, item)
-                    if current['signature'] != item['decision']['native_signature'] or current['revision'] != item['decision']['approved_revision']:
-                        raise Conflict('承認後にFAXの正本または版が変わりました。再確認が必要です')
-                    continue
-                wf = await self.call(run, command, str(oid)+':before:'+name, 'hospital_get_workflow', {'ids': {'order_id': oid}})
-                await self.call(run, command, str(oid)+':'+name, name, {'ids': {'order_id': oid}, 'body': body, 'expected_revision': wf['data']['revision'], 'reason': '利用者が原本照合し承認した数量シートをそのまま処理'})
+            sheet = item['review']['sheet']
+            for name, body in [('hospital_check_anomalies', {'sheet': sheet, 'use_llm': False}), ('hospital_review_sheet', {'sheet': sheet}), ('hospital_save_sheet', {'sheet': sheet})]:
+                await apply_step(item, name, body)
+        for item in items:
+            oid = item['snapshot']['order_id']
+            for name in ('hospital_bag_order', 'hospital_confirm_order'):
+                await apply_step(item, name, {})
             for name in ('hospital_export_labels', 'hospital_export_delivery_notes', 'hospital_export_aggregate'):
                 output = await self.call(run, command, str(oid)+':'+name, name, {'query': {'order_id': oid}})
                 artifacts.append(output['artifact']['id'])

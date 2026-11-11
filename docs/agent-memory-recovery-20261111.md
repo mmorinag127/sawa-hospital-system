@@ -32,21 +32,46 @@
   retaining original job/generation/input identities and completed receipts.
 - [ ] Add all regression cases, then run a single serial local batch.
 - [ ] Integrate develop, deploy staging once and verify six original copies.
-- [ ] Preserve the original execution binding and require owner acknowledgement
+- [x] Preserve the original execution binding and require owner acknowledgement
   for a native-only source upgrade. Prompt, tools, model, budget and task changes
   remain refused; unresolved mutations cannot be upgraded.
-- [ ] Keep literal quantity OCR text editable during native initial intake;
+- [x] Keep literal quantity OCR text editable during native initial intake;
   defer numeric order-line materialization until quantities are corrected.
   Original/document/template/date/menu identity checks remain mandatory.
+- [x] Check recovery bindings synchronously before activating a model task.
+- [x] Allow a new copy only after the old native copy is proven stopped at the
+  current generation. Retain uncertain provider spend and block stale proofs.
+- [x] Preserve low-confidence authored note text at verified cell positions;
+  keep confidence metadata without treating content confidence as missing geometry.
+- [x] Save every individually approved draft before final bagging/confirmation.
+  Keep human approvals, native version checks and final quantity checks intact.
+- [x] Do not pause model preparation when only the first FAX has a review.
+  Refresh background FAX progress after a quiescent/restarted approval phase;
+  retain existing reviews and continue only the remaining preparation.
 
 ## Status
 
 First batch at `2bf62068`: backend 215, agent 321, frontend 189 passed, types and
 build passed. Staging run 42954087675 succeeded (web 00502-gvb / worker 00949-4b5).
 The same interrupted wait resumed and the native recovery endpoint returned 200.
-Live continuation exposed the native-source binding guard and initial numeric
-materialization guard. Their fixes above are in progress; no further batch or
-deployment starts until both are implemented. Production remains out of scope.
+Later aggregate at `58985343`: backend 262, agent 340, frontend 239 passed,
+types/build passed; staging run 42962661205 succeeded. The original run's native
+upgrade retained two binding epochs and resumed provider execution. Its unknown
+provider dispatch remains reserved; native generation 10 has a positive stop
+receipt. No unknown dispatch was replayed or marked successful.
+
+Fresh real-source run `3ccdd027cc7440698fb25357d9523b7a` accepted the exact six
+originals with OCR enabled. Five native deliveries have returned; the maximum
+recorded native-process RSS is 3870.84 MiB, not total container memory. The first
+OCR is ready. Ikoi, Shimanto and Kasuga have zero skipped cells and 56 deferred
+note cells each; Shonan has zero skipped cells and 54 deferred note cells. All
+four failures are note-confidence projection rejection, not geometry or quantity
+confidence. Fureai's terminal result is still unverified. A first-review pause
+also prevented background-result collection/restart; this is fixed locally with
+generation/source preflight before native restart. All known implementation
+changes are finished; the aggregate local proof is next. Live six-source
+completion remains required after staging deployment.
+Six saved/reloaded sheets have NOT yet been verified. Production remains out of scope.
 
 The restart transport ID is now independent of the rotating HTTP access token.
 Existing checkpoints adopt their one matching saved delivery ID; ambiguous or

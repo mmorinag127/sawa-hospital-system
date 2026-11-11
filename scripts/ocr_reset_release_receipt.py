@@ -56,9 +56,14 @@ ALLOWED = {
     'experiments/agent_assistant/execution_binding.py',
     'experiments/agent_assistant/managed.py',
     'experiments/agent_assistant/tests/test_generation_fence.py',
+    'experiments/agent_assistant/workflow_completion.py',
+    'experiments/agent_assistant/business_workflow.py',
+    'experiments/agent_assistant/tests/test_business_workflow.py',
+    'experiments/agent_assistant/tests/test_workflow_completion.py',
     'experiments/agent_assistant/tests/test_execution_binding.py',
     'experiments/agent_assistant/tests/test_durable_postgres.py',
     'backend/tests/unit/test_native_ingest_sql_component.py',
+    'backend/tests/unit/test_hakodate_order_sheet_evidence_projection.py',
     'frontend/src/pages/api/assistant-trial/[[...path]].ts',
     'frontend/tests/assistant-workflow-ui.test.cjs',
 }
@@ -66,13 +71,13 @@ BACKEND = ['backend/tests/unit/' + name for name in (
     'test_workflow_ocr_reset.py', 'test_order_workflow_v2_service.py',
     'test_initial_saved_import_service.py', 'test_online_production_release.py',
     'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py','test_stg_ocr_restore_command.py',
-    'test_native_ingest_sql_component.py')]
+    'test_native_ingest_sql_component.py','test_hakodate_order_sheet_evidence_projection.py')]
 AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_cloud_store_target.py', 'test_connection_pool.py', 'test_durable_postgres.py',
     'test_postgres_ledger_contract.py', 'test_ledger_codec.py', 'test_generation_fence.py',
     'test_fax_workflow.py', 'test_hospital_output_completion.py',
     'test_hospital_source.py','test_selected_tasks.py','test_trial.py','test_execution_binding.py',
-    'test_recovery.py','test_staging_runtime.py','test_native_lifecycle.py')]
+    'test_recovery.py','test_staging_runtime.py','test_native_lifecycle.py','test_workflow_completion.py','test_business_workflow.py')]
 COMMANDS = [
     ('backend', ['python', '-m', 'pytest', '-q', *BACKEND, '--junitxml=backend.xml'], '.'),
     ('agent', ['python', '-m', 'pytest', '-q', *AGENT, '--junitxml=agent.xml'], '.'),
