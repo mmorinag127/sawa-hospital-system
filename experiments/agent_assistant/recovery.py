@@ -34,6 +34,13 @@ class Recovery:
                 raise Conflict('接続先の実行IDが未確定です。再送せず予約額を保持します')
             if manager.tools.authorization_validator:
                 await manager.tools.authorization_validator(run)
+            # Reject changed bindings synchronously, before marking the run as
+            # running. Otherwise the business driver repeatedly starts a task
+            # that fails asynchronously before its first provider request.
+            if await run_blocking(self.store.latest_event, ident, 'execution_binding'):
+                from .execution_binding import record
+                from .managed import SYSTEM
+                await run_blocking(record, self.store, manager.tools, run, SYSTEM)
             # A provider call can outlive a process. Never infer that an unfinished
             # mutation failed merely because this process no longer owns its task.
             def pending_commands():

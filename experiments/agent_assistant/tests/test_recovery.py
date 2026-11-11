@@ -54,6 +54,26 @@ def test_restart_restores_same_question_without_model_post_or_native_write(tmp_p
     asyncio.run(scenario())
 
 
+def test_changed_binding_is_refused_before_provider_read_or_running_transition(tmp_path, monkeypatch):
+    from experiments.agent_assistant.execution_binding import record
+    from experiments.agent_assistant.managed import SYSTEM
+    recovery, agent, store, sandbox, tools, run, requests = setup(tmp_path, monkeypatch, interaction('turn', []))
+    original = record(store, tools, store.get(run['id']), SYSTEM, starting=True)
+    monkeypatch.setenv('GEMINI_AGENT_MODEL', 'changed-model')
+    before = store.get(run['id'])
+    async def scenario():
+        with pytest.raises(Conflict, match='開始時と業務契約'):
+            await recovery.resume(run['id'])
+        after = store.get(run['id'])
+        assert after['status'] == 'reconciliation_required'
+        assert (after['generation'], after['spent'], after['reserved']) == (before['generation'], before['spent'], before['reserved'])
+        assert requests == []
+        assert run['id'] not in agent.tasks
+        assert store.latest_event(run['id'], 'execution_binding')['payload'] == original
+        await agent.client.aclose()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('wait', ['wait_for_task_decision', 'wait_for_native_job', 'wait_for_fax_work'])
 def test_all_readonly_waits_rebind_without_unknown_mutation_error(tmp_path, monkeypatch, wait):
     args = {'operation': 'shift_get_run', 'parameters': {'ids': {'run_id': 'native'}}} if wait == 'wait_for_native_job' else {}
