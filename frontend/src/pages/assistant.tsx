@@ -27,6 +27,8 @@ type ChatMessage = {question_map?:QuestionMap;id:string;role:"assistant"|"user";
 type Run = { business?:BusinessProgress; business_messages?:ChatMessage[]; request_key?:string; provider?:string; usage?:{estimated?:boolean}; lunch_review?:Record<string,string>[]; shift_review?:ShiftReviewData; conversation?:ChatMessage[]; pending_question?:ChatMessage; task_review?:TaskReview; task_inputs?:{inputs?:Record<string,any>;targets?:{label:string;data:Record<string,any>}[]}; task_id?: string; fax_items?: Fax[]; id: string; instruction: string; domains: string[]; status: string; cap: number; spent: number;
   events?: { id: number; kind: string; payload: Record<string, any> }[];
   source_attached?:boolean;
+  generation?:number;
+  native_upgrade?:{previous_sha256:string;current_sha256:string;previous_sources:Record<string,{source_revision:string}>;current_sources:Record<string,{source_revision:string}>}|null;
   event_page?:AssistantEventPage;
   fax_page?:{next_after:number|null;state:string;summary:{total:number;states:Record<string,number>}};
   artifact_page?:{next_after:number|null};
@@ -296,7 +298,9 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     setControlNotice(action==="stop" ? "接続先へ停止状況を確認しています…" : action==="rollback" ? "開始前の状態へ戻しています…" : "処理結果を確認しています…");
     try {await act(async () => {
       try {
-        const response=await assistantApi.post<Run | {run:Run}>(`/assistant-trial/runs/${id}/${action}`);
+        const upgrade=action==="upgrade-native" && selected.native_upgrade ? {generation:selected.generation,
+          previous_sha256:selected.native_upgrade.previous_sha256,current_sha256:selected.native_upgrade.current_sha256}:undefined;
+        const response=await assistantApi.post<Run | {run:Run}>(`/assistant-trial/runs/${id}/${action}`,upgrade);
         if(selectedId.current!==id)return;
         const run="run" in response.data ? response.data.run : response.data;
         receiveRun(run);
@@ -501,6 +505,10 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {!adminView && <div className="assistant-footer"><span className="muted">回答した内容は保存されています。作業一覧へ戻っても、この作業は引き続き確認できます。</span><button className="primary" onClick={newTask}>{terminal || selected.status==="rollback_stop_pending" ? "別の作業を始める" : "作業一覧に戻る"}</button></div>}
       <details className="conversation-history"><summary>これまでのやり取り{messages?.length ? `（${messages.length}件）` : ""}</summary><div role="log">{messages?.map(message=><div className={message.role==="user" ? "chat-bubble user-message" : "chat-bubble"} key={message.id}><strong>{message.role==="user" ? "あなた" : "エージェント"}</strong><p>{message.text}</p></div>)}</div></details>
       {adminView && selected.status==="reconciliation_required" && <button className="primary" disabled={controlling || busy} onClick={()=>control("resume")}>保存済みの結果を確認して再開</button>}
+      {adminView && selected.native_upgrade && <section className="assistant-notice"><h3>業務APIの修正版があります</h3>
+        {Object.entries(selected.native_upgrade.current_sources).map(([domain,source])=><p key={domain}>{labels[domain] || domain}：{selected.native_upgrade?.previous_sources[domain].source_revision.slice(0,8)} → {source.source_revision.slice(0,8)}</p>)}
+        <p>開始時の版・処理履歴は保持します。原本と保存済みデータを引き継ぎ、結果未確定の更新は再送しません。</p>
+        <button disabled={busy || controlling} onClick={()=>control("upgrade-native")}>修正版へ引き継いで再開</button></section>}
       {adminView && selected.business?.state==="checking" && <section className="assistant-notice"><h3>管理者による確認が必要な業務</h3>{selected.events?.filter(event=>event.kind==="business_support").slice(-1).map(event=><p key={event.id}>{event.payload.message}</p>)}<button disabled={busy || controlling} onClick={()=>control("reconcile-business")}>業務結果を再照合する</button><p>結果未確定の更新は再送せず、保存済みの証跡を確認します。</p></section>}
       {adminView && controlNotice && <p className="assistant-notice" role="status" aria-live="polite">{controlNotice}</p>}
       {adminView && <div className="work-controls"><button disabled={controlling || terminal || selected.status==="stopping"} onClick={()=>control("stop")}>{controlling ? "操作結果を確認中…" : ["stop_pending","rollback_stop_pending"].includes(selected.status) ? "停止を再確認する" : "作業を停止する"}</button><button className="quiet" disabled={controlling || ["rolled_back","rollback_stop_pending"].includes(selected.status)} onClick={()=>setConfirmRollback(true)}>開始前に戻す</button>{adminView && <button onClick={()=>control("refresh-usage")} disabled={busy}>料金を再取得</button>}</div>}

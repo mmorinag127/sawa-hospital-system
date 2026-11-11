@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 
 from .business_contracts import CONTRACTS, model_definitions
-from .store import Conflict
+from .store import Conflict, now
+from .catalog import OPERATIONS, READ_ONLY_WAITS
 from .tasks import TASKS
 
 
@@ -60,3 +61,45 @@ def record(store, tools, run, system, *, starting=False):
     if saved is None or saved['payload'] != current:
         raise Conflict('開始時の業務契約を保存できませんでした')
     return current
+
+
+def native_upgrade(store, tools, run, system):
+    if run['status'] != 'reconciliation_required':
+        return None
+    previous = store.latest_event(run['id'], 'execution_binding')
+    if not previous:
+        return None
+    before, after = previous['payload'], binding(tools, run, system)
+    if before == after or {k: v for k, v in before.items() if k != 'native_sources'} != {k: v for k, v in after.items() if k != 'native_sources'}:
+        return None
+    if set(before['native_sources']) != set(after['native_sources']) or any(
+            not before['native_sources'][name] or not after['native_sources'][name] for name in after['native_sources']):
+        return None
+    return {'previous_sha256': digest(before), 'current_sha256': digest(after),
+            'previous_sources': before['native_sources'], 'current_sources': after['native_sources']}
+
+
+def approve_native_upgrade(store, tools, run, system, *, generation, previous_sha256, current_sha256):
+    plan = native_upgrade(store, tools, run, system)
+    if (not plan or run['generation'] != generation or plan['previous_sha256'] != previous_sha256
+            or plan['current_sha256'] != current_sha256):
+        raise Conflict('表示後に依頼または業務API版が変更されています')
+    current = binding(tools, run, system)
+    if digest(current) != current_sha256:
+        raise Conflict('引継ぎ対象の業務API版が変更されています')
+    with store.tx() as db:
+        saved = db.execute('SELECT generation,status FROM runs WHERE id=?', (run['id'],)).fetchone()
+        prior = db.execute("SELECT payload FROM events WHERE run_id=? AND kind='execution_binding' ORDER BY id DESC LIMIT 1", (run['id'],)).fetchone()
+        if (saved['generation'] != generation or saved['status'] != 'reconciliation_required'
+                or not prior or digest(json.loads(prior['payload'])) != previous_sha256):
+            raise Conflict('版の引継ぎ中に依頼が変更されています')
+        for row in db.execute("SELECT request FROM commands WHERE run_id=? AND status!='done'", (run['id'],)):
+            name = json.loads(row['request'])['name']
+            if name not in READ_ONLY_WAITS and not (OPERATIONS.get(name) and OPERATIONS[name].method == 'GET'):
+                raise Conflict('結果未確定の更新があるため業務API版を引き継げません')
+        # Retain the historical binding; the owner starts a new native-code
+        # epoch under the identical prompt, tools and provider.
+        for kind, payload in (('native_runtime_upgrade', {**plan, 'generation': generation}), ('execution_binding', current)):
+            db.execute('INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)',
+                (run['id'], kind, json.dumps(payload, ensure_ascii=False), now()))
+    return plan

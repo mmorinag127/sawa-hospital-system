@@ -20,6 +20,20 @@ for(const [id,domain,label,target_kind,month] of [
 const config={missing:[],domains:Object.fromEntries(['hospital','shift','school-lunch'].map(k=>[k,{baseline_ready:true}])),budget:{spent_cents:0,reserved_cents:0,monthly_cents:1000,available_cents:1000,notice:'synthetic'}};
 const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',instruction:'翌月のシフト案を作る',domains:['shift'],status,spent:0,cap:100,events:[],artifacts:[],conversation:[],task_inputs:{inputs:{month:'2026-11'},targets:[{label:'11月の勤務計画',data:{}}]},pending_question:{id:'q1',role:'assistant',question_id:'question-1',text:'登録内容で作成しますか？',options:['登録内容で進める','確認したい']}});
 
+test('native upgrade sends the displayed binding hashes and generation only after owner action',async()=>{
+ const initial={...makeRun('reconciliation_required'),generation:7,pending_question:null,native_upgrade:{previous_sha256:'a'.repeat(64),current_sha256:'b'.repeat(64),previous_sources:{hospital:{source_revision:'a'.repeat(40)}},current_sources:{hospital:{source_revision:'c'.repeat(40)}}}};
+ const h=await mount({initial,adminView:true,beforePost:async(url,body)=>{
+  if(url.endsWith('/upgrade-native'))return {data:{...initial,status:'running',native_upgrade:null}};
+ }});
+ try{
+  assert.equal(h.calls.filter(c=>c.url.endsWith('/upgrade-native')).length,0);
+  await h.click(h.button('修正版へ引き継いで再開'));
+  const request=h.calls.find(c=>c.url.endsWith('/upgrade-native'));
+  assert.deepEqual(request.body,{generation:7,previous_sha256:'a'.repeat(64),current_sha256:'b'.repeat(64)});
+  assert.ok(!h.document.body.textContent.includes('修正版へ引き継いで再開'));
+ }finally{await h.close();}
+});
+
 test('hospital source selector and per-request cap use normal discovery and create contracts',async()=>{
  const source={...makeRun('completed'),id:'a'.repeat(32),task_id:'hospital_pending_faxes',domains:['hospital']};
  const h=await mount({initial:source,openInitial:false});

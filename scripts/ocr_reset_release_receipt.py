@@ -53,11 +53,18 @@ ALLOWED = {
     'experiments/agent_assistant/tests/test_staging_runtime.py',
     'experiments/agent_assistant/tests/test_native_lifecycle.py',
     'docs/agent-memory-recovery-20261111.md',
+    'experiments/agent_assistant/execution_binding.py',
+    'experiments/agent_assistant/tests/test_execution_binding.py',
+    'experiments/agent_assistant/tests/test_durable_postgres.py',
+    'backend/tests/unit/test_native_ingest_sql_component.py',
+    'frontend/src/pages/api/assistant-trial/[[...path]].ts',
+    'frontend/tests/assistant-workflow-ui.test.cjs',
 }
 BACKEND = ['backend/tests/unit/' + name for name in (
     'test_workflow_ocr_reset.py', 'test_order_workflow_v2_service.py',
     'test_initial_saved_import_service.py', 'test_online_production_release.py',
-    'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py','test_stg_ocr_restore_command.py')]
+    'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py','test_stg_ocr_restore_command.py',
+    'test_native_ingest_sql_component.py')]
 AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_cloud_store_target.py', 'test_connection_pool.py', 'test_durable_postgres.py',
     'test_postgres_ledger_contract.py', 'test_ledger_codec.py', 'test_generation_fence.py',
@@ -68,7 +75,8 @@ COMMANDS = [
     ('backend', ['python', '-m', 'pytest', '-q', *BACKEND, '--junitxml=backend.xml'], '.'),
     ('agent', ['python', '-m', 'pytest', '-q', *AGENT, '--junitxml=agent.xml'], '.'),
     ('frontend', ['node', '--test', '--test-concurrency=1',
-        'tests/workflow-demand-read-contract.test.cjs', 'tests/modernization-workflow-action-dom.test.cjs'], 'frontend'),
+        'tests/workflow-demand-read-contract.test.cjs', 'tests/modernization-workflow-action-dom.test.cjs',
+        'tests/assistant-workflow-ui.test.cjs'], 'frontend'),
     ('types', ['node', 'node_modules/typescript/bin/tsc', '--noEmit', '--incremental', 'false'], 'frontend'),
     ('build', ['node', 'node_modules/next/dist/bin/next', 'build'], 'frontend'),
 ]

@@ -13000,20 +13000,32 @@ def _persist_ocr_rerun_completion(
                     raise ValueError(projection_error or "native_ingest_projection_blocked")
                 original = processing_start_read_input()
                 configured = original["configured_input"]
-                lines = _build_materialization_lines_from_sheet_rows(
-                    fields=sheet.get("fields"), rows_payload=sheet.get("rows"),
-                    cell_confidence_rows=sheet.get("cell_confidence_rows"),
-                    cell_score_rows=sheet.get("cell_score_rows"),
-                    cell_provenance_rows=sheet.get("cell_provenance_rows"),
-                    received_at=_normalize_received_at(original["order"]["received_at"]),
-                    date_policy=configured["policy"],
-                    template=configured["facility"]["fax_template"], existing_week_code=original["order"]["week_code"])
-                session.execute(delete(OrderLine).where(OrderLine.order_id == order_id))
-                for line in lines:
-                    session.add(OrderLine(id=_make_line_id(), order_id=order_id,
-                        **{key: line.get(key) for key in ("date", "daypart", "menu_name", "diet_type", "area_id", "bag_type", "quantity_original", "quantity_corrected", "change_note")}))
-                order.lines_updated_at = datetime.utcnow()
-                advance_nonworkflow_order_input(session, execution, order)
+                quantity_review = _materialization_quantity_cell_issues(fields=sheet.get('fields'),
+                    rows_payload=sheet.get('rows'), template=configured['facility']['fax_template'])
+                if quantity_review:
+                    # Recognition text belongs to the editor. Do not turn an
+                    # unreadable quantity into a failed OCR or a guessed number.
+                    _, identity_issues = _materialization_identity_rows(fields=sheet.get('fields'),
+                        rows_payload=sheet.get('rows'), template=configured['facility']['fax_template'],
+                        existing_week_code=original['order']['week_code'])
+                    if identity_issues:
+                        raise ValueError('sheet_identity_review_required')
+                    metrics_patch = {**(metrics_patch or {}), 'quantity_cell_review': quantity_review}
+                else:
+                    lines = _build_materialization_lines_from_sheet_rows(
+                        fields=sheet.get("fields"), rows_payload=sheet.get("rows"),
+                        cell_confidence_rows=sheet.get("cell_confidence_rows"),
+                        cell_score_rows=sheet.get("cell_score_rows"),
+                        cell_provenance_rows=sheet.get("cell_provenance_rows"),
+                        received_at=_normalize_received_at(original["order"]["received_at"]),
+                        date_policy=configured["policy"],
+                        template=configured["facility"]["fax_template"], existing_week_code=original["order"]["week_code"])
+                    session.execute(delete(OrderLine).where(OrderLine.order_id == order_id))
+                    for line in lines:
+                        session.add(OrderLine(id=_make_line_id(), order_id=order_id,
+                            **{key: line.get(key) for key in ("date", "daypart", "menu_name", "diet_type", "area_id", "bag_type", "quantity_original", "quantity_corrected", "change_note")}))
+                    order.lines_updated_at = datetime.utcnow()
+                    advance_nonworkflow_order_input(session, execution, order)
             if project_sheet:
                 captured = _captured_reparse_read_input(order_id, write_session=session)
                 if captured is None:

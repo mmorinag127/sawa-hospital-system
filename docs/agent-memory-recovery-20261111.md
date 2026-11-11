@@ -32,12 +32,21 @@
   retaining original job/generation/input identities and completed receipts.
 - [ ] Add all regression cases, then run a single serial local batch.
 - [ ] Integrate develop, deploy staging once and verify six original copies.
+- [ ] Preserve the original execution binding and require owner acknowledgement
+  for a native-only source upgrade. Prompt, tools, model, budget and task changes
+  remain refused; unresolved mutations cannot be upgraded.
+- [ ] Keep literal quantity OCR text editable during native initial intake;
+  defer numeric order-line materialization until quantities are corrected.
+  Original/document/template/date/menu identity checks remain mandatory.
 
 ## Status
 
-Implementation and regression additions are finished. Serial batch verification
-is next; no tests or deployments run for this change yet. Production `fc76bc51`
-and its cleared selections remain untouched.
+First batch at `2bf62068`: backend 215, agent 321, frontend 189 passed, types and
+build passed. Staging run 42954087675 succeeded (web 00502-gvb / worker 00949-4b5).
+The same interrupted wait resumed and the native recovery endpoint returned 200.
+Live continuation exposed the native-source binding guard and initial numeric
+materialization guard. Their fixes above are in progress; no further batch or
+deployment starts until both are implemented. Production remains out of scope.
 
 The restart transport ID is now independent of the rotating HTTP access token.
 Existing checkpoints adopt their one matching saved delivery ID; ambiguous or

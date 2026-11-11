@@ -206,7 +206,7 @@ def snapshot(f):
             for table in models.Base.metadata.sorted_tables}
 
 
-def authored_native_payload(f, boundary, quantity, *, note=None):
+def authored_native_payload(f, boundary, quantity, *, note=None, literal_quantity=False):
     """Authored external OCR output; real packet, source, assignment and SQL.
 
     This does not exercise recognition or assert accuracy on an operator FAX.
@@ -232,7 +232,7 @@ def authored_native_payload(f, boundary, quantity, *, note=None):
             "resolved_value": value, "recognizer_score": 0.99})
     workspace = f["source"].parent / ("external-" + boundary["execution_id"])
     outputs = authored_outputs(workspace)
-    review_required = quantity != "" and not quantity.isdecimal()
+    review_required = not literal_quantity and quantity != "" and not quantity.isdecimal()
     if review_required:
         from PIL import Image
         from src.services.hakodate_recognizer_input_evidence import contact_crop_evidence
@@ -274,11 +274,11 @@ def authored_native_payload(f, boundary, quantity, *, note=None):
     return payload
 
 
-def finish_authored_native(f, quantity, *, failure=None, note=None):
+def finish_authored_native(f, quantity, *, failure=None, note=None, literal_quantity=False):
     with delivery.claim_context(f["claim"]), ingest.ingest_execution_context(f["claim"]["lease"]):
         boundary = initialize_and_capture(f)
         with guard.nonworkflow_execution_context(boundary):
-            payload = authored_native_payload(f, boundary, quantity, note=note) if failure is None else None
+            payload = authored_native_payload(f, boundary, quantity, note=note, literal_quantity=literal_quantity) if failure is None else None
             result, error = order_service._persist_ocr_rerun_completion(f["order_id"], f["job_id"], payload,
                 error=failure, producer_version="hakodate_best_method_pipeline")
             assert error == failure
@@ -493,6 +493,21 @@ def test_actual_native_initial_pending_lines_preserve_digits_zero_and_blank(nati
         evidence = session.query(OrderOcrEvidenceRun).filter_by(order_id=order.id).one()
         assert [record["raw_text"] for record in evidence.payload_json["hakodate_ocr_evidence_records"]] == [quantity]
         assert evidence.payload_json["_ocr_execution"]["selected_pdf_receipt"] == boundary["selected_pdf_receipt"]
+
+
+@pytest.mark.parametrize('quantity', ['-', '--', '台'])
+def test_native_literal_quantity_is_editable_evidence_not_failed_intake(native_sql, quantity):
+    f = native_sql
+    boundary = finish_authored_native(f, quantity, literal_quantity=True)
+    with f['factory']() as session:
+        job = session.get(OcrJob, f['job_id'])
+        evidence = session.query(OrderOcrEvidenceRun).filter_by(order_id=f['order_id']).one()
+        assert job.status == 'done'
+        assert evidence.status == 'ready'
+        assert job.metrics['quantity_cell_review'][0]['raw'] == quantity
+        assert [record['raw_text'] for record in evidence.payload_json['hakodate_ocr_evidence_records']] == [quantity]
+        assert evidence.payload_json['_ocr_execution']['selected_pdf_receipt'] == boundary['selected_pdf_receipt']
+        assert session.query(OrderLine).filter_by(order_id=f['order_id']).count() == 0
 
 
 def test_actual_native_supersede_three_to_seven_seals_old_source_history(native_sql):

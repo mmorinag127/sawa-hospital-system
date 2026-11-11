@@ -38,6 +38,31 @@ def seed_legacy(database, payload):
         cursor.execute('INSERT INTO sawa_agent_trial.ledger VALUES(1,0,%s)', (payload,))
 
 
+def test_native_upgrade_uses_durable_snapshot_and_preserves_original_binding(tmp_path, database, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from experiments.agent_assistant import execution_binding
+    store = PostgresStore(tmp_path/'state', database)
+    store.set_budget(1000)
+    run, _ = store.create('operator', 'native-upgrade', 'synthetic', ['hospital'], 100, provider='gemini')
+    manifest = tmp_path/'source.json'
+    manifest.write_text(json.dumps({'source_revision': 'a'*40, 'files': {'api.py': 'b'*64}}))
+    tools = SimpleNamespace(sandbox=SimpleNamespace(configs={'hospital': {'source_manifest': str(manifest)}}))
+    monkeypatch.setattr(execution_binding, 'model_definitions', lambda *_: [])
+    monkeypatch.setenv('GEMINI_AGENT_MODEL', 'synthetic-pinned-model')
+    original = execution_binding.record(store, tools, run, 'system', starting=True)
+    store.update(run['id'], status='reconciliation_required')
+    manifest.write_text(json.dumps({'source_revision': 'c'*40, 'files': {'api.py': 'd'*64}}))
+    with store.snapshot(view='run', owner='operator', identities=[run['id']]):
+        current = store.get(run['id'], 'operator')
+        plan = execution_binding.native_upgrade(store, tools, current, 'system')
+    assert plan
+    execution_binding.approve_native_upgrade(store, tools, current, 'system', generation=current['generation'],
+        previous_sha256=plan['previous_sha256'], current_sha256=plan['current_sha256'])
+    assert store.events(run['id'], kinds=('execution_binding',))[0]['payload'] == original
+    assert execution_binding.record(store, tools, store.get(run['id']), 'system')['native_sources']['hospital']['source_revision'] == 'c'*40
+
+
 @pytest.mark.parametrize('second_operation',['event','files'])
 def test_writers_take_fresh_serial_snapshots_without_blocking_readers(tmp_path,database,second_operation):
     from concurrent.futures import ThreadPoolExecutor

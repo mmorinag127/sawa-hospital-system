@@ -93,6 +93,13 @@ class Reply(BaseModel):
     option: str | None = None
 
 
+class NativeUpgrade(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    generation: StrictInt = Field(ge=0)
+    previous_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    current_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+
 def create_app(config, root, *, managed_client=None, gemini_client=None):
     if config.get("durability") == "cloud-sql":
         from .durable import cloud_store
@@ -399,6 +406,9 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         def read_response():
             with store.snapshot(view='run', owner=owner, identities=[ident]):
                 current = store.get(ident, owner)
+                from .execution_binding import native_upgrade
+                from .managed import SYSTEM
+                upgrade = native_upgrade(store, tools, current, SYSTEM)
                 with store.read() as db:
                     artifact_rows = db.execute('SELECT rowid,id,name,sha256,size FROM artifacts '
                         'WHERE run_id=? AND rowid>? ORDER BY rowid LIMIT 51', (ident, artifacts_after)).fetchall()
@@ -420,7 +430,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 # Old clients also use this immutable binding to distinguish a
                 # source-upload question from an ordinary operator question.
                 context = [source_event] if source_event and all(event['id'] != source_event['id'] for event in events) else []
-                return {**current, 'business': business.projection(current, review, awaiting_fax=fax_page['summary']['states'].get('awaiting_approval', 0) > 0), 'business_messages': business_conversation(events, fax_labels) if owned(current) else [], "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": store.pending_question(ident) if current["status"] == "waiting_input" else None, "events": context + events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(current), "task_review": review, "fax_items": faxes,
+                return {**current, 'native_upgrade': upgrade, 'business': business.projection(current, review, awaiting_fax=fax_page['summary']['states'].get('awaiting_approval', 0) > 0), 'business_messages': business_conversation(events, fax_labels) if owned(current) else [], "lunch_review": lunch_review, "shift_review": shift_review, "conversation": conversation(events), "pending_question": store.pending_question(ident) if current["status"] == "waiting_input" else None, "events": context + events, "artifacts": artifacts, "local_jobs": sandbox.local_jobs(current), "task_review": review, "fax_items": faxes,
                         'fax_page': {key: value for key, value in fax_page.items() if key != 'items'},
                         'artifact_page': {'next_after': artifact_rows[49]['rowid'] if len(artifact_rows) > 50 else None},
                         'source_attached': source_event is not None, 'source_event': source_event,
@@ -538,6 +548,21 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await authorize(request.headers.get('authorization', ''), run['domains'])
         async with control_lock(ident):
             tools.authorizations[ident] = request.headers.get('authorization', '')
+            return await managed.resume(ident)
+
+    @app.post('/runs/{ident}/upgrade-native')
+    @_complete_request
+    async def upgrade_native(ident: str, payload: NativeUpgrade, request: Request):
+        run = await run_blocking(store.get, ident, owner)
+        await authorize(request.headers.get('authorization', ''), run['domains'])
+        async with control_lock(ident):
+            if managed.tasks.get(ident) and not managed.tasks[ident].done():
+                raise Conflict('処理中の依頼の業務API版は変更できません')
+            from .execution_binding import approve_native_upgrade
+            from .managed import SYSTEM
+            await run_blocking(approve_native_upgrade, store, tools, run, SYSTEM, **payload.model_dump())
+            tools.authorizations[ident] = request.headers.get('authorization', '')
+            await run_blocking(business.checkpoint, ident, attempts=0, next_attempt=0)
             return await managed.resume(ident)
 
     @app.post('/runs/{ident}/reconcile-business')
