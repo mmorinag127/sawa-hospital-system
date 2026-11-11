@@ -86,8 +86,8 @@ class Managed:
             except Exception:
                 await run_blocking(self.store.event, run['id'], 'late_session_stop_pending', {'session_id': session.id})
             raise
-        from .business_contracts import preparation_instruction
-        await self.follow(run["id"], {"type": "user.message", "content": [{"type": "text", "text": preparation_instruction(self.tools, run)}]})
+        from .business_contracts import preparation_content
+        await self.follow(run["id"], {"type": "user.message", "content": await preparation_content(self.tools, run)})
 
     async def follow(self, run_id, event):
         old = self.tasks.get(run_id)

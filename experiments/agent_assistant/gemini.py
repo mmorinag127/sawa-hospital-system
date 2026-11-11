@@ -96,9 +96,8 @@ class Gemini(Managed):
         from .execution_binding import record
         await run_blocking(record, self.store, self.tools, run, SYSTEM, starting=True)
         await run_blocking(self.store.update, run['id'], expected_generation=run['generation'], status='running')
-        from .business_contracts import preparation_instruction
-        text = preparation_instruction(self.tools, run)
-        await self.follow(run['id'], {'type': 'user.message', 'content': [{'type': 'text', 'text': text}]})
+        from .business_contracts import preparation_content
+        await self.follow(run['id'], {'type': 'user.message', 'content': await preparation_content(self.tools, run)})
 
     async def follow(self, ident, event):
         old = self.tasks.get(ident)

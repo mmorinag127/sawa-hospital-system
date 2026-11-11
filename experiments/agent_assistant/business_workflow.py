@@ -44,6 +44,8 @@ class BusinessWorkflow:
         if run.get('task_id') not in CONTRACTS:
             raise ValueError('登録された業務を選択してください')
         self.checkpoint(run['id'], version=1, phase='source' if run['task_id'] == 'lunch_import' else 'preparing', epoch=0, attempts=0)
+        if run['task_id'] == 'hospital_pending_faxes':
+            self.checkpoint(run['id'], fax_harness=2)
 
     def adopt(self, run):
         if owned(run) or run.get('task_id') not in CONTRACTS or run['status'] not in ('running', 'waiting_input', 'reconciliation_required'):
@@ -416,6 +418,9 @@ class BusinessWorkflow:
             await self.tools.sandbox.start(run)
             await run_blocking(self.activate, run)
             run = await run_blocking(self.store.get, ident)
+            from .fax_preparation import enabled, prepare
+            if enabled(run) and not await prepare(self, run):
+                return True
             if await self.choose_layout(run):
                 return False
             if self.tools.faxes.active(run):

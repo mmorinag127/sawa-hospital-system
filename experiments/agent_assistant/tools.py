@@ -255,6 +255,10 @@ class Tools:
                     if set(raw) - {"fax_id", "summary", "sheet", "cell_edits"} or not {"fax_id", "summary"}.issubset(raw) or not self.faxes.active(run):
                         raise ValueError("対象FAXと確認結果が必要です")
                     result = await self.faxes.submit(run, raw["fax_id"], raw["summary"], raw.get("sheet"), raw.get("cell_edits"))
+                    from .fax_preparation import enabled
+                    if enabled(run):
+                        result = {'ok': True, 'queued_for_human': True, 'fax_id': raw['fax_id'],
+                                  'review_id': result['review']['id']}
                 elif name == "finish_work":
                     await self.flow.finish(run, raw.get("artifact_ids", []))
                     if self.faxes.active(run):

@@ -44,6 +44,9 @@ def owned(run):
 
 def model_definitions(tools, run):
     definitions = tools.definitions(run['domains'])
+    from .fax_preparation import enabled
+    if enabled(run):
+        return [definition for definition in definitions if definition['name'] in ('request_fax_approval', 'ask_operator')]
     if not owned(run):
         return definitions
     server = server_tools(run['task_id'])
@@ -53,6 +56,10 @@ def model_definitions(tools, run):
 def require_server(run, name):
     if not owned(run) or SERVER_EXECUTION.get():
         return
+    from .fax_preparation import enabled
+    if enabled(run) and name not in ('request_fax_approval', 'ask_operator'):
+        from .store import Conflict
+        raise Conflict('FAXの取得・OCR・採用・待機・保存はサーバーが担当します')
     if name in server_tools(run['task_id']):
         from .store import Conflict
         raise Conflict('承認した内容の保存・確定・帳票出力は業務進行サーバーが実行します')
@@ -69,3 +76,10 @@ def preparation_instruction(tools, run):
         if review and review.get('decision'):
             text += '\n保存済みの利用者の訂正依頼：' + json.dumps(review['decision'], ensure_ascii=False)
     return text
+
+
+async def preparation_content(tools, run):
+    from .fax_preparation import enabled, content
+    if enabled(run):
+        return await content(tools, run)
+    return [{'type': 'text', 'text': preparation_instruction(tools, run)}]
