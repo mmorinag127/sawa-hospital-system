@@ -20,6 +20,7 @@ on:
           - normal
           - recover-web-image
           - rehearse-retained-worker
+          - restore-ocr-selection
       retained_revision:
         description: "Rehearsal only: reviewed retained worker-stg revision"
         required: false
@@ -74,6 +75,50 @@ env:
   SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT: ${{ vars.STG_SCHOOL_LUNCH_AUTOMATION_AUTH_SUBJECT }}
 
 jobs:
+  restore-ocr-selection:
+    needs: source-gate
+    if: inputs.mode == 'restore-ocr-selection'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Update TLS trust stores
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          case "$VERSION_ID" in
+            22.04|24.04|26.04|26.10) minimum="20260816ubuntu0.${VERSION_ID}.1" ;;
+            *) exit 1 ;;
+          esac
+          sudo apt-get update
+          sudo apt-get install --only-upgrade -y ca-certificates
+          dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge "$minimum"
+          printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt' >> "$GITHUB_ENV"
+      - uses: actions/checkout@v6
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}
+          token_format: id_token
+          id_token_audience: ${{ env.GOOGLE_OAUTH_CLIENT_ID }}
+      - name: Restore only the explicitly approved staging audit
+        env:
+          STG_ID_TOKEN: ${{ steps.auth.outputs.id_token }}
+          RESTORE_CONFIRMATION: ${{ inputs.confirmation }}
+        run: python3 scripts/restore_stg_ocr_selection.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stg-selection-restore-${{ github.run_id }}
+          path: ${{ runner.temp }}/stg-selection-restore.json
+          if-no-files-found: warn
+          retention-days: 7
+
   rehearse-retained-worker:
     needs: source-gate
     if: inputs.mode == 'rehearse-retained-worker'
@@ -256,6 +301,10 @@ jobs:
           test "$GITHUB_REF" = refs/heads/develop
           case "$GITHUB_EVENT_NAME:${DEPLOY_MODE:-normal}" in
             workflow_dispatch:normal) test -z "$RECOVERY_CONFIRMATION$EXPECTED_REVISION$EXPECTED_IMAGE$RETAINED_REVISION" ;;
+            workflow_dispatch:restore-ocr-selection)
+              test "$RECOVERY_CONFIRMATION" = RESTORE_STG_ORD37344B72_AUDd87f48731479454692f4d907f2256326
+              test -z "$EXPECTED_REVISION$EXPECTED_IMAGE$RETAINED_REVISION"
+              ;;
             workflow_dispatch:rehearse-retained-worker)
               test "$RECOVERY_CONFIRMATION" = REHEARSE_STG_TRAFFIC_AND_RESTORE
               test -z "$EXPECTED_IMAGE"
@@ -333,7 +382,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && ( "$DEPLOY_MODE" == recover-web-image || "$DEPLOY_MODE" == rehearse-retained-worker ) ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && ( "$DEPLOY_MODE" == recover-web-image || "$DEPLOY_MODE" == rehearse-retained-worker || "$DEPLOY_MODE" == restore-ocr-selection ) ]]; then
             echo "backend_changed=false" >> "$GITHUB_OUTPUT"
             echo "frontend_changed=false" >> "$GITHUB_OUTPUT"
             exit 0

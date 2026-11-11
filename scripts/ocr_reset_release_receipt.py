@@ -43,11 +43,13 @@ ALLOWED = {
     'experiments/agent_assistant/tests/test_hospital_source.py',
     'frontend/src/pages/assistant.tsx','scripts/prepare_hospital_trial_source.py',
     'frontend/tests/helpers/modernization-react-dom.cjs',
+    '.github/workflows/deploy-stg.yml','scripts/restore_stg_ocr_selection.py',
+    'backend/tests/unit/test_stg_ocr_restore_command.py',
 }
 BACKEND = ['backend/tests/unit/' + name for name in (
     'test_workflow_ocr_reset.py', 'test_order_workflow_v2_service.py',
     'test_initial_saved_import_service.py', 'test_online_production_release.py',
-    'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py')]
+    'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py','test_stg_ocr_restore_command.py')]
 AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_cloud_store_target.py', 'test_connection_pool.py', 'test_durable_postgres.py',
     'test_postgres_ledger_contract.py', 'test_ledger_codec.py', 'test_generation_fence.py',
