@@ -52,6 +52,31 @@ def test_stop_reclaims_only_models_and_retains_business_and_before_data(tmp_path
     asyncio.run(scenario())
 
 
+def test_model_weights_are_shared_readonly_links_but_locks_are_private(tmp_path):
+    from experiments.agent_assistant.tests.test_trial import prepared
+    _, sandbox, _, run = prepared(tmp_path)
+    data = sandbox.path(run['id']) / 'data/hospital'
+    (data / 'facility-master.json').write_text('{}')
+    models = tmp_path / 'packaged-models'
+    (models / 'blobs').mkdir(parents=True)
+    (models / 'snapshots').mkdir()
+    (models / 'blobs/weight').write_bytes(b'immutable-model')
+    (models / 'snapshots/weight').symlink_to('../blobs/weight')
+    (models / 'download.lock').touch()
+    cfg = {'facility_master_file': 'facility-master.json', 'model_cache': str(models)}
+    env = sandbox.environment(run, 'hospital', cfg, data, ROOT, 'synthetic-token')
+    cache = Path(env['HF_HOME'])
+    assert (cache / 'blobs/weight').is_symlink()
+    assert (cache / 'snapshots/weight').read_bytes() == b'immutable-model'
+    assert not (cache / 'download.lock').is_symlink()
+    assert sum(path.stat().st_size for path in cache.rglob('*') if path.is_file() and not path.is_symlink()) == 0
+    from experiments.agent_assistant.working_copy import files
+    assert all('/home/' not in name for name, _ in files(data.parent))
+    import shutil
+    shutil.rmtree(cache)
+    assert (models / 'blobs/weight').read_bytes() == b'immutable-model'
+
+
 def test_native_absolute_output_defaults_are_confined_per_request(tmp_path):
     from experiments.agent_assistant.tests.test_trial import prepared
     _, sandbox, _, run = prepared(tmp_path)

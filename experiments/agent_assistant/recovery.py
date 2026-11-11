@@ -7,7 +7,7 @@ from .store import Conflict, billing_month
 from .sandbox import run_blocking
 from .gemini import command_identity
 from .conversation import record_question_receipt
-from .catalog import OPERATIONS
+from .catalog import OPERATIONS, READ_ONLY_WAITS
 
 
 class RecoveryPending(Conflict):
@@ -40,8 +40,7 @@ class Recovery:
                 with self.store.read() as db:
                     return list(db.execute("SELECT id,request FROM commands WHERE run_id=? AND status!='done'", (ident,)))
             pending = await run_blocking(pending_commands)
-            safe_waits = [row for row in pending if json.loads(row['request']).get('name') in
-                          ('wait_for_task_decision', 'wait_for_native_job')]
+            safe_waits = [row for row in pending if json.loads(row['request']).get('name') in READ_ONLY_WAITS]
             safe_reads = [row for row in pending if
                           (operation := OPERATIONS.get(json.loads(row['request']).get('name'))) and operation.method == 'GET']
             if len(pending) != len(safe_waits) + len(safe_reads):

@@ -402,13 +402,14 @@ class Store:
             return dict(zip(keys, totals))
 
     def command(self, ident, command_id, request):
+        from .catalog import READ_ONLY_WAITS
         encoded = json.dumps(request, sort_keys=True, ensure_ascii=False)
         with self.tx() as db:
             row = db.execute("SELECT * FROM commands WHERE run_id=? AND id=?", (ident, command_id)).fetchone()
             if row:
                 if row["request"] != encoded:
                     raise Conflict("命令IDが別の内容で再利用されました")
-                if row['status'] == 'recoverable_wait' and request.get('name') in ('wait_for_task_decision', 'wait_for_native_job'):
+                if row['status'] == 'recoverable_wait' and request.get('name') in READ_ONLY_WAITS:
                     db.execute("UPDATE commands SET status='executing' WHERE run_id=? AND id=?", (ident, command_id))
                     return None
                 if row['status'] == 'recoverable_read':

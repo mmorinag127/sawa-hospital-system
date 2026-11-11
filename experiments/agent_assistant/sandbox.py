@@ -230,7 +230,15 @@ class Sandbox:
             if any(p.is_symlink() and not p.resolve().is_relative_to(source_cache) for p in source_cache.rglob("*")):
                 raise Conflict("OCRモデルのキャッシュが保存範囲外を参照しています")
             if not target_cache.exists():
-                shutil.copytree(source_cache, target_cache)
+                # Fixed image blobs are read-only. Only cache directories and
+                # lock files belong to the request; copying weights consumes RAM
+                # on Cloud Run's writable filesystem for no business benefit.
+                def link_weight(source, destination):
+                    if Path(source).name.endswith('.lock'):
+                        Path(destination).touch()
+                    else:
+                        Path(destination).symlink_to(Path(source).resolve())
+                shutil.copytree(source_cache, target_cache, copy_function=link_weight)
             env["HF_HOME"] = str(target_cache)
         uri = "sqlite:///"+str(data / "database.sqlite3")
         env.update({"DB_URI": uri, "DATABASE_URL": uri, "SAWA_TRIAL_TOKEN": token,
@@ -331,6 +339,11 @@ class Sandbox:
                 # Worker validation reads the same captured local URL and timeout.
                 # These are set in its child process before importing the native app.
             await self.launch(run, domain, cfg["python"], data, env)
+            if domain == 'hospital' and cfg.get('initialize_pending_sources') and run.get('purpose') != 'target_lookup':
+                async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+                    response = await client.post(self.urls[key] + '/__trial_resume_deliveries',
+                        headers={'X-Trial-Token': self.tokens[key]})
+                    response.raise_for_status()
 
     async def launch(self, run, domain, python, data, env):
         key = (run["id"], domain)

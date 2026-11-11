@@ -4,7 +4,7 @@ import json
 
 import httpx
 
-from .catalog import OPERATIONS
+from .catalog import OPERATIONS, READ_ONLY_WAITS
 from .store import Conflict
 from .sandbox import run_blocking
 
@@ -35,7 +35,7 @@ async def reconcile(engine, run):
                 store.event(run['id'], 'business_read_recovery', {'command_id': row['id']})
             await run_blocking(recover_read)
             continue
-        if request['name'] in ('wait_for_native_job', 'wait_for_task_decision', 'wait_for_fax_work'):
+        if request['name'] in READ_ONLY_WAITS:
             continue
         def matching_receipts():
             return [receipt for receipt in receipts if receipt['command_id'] == row['id'] and receipt_generation(store, run, receipt)

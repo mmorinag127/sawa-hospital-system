@@ -45,6 +45,14 @@ ALLOWED = {
     'frontend/tests/helpers/modernization-react-dom.cjs',
     '.github/workflows/deploy-stg.yml','scripts/restore_stg_ocr_selection.py',
     'backend/tests/unit/test_stg_ocr_restore_command.py',
+    'experiments/agent_assistant/catalog.py',
+    'experiments/agent_assistant/domain_host.py',
+    'experiments/agent_assistant/native_recovery.py',
+    'experiments/agent_assistant/recovery.py',
+    'experiments/agent_assistant/tests/test_recovery.py',
+    'experiments/agent_assistant/tests/test_staging_runtime.py',
+    'experiments/agent_assistant/tests/test_native_lifecycle.py',
+    'docs/agent-memory-recovery-20261111.md',
 }
 BACKEND = ['backend/tests/unit/' + name for name in (
     'test_workflow_ocr_reset.py', 'test_order_workflow_v2_service.py',
@@ -54,7 +62,8 @@ AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_cloud_store_target.py', 'test_connection_pool.py', 'test_durable_postgres.py',
     'test_postgres_ledger_contract.py', 'test_ledger_codec.py', 'test_generation_fence.py',
     'test_fax_workflow.py', 'test_hospital_output_completion.py',
-    'test_hospital_source.py','test_selected_tasks.py','test_trial.py','test_execution_binding.py')]
+    'test_hospital_source.py','test_selected_tasks.py','test_trial.py','test_execution_binding.py',
+    'test_recovery.py','test_staging_runtime.py','test_native_lifecycle.py')]
 COMMANDS = [
     ('backend', ['python', '-m', 'pytest', '-q', *BACKEND, '--junitxml=backend.xml'], '.'),
     ('agent', ['python', '-m', 'pytest', '-q', *AGENT, '--junitxml=agent.xml'], '.'),

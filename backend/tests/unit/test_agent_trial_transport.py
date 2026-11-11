@@ -45,13 +45,101 @@ def test_local_delivery_executes_once_and_records_callback_result(local_root):
         assert db.execute("SELECT value FROM component").fetchone()[0] == 8
 
 
-def test_foreign_generation_or_restarted_credentials_never_execute(local_root, monkeypatch):
+def test_foreign_generation_is_refused_but_rotating_http_token_keeps_delivery_identity(local_root, monkeypatch):
     saved = local.contract("component-delivery", 1, "workflow")
     with pytest.raises(ValueError):
         local.validate(saved, "component-delivery", 2, "workflow")
     monkeypatch.setenv("SAWA_TRIAL_TOKEN", "another-isolated-token-"*3)
+    assert local.contract('component-delivery', 1, 'workflow') == saved
+    forged = {**saved, 'credential_digest': '0' * 64}
     with pytest.raises(ValueError):
-        local.submit(saved, "component-delivery", 1, "workflow", lambda: pytest.fail("foreign callback"))
+        local.submit(forged, 'component-delivery', 1, 'workflow', lambda: pytest.fail('foreign callback'))
+
+
+def test_six_deliveries_are_fifo_serial_and_keep_context(local_root):
+    from contextvars import ContextVar
+    import threading
+    current = ContextVar('component_delivery_context')
+    release = threading.Event()
+    entered = threading.Event()
+    observed = []
+    active = 0
+    peak = 0
+    def execute(number):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if number == 0:
+            entered.set()
+            assert release.wait(5)
+        observed.append((number, current.get()))
+        active -= 1
+        return {'number': number}
+    for number in range(6):
+        current.set(number)
+        identity = 'serial-' + str(number)
+        local.submit(local.contract(identity, 1, 'ingest'), identity, 1, 'ingest', lambda n=number: execute(n))
+    assert entered.wait(5)
+    assert not observed
+    duplicate = local.contract('serial-5', 1, 'ingest')
+    assert local.submit(duplicate, 'serial-5', 1, 'ingest', lambda: pytest.fail('duplicate'))['action'] == 'already_accepted'
+    release.set()
+    local._QUEUE.join()
+    assert peak == 1
+    assert observed == [(number, number) for number in range(6)]
+
+
+def test_serial_worker_allows_successor_without_deadlocking(local_root):
+    calls = []
+    def parent():
+        calls.append('parent')
+        local.submit(local.contract('child', 1, 'workflow'), 'child', 1, 'workflow', lambda: calls.append('child'))
+    local.submit(local.contract('parent', 1, 'ingest'), 'parent', 1, 'ingest', parent)
+    local._QUEUE.join()
+    assert calls == ['parent', 'child']
+
+
+def test_restart_requeues_exact_worker_contract_not_http_intake(local_root, monkeypatch):
+    original = local._enqueue
+    monkeypatch.setattr(local, '_enqueue', lambda *_: None)
+    saved = local.contract('saved-worker', 1, 'ingest')
+    local.submit(saved, 'saved-worker', 1, 'ingest', lambda: pytest.fail('old worker'))
+    # Legacy checkpoint upgrade must preserve the already captured transport ID.
+    (local_root / 'local-deliveries/.identity').unlink()
+    monkeypatch.setenv('SAWA_TRIAL_TOKEN', 'rotated-current-http-token-' * 3)
+    assert local.configuration()['credential_digest'] == saved['credential_digest']
+    monkeypatch.setattr(local, '_enqueue', original)
+    from src.services import ingest_delivery_service
+    calls = []
+    monkeypatch.setattr(ingest_delivery_service, 'process', lambda identity, generation: calls.append((identity, generation)))
+    assert local.resume_deliveries() == {'accepted': 1}
+    assert local.resume_deliveries()['accepted'] in (0, 1)
+    local._QUEUE.join()
+    assert calls == [('saved-worker', 1)]
+    assert local.resume_deliveries() == {'accepted': 0}
+
+
+def test_worker_recovery_validates_whole_batch_before_dispatch(local_root, monkeypatch):
+    monkeypatch.setattr(local, '_enqueue', lambda *_: None)
+    saved = local.contract('saved-worker', 1, 'ingest')
+    local.submit(saved, 'saved-worker', 1, 'ingest', lambda: None)
+    bad = local.contract('foreign-worker', 2, 'ingest')
+    bad['name'] = '/not-this-copy/tasks/foreign-worker-g2'
+    folder = local_root / 'local-deliveries'
+    (folder / hashlib.sha256(bad['name'].encode()).hexdigest()).write_text(json.dumps({'state': 'accepted', 'contract': bad}))
+    calls = []
+    monkeypatch.setattr(local, '_enqueue', lambda *_: calls.append(True))
+    with pytest.raises(ValueError, match='saved_contract_differs'):
+        local.resume_deliveries()
+    assert calls == []
+
+
+def test_recovery_does_not_retry_unknown_provider_mutation(local_root, monkeypatch):
+    monkeypatch.setattr(local, '_enqueue', lambda *_: None)
+    saved = local.contract('provider-work', 1, 'auto-llm')
+    local.submit(saved, 'provider-work', 1, 'auto-llm', lambda: None)
+    with pytest.raises(ValueError, match='provider_response_unknown'):
+        local.resume_deliveries()
 
 
 def test_local_mode_cannot_target_another_database(local_root, monkeypatch):

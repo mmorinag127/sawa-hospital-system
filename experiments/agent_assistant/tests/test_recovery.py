@@ -54,6 +54,29 @@ def test_restart_restores_same_question_without_model_post_or_native_write(tmp_p
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('wait', ['wait_for_task_decision', 'wait_for_native_job', 'wait_for_fax_work'])
+def test_all_readonly_waits_rebind_without_unknown_mutation_error(tmp_path, monkeypatch, wait):
+    args = {'operation': 'shift_get_run', 'parameters': {'ids': {'run_id': 'native'}}} if wait == 'wait_for_native_job' else {}
+    response = interaction('turn', [('wait', wait, args)])
+    recovery, agent, store, sandbox, tools, run, requests = setup(tmp_path, monkeypatch, response)
+    command = command_identity('turn', 'wait')
+    request = {'name': wait, 'arguments': args}
+    store.command(run['id'], command, request)
+    observed = []
+    async def consume(ident, generation, state, inputs):
+        assert store.command(ident, command, request) is None
+        observed.append((generation, state['calls'][0]['name']))
+    monkeypatch.setattr(agent, 'consume_gemini', consume)
+    async def scenario():
+        await recovery.resume(run['id'])
+        await agent.tasks[run['id']]
+        assert requests == ['GET']
+        assert observed == [(store.get(run['id'])['generation'], wait)]
+        assert store.get(run['id'])['status'] == 'running'
+        await agent.client.aclose()
+    asyncio.run(scenario())
+
+
 def test_saved_business_answer_is_resumed_after_history_proves_no_remote_answer(tmp_path, monkeypatch):
     args = {'question': '登録内容で作成しますか？', 'options': ['登録内容で進める']}
     response = interaction('turn', [('question', 'ask_operator', args)])

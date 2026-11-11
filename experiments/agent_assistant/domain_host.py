@@ -9,6 +9,7 @@ import signal
 
 import uvicorn
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 data = Path(os.environ["SAWA_TRIAL_DATA"]).resolve()
 parent_pid = os.getppid()
@@ -85,6 +86,11 @@ async def trial_identity_boundary(request, call_next):
         return JSONResponse({"detail": "Trial gateway required"}, status_code=401)
     if request.url.path == "/__trial_identity":
         return JSONResponse({"data": str(data)})
+    if request.url.path == '/__trial_resume_deliveries':
+        if request.method != 'POST' or os.environ['SAWA_TRIAL_MODULE'] != 'src.main:app' or 'hospital' not in data.parts:
+            return JSONResponse({'detail': 'Hospital trial worker recovery only'}, status_code=403)
+        from src.services.agent_trial_transport import resume_deliveries
+        return JSONResponse(await run_in_threadpool(resume_deliveries))
     return await call_next(request)
 
 

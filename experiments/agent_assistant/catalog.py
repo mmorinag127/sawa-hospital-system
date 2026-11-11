@@ -17,6 +17,7 @@ class Operation:
 
 
 OPERATIONS = {}
+READ_ONLY_WAITS = frozenset({'wait_for_task_decision', 'wait_for_native_job', 'wait_for_fax_work'})
 
 
 def add(domain, name, method, path, description, **kwargs):
