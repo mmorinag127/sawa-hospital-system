@@ -48,6 +48,10 @@
 - [x] Do not pause model preparation when only the first FAX has a review.
   Refresh background FAX progress after a quiescent/restarted approval phase;
   retain existing reviews and continue only the remaining preparation.
+- [x] Defer native HTTP mutations while the same domain has accepted local
+  worker deliveries. A shared read-only idle wait releases the tool lock,
+  restores only owned worker contracts and remains recoverable after restart.
+  GETs and other domains remain available; unknown write responses stay blocked.
 
 ## Status
 
@@ -72,6 +76,24 @@ generation/source preflight before native restart. All known implementation
 changes are finished; the aggregate local proof is next. Live six-source
 completion remains required after staging deployment.
 Six saved/reloaded sheets have NOT yet been verified. Production remains out of scope.
+
+Aggregate at `516878d8`: backend 301, agent 389 and frontend 239 passed,
+types/build passed. Staging run 42972664053 succeeded, web 00506-qtt and worker
+00952-wj5. Trial `3697cf72ca5041c9bd013cd6e6197208` progressed through three
+successful OCRs; its first proposed value changes were rejected, and the raw
+unchanged review was approved. No sheet has yet been saved in this trial.
+
+The second OCR selection returned HTTP 500 while another native delivery was
+writing the same SQLite database. The frozen source selected successfully alone,
+including the real artifact/checkpoint files, foreign keys, WAL and confinement.
+A concurrent writer reproduced an uncaught `database is locked` on the shared
+ownership UPDATE. The native child exception itself was not externally logged;
+this reproduction establishes the competing-writer failure class, not a captured
+live traceback. The idle gate prevents that overlap without changing SQLite's
+timeout, recognition values, permissions or error/replay safety. The new wait,
+read/write gate and stop/recovery cases require the next aggregate batch.
+The original HTTP 500 command remains unresolved; it was not resent, declared
+successful or directly modified in the ledger.
 
 The restart transport ID is now independent of the rotating HTTP access token.
 Existing checkpoints adopt their one matching saved delivery ID; ambiguous or

@@ -74,9 +74,11 @@ def test_changed_binding_is_refused_before_provider_read_or_running_transition(t
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('wait', ['wait_for_task_decision', 'wait_for_native_job', 'wait_for_fax_work'])
+@pytest.mark.parametrize('wait', ['wait_for_task_decision', 'wait_for_native_job', 'wait_for_fax_work', 'wait_for_native_idle'])
 def test_all_readonly_waits_rebind_without_unknown_mutation_error(tmp_path, monkeypatch, wait):
     args = {'operation': 'shift_get_run', 'parameters': {'ids': {'run_id': 'native'}}} if wait == 'wait_for_native_job' else {}
+    if wait == 'wait_for_native_idle':
+        args = {'domain':'shift'}
     response = interaction('turn', [('wait', wait, args)])
     recovery, agent, store, sandbox, tools, run, requests = setup(tmp_path, monkeypatch, response)
     command = command_identity('turn', 'wait')

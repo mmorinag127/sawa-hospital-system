@@ -68,6 +68,7 @@ class Tools:
             dict(name="request_fax_approval", description="保存シートと原本を確認画面へ提出する。変更なしならfax_id・summaryだけ渡す。手動訂正はcell_editsで日付・食事・献立・数量列名・訂正文字列を指定する。全行を転記せず、説明文だけで訂正済みとしない。", input_schema={"type": "object", "properties": {"fax_id": {"type": "string"}, "summary": {"type": "string", "minLength": 1, "maxLength": 4000}, "sheet": {"type": "object"}, "cell_edits": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {key: {"type": "string"} for key in ("date_mmdd", "daypart", "menu", "field", "value")}, "required": ["date_mmdd", "daypart", "menu", "field", "value"], "additionalProperties": False}}}, "required": ["fax_id", "summary"], "additionalProperties": False}),
             dict(name="wait_for_fax_work", description="OCR完了または利用者回答までサーバーで待つ。モデルの反復ポーリングを避ける。", input_schema={"type": "object", "properties": {}, "additionalProperties": False})
         ] if "hospital" in domains else []) + [
+            dict(name="wait_for_native_idle", description="同じ依頼のローカル処理の保存が終わるまでサーバーで待つ。native_busyの後はこの待機を使い、更新を反復しない。待機は停止・再開でき、数量や原本を変更しない。", input_schema={"type":"object","properties":{"domain":{"type":"string","enum":list(domains)}},"required":["domain"],"additionalProperties":False}),
             dict(name="save_lunch_process_answers", description="全工程への回答後、検証済みの当日回答をサーバーからそのまま保存する。モデルが工程JSONを転記する必要はない。未回答・入力版変更・保存後不一致は拒否する。", input_schema={"type":"object","properties":{},"additionalProperties":False}),
             dict(name="save_lunch_daily_schedule",description="保存済みの当日工程表案をそのまま使い、利用者が回答した盛付時刻・原本の8個の時刻目盛・配送担当を保存する。作業行・設備・担当・工程版・保存版をモデルで転記しない。",input_schema={"type":"object","properties":{"plating_start":{"type":"string"},"plating_end":{"type":"string"},"timeline_ticks":{"type":"array","items":{"type":"string"},"minItems":8,"maxItems":8},"delivery_assignees":{"type":"array","items":{"type":"string"}}},"required":["plating_start","plating_end","timeline_ticks","delivery_assignees"],"additionalProperties":False}),
             dict(name="prepare_lunch_daily_review",description="日次の工程表・価格の保存後、回答済み工程と選択済み図面から動線図を作成する。全献立・工程・工程表・動線図・価格を再取得して人の確認画面へ提出する。図面ID・版・証跡ID・actionsをモデルで組み立てない。",input_schema={"type":"object","properties":{},"additionalProperties":False}),
@@ -189,6 +190,8 @@ class Tools:
             return await self.wait_task(run_id, generation, name, raw, command_id)
         if name == "wait_for_fax_work":
             return await self.wait_fax(run_id, generation, raw, command_id)
+        if name == 'wait_for_native_idle':
+            return await self.wait_native_idle(run_id, generation, raw, command_id)
         async with self.lock(run_id):
             run = await run_blocking(self.store.get, run_id)
             if run["generation"] != generation or run["status"] != "running":
@@ -349,6 +352,39 @@ class Tools:
                     return result
             await asyncio.sleep(1)
 
+    def pending_native_jobs(self, run, domain):
+        return [job for job in self.sandbox.local_jobs(run)
+                if job['domain'] == domain and job.get('state') not in ('returned', 'failed')]
+
+    async def wait_native_idle(self, run_id, generation, raw, command_id):
+        async with self.lock(run_id):
+            run = await run_blocking(self.store.get, run_id)
+            if set(raw) != {'domain'} or raw['domain'] not in run['domains']:
+                raise ValueError('依頼対象の業務を指定してください')
+            if run['generation'] != generation or run['status'] != 'running':
+                raise Conflict('依頼は停止されました')
+            previous = await run_blocking(self.store.command, run_id, command_id,
+                {'name':'wait_for_native_idle','arguments':raw})
+            if previous is not None:
+                return previous
+        # Restore only owned saved deliveries after a process restart. No business
+        # HTTP command is repeated, and the tool lock is free during the wait.
+        await self.sandbox.start(run)
+        while True:
+            async with self.lock(run_id):
+                run = await run_blocking(self.store.get, run_id)
+                if run['generation'] != generation or run['status'] != 'running':
+                    raise Conflict('依頼は停止されました')
+                if self.authorization_validator is not None:
+                    await self.authorization_validator(run)
+                if not await run_blocking(self.pending_native_jobs, run, raw['domain']):
+                    result = {'ok':True,'domain':raw['domain'],'native_idle':True,'command_id':command_id}
+                    await run_blocking(self.store.finish_command, run_id, command_id, result)
+                    await run_blocking(self.store.event, run_id, 'tool_result',
+                        {'tool':'wait_for_native_idle','result':result})
+                    return result
+            await asyncio.sleep(1)
+
     async def wait_fax(self, run_id, generation, raw, command_id):
         # Do not hold the write lock while sleeping: human answers and stop must
         # remain possible while a provider custom tool is waiting.
@@ -469,6 +505,9 @@ class Tools:
             if any(item.get('unit_price_tax_included') is not None and item.get('unit_price_tax_excluded') is not None for item in costs):
                 raise ValueError('cost_itemsは税込単価・税抜単価の片方だけ指定してください。同じ金額でも両方は送れません。回答済みの金額・税率は変更せず、形式だけ修正してください。')
         path = build_path(op, args.ids)
+        if op.method != 'GET' and await run_blocking(self.pending_native_jobs, run, op.domain):
+            return {'ok':False,'status':409,'native_busy':True,
+                'next_step':'wait_for_native_idleにdomain='+op.domain+'を渡し、同じ依頼のローカル保存完了を待つ。更新はまだ送信していない。待機後に最新の版を取得して操作する。'}
         await self.flow.gate(run, name, args)
         await self.faxes.gate(run, name, args)
         if name=='lunch_generate_route':
