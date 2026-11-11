@@ -79,6 +79,18 @@ def require_local_postgres(dsn):
         raise ValueError('Disposable local agent_trial database required')
 
 
+def validate_staging_jobs(jobs):
+    deployed = {job.get('name') for job in jobs if job.get('conclusion')=='success'}
+    if not {'deploy-backend','deploy-frontend'}.issubset(deployed):
+        raise ValueError('Successful backend and frontend deployment jobs required; restore-only runs are not deployment proof')
+
+
+def require_staging_deployments(run):
+    payload = json.loads(subprocess.check_output(['gh','api',
+        f'repos/mmorinag127/sawa-hospital-system/actions/runs/{run}/jobs?per_page=100'],text=True))
+    validate_staging_jobs(payload['jobs'])
+
+
 def validate(proof, source, definition, *, require_staging=False):
     from local_hospital_test_runner import validate_receipt
     fields = {'receipt_version', 'source_sha', 'definition_sha256', 'baseline',
@@ -122,6 +134,7 @@ def validate(proof, source, definition, *, require_staging=False):
         if type(staging) is not int or staging <= 0:
             raise ValueError('Invalid staging run')
         successful_run(staging, source, '.github/workflows/deploy-stg.yml', 'develop')
+        require_staging_deployments(staging)
     elif require_staging:
         raise ValueError('Production requires exact successful staging deployment')
 

@@ -29,6 +29,7 @@ def test_exact_source_and_complete_related_execution_required(monkeypatch, chang
     monkeypatch.setattr(subject,'verify_signed',lambda value:value['payload'])
     monkeypatch.setattr(local_hospital_test_runner,'validate_receipt',lambda *a,**kw:None)
     monkeypatch.setattr(subject,'successful_run',lambda *a:None)
+    monkeypatch.setattr(subject,'require_staging_deployments',lambda *a:None)
     monkeypatch.setattr(subject,'git',lambda *a:'\n'.join(paths) if a[0]=='diff' else '')
     if change=='source':proof['source_sha']='a'*40
     if change=='definition':proof['definition_sha256']='a'*64
@@ -76,3 +77,17 @@ def test_disposable_database_cannot_resolve_to_business_or_remote_target(dsn):
 
 def test_explicit_local_disposable_database_is_accepted():
     subject.require_local_postgres('host=127.0.0.1 port=55439 dbname=agent_trial_ocr_reset')
+
+
+@pytest.mark.parametrize('jobs',[
+    [{'name':'restore-ocr-selection','conclusion':'success'}],
+    [{'name':'deploy-backend','conclusion':'success'},{'name':'deploy-frontend','conclusion':'skipped'}],
+    [{'name':'deploy-backend','conclusion':'failure'},{'name':'deploy-frontend','conclusion':'success'}],
+])
+def test_restore_or_partial_runs_cannot_be_used_as_production_staging_proof(jobs):
+    with pytest.raises(ValueError,match='deployment jobs required'):
+        subject.validate_staging_jobs(jobs)
+
+
+def test_both_real_deployment_jobs_are_required():
+    subject.validate_staging_jobs([{'name':name,'conclusion':'success'} for name in ('deploy-backend','deploy-frontend')])
