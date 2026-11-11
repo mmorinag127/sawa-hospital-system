@@ -165,6 +165,25 @@ def test_fax_correction_without_pause_uses_verified_provider_recovery(tmp_path):
     asyncio.run(scenario())
 
 
+def test_exhausted_correction_cannot_reactivate_provider_or_recovery(tmp_path):
+    async def scenario():
+        store,native,tools,run=shift(tmp_path)
+        engine,run=attach(store,native,tools,run)
+        store.update(run['id'],spent=run['cap'],reserved=0)
+        engine.providers.resume=AsyncMock()
+        engine.require_binding=AsyncMock()
+        assert await engine.advance(run['id']) is False
+        engine.require_binding.assert_not_awaited()
+        store.update(run['id'],status='running')
+        await engine.continue_model(run,'保存済み回答は保持')
+        assert store.get(run['id'])['status']=='budget_reached'
+        assert await engine.advance(run['id']) is False
+        engine.providers.resume.assert_not_awaited()
+        assert not engine.providers.started
+        assert not native.writes
+    asyncio.run(scenario())
+
+
 def test_every_visible_task_has_a_server_contract_and_models_cannot_finalize(tmp_path):
     assert set(CONTRACTS) == {task['id'] for task in public_tasks()}
     assert len(CONTRACTS) == 12

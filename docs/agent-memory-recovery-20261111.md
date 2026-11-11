@@ -133,6 +133,17 @@ and history responses now project only fields rendered by the UI. Full ledger
 receipts and recovery checkpoints remain unchanged. API tests cover both routes,
 retained event IDs/cursors, questions/corrections and unchanged raw audit data.
 
+Run 43008606389 deployed `5cf57996` to web 00510-9wd. The admin detail opened
+successfully, and the same six copies upgraded from `5bde2556` through an audited
+native-only epoch at generation 4. Provider history was reconciled without
+unknown writes, and original-sheet reads resumed. Its next in-flight response
+raised estimated usage from $2.39 to $2.54, exceeding the unchanged $2.50 cap by
+$0.04. No dispatch remains unsettled. The controller must retain `budget_reached`
+instead of reactivating correction after provider budget termination; this guard
+is now added before both progression and model continuation. The six proposed
+edits remain unapproved, and zero draft saves/reloads are verified. Remaining live
+verification is budget-blocked; no increase or synthetic successful result is used.
+
 The restart transport ID is now independent of the rotating HTTP access token.
 Existing checkpoints adopt their one matching saved delivery ID; ambiguous or
 foreign contracts are refused. A process-owned file lock excludes surviving

@@ -258,6 +258,10 @@ class BusinessWorkflow:
             raise
 
     async def continue_model(self, run, message):
+        current = await run_blocking(self.store.get, run['id'])
+        if current['spent'] >= current['cap'] or current['reserved'] <= 0:
+            await run_blocking(self.set_status, current, 'budget_reached')
+            return
         waits = [event for event in await run_blocking(self.store.events, run['id'], kinds=('business_model_wait',))]
         if not waits:
             if self.tools.faxes.active(run):
@@ -298,8 +302,11 @@ class BusinessWorkflow:
             await self.release_completed(run)
             await run_blocking(self.checkpoint, ident, phase='completed')
             return False
-        if run['status'] in ('stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending', 'stopping'):
+        if run['status'] in ('budget_reached', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending', 'stopping'):
             return False  # Explicit administrator action, never an automatic cancellation.
+        if run['spent'] >= run['cap']:
+            await run_blocking(self.set_status, run, 'budget_reached')
+            return False
         if state.get('phase') == 'support' and time.time() < state.get('next_attempt', 0):
             return False
         if state.get('phase') == 'support':
