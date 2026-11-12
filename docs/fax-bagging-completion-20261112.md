@@ -42,3 +42,26 @@ No blanket conversion of these values is authorized.
 The old trial was explicitly stopped after save/readback and has no reservation.
 Do not silently rewrite its terminal status or old execution binding. Old native
 and AI receipts remain historical evidence, not proof of bagging success.
+
+## Incomplete Inference Found In Staging
+
+Run 43125720030 deployed bd9ad8c2 successfully. Trial
+2e4d51b976264951bd1278a341d2be79 retained all six completed native OCRs. A
+read-only GET of its existing Gemini interaction proved status `incomplete`,
+7,860 thought tokens and 328 output tokens under an 8,192 combined limit, with
+no function-call steps. Estimated cost was $0.06. No reviews or writes were
+executed from that incomplete response.
+
+The provider documents that max_output_tokens includes thinking and output,
+and recommends reducing thinking_level rather than using a small cutoff:
+https://ai.google.dev/gemini-api/docs/thought-signatures
+
+New fixed-FAX runs pin thinking_level=low. Recovery of the already-prepared
+trial is bounded to one restart only when the provider proves an incomplete
+response with no function calls, no local model execution checkpoint, no human
+review/decision, settled usage and unchanged owner/source/budget fences. The old
+interaction and its charges remain in history; a lower-thinking attempt uses the
+same working copy, cap and completed OCRs. The response-token ceiling doubles
+(8192 to 16384 here) but remains clamped by the existing unspent run allowance;
+the monetary cap and monthly budget do not increase. Low-thinking incomplete responses,
+unknown provider results and any potentially executed tool call are not retried.

@@ -3,7 +3,7 @@ import asyncio
 import json
 from urllib.parse import quote
 
-from .store import Conflict, billing_month
+from .store import Conflict, billing_month, now
 from .sandbox import run_blocking
 from .gemini import command_identity
 from .conversation import record_question_receipt
@@ -94,6 +94,26 @@ class Recovery:
                     for row in safe_reads:
                         db.execute("UPDATE commands SET status='recoverable_read' WHERE run_id=? AND id=? AND status!='done'", (ident, row['id']))
             await run_blocking(mark_recoverable)
+            if plan.get('retry_incomplete'):
+                # The provider proved the old inference ended with no function
+                # calls. Retain its usage/history, change no native receipt,
+                # and issue a single lower-thinking attempt on this same copy.
+                def activate_retry():
+                    with self.store.tx() as db:
+                        saved = db.execute('SELECT generation,status,session_id FROM runs WHERE id=?', (ident,)).fetchone()
+                        if (saved['generation'] != run['generation'] or saved['status'] != 'reconciliation_required'
+                                or saved['session_id'] != run['session_id']):
+                            raise Conflict('再開前に依頼が停止または変更されました')
+                        db.execute("UPDATE runs SET status='running',session_id=NULL,updated=? WHERE id=?", (now(), ident))
+                        for kind, payload in (('gemini_binding', plan['pin']),
+                                ('gemini_incomplete_retry', {'interaction':run['session_id'],
+                                    'generation':run['generation'], 'thinking_level':'low'})):
+                            db.execute('INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)',
+                                (ident,kind,json.dumps(payload),now()))
+                await run_blocking(activate_retry)
+                await run_blocking(manager.tools.business.checkpoint, ident, phase='analysing', attempts=0)
+                await manager.start(await run_blocking(self.store.get, ident))
+                return await run_blocking(self.store.get, ident)
             await run_blocking(self.store.update, ident, expected_generation=run['generation'], status='running')
             await run_blocking(self.store.event, ident, 'recovery', {'status': 'running', 'generation': run['generation']})
             if run['provider'] == 'gemini':
@@ -143,6 +163,19 @@ class Recovery:
             raise Conflict('接続先の実行IDが一致しません')
         if value.get('status') in ('in_progress', 'queued'):
             raise RecoveryPending('接続先の処理を照合中です')
+        if value.get('status') == 'incomplete':
+            from .fax_preparation import enabled
+            pin = await run_blocking(manager.pin, ident)
+            items = await run_blocking(manager.tools.faxes.items, ident)
+            if (not enabled(run) or pin.get('thinking_level') == 'low'
+                    or self.store.latest_event(ident, 'gemini_incomplete_retry')
+                    or any(step.get('type') == 'function_call' for step in value.get('steps', []))
+                    or not items or any(item['state'] != 'ready' or item['review'] or item['decision'] for item in items)
+                    or manager.state(ident) is not None):
+                raise Conflict('不完了応答の未実行条件を確認できません。業務操作を再送しません')
+            await run_blocking(manager.record_usage, ident, value)
+            return {'waiting':False, 'retry_incomplete':True, 'pin':{**pin,'thinking_level':'low',
+                'max_output_tokens':min(65536, pin['max_output_tokens'] * 2)}}
         if value.get('status') not in ('requires_action', 'completed'):
             raise Conflict('接続先の結果を確定できません。保存済み内容を管理者が確認します')
         manager.record_usage(ident, value)

@@ -103,6 +103,7 @@ def test_one_provider_request_submits_all_preloaded_fax_reviews(tmp_path,monkeyp
         agent=Gemini(store,native,tools,build_mcp(tools),{},client=client)
         await agent.consume_gemini(run['id'],run['generation'],None,content(await packet_content(tools,run)))
         assert len(requests)==1
+        assert requests[0]['generation_config']['thinking_level'] == 'low'
         assert {tool['name'] for tool in requests[0]['tools']}=={'request_fax_approval','ask_operator'}
         assert all(item['state']=='awaiting_approval' for item in tools.faxes.items(run['id']))
         assert all(item['review']['signature']==item['review']['native_signature'] for item in tools.faxes.items(run['id']))

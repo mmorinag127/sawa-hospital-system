@@ -31,6 +31,49 @@ def setup(tmp_path, monkeypatch, response):
     return recovery, agent, store, sandbox, tools, run, requests
 
 
+@pytest.mark.parametrize('fault', [None, 'function_call', 'review', 'low', 'second_retry'])
+def test_incomplete_fax_restarts_only_unused_inference_with_same_copy_and_cap(tmp_path, monkeypatch, fault):
+    response = interaction('turn', status='incomplete')
+    if fault == 'function_call':
+        response['steps'] = [{'type':'function_call','id':'partial','name':'request_fax_approval','arguments':{}}]
+    recovery, agent, store, sandbox, tools, run, requests = setup(tmp_path, monkeypatch, response)
+    original_pin = agent.pin(run['id'])
+    store.update(run['id'], task_id='hospital_pending_faxes',
+        task_inputs={'business_workflow':{'version':1,'fax_harness':2,'phase':'checking'}})
+    tools.faxes.items = lambda _: [{'state':'ready','review':None,'decision':None}] if fault!='review' else [
+        {'state':'awaiting_approval','review':{'id':'retained'},'decision':None}]
+    if fault == 'low': store.event(run['id'], 'gemini_binding', {**original_pin,'thinking_level':'low'})
+    if fault == 'second_retry': store.event(run['id'], 'gemini_incomplete_retry', {'interaction':'older'})
+    checkpoints, started = [], []
+    tools.business = SimpleNamespace(checkpoint=lambda *args, **kwargs: checkpoints.append(kwargs))
+    async def start(current): started.append(current)
+    agent.start = start
+    before = store.get(run['id'])
+    originals = {str(path):path.read_bytes() for path in sandbox.path(run['id']).rglob('database.sqlite3')}
+    async def scenario():
+        if fault:
+            with pytest.raises(Conflict,match='不完了応答'):
+                await recovery.resume(run['id'])
+            assert not started
+            assert store.get(run['id'])['status'] == 'reconciliation_required'
+        else:
+            current = await recovery.resume(run['id'])
+            assert len(started) == 1 and current['status'] == 'running'
+            assert started[0]['session_id'] is None
+            assert current['generation'] == before['generation']
+            assert current['cap'] == before['cap']
+            assert current['spent'] + current['reserved'] == before['spent'] + before['reserved']
+            assert agent.pin(run['id']) == {**original_pin,'thinking_level':'low',
+                'max_output_tokens':min(65536, original_pin['max_output_tokens']*2)}
+            assert store.latest_event(run['id'],'gemini_incomplete_retry')['payload']['interaction'] == 'turn'
+            assert len(store.events(run['id'], kinds=('gemini_dispatch',))) == 1
+            with pytest.raises(Conflict): await recovery.resume(run['id'])
+        assert requests == ['GET']
+        assert {str(path):path.read_bytes() for path in sandbox.path(run['id']).rglob('database.sqlite3')} == originals
+        await agent.client.aclose()
+    asyncio.run(scenario())
+
+
 def test_restart_restores_same_question_without_model_post_or_native_write(tmp_path, monkeypatch):
     args = {'question': '確認しますか？', 'options': ['はい', 'いいえ']}
     response = interaction('turn', [('question', 'ask_operator', args)])

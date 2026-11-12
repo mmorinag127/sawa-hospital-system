@@ -65,6 +65,9 @@ class Gemini(Managed):
         maximum = int(os.environ.get('GEMINI_AGENT_MAX_OUTPUT_TOKENS', '4096'))
         if not 1 <= maximum <= 65536: raise ValueError('Geminiの最大出力トークン数が不正です')
         value = dict(model=model, input_rate=str(rates[0]), output_rate=str(rates[1]), max_output_tokens=maximum)
+        from .fax_preparation import enabled
+        if enabled(self.store.get(ident)):
+            value['thinking_level'] = 'low'
         self.store.event(ident, 'gemini_binding', value)
         return value
 
@@ -224,6 +227,8 @@ class Gemini(Managed):
                 body = {'model': pin['model'], 'input': inputs, 'system_instruction': SYSTEM,
                     'store': True, 'background': False, 'generation_config': {'max_output_tokens': output_limit},
                     'tools': [{'type': 'function', 'name': d['name'], 'description': d['description'], 'parameters': d['input_schema']} for d in model_definitions(self.tools, run)]}
+                if pin.get('thinking_level'):
+                    body['generation_config']['thinking_level'] = pin['thinking_level']
                 if run['session_id']: body['previous_interaction_id'] = run['session_id']
                 dispatch = uuid4().hex
                 await run_blocking(self.store.event, ident, 'gemini_dispatch', {'id': dispatch, 'generation': generation})
