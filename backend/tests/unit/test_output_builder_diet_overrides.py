@@ -910,7 +910,7 @@ def test_monthly_menu_metadata_falls_back_to_same_daypart_for_variant_diets_and_
 
     mixer_tamago = next(line for line in enriched if line["menu_name"] == "玉子焼き")
     assert mixer_tamago["menu_temp_type"] == "hot"
-    assert mixer_tamago["menu_unit_type"] == "count"
+    assert mixer_tamago["menu_unit_type"] == "個"
     assert mixer_tamago["menu_qty_per_serving"] == 2
 
     labels, _fields, _label_format = output_builder._build_label_rows(
