@@ -156,6 +156,9 @@ class Tools:
                     current=await run_blocking(self.store.get, run_id)
                     if current['generation']!=generation or current['status']!='running': raise
                     result={'error':str(exc)}
+                    from .workflow_completion import BusinessInputRequired
+                    if isinstance(exc,BusinessInputRequired):
+                        result['business_input_required']=True
                 result={**result,'command_id':command_id}
                 # Children own mutation idempotency and unknown-outcome fences.
                 # A wrapper is recorded only after returning, so finish_work never

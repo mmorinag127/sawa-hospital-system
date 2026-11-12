@@ -137,6 +137,9 @@ class BusinessWorkflow:
         finally:
             SERVER_EXECUTION.reset(token)
         if not result.get('ok') and not result.get('queued_for_human') and not result.get('waiting_input'):
+            if result.get('business_input_required'):
+                from .workflow_completion import BusinessInputRequired
+                raise BusinessInputRequired(str(result['error']))
             raise Conflict(str(result.get('error', result.get('question', '業務処理の結果を確認できません'))))
         return result
 
@@ -482,12 +485,16 @@ class BusinessWorkflow:
                 raise
             except Exception as exc:
                 from .recovery import RecoveryPending
+                from .workflow_completion import BusinessInputRequired
                 state = await run_blocking(self.state, ident)
                 attempt = state.get('attempts', 0) + 1
                 delay = min(300, 15 * 2 ** min(attempt, 4))
                 retryable = isinstance(exc, (RecoveryPending, httpx.TransportError, TimeoutError, ConnectionError)) or isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
                 await run_blocking(self.store.event, ident, 'business_support', {'class': type(exc).__name__, 'message': str(exc) if isinstance(exc, (ValueError, Conflict)) else '業務結果の照合が必要です。回答・承認・保存済み内容は保持しています。'})
                 await run_blocking(self.checkpoint, ident, phase='support', resume_phase=state.get('resume_phase') if state['phase']=='support' else state['phase'], attempts=attempt, next_attempt=time.time() + delay, retryable=retryable)
+                if isinstance(exc,BusinessInputRequired):
+                    await run_blocking(self.checkpoint,ident,attempts=4,next_attempt=0)
+                    return
                 if attempt >= 4 and not retryable:
                     return
                 await asyncio.sleep(delay)

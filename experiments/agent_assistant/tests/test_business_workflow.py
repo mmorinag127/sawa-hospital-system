@@ -49,6 +49,21 @@ def attach(store, native, tools, run):
     return engine, store.get(run['id'])
 
 
+def test_missing_business_data_stops_without_replaying_completion(tmp_path):
+    from experiments.agent_assistant.workflow_completion import BusinessInputRequired
+    async def scenario():
+        store,native,tools,run=shift(tmp_path)
+        engine,run=attach(store,native,tools,run)
+        engine.checkpoint(run['id'],phase='saving')
+        engine.advance=AsyncMock(side_effect=BusinessInputRequired('糖尿の一人量が未登録です'))
+        await engine.drive(run['id'])
+        engine.advance.assert_awaited_once()
+        assert engine.state(run['id'])['phase']=='support'
+        assert engine.state(run['id'])['attempts']==4
+        assert not native.writes
+    asyncio.run(scenario())
+
+
 def test_first_fax_review_does_not_pause_preparation_of_remaining_faxes(tmp_path):
     from experiments.agent_assistant.tests.test_fax_workflow import Native
     from experiments.agent_assistant.store import Store

@@ -114,3 +114,22 @@ response position, and consumes only the remaining proposal tail. A missing or
 changed receipt is rejected. The controller recognizes this outstanding local
 tail before entering ordinary human-approval wait; it does not dispatch a new
 model interaction. A completed tail remains in approval without a model post.
+
+## Native Menu Amount Boundary
+
+Trial 2e4d51b976264951bd1278a341d2be79 reached six approved full-sheet saves
+with successful native readback. Momoya completed native bagging, confirmation,
+and three exports. Ikoi then returned HTTP 400 menu_amount_unresolved: all 56
+affected lines have diet_type=diabetes. This is a separate menu authority issue,
+not a remaining nonnumeric quantity. The captured monthly items/entries contain
+regular only. Existing active wildcard global rules specify breakfast main 70g,
+lunch/dinner main 100g and sides 40g, but applying them to the missing diabetes
+authority has not been approved. No menu quantities are inferred or written.
+Other five orders' latest native menu resolutions are resolved.
+
+The completion harness now preserves all-six-save-first, records exact unresolved
+menu/quantity details, continues resolved orders, and does not claim whole-run
+completion while any remain blocked. Known missing business input stops without
+replaying the whole workflow four times. Native success receipts, unknown-write
+fences, original PDFs and operator-approved sheets remain authoritative. A done
+command with ok=false is not counted as successful bagging in the proof queries.

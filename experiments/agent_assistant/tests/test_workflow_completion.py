@@ -11,6 +11,44 @@ from experiments.agent_assistant.tools import Arguments
 from experiments.agent_assistant.tests.test_selected_tasks import shift, shift_evidence, record
 
 
+def test_missing_menu_amount_does_not_block_other_approved_faxes(tmp_path):
+    from experiments.agent_assistant.tests.test_fax_workflow import Native
+    from experiments.agent_assistant.store import Store
+    from experiments.agent_assistant.tools import Tools
+    async def scenario():
+        store=Store(tmp_path/'ledger');store.set_budget(100)
+        run,_=store.create('user','partial-menu-data','FAX',['hospital'],100,task_id='hospital_pending_faxes')
+        store.update(run['id'],status='running');run=store.get(run['id'])
+        native=Native(tmp_path/'files');request=native.request
+        missing={'status':'unresolved','blocker':'menu_amount_unresolved','affected_lines':[
+            {'date':'2026-11-15','daypart':'朝','menu_name':'Dish','diet_type':'diabetes',
+             'unresolved_fields':['qty_per_serving','unit_type']}]}
+        native.wfs['OA']['menu_amount_resolution']=missing
+        async def transport(run,domain,method,path,**kwargs):
+            if path.startswith('/outputs/') and method=='GET':
+                return httpx.Response(200,content=b'synthetic sealed output',headers={'content-type':'text/csv'})
+            if path.endswith('/bagging'):
+                assert native.saved=={'OA','OB'}
+                assert '/OA/' not in path
+            return await request(run,domain,method,path,**kwargs)
+        native.request=transport;tools=Tools(store,native)
+        for source in native.sources.values():source['status']='completed'
+        await tools.faxes.refresh(run)
+        for fax in ('A','B'):
+            review=(await tools.faxes.submit(run,fax,'原本照合済みの合成コピー'))['review']
+            await tools.faxes.decide(run,fax,review['id'],True,'承認')
+        original=deepcopy(native.sheets)
+        result=await tools.execute(run['id'],0,'complete_fax_work',{},'partial-native-completion')
+        assert result['business_input_required'] is True
+        assert native.wfs['OB']['state']=='confirmed'
+        assert native.wfs['OA']['state']!='confirmed'
+        assert native.sheets==original
+        event=store.latest_event(run['id'],'fax_completion_blocked')['payload']
+        assert len(event['items'])==1 and event['items'][0]['menu_amount_resolution']==missing
+        assert store.get(run['id'])['status']!='completed'
+    asyncio.run(scenario())
+
+
 def test_failed_read_is_not_retried_until_verified_native_source_changes(tmp_path):
     from experiments.agent_assistant.workflow_completion import WorkflowCompletion
     from experiments.agent_assistant.business_contracts import SERVER_EXECUTION

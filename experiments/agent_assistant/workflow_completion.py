@@ -16,6 +16,10 @@ class OperatorWait(Exception):
         self.result = result
 
 
+class BusinessInputRequired(Conflict):
+    """Known missing business data must not replay an unchanged workflow."""
+
+
 class WorkflowCompletion:
     def __init__(self, tools):
         self.tools = tools
@@ -191,15 +195,20 @@ class WorkflowCompletion:
             sheet = item['review']['sheet']
             for name, body in [('hospital_check_anomalies', {'sheet': sheet, 'use_llm': False}), ('hospital_review_sheet', {'sheet': sheet}), ('hospital_save_sheet', {'sheet': sheet})]:
                 await apply_step(item, name, body)
+        blocked = []
         for item in items:
             oid = item['snapshot']['order_id']
             current = await self.tools.faxes.capture(run, item)
             readiness = await self.tools.faxes.quantity_review(run, item, current)
             if not readiness['quantity_ready']:
-                import json
-                raise Conflict(item['snapshot'].get('name', item['fax_id']) +
-                    '：保存済み数量の原本確認が必要です。日付・食事・献立・列を指定して訂正してください。' +
-                    json.dumps(readiness['cell_issues'], ensure_ascii=False))
+                blocked.append({'original':item['snapshot'].get('name',item['fax_id']),
+                    'order_id':oid,'quantity_review':readiness})
+                continue
+            amounts = current['workflow'].get('menu_amount_resolution')
+            if isinstance(amounts,dict) and amounts.get('status') == 'unresolved':
+                blocked.append({'original':item['snapshot'].get('name',item['fax_id']),
+                    'order_id':oid,'menu_amount_resolution':amounts})
+                continue
             for name in ('hospital_bag_order', 'hospital_confirm_order'):
                 await apply_step(item, name, {})
             for name in ('hospital_export_labels', 'hospital_export_delivery_notes', 'hospital_export_aggregate'):
@@ -209,6 +218,11 @@ class WorkflowCompletion:
             evidence.append(final['command_id'])
             fax = await self.call(run, command, str(oid)+':final-fax', 'hospital_get_fax', {'ids': {'uploaded_pdf_id': item['fax_id']}})
             evidence.append(fax['command_id'])
+        if blocked:
+            import json
+            await run_blocking(self.tools.store.event,ident,'fax_completion_blocked',{'items':blocked})
+            raise BusinessInputRequired('確定に必要な業務情報が未登録です。解決済みの注文は処理済みです。' +
+                json.dumps(blocked,ensure_ascii=False))
         if not evidence:
             evidence.append((await self.call(run, command, 'empty', 'hospital_pending_faxes'))['command_id'])
         return await self.call(run, command, 'finish', 'finish_work', raw={'summary': '承認したFAX注文を確定し、正規のラベル・納品書・製造集計を出力・照合しました。', 'evidence_commands': evidence, 'artifact_ids': artifacts})
