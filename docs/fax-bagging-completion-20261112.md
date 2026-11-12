@@ -105,3 +105,12 @@ model cap checks remain unchanged; no additional inference is authorized.
 This additional root fix requires a new consolidated local regression receipt
 and staging rollout before live recovery. Six native confirmations are still
 pending; no success is claimed from proposal registration alone.
+
+The first live receipt recovery exposed an older checkpoint already paused
+after the first corrected proposal. Its second paid proposal was still pending
+in that response. Recovery now verifies the exact completed local proposal and
+matching business_model_wait receipt, appends that real result to the saved
+response position, and consumes only the remaining proposal tail. A missing or
+changed receipt is rejected. The controller recognizes this outstanding local
+tail before entering ordinary human-approval wait; it does not dispatch a new
+model interaction. A completed tail remains in approval without a model post.

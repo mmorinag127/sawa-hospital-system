@@ -50,6 +50,43 @@ def test_paid_review_recovery_at_cap_does_not_send_another_inference(tmp_path, m
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('fault', [None, 'missing_pause', 'changed_receipt'])
+def test_paid_business_pause_restores_only_unconsumed_review_tail(tmp_path, monkeypatch, fault):
+    from unittest.mock import AsyncMock
+    args = {'fax_id':'A','summary':'保持済み確認案'}
+    response = interaction('turn',[('a','request_fax_approval',args),
+        ('b','request_fax_approval',{'fax_id':'B','summary':'未処理確認案'})])
+    recovery, agent, store, _, _, run, requests = setup(tmp_path,monkeypatch,response)
+    with store.tx() as db:
+        db.execute('UPDATE runs SET task_id=?,task_inputs=?,spent=cap,reserved=0 WHERE id=?',
+            ('hospital_pending_faxes',json.dumps({'business_workflow':{'version':1,'fax_harness':2}}),run['id']))
+    command=command_identity('turn','a')
+    store.command(run['id'],command,{'name':'request_fax_approval','arguments':args})
+    result={'ok':True,'queued_for_human':True,'command_id':command,'review':{'id':'retained'}}
+    store.finish_command(run['id'],command,result)
+    if fault != 'missing_pause':
+        store.event(run['id'],'business_model_wait',{'command_id':command,
+            'result':{**result,'review':{'id':'different'}} if fault == 'changed_receipt' else result})
+    agent.checkpoint(run['id'],{'interaction':'turn','calls':response['steps'],
+        'index':0,'results':[],'pending':command})
+    agent.consume_gemini=AsyncMock()
+    async def scenario():
+        if fault:
+            with pytest.raises(Conflict): await recovery.resume(run['id'])
+            agent.consume_gemini.assert_not_awaited()
+        else:
+            await recovery.resume(run['id'])
+            await agent.tasks[run['id']]
+            state=agent.consume_gemini.call_args.args[2]
+            assert state['index']==1 and state['pending'] is None
+            assert len(state['results'])==1
+            assert state['calls'][1]['arguments']['fax_id']=='B'
+        assert requests==['GET']
+        assert store.get(run['id'])['reserved']==0
+        await agent.client.aclose()
+    asyncio.run(scenario())
+
+
 def setup(tmp_path, monkeypatch, response):
     requests = []
     async def handler(request):

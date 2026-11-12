@@ -5,7 +5,7 @@ from urllib.parse import quote
 
 from .store import Conflict, billing_month, now
 from .sandbox import run_blocking
-from .gemini import command_identity
+from .gemini import command_identity, function_result
 from .conversation import record_question_receipt
 from .catalog import OPERATIONS, READ_ONLY_WAITS
 
@@ -138,6 +138,9 @@ class Recovery:
             await run_blocking(self.store.event, ident, 'recovery', {'status': 'running', 'generation': run['generation']})
             if run['provider'] == 'gemini':
                 await run_blocking(manager.checkpoint, ident, plan['state'])
+                if plan.get('reviews_complete'):
+                    await run_blocking(manager.tools.business.checkpoint, ident, phase='approval')
+                    return await run_blocking(self.store.get, ident)
                 manager.tasks[ident] = asyncio.create_task(manager.consume_gemini(ident, run['generation'], plan['state'], None))
             else:
                 manager.tasks[ident] = asyncio.create_task(manager.consume(ident, plan['stream'], replay=plan['replay']))
@@ -217,7 +220,25 @@ class Recovery:
                 raise Conflict('質問の処理位置が不正です')
             call = calls[state['index']]
             command = command_identity(value['id'], call['id'])
-            if command != state['pending'] or not await run_blocking(self.waiting, ident, command):
+            if command != state['pending']:
+                raise Conflict('保存済みの質問と接続先の命令が一致しません')
+            from .fax_preparation import enabled
+            if enabled(run) and call['name'] == 'request_fax_approval':
+                with self.store.read() as db:
+                    row = db.execute('SELECT request,status,result FROM commands WHERE run_id=? AND id=?', (ident,command)).fetchone()
+                if (not row or row['status'] != 'done' or json.loads(row['request']) !=
+                        {'name':call['name'],'arguments':call['arguments']}):
+                    raise Conflict('保存済み確認案の命令と応答を照合できません')
+                result = json.loads(row['result'])
+                waits = self.store.events(ident,kinds=('business_model_wait',))
+                if not any(e['payload'] == {'command_id':command,'result':result} for e in waits):
+                    raise Conflict('保存済み確認案の業務停止位置を照合できません')
+                state['results'].append({'type':'function_result','call_id':call['id'],'name':call['name'],
+                    'result':function_result([{'type':'text','text':json.dumps(result,ensure_ascii=False)}])})
+                state['index'] += 1
+                state['pending'] = None
+                return {'waiting':False,'state':state,'reviews_complete':state['index']==len(calls)}
+            if not await run_blocking(self.waiting, ident, command):
                 raise Conflict('保存済みの質問と接続先の命令が一致しません')
             result = await run_blocking(self.verify_receipt, ident, command, call['name'], call['arguments'])
             return {'waiting': True, 'question': (call['name'], result)}

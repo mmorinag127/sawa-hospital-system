@@ -343,6 +343,16 @@ class BusinessWorkflow:
             return False
         manager_task = self.providers.tasks.get(ident)
         model_busy = manager_task and not manager_task.done()
+        from .fax_preparation import enabled
+        if not model_busy and enabled(run) and run['provider'] == 'gemini':
+            manager = await run_blocking(self.providers.for_run, ident) or self.providers
+            saved_model = await run_blocking(manager.state, ident)
+            if (saved_model and saved_model.get('pending')
+                    and saved_model['index'] + 1 < len(saved_model['calls'])
+                    and all(call['name'] == 'request_fax_approval' for call in saved_model['calls'])):
+                await run_blocking(self.set_status, run, 'reconciliation_required')
+                await self.providers.resume(ident)
+                return True
         review = (await run_blocking(self.tools.flow.review, ident))
         faxes = (await run_blocking(self.tools.faxes.items, ident)) if self.tools.faxes.active(run) else []
         if not model_busy and any(item['state'] in ('pending','processing') for item in faxes):
