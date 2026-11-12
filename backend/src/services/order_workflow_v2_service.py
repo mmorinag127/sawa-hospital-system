@@ -4411,6 +4411,10 @@ def _build_bag_rows_for_candidate(*, order: Order, lines: list[dict[str, Any]], 
         if isinstance(exc, BaggingOutputUnresolved):
             raise
         code = MENU_AMOUNT_UNRESOLVED if isinstance(exc, MenuReadUnresolved) else "bagging_output_enrichment_failed"
+        import re
+        reason = str(exc)
+        safe_reason = reason if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", reason) else "non_symbolic_error"
+        logger.warning("Bagging output rejected: cause={} class={}", safe_reason,type(exc).__name__)
         raise BaggingOutputUnresolved(code) from exc
 
 

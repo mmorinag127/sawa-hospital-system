@@ -134,6 +134,22 @@ def format_diet_type_label(value: object) -> str:
     return DIET_TYPE_LABELS.get(normalized, str(value).strip() or "-")
 
 
+def monthly_entry_diet_priority(entry_diet: object, line_diet: object) -> int:
+    entry = normalize_diet_type(entry_diet)
+    line = normalize_diet_type(line_diet) or 'regular'
+    if entry == line:
+        return 0
+    soft = {'soft','mixer','soft_mixer'}
+    if entry in soft and line in soft:
+        return 1
+    if not entry:
+        return 2 if line == 'regular' else 3
+    # This selects a dated menu row, not another diet's serving amount.
+    if entry == 'regular' and line in DIET_TYPE_LABELS and line != 'unknown':
+        return 4
+    return 99
+
+
 def bucket_diet_type_for_aggregation(value: object) -> str | None:
     normalized = normalize_diet_type(value)
     if not normalized:

@@ -49,7 +49,7 @@ from src.services import (
     daily_output_override_service,
     order_output_artifact_service,
 )
-from src.services.menu_vocabulary import bucket_diet_type_for_aggregation
+from src.services.menu_vocabulary import bucket_diet_type_for_aggregation, monthly_entry_diet_priority
 from src.services.storage_service import load_bytes_from_uri
 
 OUTPUT_DIR = Path(os.getenv("ORDERS_OUTPUT_DIR", "/tmp/orders-outputs"))
@@ -1100,18 +1100,8 @@ def _monthly_entry_diet_matches_line(entry_diet: object, line_diet: object) -> b
         entry_key = _normalize_delivery_diet_key(entry_diet.get("diet_type"))
     else:
         entry_key = _normalize_delivery_diet_key(entry_diet)
-    if not entry_key:
-        return True
     line_key = _normalize_delivery_diet_key(line_diet) or "regular"
-    if entry_key == line_key:
-        return True
-    if entry_key == "regular" and line_key in {"soft", "mixer", "soft_mixer"}:
-        return True
-    if entry_key == "soft_mixer" and line_key in {"soft", "mixer", "soft_mixer"}:
-        return True
-    if line_key == "soft_mixer" and entry_key in {"soft", "mixer", "soft_mixer"}:
-        return True
-    return False
+    return monthly_entry_diet_priority(entry_key,line_key) < 99
 
 
 def _monthly_entry_line_diet(line: dict) -> str:
@@ -1136,17 +1126,7 @@ def _canonical_monthly_entry_menu_name(entry: dict, line: dict) -> str | None:
 def _monthly_entry_diet_priority(entry: dict, line_diet: object) -> int:
     entry_key = _normalize_delivery_diet_key(entry.get("diet_type")) or ""
     line_key = _normalize_delivery_diet_key(line_diet) or "regular"
-    if entry_key == line_key:
-        return 0
-    if entry_key == "soft_mixer" and line_key in {"soft", "mixer", "soft_mixer"}:
-        return 1
-    if entry_key == "" and line_key == "regular":
-        return 2
-    if entry_key == "":
-        return 3
-    if entry_key == "regular" and line_key in {"soft", "mixer", "soft_mixer"}:
-        return 4
-    return 99
+    return monthly_entry_diet_priority(entry_key,line_key)
 
 
 def _build_monthly_entry_physical_rows(

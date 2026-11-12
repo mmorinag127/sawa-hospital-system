@@ -20,6 +20,12 @@ class BusinessInputRequired(Conflict):
     """Known missing business data must not replay an unchanged workflow."""
 
 
+class NativeInputRequired(BusinessInputRequired):
+    def __init__(self, operation, result):
+        self.operation, self.result = operation, result
+        super().__init__(operation + ': ' + str(result))
+
+
 class WorkflowCompletion:
     def __init__(self, tools):
         self.tools = tools
@@ -58,6 +64,8 @@ class WorkflowCompletion:
                     detail = {}
                 if isinstance(detail, dict) and isinstance(detail.get('preflight'), dict):
                     raise OperatorWait(await ShiftQuestions(self.tools).infeasible(run, command, detail))
+            if name.startswith('hospital_') and result.get('input_validation_failed') and result.get('status') in (400,422):
+                raise NativeInputRequired(name,result)
             raise Conflict(name + ': ' + str(result))
         return result
 
@@ -191,12 +199,21 @@ class WorkflowCompletion:
             await self.call(run, command, str(oid)+':'+name, name, {'ids': {'order_id': oid}, 'body': body, 'expected_revision': wf['data']['revision'], 'reason': '利用者が原本照合し承認した数量シートをそのまま処理'})
         # Persist every approved draft before final quantity/confirmation checks.
         # One order needing correction must not prevent other drafts being saved.
+        blocked = []
+        saved = []
+        def record_input_failure(item, exc):
+            blocked.append({'original':item['snapshot'].get('name',item['fax_id']),
+                'order_id':item['snapshot']['order_id'],'operation':exc.operation,'validation':exc.result})
         for item in items:
             sheet = item['review']['sheet']
-            for name, body in [('hospital_check_anomalies', {'sheet': sheet, 'use_llm': False}), ('hospital_review_sheet', {'sheet': sheet}), ('hospital_save_sheet', {'sheet': sheet})]:
-                await apply_step(item, name, body)
-        blocked = []
-        for item in items:
+            try:
+                for name, body in [('hospital_check_anomalies', {'sheet': sheet, 'use_llm': False}), ('hospital_review_sheet', {'sheet': sheet}), ('hospital_save_sheet', {'sheet': sheet})]:
+                    await apply_step(item, name, body)
+            except NativeInputRequired as exc:
+                record_input_failure(item,exc)
+                continue
+            saved.append(item)
+        for item in saved:
             oid = item['snapshot']['order_id']
             current = await self.tools.faxes.capture(run, item)
             readiness = await self.tools.faxes.quantity_review(run, item, current)
@@ -209,15 +226,18 @@ class WorkflowCompletion:
                 blocked.append({'original':item['snapshot'].get('name',item['fax_id']),
                     'order_id':oid,'menu_amount_resolution':amounts})
                 continue
-            for name in ('hospital_bag_order', 'hospital_confirm_order'):
-                await apply_step(item, name, {})
-            for name in ('hospital_export_labels', 'hospital_export_delivery_notes', 'hospital_export_aggregate'):
-                output = await self.call(run, command, str(oid)+':'+name, name, {'query': {'order_id': oid}})
-                artifacts.append(output['artifact']['id'])
-            final = await self.call(run, command, str(oid)+':final', 'hospital_get_workflow', {'ids': {'order_id': oid}})
-            evidence.append(final['command_id'])
-            fax = await self.call(run, command, str(oid)+':final-fax', 'hospital_get_fax', {'ids': {'uploaded_pdf_id': item['fax_id']}})
-            evidence.append(fax['command_id'])
+            try:
+                for name in ('hospital_bag_order', 'hospital_confirm_order'):
+                    await apply_step(item, name, {})
+                for name in ('hospital_export_labels', 'hospital_export_delivery_notes', 'hospital_export_aggregate'):
+                    output = await self.call(run, command, str(oid)+':'+name, name, {'query': {'order_id': oid}})
+                    artifacts.append(output['artifact']['id'])
+                final = await self.call(run, command, str(oid)+':final', 'hospital_get_workflow', {'ids': {'order_id': oid}})
+                evidence.append(final['command_id'])
+                fax = await self.call(run, command, str(oid)+':final-fax', 'hospital_get_fax', {'ids': {'uploaded_pdf_id': item['fax_id']}})
+                evidence.append(fax['command_id'])
+            except NativeInputRequired as exc:
+                record_input_failure(item,exc)
         if blocked:
             import json
             await run_blocking(self.tools.store.event,ident,'fax_completion_blocked',{'items':blocked})

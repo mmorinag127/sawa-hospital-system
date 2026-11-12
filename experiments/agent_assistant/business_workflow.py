@@ -85,6 +85,12 @@ class BusinessWorkflow:
     def activate(self, run):
         self.set_status(run, 'running')
 
+    def begin_reconciliation(self, run):
+        state=self.state(run['id'])
+        attempt={'epoch':state.get('epoch',0)+1} if run.get('task_id') in (
+            'hospital_pending_faxes','hospital_review_faxes') else {}
+        return self.checkpoint(run['id'],attempts=0,next_attempt=0,**attempt)
+
     def set_status(self, run, status):
         self.store.update(run['id'], expected_generation=run['generation'], status=status)
 

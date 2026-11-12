@@ -13,7 +13,7 @@ import pytest
 import sqlalchemy as sa
 
 from src import db
-from src.models.menu import MenuMaster, MonthlyMenuEntry, MonthlyMenuItem
+from src.models.menu import MenuMaster, MenuRule, MonthlyMenuEntry, MonthlyMenuItem
 from src.services import menu_service
 from src.services import order_serialization_service as serialization
 from test_modernization_monthly_item_identity import MONTH, NAME, store
@@ -167,3 +167,43 @@ def test_explicit_diet_alias_does_not_supply_missing_item_identity(store, item_d
     order = _order("常食")
     with _readonly(store, order):
         _assert_resolution(order, quantity=quantity, fields=fields)
+
+
+@pytest.mark.parametrize('fault',[None,'missing','inactive','other-diet','ambiguous','unknown-diet'])
+def test_shared_serving_amount_comes_only_from_registered_unambiguous_rule(store,fault):
+    _seed_item('base',quantity=37)
+    if fault!='missing':
+        with db.session_scope() as session:
+            session.add(MenuRule(id='common',rule_type='global',daypart=DAYPART,category='主菜',
+                diet_type='mixer' if fault=='other-diet' else None,
+                unit_type='g',qty_per_serving=29,priority=0,active=fault!='inactive'))
+            if fault=='ambiguous':
+                session.add(MenuRule(id='other',rule_type='global',daypart=DAYPART,category='主菜',
+                    unit_type='g',qty_per_serving=31,priority=0,active=True))
+    order=_order('not-authored' if fault=='unknown-diet' else 'diabetes')
+    with _readonly(store,order):
+        if fault is None:
+            _assert_resolution(order,quantity=29.0)
+        else:
+            _assert_resolution(order,fields=['menu_identity'] if fault=='ambiguous' else ['qty_per_serving','unit_type'])
+
+
+def test_explicit_diet_serving_amount_precedes_common_global_rule(store):
+    _seed_item('base',quantity=37)
+    _seed_item('diabetic',quantity=13,diet='diabetes')
+    with db.session_scope() as session:
+        session.add(MenuRule(id='common',rule_type='global',daypart=DAYPART,category='主菜',
+            unit_type='g',qty_per_serving=29,priority=0,active=True))
+    order=_order('diabetes')
+    with _readonly(store,order):
+        _assert_resolution(order,quantity=13.0)
+
+
+@pytest.mark.parametrize('diet',['diabetes','mixer','no_fish','staff'])
+def test_shared_rule_never_borrows_another_dates_schedule(store,diet):
+    _seed_item('base',quantity=37,menu_date=date(2026,10,5))
+    with db.session_scope() as session:
+        session.add(MenuRule(id='common',rule_type='global',daypart=DAYPART,category='主菜',
+            unit_type='g',qty_per_serving=29,priority=0,active=True))
+    with _readonly(store,_order(diet)):
+        _assert_resolution(_order(diet),fields=['qty_per_serving','unit_type'])

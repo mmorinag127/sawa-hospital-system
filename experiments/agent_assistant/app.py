@@ -564,7 +564,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             from .managed import SYSTEM
             await run_blocking(approve_native_upgrade, store, tools, run, SYSTEM, **payload.model_dump())
             tools.authorizations[ident] = request.headers.get('authorization', '')
-            await run_blocking(business.checkpoint, ident, attempts=0, next_attempt=0)
+            await run_blocking(business.begin_reconciliation, run)
             return await managed.resume(ident)
 
     @app.post('/runs/{ident}/reconcile-business')
@@ -574,10 +574,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await authorize(request.headers.get('authorization', ''), run['domains'])
         if not owned(run):
             raise Conflict('共通業務進行を利用している依頼ではありません')
-        state = await run_blocking(business.state,ident)
-        attempt = {'epoch':state.get('epoch',0)+1} if run.get('task_id') in (
-            'hospital_pending_faxes','hospital_review_faxes') else {}
-        await run_blocking(business.checkpoint, ident, attempts=0, next_attempt=0,**attempt)
+        await run_blocking(business.begin_reconciliation, run)
         await business.kick_many([ident], request.headers.get('authorization', ''))
         return await asyncio.to_thread(store.get, ident, owner)
 

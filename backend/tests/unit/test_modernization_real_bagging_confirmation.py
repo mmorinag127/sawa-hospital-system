@@ -3,6 +3,7 @@
 OCR selection is manually seeded by the unchanged surface fixture. These are
 not HTTP/operator/native recognition/formal PG/staging proofs. Real bagging,
 artifact persistence, revision fences and final materialization are not mocked.
+The diagnostic-only rejection test injects one output-enrichment exception.
 """
 
 from copy import deepcopy
@@ -20,6 +21,24 @@ from src.models.order_workflow_state import OrderWorkflowState
 from src.services import order_output_artifact_service as artifacts
 from src.services import order_service as orders
 from src.services import order_workflow_v2_service as workflow
+
+
+@pytest.mark.parametrize('reason',['monthly_entry_source_row_unresolved','private arbitrary text'])
+def test_rejection_logs_only_symbolic_cause(monkeypatch,reason):
+    from types import SimpleNamespace
+    from src.services import output_builder
+    messages=[]
+    monkeypatch.setattr(workflow.logger,'warning',lambda *args,**kwargs:messages.append(args))
+    def reject(*args,**kwargs):
+        raise ValueError(reason)
+    monkeypatch.setattr(output_builder,'build_order_lines_for_outputs',reject)
+    order=SimpleNamespace(id='unit',facility_code='unit-facility',week_code='2026-11',received_at=None)
+    with pytest.raises(workflow.BaggingOutputUnresolved,match='bagging_output_enrichment_failed') as caught:
+        workflow._build_bag_rows_for_candidate(order=order,lines=[],materialization_candidate={})
+    assert str(caught.value.__cause__)==reason
+    assert len(messages)==1
+    assert messages[0][1]==('monthly_entry_source_row_unresolved' if reason.startswith('monthly_') else 'non_symbolic_error')
+    assert messages[0][2]=='ValueError'
 
 
 @pytest.fixture
@@ -48,6 +67,34 @@ def owned_bagging(surface):
 def revision(fixture):
     with fixture.session_scope() as session:
         return session.get(OrderWorkflowState, fixture.order_id).revision
+
+
+@pytest.mark.parametrize('diet,column',[('no_fish',6),('staff',7)])
+def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_bagging,diet,column):
+    from src.models.menu import MenuRule
+    fixture=owned_bagging
+    with fixture.session_scope() as session:
+        session.add(MenuRule(id='UNIT-COMMON',rule_type='global',daypart='朝',category=None,
+            diet_type=None,unit_type='g',qty_per_serving=17,priority=0,active=True))
+    sheet=fixture.saved()
+    sheet['rows'][0][column]='1'
+    for method in (workflow.run_sheet_anomaly_review,workflow.confirm_sheet_review):
+        kwargs={'use_llm':False} if method is workflow.run_sheet_anomaly_review else {}
+        _,error=method(order_id=fixture.order_id,sheet=sheet,expected_revision=revision(fixture),**kwargs)
+        assert error is None,error
+    _,error=workflow.save_sheet(order_id=fixture.order_id,sheet=sheet,
+        require_pre_save_checks=True,expected_revision=revision(fixture))
+    assert error is None,error
+    bagged,error=workflow.run_bagging(fixture.order_id,expected_revision=revision(fixture))
+    assert error is None,error
+    lines=bagged['bagging_result']['materialization_candidate']['output_lines']
+    specific=[line for line in lines if line.get('diet_type')==diet]
+    assert specific and all(line['menu_qty_per_serving']==17 for line in specific)
+    assert sum(row['quantity'] for row in bagged['bagging_result']['bag_rows'] if row.get('diet_type')==diet)==1
+    confirmed,error=workflow.final_confirm(fixture.order_id,expected_revision=revision(fixture))
+    assert error is None,error
+    assert confirmed['confirmed_snapshot_id']
+    assert fixture.saved()==sheet
 
 
 def assert_no_confirmation(fixture):

@@ -141,3 +141,9 @@ This permits a known no-write validation failure to be retried after actual
 business data correction without overwriting the old failure receipt. Run
 43161226205 was cancelled while building (no deployment job started), so this
 additional fix can be validated and deployed together.
+# 登録済み共通ルールの適用承認
+
+ユーザー回答「登録済み共通ルールを適用する」を受領。食種別月次設定がある場合は優先し、存在しない既知食種では同日・同食事・同献立の一意な常食行を日程と分類の照合だけに使い、一人量は既存の登録済みルール処理から取得する。常食の数値流用、固定数値追加、未登録食種・競合設定の成功化は行わない。
+
+同時に、既知の入力不備だけを注文単位で隔離し、他の承認済み注文の袋詰め・確定を継続する。未知の書込み結果と500系障害は全体停止を維持する。全件成功までは完了としない。新規AI呼出し・予算・IAM・本番の変更なし。
+

@@ -15,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'ed03f88a8ee2d562f4acd10fb96a10043ef2f119'
 BASE_RUN = 42815316580
 ALLOWED = {
+    'backend/src/services/menu_vocabulary.py',
+    'backend/src/services/order_serialization_service.py',
+    'backend/src/services/output_builder.py',
+    'backend/tests/unit/test_modernization_menu_amount_identity.py',
     '.github/workflows/deploy-prod.yml', 'backend/src/api/orders.py',
     'backend/src/services/order_workflow_v2_service.py',
     'backend/src/services/initial_saved_import_service.py',
@@ -87,7 +91,10 @@ BACKEND = ['backend/tests/unit/' + name for name in (
     'test_initial_saved_import_service.py', 'test_online_production_release.py',
     'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py','test_stg_ocr_restore_command.py',
     'test_native_ingest_sql_component.py','test_hakodate_order_sheet_evidence_projection.py',
-    'test_modernization_real_bagging_confirmation.py')]
+    'test_modernization_real_bagging_confirmation.py',
+    'test_modernization_menu_amount_identity.py',
+    'test_output_builder_diet_overrides.py', 'test_h2_monthly_source_date_boundary.py',
+    'test_output_menu_metadata_validation.py', 'test_h2_output_source_capture.py')]
 AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_cloud_store_target.py', 'test_connection_pool.py', 'test_durable_postgres.py',
     'test_postgres_ledger_contract.py', 'test_ledger_codec.py', 'test_generation_fence.py',

@@ -11,6 +11,7 @@ from src.db import session_scope
 from src.models.order import Order, OrderLine
 from src.models.order_version import OrderVersion
 from src.services import menu_service, sheet_week_service
+from src.services.menu_vocabulary import monthly_entry_diet_priority
 from src.services.workflow_attempt_guard_service import selected_version_snapshot
 from src.services.ocr_job_service import get_recorded_order_job_bindings, recorded_order_job_fields
 
@@ -196,6 +197,27 @@ MENU_AMOUNT_UNRESOLVED = "menu_amount_unresolved"
 MENU_AMOUNT_MESSAGE = "月次メニューの一人量または単位を確認してください。確定するまで量計算と出力はできません。"
 
 
+def _shared_rule_menu_amount(items, line, rules, facility_id):
+    name, daypart, diet, menu_date = _line_menu_identity(line)
+    if monthly_entry_diet_priority('regular',diet) != 4:
+        return None
+    base = [item for item in items if str(item.get('name') or '').strip() == name
+        and _matches_explicit_line_identity(item,daypart=daypart,diet='regular',menu_date=menu_date)]
+    identities = {(item.get('month_id'),item.get('id'),item.get('menu_master_id'),
+        menu_service._monthly_item_identity_key_from_payload(item,item.get('facility_override'))) for item in base}
+    if not base or len(identities) != 1 or any(not item.get('id') or not item.get('month_id') for item in base):
+        return None
+    menu_service.require_resolved_menu_items(base)
+    from src.services import output_builder
+    projected = output_builder._apply_menu_rules([{'menu_name':name,'daypart':daypart,
+        'diet_type':menu_service.normalize_diet_type(diet),'menu_category':base[0].get('category')}],facility_id,rules=rules)[0]
+    quantity, unit = projected.get('menu_qty_per_serving'), projected.get('menu_unit_type')
+    unit = menu_service._normalize_menu_unit_type(unit)
+    if not menu_service.is_resolved_quantity(quantity) or unit not in {'g','cut','count'}:
+        return None
+    return {'qty_per_serving':float(quantity),'unit_type':unit}
+
+
 def _resolve_menu_amounts(order: Order) -> tuple[dict, dict]:
     affected = []
     resolution = {"status": "resolved", "blocker": None, "message": None, "affected_lines": affected}
@@ -205,6 +227,7 @@ def _resolve_menu_amounts(order: Order) -> tuple[dict, dict]:
     if order.week_code:
         items = _collect_menu_items_for_week(order.week_code, order.facility_code)
     meta = {}
+    shared_rules = None
     for line in order.lines or []:
         name, daypart, diet, menu_date = _line_menu_identity(line)
         if not name:
@@ -223,7 +246,17 @@ def _resolve_menu_amounts(order: Order) -> tuple[dict, dict]:
         ]
         fields = []
         if not candidates:
-            fields = ["qty_per_serving", "unit_type"]
+            if shared_rules is None:
+                shared_rules = menu_service.menu_rule_service.list_active_rules()
+            try:
+                common = _shared_rule_menu_amount(items,line,shared_rules,order.facility_code)
+            except ValueError:
+                fields = ['menu_identity']
+            else:
+                if common is not None:
+                    meta[_line_menu_identity(line)] = common
+                    continue
+                fields = ["qty_per_serving", "unit_type"]
         else:
             identities = {
                 (item.get("month_id"), item.get("id"), item.get("menu_master_id"),

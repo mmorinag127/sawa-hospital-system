@@ -11,7 +11,8 @@ from experiments.agent_assistant.tools import Arguments
 from experiments.agent_assistant.tests.test_selected_tasks import shift, shift_evidence, record
 
 
-def test_missing_menu_amount_does_not_block_other_approved_faxes(tmp_path):
+@pytest.mark.parametrize('native_failure',[None,400,422,500])
+def test_missing_menu_amount_does_not_block_other_approved_faxes(tmp_path,native_failure):
     from experiments.agent_assistant.tests.test_fax_workflow import Native
     from experiments.agent_assistant.store import Store
     from experiments.agent_assistant.tools import Tools
@@ -23,13 +24,16 @@ def test_missing_menu_amount_does_not_block_other_approved_faxes(tmp_path):
         missing={'status':'unresolved','blocker':'menu_amount_unresolved','affected_lines':[
             {'date':'2026-11-15','daypart':'朝','menu_name':'Dish','diet_type':'diabetes',
              'unresolved_fields':['qty_per_serving','unit_type']}]}
-        native.wfs['OA']['menu_amount_resolution']=missing
+        if native_failure is None:
+            native.wfs['OA']['menu_amount_resolution']=missing
         async def transport(run,domain,method,path,**kwargs):
             if path.startswith('/outputs/') and method=='GET':
                 return httpx.Response(200,content=b'synthetic sealed output',headers={'content-type':'text/csv'})
             if path.endswith('/bagging'):
                 assert native.saved=={'OA','OB'}
-                assert '/OA/' not in path
+                if '/OA/' in path:
+                    assert native_failure is not None
+                    return httpx.Response(native_failure,json={'detail':'bagging_output_enrichment_failed'})
             return await request(run,domain,method,path,**kwargs)
         native.request=transport;tools=Tools(store,native)
         for source in native.sources.values():source['status']='completed'
@@ -39,12 +43,23 @@ def test_missing_menu_amount_does_not_block_other_approved_faxes(tmp_path):
             await tools.faxes.decide(run,fax,review['id'],True,'承認')
         original=deepcopy(native.sheets)
         result=await tools.execute(run['id'],0,'complete_fax_work',{},'partial-native-completion')
-        assert result['business_input_required'] is True
-        assert native.wfs['OB']['state']=='confirmed'
+        if native_failure==500:
+            assert 'error' in result and not result.get('business_input_required')
+            assert native.wfs['OB']['state']!='confirmed'
+        else:
+            assert result['business_input_required'] is True
+            assert native.wfs['OB']['state']=='confirmed'
         assert native.wfs['OA']['state']!='confirmed'
         assert native.sheets==original
-        event=store.latest_event(run['id'],'fax_completion_blocked')['payload']
-        assert len(event['items'])==1 and event['items'][0]['menu_amount_resolution']==missing
+        event=store.latest_event(run['id'],'fax_completion_blocked')
+        if native_failure==500:
+            assert event is None
+        else:
+            assert len(event['payload']['items'])==1
+            if native_failure is None:
+                assert event['payload']['items'][0]['menu_amount_resolution']==missing
+            else:
+                assert event['payload']['items'][0]['validation']['status']==native_failure
         assert store.get(run['id'])['status']!='completed'
     asyncio.run(scenario())
 
