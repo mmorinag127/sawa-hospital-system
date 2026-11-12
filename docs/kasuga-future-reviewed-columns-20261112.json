@@ -1,0 +1,27 @@
+{
+  "facility_id": "FAC00003",
+  "evidence_orders": ["ORD108ac1e3", "ORD47f63e9f"],
+  "approval": "今後の設定を花・月にし、既存履歴は保持",
+  "expected_areas": [],
+  "new_areas": [{"id": "hana", "name": "花"}, {"id": "tsuki", "name": "月"}],
+  "source_label_patches": [
+    {"source_index": 4, "expected": {"role": "quantity", "diet_type": "regular", "name": "qty.regular_2f"}, "replacement": {"header": "常食 花", "delivery_header": "常食 花", "area_id": "hana", "name": "qty.regular_hana"}},
+    {"source_index": 5, "expected": {"role": "quantity", "diet_type": "regular", "name": "qty.regular_3f"}, "replacement": {"header": "常食 月", "delivery_header": "常食 月", "area_id": "tsuki", "name": "qty.regular_tsuki"}},
+    {"source_index": 6, "expected": {"role": "quantity", "diet_type": "soft", "name": "qty.soft_2f"}, "replacement": {"header": "軟菜 花", "delivery_header": "軟菜 花", "area_id": "hana", "name": "qty.soft_hana"}},
+    {"source_index": 7, "expected": {"role": "quantity", "diet_type": "soft", "name": "qty.soft_3f"}, "replacement": {"header": "軟菜 月", "delivery_header": "軟菜 月", "area_id": "tsuki", "name": "qty.soft_tsuki"}},
+    {"source_index": 8, "expected": {"role": "quantity", "diet_type": "mixer", "name": "qty.mixer_2f"}, "replacement": {"header": "ミキサー 花", "delivery_header": "ミキサー 花", "area_id": "hana", "name": "qty.mixer_hana"}},
+    {"source_index": 9, "expected": {"role": "quantity", "diet_type": "mixer", "name": "qty.mixer_3f"}, "replacement": {"header": "ミキサー 月", "delivery_header": "ミキサー 月", "area_id": "tsuki", "name": "qty.mixer_tsuki"}},
+    {"source_index": 10, "expected": {"role": "quantity", "diet_type": "no_fish", "name": "qty.no_fish_regular_2f"}, "replacement": {"header": "魚禁 花", "delivery_header": "禁食、魚 花", "area_id": "hana", "name": "qty.no_fish_regular_hana"}},
+    {"source_index": 11, "expected": {"role": "quantity", "diet_type": "no_fish", "name": "qty.no_fish_regular_3f"}, "replacement": {"header": "魚禁 月", "delivery_header": "禁食、魚 月", "area_id": "tsuki", "name": "qty.no_fish_regular_tsuki"}},
+    {"source_index": 12, "expected": {"role": "quantity", "diet_type": "no_fish", "name": "qty.no_fish_soft_2f"}, "replacement": {"header": "魚禁 花", "delivery_header": "禁食、魚 花", "area_id": "hana", "name": "qty.no_fish_soft_hana"}},
+    {"source_index": 13, "expected": {"role": "quantity", "diet_type": "no_fish", "name": "qty.no_fish_soft_3f"}, "replacement": {"header": "魚禁 月", "delivery_header": "禁食、魚 月", "area_id": "tsuki", "name": "qty.no_fish_soft_tsuki"}},
+    {"source_index": 14, "expected": {"role": "quantity", "diet_type": "no_fish", "name": "qty.no_fish_mixer_2f"}, "replacement": {"header": "魚禁 花", "delivery_header": "禁食、魚 花", "area_id": "hana", "name": "qty.no_fish_mixer_hana"}},
+    {"source_index": 15, "expected": {"role": "quantity", "diet_type": "no_fish", "name": "qty.no_fish_mixer_3f"}, "replacement": {"header": "魚禁 月", "delivery_header": "禁食、魚 月", "area_id": "tsuki", "name": "qty.no_fish_mixer_tsuki"}}
+  ],
+  "invoice_label_patches": [
+    {"column_index": 4, "expected": {"name": "常食2F", "diet_type": "regular", "area_id": "2F"}, "replacement": {"name": "常食 花", "header": "常食 花", "area_id": "hana"}},
+    {"column_index": 5, "expected": {"name": "常食3F", "diet_type": "regular", "area_id": "3F"}, "replacement": {"name": "常食 月", "header": "常食 月", "area_id": "tsuki"}},
+    {"column_index": 7, "expected": {"name": "ミキサー2F", "diet_type": "mixer", "area_id": "2F"}, "replacement": {"name": "ミキサー 花", "header": "ミキサー 花", "area_id": "hana"}},
+    {"column_index": 8, "expected": {"name": "ミキサー3F", "diet_type": "mixer", "area_id": "3F"}, "replacement": {"name": "ミキサー 月", "header": "ミキサー 月", "area_id": "tsuki"}}
+  ]
+}

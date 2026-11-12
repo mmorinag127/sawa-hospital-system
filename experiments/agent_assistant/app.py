@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import secrets
 from urllib.parse import urlparse
+from typing import Literal
 
 import httpx
 
@@ -91,6 +92,15 @@ class Reply(BaseModel):
     message: str = Field(min_length=1, max_length=20000)
     question_id: str | None = None
     option: str | None = None
+
+
+class TrialMenuAmount(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(min_length=1,max_length=200)
+    quantity: float = Field(gt=0,le=10000,allow_inf_nan=False)
+    unit: Literal['g','cut','count']
+    provisional: Literal[True]
+    reason: str = Field(min_length=1,max_length=1000)
 
 
 class NativeUpgrade(BaseModel):
@@ -428,6 +438,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 faxes = fax_page['items']
                 fax_labels = tools.faxes.labels(ident, events)
                 source_event = store.latest_event(ident, 'source')
+                provisional = store.latest_event(ident, 'trial_provisional_menu_amount')
+                current = {**current, 'provisional_menu_amount':provisional['payload'] if provisional else None}
                 # Old clients also use this immutable binding to distinguish a
                 # source-upload question from an ordinary operator question.
                 context = [source_event] if source_event and all(event['id'] != source_event['id'] for event in events) else []
@@ -577,6 +589,57 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await run_blocking(business.begin_reconciliation, run)
         await business.kick_many([ident], request.headers.get('authorization', ''))
         return await asyncio.to_thread(store.get, ident, owner)
+
+    @app.post('/runs/{ident}/trial-menu-amount')
+    @_complete_request
+    async def trial_menu_amount(ident: str, payload: TrialMenuAmount, request: Request):
+        run=await run_blocking(store.get,ident,owner)
+        await authorize(request.headers.get('authorization',''),run['domains'])
+        if not owned(run) or run.get('task_id') != 'hospital_pending_faxes' or run['domains'] != ['hospital'] or run['status'] in (
+                'completed','stopped','rolled_back','stopping','stop_pending','rollback_stop_pending'):
+            raise Conflict('未完了の病院試用コピーだけ変更できます')
+        async with control_lock(ident):
+            async with tools.workflow_locks.setdefault(ident,asyncio.Lock()):
+                run=await run_blocking(store.get,ident,owner)
+                if run['status'] in ('completed','stopped','rolled_back','stopping','stop_pending','rollback_stop_pending'):
+                    raise Conflict('停止済み・完了済みの試用コピーは変更しません')
+                await run_blocking(business.require_copy,run)
+                tools.authorizations[ident]=request.headers.get('authorization','')
+                from .business_contracts import OWNER_INPUT_EXECUTION,SERVER_EXECUTION
+                command='owner-menu-'+hashlib.sha256(json.dumps(payload.model_dump(),sort_keys=True).encode()).hexdigest()
+                old_status=run['status']
+                await run_blocking(store.update,ident,expected_generation=run['generation'],status='running')
+                owner_token=OWNER_INPUT_EXECUTION.set(True)
+                server_token=SERVER_EXECUTION.set(True)
+                try:
+                    result=await tools.execute(ident,run['generation'],'hospital_create_menu_master',{'parameters':{
+                        'body':{'name':payload.name.strip(),'qty_per_serving':payload.quantity,
+                                'unit_type':payload.unit,'category':'添え'},
+                        'reason':payload.reason}},command)
+                    if result.get('ok') is not True:
+                        await run_blocking(store.update,ident,expected_generation=run['generation'],status=old_status)
+                        raise HTTPException(status_code=400,detail=result)
+                    item=result['data']['item']
+                    checked=await tools.execute(ident,run['generation'],'hospital_get_menu_master',{'parameters':{
+                        'ids':{'item_id':item['id']}}},command+'-readback-'+secrets.token_hex(8))
+                    actual=checked.get('data',{}).get('item',{})
+                    if (checked.get('ok') is not True or actual.get('name') != payload.name.strip()
+                            or actual.get('qty_per_serving') != payload.quantity or actual.get('unit_type') != payload.unit):
+                        raise Conflict('登録した一人量の再読込みが一致しません')
+                    await run_blocking(store.event,ident,'trial_provisional_menu_amount',{
+                        **payload.model_dump(),'menu_master_id':item['id'],'command_id':command,
+                        'readback_command_id':checked['command_id']})
+                except HTTPException:
+                    raise
+                except Exception:
+                    await run_blocking(store.update,ident,expected_generation=run['generation'],status='reconciliation_required')
+                    raise
+                finally:
+                    OWNER_INPUT_EXECUTION.reset(owner_token)
+                    SERVER_EXECUTION.reset(server_token)
+                await run_blocking(business.begin_reconciliation,run)
+        await business.kick_many([ident],request.headers.get('authorization',''))
+        return await run_blocking(store.get,ident,owner)
 
     @app.post("/runs/{ident}/stop")
     async def stop(ident: str):

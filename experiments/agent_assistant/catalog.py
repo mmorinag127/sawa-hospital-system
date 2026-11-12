@@ -17,6 +17,7 @@ class Operation:
 
 
 OPERATIONS = {}
+OWNER_INPUT_OPERATIONS = frozenset({'hospital_create_menu_master', 'hospital_get_menu_master'})
 READ_ONLY_WAITS = frozenset({'wait_for_task_decision', 'wait_for_native_job', 'wait_for_fax_work', 'wait_for_native_idle'})
 
 
@@ -46,6 +47,8 @@ for name, method, path, description in [
     ("pre_save", "POST", "/orders/{order_id}/workflow-v2/sheet/pre-save-status", "指定数量シートの保存前検査を実行する。"),
 ]:
     add("hospital", name, method, path, description)
+add('hospital','create_menu_master','POST','/menu-masters','所有者が指定した試用コピーの一人量を登録する。モデルからは実行しない。')
+add('hospital','get_menu_master','GET','/menu-masters/{item_id}','所有者が登録した一人量を再読込みする。')
 for name, path, description in [
     ("set_context", "context", "施設・週・正本テンプレートを明示して設定する。推測や既定候補は禁止。"),
     ("run_ocr", "ocr-runs", "原本・施設・対象週が確認済みの場合にOCRを開始する。受付だけを成功としない。"),

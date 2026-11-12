@@ -1,0 +1,24 @@
+{
+  "facility_id": "FAC00004",
+  "evidence_orders": ["ORD613fc70e", "ORDf021b65f"],
+  "excluded_source_columns": [
+    {"source_index": 7, "header": "肉禁", "diet_type": "no_meat", "area_id": "X"},
+    {"source_index": 8, "header": "魚禁", "diet_type": "no_fish", "area_id": "X"},
+    {"source_index": 9, "header": "揚げ物禁", "diet_type": "no_fried", "area_id": "X"},
+    {"source_index": 10, "header": "変更1", "diet_type": "change_1", "area_id": "X"}
+  ],
+  "source_columns": [
+    {"source_index": 4, "header": "常食", "diet_type": "regular", "area_id": "X"},
+    {"source_index": 5, "header": "通所", "diet_type": "daycare", "area_id": "X"},
+    {"source_index": 6, "header": "職員", "diet_type": "staff", "area_id": "X"}
+  ],
+  "invoice_columns": [
+    {"name": "日付", "source": "date", "header": "日付", "column_index": 1},
+    {"name": "区分", "source": "daypart", "header": "区分", "column_index": 2},
+    {"name": "献立", "source": "menu_display", "column_index": 3},
+    {"name": "常食", "source": "quantity", "diet_type": "regular", "area_id": "X", "header": "常食", "column_index": 4},
+    {"name": "通所", "source": "quantity", "diet_type": "daycare", "area_id": "X", "header": "通所", "column_index": 5},
+    {"name": "職員", "source": "quantity", "diet_type": "staff", "area_id": "X", "header": "職員", "column_index": 6},
+    {"name": "備考", "source": "note", "header": "備考", "column_index": 9}
+  ]
+}

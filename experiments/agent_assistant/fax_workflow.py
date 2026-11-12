@@ -362,6 +362,11 @@ class FaxWorkflow:
         return {"ok": True}
 
     async def gate(self, run, name, args):
+        from .catalog import OWNER_INPUT_OPERATIONS
+        if name in OWNER_INPUT_OPERATIONS:
+            from .business_contracts import require_server
+            require_server(run,name)
+            return
         if not self.active(run):
             return
         await self.initialize(run)

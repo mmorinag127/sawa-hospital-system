@@ -5,14 +5,16 @@ from dataclasses import dataclass
 from .tasks import TASKS
 
 SERVER_EXECUTION = ContextVar('sawa_business_execution', default=False)
+OWNER_INPUT_EXECUTION = ContextVar('sawa_owner_input_execution', default=False)
 
 
 def server_tools(task_id):
+    from .catalog import OWNER_INPUT_OPERATIONS
     spec = TASKS[task_id]
     names = {'shift_save_settings', 'shift_apply_rules', 'shift_propose_rules', 'finish_work', 'complete_shift_work', 'complete_fax_work', 'complete_lunch_daily_work', *spec.get('terminal', ()), *spec.get('exports', ())}
     if task_id in ('hospital_pending_faxes', 'hospital_review_faxes'):
         names.update(('hospital_check_anomalies', 'hospital_review_sheet', 'hospital_save_sheet', 'hospital_bag_order', 'hospital_confirm_order', 'hospital_export_labels', 'hospital_export_delivery_notes', 'hospital_export_aggregate'))
-    return names
+    return names | OWNER_INPUT_OPERATIONS
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,10 @@ def model_definitions(tools, run):
 
 
 def require_server(run, name):
+    from .catalog import OWNER_INPUT_OPERATIONS
+    if name in OWNER_INPUT_OPERATIONS and not OWNER_INPUT_EXECUTION.get():
+        from .store import Conflict
+        raise Conflict('試用コピーの業務設定は所有者の明示操作が必要です')
     if not owned(run) or SERVER_EXECUTION.get():
         return
     from .fax_preparation import enabled

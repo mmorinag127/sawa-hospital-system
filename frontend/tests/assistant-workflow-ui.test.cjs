@@ -20,6 +20,25 @@ for(const [id,domain,label,target_kind,month] of [
 const config={missing:[],domains:Object.fromEntries(['hospital','shift','school-lunch'].map(k=>[k,{baseline_ready:true}])),budget:{spent_cents:0,reserved_cents:0,monthly_cents:1000,available_cents:1000,notice:'synthetic'}};
 const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',instruction:'翌月のシフト案を作る',domains:['shift'],status,spent:0,cap:100,events:[],artifacts:[],conversation:[],task_inputs:{inputs:{month:'2026-11'},targets:[{label:'11月の勤務計画',data:{}}]},pending_question:{id:'q1',role:'assistant',question_id:'question-1',text:'登録内容で作成しますか？',options:['登録内容で進める','確認したい']}});
 
+test('owner trial serving input is explicit and marked provisional without budget changes',async()=>{
+ const initial={...makeRun(),task_id:'hospital_pending_faxes',domains:['hospital'],pending_question:null};
+ const h=await mount({initial,adminView:true,beforePost:async(url,body)=>{
+  if(url.endsWith('/trial-menu-amount')){h.setRun({...initial,provisional_menu_amount:body});return {data:h.run};}
+ }});
+ try{
+  const form=[...h.document.querySelectorAll('form')].find(item=>item.textContent.includes('試用コピー専用の仮一人量'));
+  assert.ok(form);
+  assert.equal(h.calls.filter(call=>call.url.endsWith('/trial-menu-amount')).length,0);
+  await h.change(form.querySelector('input:not([type])'),'Synthetic sauce');
+  await h.change(form.querySelector('input[type=number]'),'1');
+  await h.click(h.button('仮登録して再開'));
+  const request=h.calls.find(call=>call.url.endsWith('/trial-menu-amount'));
+  assert.deepEqual(request.body,{name:'Synthetic sauce',quantity:1,unit:'g',provisional:true,reason:'検証用仮設定。実運用の一人量は未確認。'});
+  assert.equal(request.body.cap,undefined);
+  assert.ok(h.document.body.textContent.includes('検証専用の仮設定：Synthetic sauce 1g'));
+ }finally{await h.close();}
+});
+
 test('native upgrade sends the displayed binding hashes and generation only after owner action',async()=>{
  const initial={...makeRun('reconciliation_required'),generation:7,pending_question:null,native_upgrade:{previous_sha256:'a'.repeat(64),current_sha256:'b'.repeat(64),previous_sources:{hospital:{source_revision:'a'.repeat(40)}},current_sources:{hospital:{source_revision:'c'.repeat(40)}}}};
  const h=await mount({initial,adminView:true,beforePost:async(url,body)=>{

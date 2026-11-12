@@ -123,9 +123,10 @@ and three exports. Ikoi then returned HTTP 400 menu_amount_unresolved: all 56
 affected lines have diet_type=diabetes. This is a separate menu authority issue,
 not a remaining nonnumeric quantity. The captured monthly items/entries contain
 regular only. Existing active wildcard global rules specify breakfast main 70g,
-lunch/dinner main 100g and sides 40g, but applying them to the missing diabetes
-authority has not been approved. No menu quantities are inferred or written.
-Other five orders' latest native menu resolutions are resolved.
+lunch/dinner main 100g and sides 40g. Application to missing diet-specific
+amounts was subsequently explicitly approved below. No menu quantities are
+inferred or written. Earlier explicit GET receipts for the other orders may
+precede the final save and are not proof of their current saved resolution.
 
 The completion harness now preserves all-six-save-first, records exact unresolved
 menu/quantity details, continues resolved orders, and does not claim whole-run
@@ -141,9 +142,29 @@ This permits a known no-write validation failure to be retried after actual
 business data correction without overwriting the old failure receipt. Run
 43161226205 was cancelled while building (no deployment job started), so this
 additional fix can be validated and deployed together.
-# 登録済み共通ルールの適用承認
+## 登録済み共通ルールの適用承認
 
 ユーザー回答「登録済み共通ルールを適用する」を受領。食種別月次設定がある場合は優先し、存在しない既知食種では同日・同食事・同献立の一意な常食行を日程と分類の照合だけに使い、一人量は既存の登録済みルール処理から取得する。常食の数値流用、固定数値追加、未登録食種・競合設定の成功化は行わない。
 
 同時に、既知の入力不備だけを注文単位で隔離し、他の承認済み注文の袋詰め・確定を継続する。未知の書込み結果と500系障害は全体停止を維持する。全件成功までは完了としない。新規AI呼出し・予算・IAM・本番の変更なし。
 
+常食の月次設定・保存済みスナップショットから他食種の一人量を上書きする出力経路も修正。食種別の登録値がなければ登録ルールを適用し、同順位競合・未知食種・別日・別食事は停止する。魚禁などの既存集計除外仕様は変更しない。
+
+## 最終集約検証と反映
+
+- 検証ソース: `2c7704987f3707c0b7bec545dc3ee2b22aa22baf`。
+- backend 429件、agent 450件、frontend 239件成功。型チェック・ビルド成功。スキップ0。
+- 署名記録: `tmp/fax-bagging-common-rules-proof-20261112-release/receipt.json`。失敗した前段batchには成功記録を発行していない。
+- develop統合済み。正規stg配信 `43169272743` 成功。画面footerのsource一致を確認。
+- 同一試験 `2e4d51b976264951bd1278a341d2be79` を所有者操作で新版へ引継ぎ・再開済み。6件の保存・承認、成功済みの確定記録を保持。新規OCR・AI起動なし。
+- この時点では6件の確定完了をまだ主張しない。実状態・全保存シートの一致は最終readbackで判定する。
+
+## 追加で特定した投入データ不足
+
+同一試験の保存済みSQLite・原本・設定・参照資材をread-only PG snapshotからローカルへ採取し、未変更の候補生成・出力構築を再現した。業務sessionはrollbackし、OCR・モデル・本番接続は起動していない。正式な全件完了検証とは区別する。
+
+- いこい `ORD35ca861f`、四万十 `ORD3d00284a`、春日苑 `ORD45810ddb`: `derived_accessory_amount_unresolved`。
+- 不足対象は `ｱｼﾞのｿﾃｰ 添)ﾄﾏﾄｿｰｽ` から分ける `ﾄﾏﾄｿｰｽ` の一人量・単位。常食・糖尿・ミキサーで同じ不足。
+- 親メニューは1切で登録されているが、トマトソース単独のマスターは未登録、親のcondimentsは空。登録済み共通ルールにも「添え」はない。親の1切や副菜40gを流用しない。
+- 同じ入力で百々家58、ふれあい193、湘南252の袋行を構築できた。ただしローカル構築だけをstg確定済みとは扱わない。
+- 証跡: `tmp/fax-bagging-captured-diagnosis-20261112.log`。ユーザーへ具体的な一人量・単位を質問済み。残るstg注文の実行は継続する。

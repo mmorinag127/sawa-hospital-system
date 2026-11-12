@@ -2955,6 +2955,7 @@ def _apply_delivery_configured_headers(
     column_map: dict[str, int],
     *,
     data_start_row: int | None = None,
+    replace_header_band: bool = False,
 ) -> None:
     if header_row < 1:
         return
@@ -2965,6 +2966,25 @@ def _apply_delivery_configured_headers(
     }
     if not configured_indexes:
         return
+    if replace_header_band:
+        if data_start_row is None or data_start_row <= header_row:
+            raise ValueError("delivery_header_band_invalid")
+        first, last = min(configured_indexes), max(configured_indexes)
+        # A reused workbook's multi-row diet headings are not authored settings.
+        # Replace only the table heading band, never title rows or quantity cells.
+        for merged in list(ws.merged_cells.ranges):
+            intersects = (merged.max_row >= header_row and merged.min_row < data_start_row
+                          and merged.max_col >= first and merged.min_col <= last)
+            if not intersects:
+                continue
+            if not (header_row <= merged.min_row <= merged.max_row < data_start_row
+                    and first <= merged.min_col <= merged.max_col <= last):
+                raise ValueError("delivery_header_merge_crosses_data_boundary")
+            ws.unmerge_cells(str(merged))
+        for row in ws.iter_rows(min_row=header_row, max_row=data_start_row - 1,
+                                min_col=first, max_col=last):
+            for cell in row:
+                cell.value = None
     for col in columns:
         name = col.get("name")
         if not name:
@@ -2972,7 +2992,7 @@ def _apply_delivery_configured_headers(
         col_idx = column_map.get(name)
         if not col_idx:
             continue
-        header = col.get("header") or name
+        header = name if replace_header_band and col.get("source") == "quantity" else col.get("header") or name
         cell = _resolve_merged_cell(ws, header_row, col_idx)
         merged = next(
             (
@@ -3732,12 +3752,13 @@ def _write_delivery_note(
     column_map = _build_delivery_column_map(ws, header_row, columns)
     menu_col_idx = _resolve_delivery_menu_column(columns, column_map)
     slot_rows = _find_delivery_slot_rows(ws, menu_col_idx) if menu_col_idx else []
-    if slot_rows:
-        # Slot templates keep the editable column labels immediately above the
-        # first menu row; fixed title/company rows can otherwise win detection.
-        header_row = max(1, min(slot_rows) - 1)
-    if not slot_rows:
-        _apply_delivery_configured_headers(ws, header_row, columns, column_map)
+    if slot_rows and header_row >= min(slot_rows):
+        raise ValueError("delivery_header_row_overlaps_data")
+    _apply_delivery_configured_headers(
+        ws, header_row, columns, column_map,
+        data_start_row=min(slot_rows) if slot_rows else None,
+        replace_header_band=bool(slot_rows),
+    )
     if slot_rows:
         worksheet_sources = {sheet.title: sheet.title for sheet in workbook.worksheets}
         source_sheet_name = ws.title

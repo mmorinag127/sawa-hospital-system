@@ -14,7 +14,7 @@ const BUSINESS_TIMEOUT = 300000;
 const terminalRun = (status: string) => ["completed", "rolled_back", "stopped", "failed"].includes(status);
 const assistantApi = {
   post<T=any>(url:string,data?:unknown,options?:AxiosRequestConfig) {
-    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage|reconcile-business)|faxes\/[^/]+\/decision)$/.test(url);
+    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage|reconcile-business|trial-menu-amount)|faxes\/[^/]+\/decision)$/.test(url);
     return apiClient.post<T>(url,data,business ? {...options,timeout:BUSINESS_TIMEOUT} : options);
   },
 };
@@ -27,6 +27,7 @@ type ChatMessage = {question_map?:QuestionMap;id:string;role:"assistant"|"user";
 type Run = { business?:BusinessProgress; business_messages?:ChatMessage[]; request_key?:string; provider?:string; usage?:{estimated?:boolean}; lunch_review?:Record<string,string>[]; shift_review?:ShiftReviewData; conversation?:ChatMessage[]; pending_question?:ChatMessage; task_review?:TaskReview; task_inputs?:{inputs?:Record<string,any>;targets?:{label:string;data:Record<string,any>}[]}; task_id?: string; fax_items?: Fax[]; id: string; instruction: string; domains: string[]; status: string; cap: number; spent: number;
   events?: { id: number; kind: string; payload: Record<string, any> }[];
   source_attached?:boolean;
+  provisional_menu_amount?:{name:string;quantity:number;unit:string;provisional:true}|null;
   generation?:number;
   native_upgrade?:{previous_sha256:string;current_sha256:string;previous_sources:Record<string,{source_revision:string}>;current_sources:Record<string,{source_revision:string}>}|null;
   event_page?:AssistantEventPage;
@@ -94,6 +95,11 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [busy, setBusy] = useState(false);
   const [controlling,setControlling]=useState(false);
   const [controlNotice,setControlNotice]=useState("");
+  const [trialMenuDrafts,setTrialMenuDrafts]=useState<Record<string,{name:string;quantity:string;unit:string}>>({});
+  const trialMenu=trialMenuDrafts[selected?.id || ""] || {name:"",quantity:"",unit:"g"};
+  const setTrialMenu=(patch:Partial<typeof trialMenu>)=>{
+    if(selected)setTrialMenuDrafts(previous=>({...previous,[selected.id]:{...trialMenu,...patch}}));
+  };
   const [pendingReply,setPendingReply]=useState<{runId:string;questionId?:string}|null>(null);
   const [pendingDecision,setPendingDecision]=useState<{runId:string;reviewId:string;faxId?:string}|null>(null);
   const [confirmRollback,setConfirmRollback]=useState(false);
@@ -320,6 +326,19 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     });}
     finally {setControlling(false);}
   }
+
+  async function registerTrialMenuAmount(event: FormEvent) {
+    event.preventDefault();
+    if(!selected || busy || controlling)return;
+    const id=selected.id;
+    await act(async()=>{
+      await assistantApi.post(`/assistant-trial/runs/${id}/trial-menu-amount`,{
+        name:trialMenu.name,quantity:Number(trialMenu.quantity),unit:trialMenu.unit,
+        provisional:true,reason:"検証用仮設定。実運用の一人量は未確認。",
+      });
+      if(selectedId.current===id){setTrialMenuDrafts(previous=>{const copy={...previous};delete copy[id];return copy;});await refreshAfterCommand(id);}
+    });
+  }
   const task = tasks.find(t => t.id === taskId && t.domain === domain);
   const targetsReady=taskId==="hospital_pending_faxes" ? !!selection : !!selection && (!task?.month || !!selection.inputs?.month) && !!targetKeys.length && (task?.target_kind!=="menu" || !!task?.date || !!layoutId);
   const ready = config && task && targetsReady && (!config.missing.length || task.requires_agent===false) && config.domains[domain]?.baseline_ready;
@@ -511,6 +530,15 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
         <button disabled={busy || controlling} onClick={()=>control("upgrade-native")}>修正版へ引き継いで再開</button></section>}
       {adminView && selected.business?.state==="checking" && <section className="assistant-notice"><h3>管理者による確認が必要な業務</h3>{selected.events?.filter(event=>event.kind==="business_support").slice(-1).map(event=><p key={event.id}>{event.payload.message}</p>)}<button disabled={busy || controlling} onClick={()=>control("reconcile-business")}>業務結果を再照合する</button><p>結果未確定の更新は再送せず、保存済みの証跡を確認します。</p></section>}
       {adminView && controlNotice && <p className="assistant-notice" role="status" aria-live="polite">{controlNotice}</p>}
+      {selected.provisional_menu_amount && <p role="status" className="assistant-notice">検証専用の仮設定：{selected.provisional_menu_amount.name} {selected.provisional_menu_amount.quantity}{selected.provisional_menu_amount.unit}（実運用の値は未確認）</p>}
+      {adminView && selected.task_id==="hospital_pending_faxes" && !terminal && <form className="assistant-notice" onSubmit={registerTrialMenuAmount}>
+        <h3>試用コピー専用の仮一人量</h3>
+        <label>品名<input required maxLength={200} value={trialMenu.name} onChange={event=>setTrialMenu({name:event.target.value})}/></label>
+        <label>一人量<input required type="number" min="0.001" max="10000" step="any" value={trialMenu.quantity} onChange={event=>setTrialMenu({quantity:event.target.value})}/></label>
+        <label>単位<select value={trialMenu.unit} onChange={event=>setTrialMenu({unit:event.target.value})}><option value="g">g</option><option value="cut">切</option><option value="count">個</option></select></label>
+        <p>実運用の一人量は未確認・検証専用</p>
+        <button disabled={busy || controlling} type="submit">仮登録して再開</button>
+      </form>}
       {adminView && <div className="work-controls"><button disabled={controlling || terminal || selected.status==="stopping"} onClick={()=>control("stop")}>{controlling ? "操作結果を確認中…" : ["stop_pending","rollback_stop_pending"].includes(selected.status) ? "停止を再確認する" : "作業を停止する"}</button><button className="quiet" disabled={controlling || ["rolled_back","rollback_stop_pending"].includes(selected.status)} onClick={()=>setConfirmRollback(true)}>開始前に戻す</button>{adminView && <button onClick={()=>control("refresh-usage")} disabled={busy}>料金を再取得</button>}</div>}
       {adminView && confirmRollback && <div className="rollback-confirmation" role="alert"><h3>この依頼の変更を、開始前へ戻しますか？</h3><p>処理を停止し、この依頼で保存した内容を戻します。履歴と利用料金は残ります。</p><div className="answer-options"><button className="danger" disabled={controlling} onClick={()=>control("rollback")}>開始前へ戻す</button><button disabled={controlling} onClick={()=>setConfirmRollback(false)}>キャンセル</button></div></div>}
       {adminView && <details className="technical-details"><summary>処理の詳細</summary><ol>{selected.events?.map(event=><li key={event.id}>{event.kind==="agent.message" ? event.payload.content?.filter((c:any)=>c.type==="text").map((c:any,i:number)=><p key={i}>{c.text}</p>) : event.kind==="tool_result" ? <p>{event.payload.tool}：{event.payload.result?.error || event.payload.result?.question || (event.payload.result?.ok===false ? "APIが処理を拒否しました" : "実行結果を記録しました")}</p> : event.kind==="completion_evidence" ? <p>{event.payload.summary}</p> : ["notice","error","operator_reply","rollback"].includes(event.kind) ? <p>{event.payload.message || event.payload.notice}</p> : null}</li>)}</ol></details>}

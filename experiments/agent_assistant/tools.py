@@ -42,6 +42,7 @@ class Tools:
         return self.locks.setdefault(ident, asyncio.Lock())
 
     def definitions(self, domains):
+        from .catalog import OWNER_INPUT_OPERATIONS
         helpers = [dict(name=name,description=description,input_schema={'type':'object','properties':properties,'required':list(properties),'additionalProperties':False}) for name,description,properties in [
             ('prepare_shift_review','選択されたシフト業務を正規API・OR-Toolsで処理し、登録済み条件と勤務案を利用者の承認画面に提出する。入力・版・証跡はサーバー管理。',{}),
             ('complete_shift_work','利用者承認後、承認した勤務候補だけを確定し正規勤務表を出力・再照合して完了する。',{}),
@@ -56,7 +57,7 @@ class Tools:
                      + ("。学校IDはparameters.query.facility_idに指定し、月指定APIではparameters.query.monthも指定する。" if op.domain=='school-lunch' else "。")
                      + (" 動線図のversionはMCPが保存状態から設定する。モデルによる指定・原本上書きは不要。" if name=='lunch_generate_route' else ""),
                      input_schema={"type": "object", "properties": {"parameters": Arguments.model_json_schema()}, "required": ["parameters"], "additionalProperties": False})
-                for name, op in OPERATIONS.items() if op.domain in domains] + [
+                for name, op in OPERATIONS.items() if op.domain in domains and name not in OWNER_INPUT_OPERATIONS] + [
             dict(name="ask_lunch_process_question", description="日次の全献立・全食材の各工程について、一緒・別々の調理を先に確認し、別々なら食材ごとに登録設備から作業場所・使用する釜を順に質問する。工程表に不足する開始・終了時刻、担当者、汚染区分、作業段階も質問する。全回答後は変更禁止のprocess_savesを返す。そのままlunch_save_processで保存する。入力変更・利用者の訂正依頼後のみrestart=trueで再質問できる。", input_schema={"type":"object","properties":{"restart":{"type":"boolean"}},"additionalProperties":False}),
             dict(name="choose_task_layout", description="チャットで利用者が回答した図面だけを日次業務に採用する。", input_schema={"type":"object","properties":{"layout_id":{"type":"integer","minimum":1}},"required":["layout_id"],"additionalProperties":False}),
             dict(name="get_task_context", description="利用者が画面で選択した対象・期間・指定・確認回答を取得する。", input_schema={"type":"object","properties":{},"additionalProperties":False}),
@@ -500,6 +501,10 @@ class Tools:
                 "method": operation.method, "schema": schema, "components": {"schemas": components}}
 
     async def native(self, run, name, args, *, command_id=None):
+        from .catalog import OWNER_INPUT_OPERATIONS
+        if name in OWNER_INPUT_OPERATIONS:
+            from .business_contracts import require_server
+            require_server(run,name)
         op = OPERATIONS.get(name)
         if op is None or op.domain not in run["domains"]:
             raise ValueError("許可されていない業務操作です")

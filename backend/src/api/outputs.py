@@ -795,7 +795,7 @@ def download_labels(order_id: str, date: str | None = None):
             raise HTTPException(status_code=500, detail=f"label csv build failed: {exc}") from exc
         logger.info("Output download", order_id=order_id, output="labels_csv", path=path)
         return FileResponse(path, media_type=CSV_MEDIA_TYPE, filename=filename)
-    outputs = build_output_preview(order_id, "labels")
+    outputs = _validated_output_preview(order_id, "labels")
     path = outputs["labels"]
     logger.info("Output download", order_id=order_id, output="labels", path=path)
     return FileResponse(path, media_type=CSV_MEDIA_TYPE, filename=f"{order_id}_labels.csv")
@@ -822,9 +822,7 @@ def download_labels_xlsx(order_id: str, date: str | None = None):
 
 @router.get("/delivery-notes", dependencies=[Depends(require_role("operator"))])
 def download_delivery(order_id: str):
-    from src.services.output_builder import build_output_preview
-
-    outputs = build_output_preview(order_id, "delivery")
+    outputs = _validated_output_preview(order_id, "delivery")
     path = outputs["delivery_note"]
     logger.info("Output download", order_id=order_id, output="delivery", path=path)
     return FileResponse(
@@ -832,6 +830,14 @@ def download_delivery(order_id: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=f"{order_id}_delivery.xlsx",
     )
+
+
+def _validated_output_preview(order_id: str, output_type: str):
+    from src.services.output_builder import build_output_preview
+    try:
+        return build_output_preview(order_id, output_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/delivery-notes/html", response_class=HTMLResponse, dependencies=[Depends(require_role("operator"))])
@@ -916,9 +922,7 @@ def download_order_form_saved_sheet(order_id: str):
 
 @router.get("/manufacturing-aggregate", dependencies=[Depends(require_role("operator"))])
 def download_aggregate(order_id: str):
-    from src.services.output_builder import build_output_preview
-
-    outputs = build_output_preview(order_id, "aggregate")
+    outputs = _validated_output_preview(order_id, "aggregate")
     path = outputs["aggregate"]
     logger.info("Output download", order_id=order_id, output="aggregate", path=path)
     return FileResponse(path, media_type=CSV_MEDIA_TYPE, filename=f"{order_id}_aggregate.csv")
@@ -930,10 +934,13 @@ def preview_output(order_id: str, type: str, limit: int = _PREVIEW_LIMIT_DEFAULT
 
     limit = max(1, min(limit, _PREVIEW_LIMIT_DEFAULT))
     if type == "labels":
-        outputs = build_output_preview(order_id, "labels")
+        outputs = _validated_output_preview(order_id, "labels")
         payload = _preview_csv(outputs["labels"], "cp932", limit)
     elif type == "delivery":
-        preview = build_delivery_preview(order_id)
+        try:
+            preview = build_delivery_preview(order_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         headers = preview.get("headers", [])
         rows = preview.get("rows", [])
         payload = {
@@ -942,7 +949,7 @@ def preview_output(order_id: str, type: str, limit: int = _PREVIEW_LIMIT_DEFAULT
             "ocr_entry_count": preview.get("ocr_entry_count"),
         }
     elif type == "aggregate":
-        outputs = build_output_preview(order_id, "aggregate")
+        outputs = _validated_output_preview(order_id, "aggregate")
         payload = _preview_csv(outputs["aggregate"], "cp932", limit)
     else:
         raise HTTPException(status_code=400, detail="invalid output type")
