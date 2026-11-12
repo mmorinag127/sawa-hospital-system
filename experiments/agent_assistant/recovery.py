@@ -70,6 +70,8 @@ class Recovery:
             if current['generation'] != run['generation'] or current['status'] != 'reconciliation_required':
                 raise Conflict('照合中に依頼が停止または変更されました')
             exhausted = current['spent'] >= current['cap'] or current['reserved'] <= 0
+            if exhausted and not (enabled(run) and run['provider'] == 'gemini'):
+                raise Conflict('照合した利用料金が実行上限に達しています。処理を再開しません')
             if safe_reviews or exhausted:
                 state = plan.get('state') or {}
                 calls = state.get('calls') or []
