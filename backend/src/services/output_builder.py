@@ -3794,6 +3794,7 @@ def _write_delivery_note(
                 workbook, template_bytes=template_bytes, output_path=path,
                 worksheet_sources=worksheet_sources,
                 modified_worksheets={ws.title},
+                sync_removed_merges=True,
             )
             return
         for idx, date_val in enumerate(dates):
@@ -3846,6 +3847,7 @@ def _write_delivery_note(
             workbook, template_bytes=template_bytes, output_path=path,
             worksheet_sources=worksheet_sources,
             modified_worksheets={name for name, source in worksheet_sources.items() if source == source_sheet_name},
+            sync_removed_merges=True,
         )
         return
 
@@ -4896,6 +4898,7 @@ def _patch_template_package_with_workbook_values(
     max_row: int | None = None,
     worksheet_sources: dict[str, str] | None = None,
     modified_worksheets: set[str] | None = None,
+    sync_removed_merges: bool = False,
 ) -> None:
     parts = _xlsx_parts_from_bytes(template_bytes)
     _drop_calc_chain(parts)
@@ -5043,6 +5046,25 @@ def _patch_template_package_with_workbook_values(
                 row_attrs = dict(ws.row_dimensions[row_idx]) if row_idx in ws.row_dimensions else {}
                 updates[row_idx] = (row_attrs, generated_cells)
         sheet_xml = _replace_xml_cell_values(sheet_xml, updates)
+        if sync_removed_merges:
+            content = sheet_xml.encode("utf-8")
+            spans = _template_xml_spans(content)
+            merge_span = next((node for node in spans["children"]
+                               if node["tag"] == _xlsx_tag("mergeCells")), None)
+            original_merges = original_root.find(_xlsx_tag("mergeCells"))
+            recorded = {node.attrib["ref"] for node in original_merges} if original_merges is not None else set()
+            current = {str(merged) for merged in ws.merged_cells.ranges}
+            if current - recorded:
+                raise ValueError("template_merge_addition_unsupported")
+            if recorded != current and merge_span is not None:
+                retained = deepcopy(original_merges)
+                for node in list(retained):
+                    if node.attrib["ref"] not in current:
+                        retained.remove(node)
+                retained.set("count", str(len(retained)))
+                replacement = ET.tostring(retained, encoding="utf-8") if len(retained) else b""
+                sheet_xml = (content[:merge_span["start"]] + replacement
+                             + content[merge_span["end"]:]).decode("utf-8")
         sheet_xml = _update_template_sheet_dimension(sheet_xml)
         for col_key, dim in ws.column_dimensions.items():
             col_idx = column_index_from_string(col_key)

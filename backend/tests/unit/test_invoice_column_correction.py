@@ -2,9 +2,11 @@ from copy import deepcopy
 import importlib.util
 from pathlib import Path
 import json
+from io import BytesIO
 
 import pytest
 from openpyxl import Workbook
+from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location(
@@ -105,3 +107,33 @@ def test_fixed_slot_quantity_headings_keep_area_identity():
         data_start_row=12, replace_header_band=True)
     assert ws.cell(8, 7).value == "ミキサー 花"
     assert ws.cell(8, 8).value == "ミキサー 月"
+
+
+def test_final_xlsx_preserves_separate_headings_and_untouched_merges(tmp_path):
+    from src.services.output_builder import (
+        _apply_delivery_configured_headers, _patch_template_package_with_workbook_values,
+    )
+    workbook = Workbook()
+    ws = workbook.active
+    ws.merge_cells("A1:I1")
+    ws.cell(1, 1, "unchanged title")
+    ws.merge_cells("G8:H10")
+    ws.cell(8, 7, "old shared heading")
+    ws.cell(12, 7, 17)
+    ws.cell(12, 8, 23)
+    template = BytesIO()
+    workbook.save(template)
+    columns = [{"name": "花", "source": "quantity", "column_index": 7},
+               {"name": "月", "source": "quantity", "column_index": 8}]
+    _apply_delivery_configured_headers(ws, 8, columns, {"花": 7, "月": 8},
+                                       data_start_row=12, replace_header_band=True)
+    output = tmp_path / "delivery.xlsx"
+    _patch_template_package_with_workbook_values(workbook, template_bytes=template.getvalue(),
+        output_path=output, modified_worksheets={ws.title}, sync_removed_merges=True)
+    restored = load_workbook(output)
+    actual = restored.active
+    assert [actual.cell(8, col).value for col in (7, 8)] == ["花", "月"]
+    assert [actual.cell(12, col).value for col in (7, 8)] == [17, 23]
+    assert {str(merged) for merged in actual.merged_cells.ranges} == {"A1:I1"}
+    assert actual.cell(1, 1).value == "unchanged title"
+    restored.close()
