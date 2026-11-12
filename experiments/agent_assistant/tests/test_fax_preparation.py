@@ -112,3 +112,31 @@ def test_one_provider_request_submits_all_preloaded_fax_reviews(tmp_path,monkeyp
         assert all('sheet' not in result and 'review' not in result for result in results)
         await client.aclose()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('fault', [None, 'revision', 'coordinate', 'schema'])
+def test_native_quantity_review_retains_raw_and_exact_cell_identity(tmp_path, fault):
+    async def scenario():
+        store, native, tools, run, engine, calls = setup(tmp_path)
+        await tools.faxes.refresh(run)
+        item = tools.faxes.item(run['id'], 'A')
+        captured = await tools.faxes.capture(run, item)
+        captured['sheet'].update(header=['日付','区分','献立','数量'],
+            fields=['date_mmdd','daypart','menu','qty.regular_x'], rows=[['11/15','昼','献立A','12_']])
+        original = native.request
+        issue = {'row_index': 0, 'column_index': 3, 'field': 'qty.regular_x', 'raw': '12_'}
+        async def request(*args, **kwargs):
+            if args[3].endswith('/pre-save-status'):
+                report = {'quantity_ready': False, 'cell_issues': [{**issue, **({'column_index':99} if fault=='coordinate' else {})}]}
+                if fault == 'schema': report = {'error':'quantity_template_field_unknown','quantity_ready':False,'cell_issues':[]}
+                return httpx.Response(200,json={'workflow':{'revision':captured['revision'] + (1 if fault=='revision' else 0)},'materialization':report})
+            return await original(*args, **kwargs)
+        native.request = request
+        if fault:
+            with pytest.raises(Conflict): await tools.faxes.quantity_review(run, item, captured)
+        else:
+            report = await tools.faxes.quantity_review(run, item, captured)
+            assert report == {'quantity_ready':False,'cell_issues':[{**issue,'date_mmdd':'11/15','daypart':'昼','menu':'献立A','label':'数量'}]}
+            assert captured['sheet']['rows'][0][3] == '12_'
+        assert not native.writes
+    asyncio.run(scenario())

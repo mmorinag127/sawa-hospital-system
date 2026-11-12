@@ -3842,10 +3842,21 @@ def get_sheet_pre_save_status(
         template_error = _selected_workflow_template_error(session, order, workflow)
         if template_error:
             return None, template_error
+        service = _get_order_service_module()
+        try:
+            configured = service._capture_selected_order_config(session, order, read_only=True)
+            quantity_issues = service._materialization_quantity_cell_issues(
+                fields=sheet.get("fields"), rows_payload=sheet.get("rows"),
+                template=configured["facility"]["fax_template"],
+            )
+            materialization = {"quantity_ready": not quantity_issues, "cell_issues": quantity_issues}
+        except ValueError as exc:
+            materialization = {"quantity_ready": False, "cell_issues": [], "error": str(exc)}
         return {
             "workflow": _serialize_workflow(workflow),
             "pre_save_checks": _workflow_pre_save_checks(meta),
             "pre_save_status": _pre_save_status_for_sheet(meta, sheet_hash),
+            "materialization": materialization,
         }, None
 
 

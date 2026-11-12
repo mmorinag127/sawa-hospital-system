@@ -193,6 +193,13 @@ class WorkflowCompletion:
                 await apply_step(item, name, body)
         for item in items:
             oid = item['snapshot']['order_id']
+            current = await self.tools.faxes.capture(run, item)
+            readiness = await self.tools.faxes.quantity_review(run, item, current)
+            if not readiness['quantity_ready']:
+                import json
+                raise Conflict(item['snapshot'].get('name', item['fax_id']) +
+                    '：保存済み数量の原本確認が必要です。日付・食事・献立・列を指定して訂正してください。' +
+                    json.dumps(readiness['cell_issues'], ensure_ascii=False))
             for name in ('hospital_bag_order', 'hospital_confirm_order'):
                 await apply_step(item, name, {})
             for name in ('hospital_export_labels', 'hospital_export_delivery_notes', 'hospital_export_aggregate'):

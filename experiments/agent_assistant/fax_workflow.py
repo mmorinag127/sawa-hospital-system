@@ -272,6 +272,7 @@ class FaxWorkflow:
             else:
                 sheet = apply_cell_edits(native["sheet"], cell_edits)
         captured = await self.capture(run, item, proposed_sheet=sheet)
+        quantity_review = await self.quantity_review(run, item, captured)
         basis = await self.capture(run, item)
         if basis["revision"] != captured["revision"]:
             raise Conflict("確認資料の取得中に版が変わりました")
@@ -296,10 +297,43 @@ class FaxWorkflow:
             raise Conflict("取得した原本PDFが依頼対象のハッシュと一致しません")
         artifact = self.tools.artifact(run["id"], original.content, f"FAX-{fax_id}.pdf")
         review = {"id": uuid4().hex, "signature": captured["signature"], "native_signature": basis["signature"], "revision": captured["revision"],
-            "summary": summary, "agent_summary": agent_summary, "sheet": captured["sheet"], "original": artifact, "order_id": order_id}
+            "summary": summary, "agent_summary": agent_summary, "sheet": captured["sheet"], "original": artifact, "order_id": order_id,
+            "quantity_review": quantity_review}
+        if quantity_review['cell_issues']:
+            review['summary'] += '\n保存は可能ですが袋詰め前に原本確認が必要です：' + json.dumps(
+                quantity_review['cell_issues'], ensure_ascii=False)
         await run_blocking(self.set, run["id"], fax_id, state="awaiting_approval", review=review, decision=None)
         await run_blocking(self.store.event, run["id"], "fax_review", {"fax_id": fax_id, "review_id": review["id"], "summary":summary})
         return {"ok": True, "queued_for_human": True, "review": review}
+
+    async def quantity_review(self, run, item, captured):
+        response = await self.tools.sandbox.request(run, 'hospital', 'POST',
+            f"/orders/{item['snapshot']['order_id']}/workflow-v2/sheet/pre-save-status",
+            body={'sheet': captured['sheet']}, authorization=self.tools.authorizations.get(run['id']))
+        if not response.is_success:
+            raise Conflict(f'袋詰め前の数量確認を取得できません（HTTP {response.status_code}）')
+        payload = response.json()
+        review = payload.get('materialization')
+        if isinstance(review, dict) and review.get('error'):
+            raise Conflict('袋詰め前の正本確認が必要です：' + str(review['error']))
+        if (payload.get('workflow', {}).get('revision') != captured['revision']
+                or not isinstance(review, dict) or type(review.get('quantity_ready')) is not bool
+                or not isinstance(review.get('cell_issues'), list)
+                or review['quantity_ready'] != (not review['cell_issues'])):
+            raise Conflict('数量確認の版または検査結果が一致しません')
+        sheet = captured['sheet']
+        issues = []
+        for issue in review['cell_issues']:
+            row_index, column = issue.get('row_index'), issue.get('column_index')
+            if (type(row_index) is not int or not 0 <= row_index < len(sheet['rows'])
+                    or type(column) is not int or not 0 <= column < len(sheet['fields'])
+                    or issue.get('field') != sheet['fields'][column]):
+                raise Conflict('数量確認のセル位置が正本と一致しません')
+            row = sheet['rows'][row_index]
+            issues.append({**issue, **{key: row[sheet['fields'].index(key)]
+                for key in ('date_mmdd', 'daypart', 'menu') if key in sheet['fields']},
+                'label': sheet['header'][column]})
+        return {**review, 'cell_issues': issues}
 
     async def decide(self, run, fax_id, review_id, approve, message):
         if run["status"] != "running" or not self.active(run):

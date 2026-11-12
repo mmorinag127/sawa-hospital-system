@@ -47,6 +47,9 @@ class Native:
             return httpx.Response(200, json=self.sources[path.rsplit('/', 1)[-1]])
         order_id = path.split('/')[2]
         wf = self.wfs[order_id]
+        if path.endswith('/sheet/pre-save-status'):
+            return httpx.Response(200, json={'workflow': wf, 'materialization': {
+                'quantity_ready': True, 'cell_issues': []}})
         if method != 'GET':
             self.writes.append(path)
             if kwargs.get('revision') != wf['revision']:

@@ -76,12 +76,17 @@ ALLOWED = {
     'backend/tests/unit/test_hakodate_order_sheet_evidence_projection.py',
     'frontend/src/pages/api/assistant-trial/[[...path]].ts',
     'frontend/tests/assistant-workflow-ui.test.cjs',
+    'experiments/agent_assistant/fax_workflow.py',
+    'experiments/agent_assistant/tests/test_fax_workflow.py',
+    'backend/tests/unit/test_modernization_real_bagging_confirmation.py',
+    'docs/fax-bagging-completion-20261112.md',
 }
 BACKEND = ['backend/tests/unit/' + name for name in (
     'test_workflow_ocr_reset.py', 'test_order_workflow_v2_service.py',
     'test_initial_saved_import_service.py', 'test_online_production_release.py',
     'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py','test_stg_ocr_restore_command.py',
-    'test_native_ingest_sql_component.py','test_hakodate_order_sheet_evidence_projection.py')]
+    'test_native_ingest_sql_component.py','test_hakodate_order_sheet_evidence_projection.py',
+    'test_modernization_real_bagging_confirmation.py')]
 AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_cloud_store_target.py', 'test_connection_pool.py', 'test_durable_postgres.py',
     'test_postgres_ledger_contract.py', 'test_ledger_codec.py', 'test_generation_fence.py',

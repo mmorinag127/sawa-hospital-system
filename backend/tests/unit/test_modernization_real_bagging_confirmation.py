@@ -160,6 +160,22 @@ def test_unresolved_or_empty_saved_quantities_stop_before_real_artifacts(owned_b
     assert_no_confirmation(fixture)
 
 
+@pytest.mark.parametrize('value,ready', [('-', False), ('一', False), ('12_', False), ('· 99', False), ('12', True), ('', True)])
+def test_pre_save_quantity_report_matches_native_bagging_without_mutation(owned_bagging, value, ready):
+    fixture = owned_bagging
+    saved = fixture.saved()
+    proposed = deepcopy(saved)
+    proposed['rows'][0][4] = value
+    before = database_snapshot()
+    report, error = workflow.get_sheet_pre_save_status(order_id=fixture.order_id, sheet=proposed)
+    assert error is None
+    expected = orders._materialization_quantity_cell_issues(
+        fields=proposed['fields'], rows_payload=proposed['rows'], template=fixture.authored['fax_template'])
+    assert report['materialization'] == {'quantity_ready': ready, 'cell_issues': expected}
+    assert database_snapshot() == before
+    assert fixture.saved() == saved
+
+
 @pytest.mark.parametrize("command", ["run_bagging", "final_confirm"])
 def test_stale_command_revision_rejects_without_database_mutation(owned_bagging, command):
     fixture = owned_bagging
