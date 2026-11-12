@@ -574,7 +574,10 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await authorize(request.headers.get('authorization', ''), run['domains'])
         if not owned(run):
             raise Conflict('共通業務進行を利用している依頼ではありません')
-        await run_blocking(business.checkpoint, ident, attempts=0, next_attempt=0)
+        state = await run_blocking(business.state,ident)
+        attempt = {'epoch':state.get('epoch',0)+1} if run.get('task_id') in (
+            'hospital_pending_faxes','hospital_review_faxes') else {}
+        await run_blocking(business.checkpoint, ident, attempts=0, next_attempt=0,**attempt)
         await business.kick_many([ident], request.headers.get('authorization', ''))
         return await asyncio.to_thread(store.get, ident, owner)
 

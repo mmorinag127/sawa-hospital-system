@@ -64,6 +64,28 @@ def test_missing_business_data_stops_without_replaying_completion(tmp_path):
     asyncio.run(scenario())
 
 
+def test_fax_completion_attempt_changes_only_after_explicit_epoch_update(tmp_path):
+    from experiments.agent_assistant.tests.test_fax_workflow import Native
+    from experiments.agent_assistant.store import Store
+    from experiments.agent_assistant.tools import Tools
+    async def scenario():
+        store=Store(tmp_path/'ledger');store.set_budget(100)
+        run,_=store.create('operator','fax-attempt','FAX',['hospital'],100,task_id='hospital_pending_faxes')
+        store.update(run['id'],status='running')
+        native=Native(tmp_path/'files');tools=Tools(store,native)
+        engine,run=attach(store,native,tools,store.get(run['id']))
+        engine.call=AsyncMock(return_value={'ok':True})
+        await engine.complete(run,None)
+        first=engine.call.call_args.args[-1]
+        await engine.complete(run,None)
+        assert engine.call.call_args.args[-1]==first
+        engine.checkpoint(run['id'],epoch=1)
+        await engine.complete(run,None)
+        assert engine.call.call_args.args[-1]!=first
+        assert not native.writes
+    asyncio.run(scenario())
+
+
 def test_first_fax_review_does_not_pause_preparation_of_remaining_faxes(tmp_path):
     from experiments.agent_assistant.tests.test_fax_workflow import Native
     from experiments.agent_assistant.store import Store

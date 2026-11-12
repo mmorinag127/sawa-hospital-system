@@ -133,3 +133,11 @@ completion while any remain blocked. Known missing business input stops without
 replaying the whole workflow four times. Native success receipts, unknown-write
 fences, original PDFs and operator-approved sheets remain authoritative. A done
 command with ok=false is not counted as successful bagging in the proof queries.
+
+Explicit owner business-reconciliation advances a FAX completion-attempt epoch.
+Ordinary polling/retries keep the same epoch. The new parent attempt preserves
+successful native child receipts; unknown mutations still fence all writes.
+This permits a known no-write validation failure to be retried after actual
+business data correction without overwriting the old failure receipt. Run
+43161226205 was cancelled while building (no deployment job started), so this
+additional fix can be validated and deployed together.

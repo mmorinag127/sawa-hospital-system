@@ -287,6 +287,8 @@ class BusinessWorkflow:
     async def complete(self, run, review):
         contract = CONTRACTS[run['task_id']]
         command = 'business:complete:' + (review['id'] if review else 'faxes')
+        if contract.complete == 'faxes':
+            command += ':' + str((await run_blocking(self.state,run['id'])).get('epoch',0))
         if contract.complete == 'shift':
             return await self.call(run, 'complete_shift_work', {}, command)
         if contract.complete == 'daily':
