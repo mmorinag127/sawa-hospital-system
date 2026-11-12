@@ -17,6 +17,7 @@ def fixture(tmp_path,monkeypatch,*,lost=False):
     monkeypatch.setenv('SAWA_TRIAL_OPERATOR_ACCOUNT','operator')
     app=create_app({},tmp_path/'ledger',managed_client=SimpleNamespace(close=AsyncMock()))
     store=app.state.store
+    store.set_budget(100)
     run,_=store.create('operator','owner-provisional-menu','FAX',['hospital'],15,task_id='hospital_pending_faxes')
     store.update(run['id'],status='waiting_input',task_inputs={'business_workflow':{
         'version':1,'phase':'support','attempts':4,'resume_phase':'saving'}})
