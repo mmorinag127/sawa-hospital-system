@@ -207,3 +207,14 @@ def test_shared_rule_never_borrows_another_dates_schedule(store,diet):
             unit_type='g',qty_per_serving=29,priority=0,active=True))
     with _readonly(store,_order(diet)):
         _assert_resolution(_order(diet),fields=['qty_per_serving','unit_type'])
+
+
+def test_regular_snapshot_cannot_overwrite_registered_special_diet_amount():
+    from src.services import output_builder
+    line={'menu_name':NAME,'daypart':DAYPART,'diet_type':'diabetes',
+          'menu_qty_per_serving':29,'menu_unit_type':'g'}
+    snapshot={NAME:{'name':NAME,'daypart':DAYPART,'diet_type':'regular',
+                    'qty_per_serving':37,'unit_type':'count'}}
+    result=output_builder._apply_menu_snapshot([line],snapshot)[0]
+    assert result['menu_qty_per_serving']==29
+    assert result['menu_unit_type']=='g'

@@ -896,6 +896,15 @@ def test_monthly_menu_metadata_falls_back_to_same_daypart_for_variant_diets_and_
     )
 
     soft_karei = next(line for line in enriched if line["menu_name"] == "カレイの照焼き" and line["diet_type"] == "soft")
+    assert soft_karei.get('menu_qty_per_serving') is None
+    assert next(line for line in enriched if line['menu_name']=='玉子焼き').get('menu_qty_per_serving') is None
+    enriched=output_builder._apply_menu_rules(enriched,None,rules=[
+        {'rule_type':'menu','menu_pattern':'カレイの照焼き','match_type':'exact',
+         'diet_type':'soft','unit_type':'g','qty_per_serving':100},
+        {'rule_type':'menu','menu_pattern':'玉子焼き','match_type':'exact',
+         'diet_type':'mixer','unit_type':'count','qty_per_serving':2},
+    ])
+    soft_karei = next(line for line in enriched if line["menu_name"] == "カレイの照焼き" and line["diet_type"] == "soft")
     assert soft_karei["menu_temp_type"] == "hot"
     assert soft_karei["menu_unit_type"] == "g"
 
@@ -994,6 +1003,11 @@ def test_monthly_menu_item_qty_survives_entry_category_mismatch_and_garnish_alia
     enriched = output_builder._apply_menu_entry_overrides(lines, entries)
     enriched = output_builder._apply_menu_overrides(enriched, items)
     enriched = output_builder._clear_stale_menu_qty_from_monthly_entry(enriched)
+
+    # Explicit variant-diet rules, not another diet's item amount, authorize units.
+    enriched = output_builder._apply_menu_rules(enriched, None, rules=[
+        {'rule_type':'global','unit_type':'count','qty_per_serving':2},
+    ])
 
     labels, _fields, _label_format = output_builder._build_label_rows(
         [

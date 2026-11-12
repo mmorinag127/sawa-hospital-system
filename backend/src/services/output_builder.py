@@ -1020,9 +1020,12 @@ def _apply_menu_snapshot(lines: list[dict], snapshot_items: dict) -> list[dict]:
             or not _is_specific_delivery_category(updated.get("menu_category"))
         ):
             updated["menu_category"] = item_category
-        if item.get("unit_type"):
+        schedule_only = monthly_entry_diet_priority(
+            item.get('diet_type'), line.get('source_diet_type') or line.get('diet_type')
+        ) == 4
+        if item.get("unit_type") and not schedule_only:
             updated["menu_unit_type"] = item.get("unit_type")
-        if item.get("qty_per_serving") is not None:
+        if item.get("qty_per_serving") is not None and not schedule_only:
             updated["menu_qty_per_serving"] = item.get("qty_per_serving")
             updated["_menu_qty_source_daypart"] = item.get("daypart")
             updated["_menu_qty_source_category"] = item.get("category")

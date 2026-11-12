@@ -78,7 +78,6 @@ def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_baggi
     # Publish a distinct synthetic diabetes column to exercise a counted diet.
     if diet == 'diabetes':
         fixture.authored['fax_template']['columns'][column]['diet_type'] = diet
-        fixture.authored['fax_template']['columns'][column]['field'] = 'qty.diabetes_x'
         fixture.authored['daily_label_comparable_diet_types'].append(diet)
         fixture.republish()
     with fixture.session_scope() as session:
@@ -104,7 +103,9 @@ def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_baggi
     confirmed,error=workflow.final_confirm(fixture.order_id,expected_revision=revision(fixture))
     assert error is None,error
     assert confirmed['confirmed_snapshot_id']
-    assert fixture.saved()==sheet
+    with fixture.session_scope() as session:
+        state=session.get(OrderWorkflowState,fixture.order_id)
+        assert session.get(OrderSheetDraft,state.draft_id).draft_sheet_json==sheet
 
 
 def assert_no_confirmation(fixture):
