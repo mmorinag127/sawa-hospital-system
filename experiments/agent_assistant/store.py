@@ -426,6 +426,9 @@ class Store:
                     if operation and operation.method == 'GET':
                         db.execute("UPDATE commands SET status='executing' WHERE run_id=? AND id=?", (ident, command_id))
                         return None
+                if row['status'] == 'recoverable_review' and request.get('name') == 'request_fax_approval':
+                    db.execute("UPDATE commands SET status='executing' WHERE run_id=? AND id=?", (ident, command_id))
+                    return None
                 if row["status"] != "done":
                     raise Conflict("前の命令の結果が未確定です。再送せず履歴を確認してください")
                 return json.loads(row["result"])

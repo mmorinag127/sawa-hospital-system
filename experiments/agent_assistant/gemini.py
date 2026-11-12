@@ -193,7 +193,12 @@ class Gemini(Managed):
                             await run_blocking(self.store.event, ident, 'operator_wait', {'command_id': command, 'result': result})
                             return
                         business = getattr(self.tools, 'business', None)
-                        if business and await business.pause_model(ident, command, result):
+                        remaining_reviews = state['calls'][state['index'] + 1:]
+                        from .fax_preparation import enabled
+                        drain_reviews = (enabled(current) and bool(remaining_reviews)
+                            and call['name'] == 'request_fax_approval'
+                            and all(item['name'] == 'request_fax_approval' for item in remaining_reviews))
+                        if business and not drain_reviews and await business.pause_model(ident, command, result):
                             state['pending'] = command
                             await run_blocking(self.checkpoint, ident, state)
                             return

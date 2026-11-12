@@ -53,6 +53,7 @@ ALLOWED = {
     'experiments/agent_assistant/native_recovery.py',
     'experiments/agent_assistant/recovery.py',
     'experiments/agent_assistant/tests/test_recovery.py',
+    'experiments/agent_assistant/tests/test_gemini.py',
     'experiments/agent_assistant/tests/test_staging_runtime.py',
     'experiments/agent_assistant/tests/test_native_lifecycle.py',
     'docs/agent-memory-recovery-20261111.md',

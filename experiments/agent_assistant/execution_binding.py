@@ -95,7 +95,9 @@ def approve_native_upgrade(store, tools, run, system, *, generation, previous_sh
             raise Conflict('版の引継ぎ中に依頼が変更されています')
         for row in db.execute("SELECT request FROM commands WHERE run_id=? AND status!='done'", (run['id'],)):
             name = json.loads(row['request'])['name']
-            if name not in READ_ONLY_WAITS and not (OPERATIONS.get(name) and OPERATIONS[name].method == 'GET'):
+            from .fax_preparation import enabled
+            review_only = name == 'request_fax_approval' and enabled(run) and run['provider'] == 'gemini'
+            if not review_only and name not in READ_ONLY_WAITS and not (OPERATIONS.get(name) and OPERATIONS[name].method == 'GET'):
                 raise Conflict('結果未確定の更新があるため業務API版を引き継げません')
         # Retain the historical binding; the owner starts a new native-code
         # epoch under the identical prompt, tools and provider.

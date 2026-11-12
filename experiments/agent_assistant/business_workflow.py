@@ -304,9 +304,17 @@ class BusinessWorkflow:
             await self.release_completed(run)
             await run_blocking(self.checkpoint, ident, phase='completed')
             return False
-        if run['status'] in ('budget_reached', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending', 'stopping'):
+        if run['status'] == 'budget_reached':
+            from .fax_preparation import enabled
+            if enabled(run):
+                # Paid responses and approvals may still be outstanding. This
+                # enables explicit receipt recovery, never another inference.
+                await run_blocking(self.set_status, run, 'reconciliation_required')
+            return False
+        if run['status'] in ('stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending', 'stopping'):
             return False  # Explicit administrator action, never an automatic cancellation.
-        if run['spent'] >= run['cap']:
+        from .fax_preparation import enabled
+        if run['spent'] >= run['cap'] and not enabled(run):
             await run_blocking(self.set_status, run, 'budget_reached')
             return False
         if state.get('phase') == 'support' and time.time() < state.get('next_attempt', 0):

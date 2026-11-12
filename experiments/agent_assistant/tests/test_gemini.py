@@ -16,6 +16,33 @@ from experiments.agent_assistant.store import Conflict, Store
 from experiments.agent_assistant.tests.test_trial import prepared
 
 
+def test_paid_fax_review_batch_drains_before_pausing_without_a_post_at_cap(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import experiments.agent_assistant.gemini as module
+    agent, store, _, tools, run = fixture(tmp_path,monkeypatch,lambda _: (_ for _ in ()).throw(AssertionError('No provider request')))
+    with store.tx() as db:
+        db.execute("UPDATE runs SET task_id=?,task_inputs=?,status='running',spent=cap,reserved=0 WHERE id=?",
+            ('hospital_pending_faxes',json.dumps({'business_workflow':{'version':1,'fax_harness':2}}),run['id']))
+    calls = interaction('paid',[('a','request_fax_approval',{'fax_id':'A','summary':'A'}),
+        ('b','request_fax_approval',{'fax_id':'B','summary':'B'})])['steps']
+    local = AsyncMock(return_value={'ok':True,'queued_for_human':True})
+    monkeypatch.setattr(module,'call_local',local)
+    pause = AsyncMock(return_value=True)
+    tools.business=SimpleNamespace(pause_model=pause)
+    state={'interaction':'paid','calls':calls,'index':0,'results':[],'pending':None}
+    async def scenario():
+        await agent.consume_gemini(run['id'],run['generation'],state,None)
+        assert local.await_count == 2
+        pause.assert_awaited_once()
+        assert agent.state(run['id'])['index'] == 1
+        assert agent.state(run['id'])['pending'] == command_identity('paid','b')
+        assert store.get(run['id'])['status'] == 'running'
+        assert not store.events(run['id'],kinds=('gemini_dispatch',))
+        await agent.client.aclose()
+    asyncio.run(scenario())
+
+
 def fixture(tmp_path, monkeypatch, handler):
     for key, value in {'GEMINI_API_KEY': 'synthetic-key', 'GEMINI_AGENT_MODEL': 'gemini-test',
         'GEMINI_AGENT_INPUT_USD_PER_MILLION': '1', 'GEMINI_AGENT_OUTPUT_USD_PER_MILLION': '2'}.items(): monkeypatch.setenv(key, value)

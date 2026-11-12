@@ -28,7 +28,9 @@ class Recovery:
             run = await run_blocking(self.store.get, ident)
             if run['status'] != 'reconciliation_required':
                 raise Conflict('結果照合が必要な依頼だけ再開できます')
-            if run['month'] != billing_month() or run['spent'] >= run['cap'] or run['reserved'] <= 0:
+            from .fax_preparation import enabled
+            paid_reviews_only = enabled(run) and run['provider'] == 'gemini' and (run['spent'] >= run['cap'] or run['reserved'] <= 0)
+            if run['month'] != billing_month() or (not paid_reviews_only and (run['spent'] >= run['cap'] or run['reserved'] <= 0)):
                 raise Conflict('実行月・利用上限・予約額を確認してください')
             if not run['session_id']:
                 raise Conflict('接続先の実行IDが未確定です。再送せず予約額を保持します')
@@ -50,7 +52,9 @@ class Recovery:
             safe_waits = [row for row in pending if json.loads(row['request']).get('name') in READ_ONLY_WAITS]
             safe_reads = [row for row in pending if
                           (operation := OPERATIONS.get(json.loads(row['request']).get('name'))) and operation.method == 'GET']
-            if len(pending) != len(safe_waits) + len(safe_reads):
+            safe_reviews = [row for row in pending if enabled(run) and run['provider'] == 'gemini'
+                            and json.loads(row['request']).get('name') == 'request_fax_approval']
+            if len(pending) != len(safe_waits) + len(safe_reads) + len(safe_reviews):
                 raise Conflict('実行結果が未確定の命令があります。業務更新を再送せず履歴を保持します')
             directory = manager.sandbox.path(ident)
             if manager.sandbox.durable_store is not None:
@@ -65,7 +69,19 @@ class Recovery:
             current = await run_blocking(self.store.get, ident)
             if current['generation'] != run['generation'] or current['status'] != 'reconciliation_required':
                 raise Conflict('照合中に依頼が停止または変更されました')
-            if current['spent'] >= current['cap'] or current['reserved'] <= 0:
+            exhausted = current['spent'] >= current['cap'] or current['reserved'] <= 0
+            if safe_reviews or exhausted:
+                state = plan.get('state') or {}
+                calls = state.get('calls') or []
+                if (not enabled(run) or run['provider'] != 'gemini' or plan['waiting']
+                        or not calls or any(call['name'] != 'request_fax_approval' for call in calls)):
+                    raise Conflict('追加推論なしで処理できる受信済み確認案を照合できません')
+                for row in safe_reviews:
+                    request = json.loads(row['request'])
+                    if not any(row['id'] == command_identity(state['interaction'], call['id'])
+                               and request == {'name':call['name'], 'arguments':call['arguments']} for call in calls):
+                        raise Conflict('未確定の確認案と接続先の命令が一致しません')
+            if exhausted and not (enabled(run) and run['provider'] == 'gemini' and plan.get('state')):
                 raise Conflict('照合した利用料金が実行上限に達しています。処理を再開しません')
             if plan['waiting']:
                 name, result = plan['question']
@@ -93,6 +109,8 @@ class Recovery:
                         db.execute("UPDATE commands SET status='recoverable_wait' WHERE run_id=? AND id=? AND status!='done'", (ident, row['id']))
                     for row in safe_reads:
                         db.execute("UPDATE commands SET status='recoverable_read' WHERE run_id=? AND id=? AND status!='done'", (ident, row['id']))
+                    for row in safe_reviews:
+                        db.execute("UPDATE commands SET status='recoverable_review' WHERE run_id=? AND id=? AND status!='done'", (ident, row['id']))
             await run_blocking(mark_recoverable)
             if plan.get('retry_incomplete'):
                 # The provider proved the old inference ended with no function

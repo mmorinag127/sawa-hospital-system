@@ -74,6 +74,15 @@ def test_first_fax_review_does_not_pause_preparation_of_remaining_faxes(tmp_path
         assert await engine.pause_model(run['id'],'all-approved',{'ok':True}) is True
         assert tools.faxes.item(run['id'],'A')['review']['id']==first['id']
         assert not native.writes
+        store.update(run['id'],spent=run['cap'],reserved=0)
+        async def finish(current, review):
+            store.update(current['id'],status='completed')
+        engine.complete=AsyncMock(side_effect=finish)
+        engine.providers.refresh_usage=AsyncMock()
+        assert await engine.advance(run['id']) is False
+        engine.complete.assert_awaited_once()
+        assert store.get(run['id'])['status']=='completed'
+        assert not engine.providers.started
     asyncio.run(scenario())
 
 

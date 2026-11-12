@@ -17,6 +17,39 @@ from experiments.agent_assistant.conversation import pending_question
 from experiments.agent_assistant.tools import Arguments
 
 
+@pytest.mark.parametrize('fault', [None, 'native_call', 'different_arguments'])
+def test_paid_review_recovery_at_cap_does_not_send_another_inference(tmp_path, monkeypatch, fault):
+    from unittest.mock import AsyncMock
+    args = {'fax_id':'A', 'summary':'原本を確認した訂正案'}
+    response = interaction('turn', [('review', 'request_fax_approval', args)])
+    if fault == 'native_call':
+        response['steps'][0]['name'] = 'hospital_confirm_order'
+    recovery, agent, store, _, _, run, requests = setup(tmp_path, monkeypatch, response)
+    with store.tx() as db:
+        db.execute('UPDATE runs SET task_id=?,task_inputs=?,spent=cap,reserved=0 WHERE id=?',
+            ('hospital_pending_faxes',json.dumps({'business_workflow':{'version':1,'fax_harness':2}}),run['id']))
+    command = command_identity('turn','review')
+    store.command(run['id'],command,{'name':'request_fax_approval','arguments':
+        {**args,'summary':'changed'} if fault == 'different_arguments' else args})
+    agent.consume_gemini = AsyncMock()
+    before = store.get(run['id'])
+    async def scenario():
+        if fault:
+            with pytest.raises(Conflict): await recovery.resume(run['id'])
+            agent.consume_gemini.assert_not_awaited()
+            assert store.get(run['id'])['status'] == 'reconciliation_required'
+        else:
+            await recovery.resume(run['id'])
+            await agent.tasks[run['id']]
+            agent.consume_gemini.assert_awaited_once()
+            assert store.command(run['id'],command,{'name':'request_fax_approval','arguments':args}) is None
+        after = store.get(run['id'])
+        assert (after['cap'],after['spent'],after['reserved']) == (before['cap'],before['spent'],0)
+        assert requests == ['GET']
+        await agent.client.aclose()
+    asyncio.run(scenario())
+
+
 def setup(tmp_path, monkeypatch, response):
     requests = []
     async def handler(request):
