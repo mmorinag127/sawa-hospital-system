@@ -51,6 +51,7 @@ def owned_bagging(surface):
     fixture.authored["packaging_policy"] = {
         "split_key": ["facility", "date", "daypart", "menu_name", "diet_type", "area_id", "bag_type"],
     }
+    fixture.authored['daily_label_comparable_diet_types'] = ['regular', 'no_meat', 'no_fish', 'staff']
     fixture.authored["invoice_template"] = {"include_menu_name": True, "columns": [
         {"name": "Date", "source": "date"},
         {"name": "Menu", "source": "menu_name"},
@@ -88,9 +89,9 @@ def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_baggi
     bagged,error=workflow.run_bagging(fixture.order_id,expected_revision=revision(fixture))
     assert error is None,error
     lines=bagged['bagging_result']['materialization_candidate']['output_lines']
-    specific=[line for line in lines if line.get('diet_type')==diet]
+    specific=[line for line in lines if (line.get('source_diet_type') or line.get('diet_type'))==diet]
     assert specific and all(line['menu_qty_per_serving']==17 for line in specific)
-    assert sum(row['quantity'] for row in bagged['bagging_result']['bag_rows'] if row.get('diet_type')==diet)==1
+    assert sum(row['quantity'] for row in bagged['bagging_result']['bag_rows'] if (row.get('source_diet_type') or row.get('diet_type'))==diet)==1
     confirmed,error=workflow.final_confirm(fixture.order_id,expected_revision=revision(fixture))
     assert error is None,error
     assert confirmed['confirmed_snapshot_id']

@@ -42,7 +42,13 @@ def test_missing_menu_amount_does_not_block_other_approved_faxes(tmp_path,native
             review=(await tools.faxes.submit(run,fax,'原本照合済みの合成コピー'))['review']
             await tools.faxes.decide(run,fax,review['id'],True,'承認')
         original=deepcopy(native.sheets)
-        result=await tools.execute(run['id'],0,'complete_fax_work',{},'partial-native-completion')
+        from experiments.agent_assistant.business_contracts import SERVER_EXECUTION
+        store.update(run['id'], task_inputs={'business_workflow': {'version': 1, 'phase': 'saving'}})
+        token=SERVER_EXECUTION.set(True)
+        try:
+            result=await tools.execute(run['id'],0,'complete_fax_work',{},'partial-native-completion')
+        finally:
+            SERVER_EXECUTION.reset(token)
         if native_failure==500:
             assert 'error' in result and not result.get('business_input_required')
             assert native.wfs['OB']['state']!='confirmed'

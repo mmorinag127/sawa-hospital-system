@@ -19,6 +19,8 @@ ALLOWED = {
     'backend/src/services/order_serialization_service.py',
     'backend/src/services/output_builder.py',
     'backend/tests/unit/test_modernization_menu_amount_identity.py',
+    'backend/tests/unit/test_output_builder_diet_overrides.py',
+    'backend/tests/unit/test_h2_monthly_source_date_boundary.py',
     '.github/workflows/deploy-prod.yml', 'backend/src/api/orders.py',
     'backend/src/services/order_workflow_v2_service.py',
     'backend/src/services/initial_saved_import_service.py',

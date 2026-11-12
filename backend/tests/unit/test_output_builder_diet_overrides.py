@@ -1782,7 +1782,7 @@ def test_label_slot_categories_ignore_excluded_split_monthly_lines(isolated_form
     assert enriched[5]["menu_category"] == "副菜2"
 
 
-def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypatch, tmp_path, isolated_formal_schema):
+def test_monthly_entry_override_regular_row_rejects_unknown_diet(monkeypatch, tmp_path, isolated_formal_schema):
     configured = publish_configuration(monkeypatch, tmp_path, day="2026-07-13")
     publish_sources([
             {
@@ -1829,7 +1829,7 @@ def test_monthly_entry_override_regular_row_applies_to_soft_mixer_only(monkeypat
                         "daypart": "夕",
                         "menu_name": "豆腐の煮物",
                         "menu_category": "副菜",
-                        "diet_type": "diabetes",
+                        "diet_type": "unregistered-diet",
                         "area_id": "2F",
                         "quantity_original": 3,
                         "source_row_index": 0,

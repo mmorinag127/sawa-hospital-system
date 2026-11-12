@@ -139,8 +139,8 @@ def monthly_entry_diet_priority(entry_diet: object, line_diet: object) -> int:
     line = normalize_diet_type(line_diet) or 'regular'
     if entry == line:
         return 0
-    soft = {'soft','mixer','soft_mixer'}
-    if entry in soft and line in soft:
+    soft = {'soft', 'mixer', 'soft_mixer'}
+    if entry in soft and line in soft and 'soft_mixer' in {entry, line}:
         return 1
     if not entry:
         return 2 if line == 'regular' else 3

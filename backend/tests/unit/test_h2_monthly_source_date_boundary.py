@@ -21,7 +21,7 @@ def test_aligned_date_preserves_exact_entry(value, daypart):
     assert output_builder._resolve_monthly_entry_by_source_row({"date": value, "daypart": daypart, "source_row_index": 0, "diet_type": "regular"}, [[ENTRY]]) is ENTRY
 
 
-@pytest.mark.parametrize("changes", [{"date": None}, {"date": "bad"}, {"date": "2026-10-08"}, {"source_row_index": 99}, {"source_row_index": -1}, {"source_row_index": "0"}, {"diet_type": "diabetes"}, {"daypart": None}, {"daypart": ""}, {"daypart": "unknown"}, {"daypart": "朝"}, {"daypart": "夕食"}])
+@pytest.mark.parametrize("changes", [{"date": None}, {"date": "bad"}, {"date": "2026-10-08"}, {"source_row_index": 99}, {"source_row_index": -1}, {"source_row_index": "0"}, {"diet_type": "unregistered-diet"}, {"daypart": None}, {"daypart": ""}, {"daypart": "unknown"}, {"daypart": "朝"}, {"daypart": "夕食"}])
 def test_invalid_identity_stops(changes):
     line = {"date": "2026-10-07", "daypart": "昼", "source_row_index": 0, "diet_type": "regular", **changes}
     with pytest.raises(ValueError, match="monthly_entry_source_row_unresolved"):
@@ -30,6 +30,14 @@ def test_invalid_identity_stops(changes):
 
 def test_no_source_index_keeps_existing_name_lookup_boundary():
     assert output_builder._resolve_monthly_entry_by_source_row({"date": None}, [[ENTRY]]) is None
+
+
+@pytest.mark.parametrize('diet',['diabetes','mixer','no_fish','staff'])
+def test_known_diet_uses_regular_schedule_identity_only(diet):
+    line={'date':'2026-10-07','daypart':'昼','source_row_index':0,'diet_type':diet}
+    assert output_builder._resolve_monthly_entry_by_source_row(line,[[ENTRY]]) is ENTRY
+    with pytest.raises(ValueError,match='monthly_entry_source_row_unresolved'):
+        output_builder._resolve_monthly_entry_by_source_row({**line,'date':'2026-10-08'},[[ENTRY]])
 
 
 @pytest.mark.parametrize("fault", ["date", "daypart"])
