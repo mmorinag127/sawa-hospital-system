@@ -3,6 +3,9 @@ import importlib.util
 from pathlib import Path
 import json
 from io import BytesIO
+from datetime import date
+import hashlib
+from zipfile import ZipFile
 
 import pytest
 from openpyxl import Workbook
@@ -137,3 +140,43 @@ def test_final_xlsx_preserves_separate_headings_and_untouched_merges(tmp_path):
     assert {str(merged) for merged in actual.merged_cells.ranges} == {"A1:I1"}
     assert actual.cell(1, 1).value == "unchanged title"
     restored.close()
+
+
+@pytest.mark.parametrize("facility", ["fureai", "kasuga"])
+def test_original_workbook_invoice_output_and_readback(tmp_path, monkeypatch, facility):
+    from src.services import output_builder
+    raw = (ROOT / "backend/tests/fixtures/invoice-original-e0edc384.xlsx").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == "e0edc3849dacfaabbeb81eb9329cea7baa4cd994c16ef69e187716981bb274ad"
+    if facility == "fureai":
+        review = json.loads((ROOT / "docs/fureai-invoice-reviewed-columns-20261112.json").read_text())
+        columns = review["invoice_columns"]
+        name = "介護老人保健施設ふれあいの丘"
+        quantities = {"常食": 67, "通所": None, "職員": None}
+    else:
+        review = json.loads((ROOT / "docs/kasuga-future-reviewed-columns-20261112.json").read_text())
+        columns = [
+            {"name": "日付", "source": "date", "column_index": 1},
+            {"name": "区分", "source": "daypart", "column_index": 2},
+            {"name": "献立", "source": "menu_display", "column_index": 3},
+            {"name": "軟菜", "source": "quantity", "diet_type": "soft", "column_index": 6},
+            {"name": "備考", "source": "note", "column_index": 9},
+            *[{"source": "quantity", "column_index": patch["column_index"], **patch["replacement"]}
+              for patch in review["invoice_label_patches"]],
+        ]
+        name = "春日苑 松茂"
+        quantities = {"常食 花": 7, "常食 月": 7, "軟菜": None, "ミキサー 花": 2, "ミキサー 月": 3}
+    monkeypatch.setattr(output_builder, "load_bytes_from_uri", lambda uri: raw)
+    row = {"date": date(2026, 11, 15), "daypart": "朝", "menu_name": "ジャーマンポテト",
+           "menu_display": "ジャーマンポテト", "menu_category": "副菜1", "note": None, **quantities}
+    path = tmp_path / "delivery.xlsx"
+    output_builder._write_delivery_note(path, [row], columns, "fixture.xlsx", False, "松岡会", name)
+    with ZipFile(BytesIO(raw)) as original, ZipFile(path) as result:
+        assert result.read("xl/worksheets/sheet2.xml") == original.read("xl/worksheets/sheet2.xml")
+    workbook = load_workbook(path)
+    ws = workbook["松岡会"]
+    assert {column["name"]: ws.cell(8, column["column_index"]).value
+            for column in columns if column["source"] == "quantity"} == {key: key for key in quantities}
+    assert {column["name"]: ws.cell(12, column["column_index"]).value
+            for column in columns if column["source"] == "quantity"} == quantities
+    assert ws.cell(4, 1).value == name
+    workbook.close()

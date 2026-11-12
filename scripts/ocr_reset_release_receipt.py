@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'ed03f88a8ee2d562f4acd10fb96a10043ef2f119'
 BASE_RUN = 42815316580
 ALLOWED = {
+    'backend/tests/fixtures/invoice-original-e0edc384.xlsx',
     'scripts/prepare_invoice_column_correction.py',
     'backend/tests/unit/test_invoice_column_correction.py',
     'docs/facility-invoice-correction-20261112.md',

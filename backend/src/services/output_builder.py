@@ -2972,15 +2972,24 @@ def _apply_delivery_configured_headers(
         first, last = min(configured_indexes), max(configured_indexes)
         # A reused workbook's multi-row diet headings are not authored settings.
         # Replace only the table heading band, never title rows or quantity cells.
-        for merged in list(ws.merged_cells.ranges):
-            intersects = (merged.max_row >= header_row and merged.min_row < data_start_row
-                          and merged.max_col >= first and merged.min_col <= last)
-            if not intersects:
-                continue
-            if not (header_row <= merged.min_row <= merged.max_row < data_start_row
-                    and first <= merged.min_col <= merged.max_col <= last):
-                raise ValueError("delivery_header_merge_crosses_data_boundary")
-            ws.unmerge_cells(str(merged))
+        selected_merges = set()
+        changed = True
+        while changed:
+            changed = False
+            for merged in ws.merged_cells.ranges:
+                if str(merged) in selected_merges:
+                    continue
+                intersects = (merged.max_row >= header_row and merged.min_row < data_start_row
+                              and merged.max_col >= first and merged.min_col <= last)
+                if not intersects:
+                    continue
+                if not header_row <= merged.min_row <= merged.max_row < data_start_row:
+                    raise ValueError("delivery_header_merge_crosses_data_boundary")
+                selected_merges.add(str(merged))
+                first, last = min(first, merged.min_col), max(last, merged.max_col)
+                changed = True
+        for merged in selected_merges:
+            ws.unmerge_cells(merged)
         for row in ws.iter_rows(min_row=header_row, max_row=data_start_row - 1,
                                 min_col=first, max_col=last):
             for cell in row:
