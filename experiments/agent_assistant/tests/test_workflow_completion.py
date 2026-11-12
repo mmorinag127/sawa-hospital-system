@@ -46,7 +46,12 @@ def test_missing_menu_amount_does_not_block_other_approved_faxes(tmp_path,native
         store.update(run['id'], task_inputs={'business_workflow': {'version': 1, 'phase': 'saving'}})
         token=SERVER_EXECUTION.set(True)
         try:
-            result=await tools.execute(run['id'],0,'complete_fax_work',{},'partial-native-completion')
+            if native_failure == 500:
+                with pytest.raises(RuntimeError,match='業務更新の応答が未確定'):
+                    await tools.execute(run['id'],0,'complete_fax_work',{},'partial-native-completion')
+                result={'error':'unknown mutation response'}
+            else:
+                result=await tools.execute(run['id'],0,'complete_fax_work',{},'partial-native-completion')
         finally:
             SERVER_EXECUTION.reset(token)
         if native_failure==500:

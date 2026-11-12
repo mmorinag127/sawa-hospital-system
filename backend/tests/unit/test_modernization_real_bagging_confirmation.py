@@ -70,14 +70,23 @@ def revision(fixture):
         return session.get(OrderWorkflowState, fixture.order_id).revision
 
 
-@pytest.mark.parametrize('diet,column',[('no_fish',6),('staff',7)])
+@pytest.mark.parametrize('diet,column',[('diabetes',6),('staff',7)])
 def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_bagging,diet,column):
     from src.models.menu import MenuRule
     fixture=owned_bagging
+    # Forbidden-diet quantities are intentionally excluded from materialization.
+    # Publish a distinct synthetic diabetes column to exercise a counted diet.
+    if diet == 'diabetes':
+        fixture.authored['fax_template']['columns'][column]['diet_type'] = diet
+        fixture.authored['fax_template']['columns'][column]['field'] = 'qty.diabetes_x'
+        fixture.authored['daily_label_comparable_diet_types'].append(diet)
+        fixture.republish()
     with fixture.session_scope() as session:
         session.add(MenuRule(id='UNIT-COMMON',rule_type='global',daypart='朝',category=None,
             diet_type=None,unit_type='g',qty_per_serving=17,priority=0,active=True))
     sheet=fixture.saved()
+    if diet == 'diabetes':
+        sheet['fields'][column] = 'qty.diabetes_x'
     sheet['rows'][0][column]='1'
     for method in (workflow.run_sheet_anomaly_review,workflow.confirm_sheet_review):
         kwargs={'use_llm':False} if method is workflow.run_sheet_anomaly_review else {}
