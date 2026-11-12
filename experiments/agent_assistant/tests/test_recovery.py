@@ -1,5 +1,6 @@
 """Restart proofs use isolated copies and HTTP doubles; no model spend or live DB."""
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -38,8 +39,9 @@ def test_incomplete_fax_restarts_only_unused_inference_with_same_copy_and_cap(tm
         response['steps'] = [{'type':'function_call','id':'partial','name':'request_fax_approval','arguments':{}}]
     recovery, agent, store, sandbox, tools, run, requests = setup(tmp_path, monkeypatch, response)
     original_pin = agent.pin(run['id'])
-    store.update(run['id'], task_id='hospital_pending_faxes',
-        task_inputs={'business_workflow':{'version':1,'fax_harness':2,'phase':'checking'}})
+    with store.tx() as db:
+        db.execute('UPDATE runs SET task_id=?,task_inputs=? WHERE id=?', ('hospital_pending_faxes',
+            json.dumps({'business_workflow':{'version':1,'fax_harness':2,'phase':'checking'}}), run['id']))
     tools.faxes.items = lambda _: [{'state':'ready','review':None,'decision':None}] if fault!='review' else [
         {'state':'awaiting_approval','review':{'id':'retained'},'decision':None}]
     if fault == 'low': store.event(run['id'], 'gemini_binding', {**original_pin,'thinking_level':'low'})
