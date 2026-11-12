@@ -89,6 +89,7 @@ def test_future_original_labels_keep_history_and_existing_aggregation():
     assert result["invoice_template"]["columns"][-1] == soft
     assert result["areas"] == [{"id": "hana", "name": "花"}, {"id": "tsuki", "name": "月"}]
     assert all(column["area_id"] in {"hana", "tsuki"} for column in result["fax_template"]["columns"])
+    assert {column["header"] for column in result["fax_template"]["columns"]} == {"花", "月"}
     assert result["fax_template_override"]["columns"] == result["fax_template"]["columns"]
     assert not any("_2f" in name or "_3f" in name for name in result["fax_template"]["main_ocr_row_fields"])
     assert all("aliases" not in area for area in result["areas"])
