@@ -1,6 +1,6 @@
 """Local trial API. Start with python -m experiments.agent_assistant.app."""
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from functools import wraps
 import hashlib
 import hmac
@@ -664,17 +664,36 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await business.kick_many([ident],request.headers.get('authorization',''))
         return await run_blocking(store.get,ident,owner)
 
+    @asynccontextmanager
+    async def completed_invoice_context(run, order_id):
+        from .business_contracts import COMPLETED_INVOICE_EXECUTION,SERVER_EXECUTION,OWNER_INPUT_EXECUTION
+        ident=run['id']
+        scope=COMPLETED_INVOICE_EXECUTION.set((ident,run['generation'],order_id))
+        server,owner_input=SERVER_EXECUTION.set(True),OWNER_INPUT_EXECUTION.set(True)
+        sandbox.completed_invoice_runs.add(ident)
+        try:
+            yield
+        finally:
+            sandbox.completed_invoice_runs.discard(ident)
+            COMPLETED_INVOICE_EXECUTION.reset(scope)
+            SERVER_EXECUTION.reset(server)
+            OWNER_INPUT_EXECUTION.reset(owner_input)
+            await sandbox.release_completed(ident,expected_generation=run['generation'])
+
     async def register_trial_order_input(ident, payload, request, *, invoice=False):
         run = await run_blocking(store.get, ident, owner)
         await authorize(request.headers.get('authorization', ''), run['domains'])
         if not owned(run) or run.get('task_id') != 'hospital_pending_faxes' or run['domains'] != ['hospital']:
             raise Conflict('病院試用コピーだけ変更できます')
         async with control_lock(ident):
-            async with tools.workflow_locks.setdefault(ident, asyncio.Lock()):
+            async with AsyncExitStack() as execution:
+                await execution.enter_async_context(tools.workflow_locks.setdefault(ident,asyncio.Lock()))
                 run = await run_blocking(store.get, ident, owner)
                 output_only = invoice and run['status']=='completed'
                 if run['status'] in ('stopped','rolled_back','stopping','stop_pending','rollback_stop_pending') or (run['status']=='completed' and not output_only):
                     raise Conflict('停止済み・完了済みの試用コピーは変更しません')
+                if output_only:
+                    await execution.enter_async_context(completed_invoice_context(run,payload.order_id))
                 items = await run_blocking(tools.faxes.items, ident)
                 matches = [item for item in items if item['snapshot'].get('order_id') == payload.order_id]
                 allowed = ('approved','completed') if invoice else ('approved',)
@@ -765,21 +784,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     @app.post('/runs/{ident}/trial-invoice-columns')
     @_complete_request
     async def trial_invoice_columns(ident: str, payload: TrialInvoiceColumns, request: Request):
-        run=await run_blocking(store.get,ident,owner)
-        if run['status']!='completed':
-            return await register_trial_order_input(ident,payload,request,invoice=True)
-        from .business_contracts import COMPLETED_INVOICE_EXECUTION,SERVER_EXECUTION,OWNER_INPUT_EXECUTION
-        scope=COMPLETED_INVOICE_EXECUTION.set((ident,run['generation'],payload.order_id))
-        server,owner_input=SERVER_EXECUTION.set(True),OWNER_INPUT_EXECUTION.set(True)
-        sandbox.completed_invoice_runs.add(ident)
-        try:
-            return await register_trial_order_input(ident,payload,request,invoice=True)
-        finally:
-            sandbox.completed_invoice_runs.discard(ident)
-            COMPLETED_INVOICE_EXECUTION.reset(scope)
-            SERVER_EXECUTION.reset(server)
-            OWNER_INPUT_EXECUTION.reset(owner_input)
-            await sandbox.release_completed(ident,expected_generation=run['generation'])
+        return await register_trial_order_input(ident,payload,request,invoice=True)
 
     @app.post("/runs/{ident}/stop")
     async def stop(ident: str):

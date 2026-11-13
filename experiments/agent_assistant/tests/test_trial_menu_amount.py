@@ -296,6 +296,14 @@ def test_completed_invoice_refresh_never_reopens_business_or_model(tmp_path,monk
     monkeypatch.setattr(execution_binding,'approve_native_upgrade',lambda *a,**kw:approvals.append(kw))
     app.state.managed.resume=AsyncMock()
     app.state.business.kick_many.reset_mock()
+    cleanups=[]
+    async def cleanup(self,ident=None,*,expected_generation=None):
+        if ident==run['id']:
+            assert app.state.tools.workflow_locks[ident].locked(), 'Cleanup must finish before the next owner operation'
+            cleanups.append((ident,expected_generation))
+        return True
+    from experiments.agent_assistant.sandbox import Sandbox
+    monkeypatch.setattr(Sandbox,'release_completed',cleanup)
     execute=app.state.tools.execute
     exports=[]
     async def dispatch(ident,generation,name,raw,command):
@@ -320,6 +328,7 @@ def test_completed_invoice_refresh_never_reopens_business_or_model(tmp_path,monk
     app.state.managed.resume.assert_not_awaited()
     app.state.business.kick_many.assert_not_awaited()
     assert bool(store.latest_event(run['id'],'trial_invoice_output'))==(failure is None)
+    assert cleanups==[(run['id'],run['generation'])]
 
 
 @pytest.mark.parametrize('operation,target',[('hospital_bag_order','OA'),('hospital_export_aggregate','OA'),('hospital_register_trial_invoice_columns','OTHER')])
