@@ -1428,6 +1428,23 @@ def register_trial_area_names(order_id: str, body: dict):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.put("/{order_id}/workflow-v2/trial-invoice-columns", dependencies=[Depends(require_role("operator"))])
+def register_trial_invoice_columns(order_id: str, body: dict):
+    from src.services import agent_trial_transport, output_builder
+    from src.services.invoice_column_correction_service import trial_invoice_template
+    if not agent_trial_transport.enabled():
+        raise HTTPException(status_code=404, detail="isolated_trial_only")
+    try:
+        order = order_service.get_order_for_output_read(order_id)
+        if not order:
+            raise ValueError('order_not_found')
+        candidate = output_builder._accepted_output_candidate(order)
+        template = trial_invoice_template(order_id, candidate, body)
+        return {'order_id':order_id, 'columns':template['columns']}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 def _raise_legacy_order_workflow_gone(endpoint: str) -> None:
     raise HTTPException(
         status_code=410,

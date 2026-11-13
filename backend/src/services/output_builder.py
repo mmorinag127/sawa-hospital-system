@@ -6148,10 +6148,15 @@ def _fax_quantity_signature(column: dict, area_aliases: dict[str, str]) -> tuple
     return _authored_quantity_signature(column, area_aliases)
 
 
-def _resolve_captured_invoice_template(facility_config: dict) -> dict:
+def _resolve_captured_invoice_template(facility_config: dict, *, order_id=None, accepted_candidate=None) -> dict:
     from src.services.config_validator import _validate_invoice_columns
 
     template = facility_config.get("invoice_template")
+    if order_id is not None:
+        from src.services.invoice_column_correction_service import trial_invoice_template
+        correction = trial_invoice_template(order_id, accepted_candidate)
+        if correction is not None:
+            template = correction
     if not isinstance(template, dict) or not isinstance(template.get("columns"), list) or not template["columns"]:
         raise ValueError("accepted_invoice_template_required")
     if not isinstance(template.get("template_uri"), str) or not template["template_uri"].strip():
@@ -6428,7 +6433,8 @@ def _prepare_output_context(
 
     packaging_policy = facility_config.get("packaging_policy", {})
     label_profile = facility_config.get("label_profile", {})
-    invoice_template = _resolve_captured_invoice_template(facility_config) if require_invoice else None
+    invoice_template = _resolve_captured_invoice_template(facility_config, order_id=order_id,
+        accepted_candidate=accepted_candidate) if require_invoice else None
     policy_started = time.perf_counter()
     quantity_rules = accepted_candidate["configured_input"]["policy"].get("quantity_rules", {})
     if timings is not None:

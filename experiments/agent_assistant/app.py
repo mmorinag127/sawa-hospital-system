@@ -117,6 +117,17 @@ class NativeUpgrade(BaseModel):
     current_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
 
 
+class TrialInvoiceColumns(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    order_id: str = Field(pattern=r'^[A-Za-z0-9_-]+$')
+    source_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    source_columns: list[dict] = Field(min_length=1,max_length=50)
+    excluded_source_columns: list[dict] = Field(default_factory=list,max_length=50)
+    invoice_columns: list[dict] = Field(min_length=1,max_length=50)
+    reason: str = Field(min_length=1,max_length=1000)
+    native_upgrade: NativeUpgrade | None = None
+
+
 def create_app(config, root, *, managed_client=None, gemini_client=None):
     if config.get("durability") == "cloud-sql":
         from .durable import cloud_store
@@ -447,8 +458,10 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 source_event = store.latest_event(ident, 'source')
                 provisional = store.latest_event(ident, 'trial_provisional_menu_amount')
                 area_names = store.latest_event(ident, 'trial_area_names')
+                invoice_columns = store.latest_event(ident, 'trial_invoice_columns')
                 current = {**current, 'provisional_menu_amount':provisional['payload'] if provisional else None,
-                           'trial_area_names':area_names['payload'] if area_names else None}
+                           'trial_area_names':area_names['payload'] if area_names else None,
+                           'trial_invoice_columns':invoice_columns['payload'] if invoice_columns else None}
                 # Old clients also use this immutable binding to distinguish a
                 # source-upload question from an ordinary operator question.
                 context = [source_event] if source_event and all(event['id'] != source_event['id'] for event in events) else []
@@ -650,9 +663,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await business.kick_many([ident],request.headers.get('authorization',''))
         return await run_blocking(store.get,ident,owner)
 
-    @app.post('/runs/{ident}/trial-area-names')
-    @_complete_request
-    async def trial_area_names(ident: str, payload: TrialAreaNames, request: Request):
+    async def register_trial_order_input(ident, payload, request, *, invoice=False):
         run = await run_blocking(store.get, ident, owner)
         await authorize(request.headers.get('authorization', ''), run['domains'])
         if not owned(run) or run.get('task_id') != 'hospital_pending_faxes' or run['domains'] != ['hospital']:
@@ -662,32 +673,53 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 run = await run_blocking(store.get, ident, owner)
                 if run['status'] in ('completed','stopped','rolled_back','stopping','stop_pending','rollback_stop_pending'):
                     raise Conflict('停止済み・完了済みの試用コピーは変更しません')
-                await run_blocking(business.require_copy, run)
                 items = await run_blocking(tools.faxes.items, ident)
                 matches = [item for item in items if item['snapshot'].get('order_id') == payload.order_id]
-                if len(matches) != 1 or matches[0]['state'] != 'approved':
-                    raise Conflict('この試用コピーの承認済み・未確定注文を指定してください')
+                allowed = ('approved','completed') if invoice else ('approved',)
+                if len(matches) != 1 or matches[0]['state'] not in allowed:
+                    raise Conflict('この試用コピーの承認済み注文を指定してください')
                 tools.authorizations[ident] = request.headers.get('authorization', '')
+                from .execution_binding import approve_native_upgrade, record
+                from .managed import SYSTEM
+                upgrade = payload.native_upgrade if invoice else None
+                if upgrade is not None:
+                    if managed.tasks.get(ident) and not managed.tasks[ident].done():
+                        raise Conflict('処理中の依頼の業務API版は変更できません')
+                    await run_blocking(approve_native_upgrade, store, tools, run, SYSTEM, **upgrade.model_dump())
+                    await managed.resume(ident)
+                    run = await run_blocking(store.get, ident, owner)
+                if await run_blocking(store.latest_event, ident, 'execution_binding'):
+                    await run_blocking(record, store, tools, run, SYSTEM)
+                await run_blocking(business.require_copy, run)
                 before = await tools.faxes.capture(run, matches[0])
+                decision = matches[0].get('decision') or {}
+                if not decision.get('approve') or before['signature'] != decision.get('native_signature'):
+                    raise Conflict('承認後に原本・保存シートが変わっています。訂正を登録しません')
                 sheet_id = before['workflow'].get('saved_sheet_id')
                 if not sheet_id:
                     raise Conflict('保存済みシートが必要です')
+                if invoice and before['workflow'].get('state') != 'confirmed':
+                    raise Conflict('確定済みの保存シートだけ納品書列を訂正できます')
                 from .business_contracts import OWNER_INPUT_EXECUTION, SERVER_EXECUTION
-                command = 'owner-areas-' + hashlib.sha256(json.dumps({**payload.model_dump(), 'saved_sheet_id':sheet_id}, sort_keys=True).encode()).hexdigest()
+                values = payload.model_dump(exclude={'native_upgrade'})
+                event_kind = 'trial_invoice_columns' if invoice else 'trial_area_names'
+                command = ('owner-invoice-' if invoice else 'owner-areas-') + hashlib.sha256(json.dumps({**values, 'saved_sheet_id':sheet_id}, sort_keys=True).encode()).hexdigest()
                 old_status = run['status']
                 await run_blocking(store.update, ident, expected_generation=run['generation'], status='running')
                 owner_token, server_token = OWNER_INPUT_EXECUTION.set(True), SERVER_EXECUTION.set(True)
                 try:
-                    result = await tools.execute(ident, run['generation'], 'hospital_register_trial_area_names', {'parameters':{
-                        'ids':{'order_id':payload.order_id}, 'body':{'saved_sheet_id':sheet_id, 'names':payload.names, 'reason':payload.reason},
+                    operation = 'hospital_register_trial_invoice_columns' if invoice else 'hospital_register_trial_area_names'
+                    result = await tools.execute(ident, run['generation'], operation, {'parameters':{
+                        'ids':{'order_id':payload.order_id}, 'body':{**{k:v for k,v in values.items() if k != 'order_id'},'saved_sheet_id':sheet_id},
                         'reason':payload.reason}}, command)
                     if result.get('ok') is not True:
                         await run_blocking(store.update, ident, expected_generation=run['generation'], status=old_status)
                         raise HTTPException(status_code=400, detail=result)
                     after = await tools.faxes.capture(run, matches[0])
-                    if after['signature'] != before['signature'] or after['sheet'] != before['sheet'] or result.get('data', {}).get('names') != payload.names:
+                    key, expected = ('columns',payload.invoice_columns) if invoice else ('names',payload.names)
+                    if after['signature'] != before['signature'] or after['sheet'] != before['sheet'] or result.get('data', {}).get(key) != expected:
                         raise Conflict('保存済みシート・原本の照合が一致しません')
-                    await run_blocking(store.event, ident, 'trial_area_names', {**payload.model_dump(), 'saved_sheet_id':sheet_id, 'command_id':command})
+                    await run_blocking(store.event, ident, event_kind, {**values, 'saved_sheet_id':sheet_id, 'command_id':command})
                 except HTTPException:
                     raise
                 except Exception:
@@ -699,6 +731,16 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 await run_blocking(business.begin_reconciliation, run)
         await business.kick_many([ident], request.headers.get('authorization', ''))
         return await run_blocking(store.get, ident, owner)
+
+    @app.post('/runs/{ident}/trial-area-names')
+    @_complete_request
+    async def trial_area_names(ident: str, payload: TrialAreaNames, request: Request):
+        return await register_trial_order_input(ident, payload, request)
+
+    @app.post('/runs/{ident}/trial-invoice-columns')
+    @_complete_request
+    async def trial_invoice_columns(ident: str, payload: TrialInvoiceColumns, request: Request):
+        return await register_trial_order_input(ident, payload, request, invoice=True)
 
     @app.post("/runs/{ident}/stop")
     async def stop(ident: str):

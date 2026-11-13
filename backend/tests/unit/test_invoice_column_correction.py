@@ -8,6 +8,8 @@ import hashlib
 from zipfile import ZipFile
 
 import pytest
+from test_modernization_real_bagging_confirmation import owned_bagging as owned_bagging
+from test_modernization_workflow_surface_parity import surface as surface, database_snapshot
 from openpyxl import Workbook
 from openpyxl import load_workbook
 
@@ -16,6 +18,140 @@ spec = importlib.util.spec_from_file_location(
     "prepare_invoice_column_correction", ROOT / "scripts/prepare_invoice_column_correction.py")
 correction = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(correction)
+
+
+@pytest.fixture
+def trial_invoice(tmp_path, monkeypatch):
+    from src.services import agent_trial_transport as local
+    from src.services import invoice_column_correction_service as service
+    reviewed = json.loads((ROOT/'docs/fureai-invoice-reviewed-columns-20261112.json').read_text())
+    sources = [*reviewed['source_columns'], *reviewed['excluded_source_columns']]
+    fields = ['qty.regular_x','qty.daycare_x','qty.staff_x','qty.no_meat_x','qty.no_fish_x','qty.no_fried_x','qty.change_1_x']
+    facility = {'facility_id':'SYNTHETIC-F', 'facility_name':'Original synthetic facility', 'areas':[],
+        'fax_template':{'columns':[{**c,'role':'quantity','name':field} for c,field in zip(sources,fields,strict=True)]},
+        'invoice_template':{'template_uri':str(ROOT/'backend/tests/fixtures/invoice-original-e0edc384.xlsx'),
+            'sheet_name':'松岡会','include_menu_name':False,'columns':[
+                *deepcopy(reviewed['invoice_columns'][:3]),
+                {'name':'Old floor','header':'Old floor','source':'quantity','diet_type':'regular','area_id':'2F','column_index':4},
+                deepcopy(reviewed['invoice_columns'][-1])]}}
+    sheet = {'fields':['date_mmdd','daypart','menu',*fields,'remarks'],
+        'header':['日付','区分','メニュー',*[c['header'] for c in sources],'備考欄'],
+        'rows':[['11/15','朝','Synthetic dish','17','23','31','5','7','11','13','operator note']]}
+    candidate = {'configured_input':{'facility':facility},'output_lines':[
+        {'date':date(2026,11,15),'daypart':'朝','menu_name':'Synthetic dish','diet_type':diet,'area_id':'X','quantity_original':qty}
+        for diet,qty in [('regular',17),('daycare',23),('staff',31)]]}
+    context = {'order_id':'OA','saved_sheet_id':'S1','source_sha256':'a'*64,'sheet_sha256':'original-sheet','candidate_sha256':'accepted'}
+    body = {key:deepcopy(reviewed[key]) for key in ('source_columns','excluded_source_columns','invoice_columns')}
+    body.update(saved_sheet_id='S1',source_sha256='a'*64,reason='Synthetic original and saved-sheet review')
+    monkeypatch.setattr(local,'enabled',lambda:True)
+    monkeypatch.setattr(local,'configuration',lambda:{'root':str(tmp_path)})
+    monkeypatch.setattr(service,'_binding',lambda oid,accepted:(deepcopy(context),deepcopy(sheet)))
+    return service, candidate, sheet, context, body, tmp_path
+
+
+def test_trial_correction_preserves_inputs_and_renders_three_distinct_quantities(trial_invoice):
+    service,candidate,sheet,context,body,root = trial_invoice
+    from src.services import output_builder as output
+    before = deepcopy((candidate,sheet,body))
+    order = {'facility':'SYNTHETIC-F','lines':candidate['output_lines']}
+    facility = candidate['configured_input']['facility']
+    with pytest.raises(ValueError,match='delivery_quantity_mapping_unresolved'):
+        output._build_delivery_rows(order,facility['invoice_template'],{},facility,allow_ocr_menu_meta=False)
+    template = service.trial_invoice_template('OA',candidate,body)
+    assert template == service.trial_invoice_template('OA',candidate)
+    assert service.trial_invoice_template('OB',candidate) is None
+    rows = output._build_delivery_rows(order,template,{},facility,allow_ocr_menu_meta=False)
+    assert [{name:r[name] for name in ('常食','通所','職員')} for r in rows] == [{'常食':17,'通所':23,'職員':31}]
+    path = root/'actual-three-quantities.xlsx'
+    output._write_delivery_note(path,rows,template['columns'],template['template_uri'],False,'松岡会',facility['facility_name'])
+    workbook = load_workbook(path)
+    ws = workbook['松岡会']
+    assert [ws.cell(8,i).value for i in (4,5,6)] == ['常食','通所','職員']
+    assert [ws.cell(12,i).value for i in (4,5,6)] == [17,23,31]
+    workbook.close()
+    assert (candidate,sheet,body) == before
+
+
+@pytest.mark.parametrize('fault',['pdf','sheet','aggregate','header','omission','duplicate','saved_header','unmapped_line'])
+def test_trial_correction_rejects_guessed_or_changed_correspondence(trial_invoice,fault):
+    service,candidate,sheet,context,body,root = trial_invoice
+    if fault=='pdf': body['source_sha256']='b'*64
+    elif fault=='sheet': body['saved_sheet_id']='other'
+    elif fault=='aggregate': body['invoice_columns'][3].pop('area_id')
+    elif fault=='header': body['source_columns'][0]['header']='Guessed'
+    elif fault=='omission': body['excluded_source_columns']=[]
+    elif fault=='duplicate': body['source_columns'].append(deepcopy(body['source_columns'][0]))
+    elif fault=='saved_header': sheet['header'][3]='Another header'
+    else: candidate['output_lines'].append({**candidate['output_lines'][0],'diet_type':'mixer'})
+    with pytest.raises(ValueError): service.trial_invoice_template('OA',candidate,body)
+    assert not (root/'owner-invoice-columns'/'OA.json').exists()
+
+
+def test_trial_correction_revalidates_binding_and_annotation_and_stays_isolated(trial_invoice,monkeypatch):
+    service,candidate,sheet,context,body,root = trial_invoice
+    from src.services import agent_trial_transport as local
+    service.trial_invoice_template('OA',candidate,body)
+    context['sheet_sha256']='edited-after-registration'
+    with pytest.raises(ValueError,match='accepted_input_changed'):
+        service.trial_invoice_template('OA',candidate)
+    context['sheet_sha256']='original-sheet'
+    path=root/'owner-invoice-columns'/'OA.json'
+    saved=json.loads(path.read_text())
+    saved['invoice_template']['columns'][3]['area_id']='2F'
+    path.write_text(json.dumps(saved))
+    with pytest.raises(ValueError,match='registration_changed'):
+        service.trial_invoice_template('OA',candidate)
+    monkeypatch.setattr(local,'enabled',lambda:False)
+    assert service.trial_invoice_template('OA',candidate) is None
+    with pytest.raises(ValueError,match='isolated_trial_only'):
+        service.trial_invoice_template('OA',candidate,body)
+    from src.api.orders import register_trial_invoice_columns
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        register_trial_invoice_columns('OA',body)
+    assert exc.value.status_code==404
+
+
+def test_real_confirmed_read_uses_correction_without_rewriting_saved_lineage(owned_bagging,tmp_path,monkeypatch):
+    from test_modernization_real_daily_delivery_html import confirm
+    from src.services import order_service as orders, output_builder as output, agent_trial_transport as local
+    from src.services import invoice_column_correction_service as service
+    from src.models.order import Order
+    from src.models.document import OrderDocument
+    from src.models.order_sheet_draft import OrderSheetDraft
+    fixture=owned_bagging
+    saved=fixture.saved()
+    saved['header']=['Date','Meal','Category','Menu','Quantity','No meat','No fish','Staff']
+    with fixture.session_scope() as session:
+        session.get(OrderSheetDraft,fixture.draft_id).draft_sheet_json=deepcopy(saved)
+    for column in fixture.authored['fax_template']['columns']:
+        if column.get('role')=='quantity':
+            index=column['source_index']
+            column.update(name=saved['fields'][index],header=saved['header'][index])
+    fixture.authored['invoice_template']['template_uri']=str(ROOT/'backend/tests/fixtures/invoice-original-e0edc384.xlsx')
+    fixture.authored['invoice_template']['columns'][-1]['area_id']='2F'
+    fixture.republish()
+    with fixture.session_scope() as session:
+        orders._record_current_order_version(session,session.get(Order,fixture.order_id),session.get(OrderDocument,'UNIT-DOC'))
+    candidate=confirm(fixture)
+    before=database_snapshot()
+    saved=fixture.saved()
+    (tmp_path/'trial-manifest.json').write_text('{"purpose":"sawa-agent-isolated-trial"}')
+    monkeypatch.setattr(local,'enabled',lambda:True)
+    monkeypatch.setattr(local,'configuration',lambda:{'root':str(tmp_path)})
+    context,_=service._binding(fixture.order_id,candidate)
+    source=candidate['configured_input']['facility']['fax_template']['columns']
+    qty=[{key:c[key] for key in ('source_index','header','diet_type','area_id')} for c in source if c.get('role')=='quantity']
+    columns=deepcopy(candidate['configured_input']['facility']['invoice_template']['columns'])
+    columns[-1].update(area_id='X',name=qty[0]['header'],header=qty[0]['header'])
+    body={'saved_sheet_id':fixture.draft_id,'source_sha256':context['source_sha256'],
+          'source_columns':qty[:1],'excluded_source_columns':qty[1:],'invoice_columns':columns,'reason':'Synthetic original review'}
+    service.trial_invoice_template(fixture.order_id,candidate,body)
+    preview=output.build_delivery_preview(fixture.order_id,include_diagnostics=False)
+    quantity=next(c for c in preview['columns'] if c['source']=='quantity')
+    assert quantity['area_id']=='X' and quantity['name']==qty[0]['header']
+    assert database_snapshot()==before
+    assert fixture.saved()==saved
 
 
 def test_reviewed_invoice_correction_preserves_identity_and_ocr():

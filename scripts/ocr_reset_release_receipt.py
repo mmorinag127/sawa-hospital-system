@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'ed03f88a8ee2d562f4acd10fb96a10043ef2f119'
 BASE_RUN = 42815316580
 ALLOWED = {
+    'backend/src/services/invoice_column_correction_service.py',
+    'docs/fureai-old-copy-invoice-20261113.md',
     'docs/six-agent-bagging-confirmation-20261113.md',
     'backend/tests/contract/test_outputs_api.py',
     'backend/tests/unit/test_modernization_delivery_name_identity.py',

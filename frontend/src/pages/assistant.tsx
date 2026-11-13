@@ -14,7 +14,7 @@ const BUSINESS_TIMEOUT = 300000;
 const terminalRun = (status: string) => ["completed", "rolled_back", "stopped", "failed"].includes(status);
 const assistantApi = {
   post<T=any>(url:string,data?:unknown,options?:AxiosRequestConfig) {
-    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage|reconcile-business|trial-menu-amount|trial-area-names)|faxes\/[^/]+\/decision)$/.test(url);
+    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage|reconcile-business|trial-menu-amount|trial-area-names|trial-invoice-columns)|faxes\/[^/]+\/decision)$/.test(url);
     return apiClient.post<T>(url,data,business ? {...options,timeout:BUSINESS_TIMEOUT} : options);
   },
 };
@@ -29,6 +29,7 @@ type Run = { business?:BusinessProgress; business_messages?:ChatMessage[]; reque
   source_attached?:boolean;
   provisional_menu_amount?:{name:string;quantity:number;unit:string;provisional:true}|null;
   trial_area_names?:{order_id:string;names:Record<string,string>}|null;
+  trial_invoice_columns?:{order_id:string;invoice_columns:{source:string;name:string}[]}|null;
   generation?:number;
   native_upgrade?:{previous_sha256:string;current_sha256:string;previous_sources:Record<string,{source_revision:string}>;current_sources:Record<string,{source_revision:string}>}|null;
   event_page?:AssistantEventPage;
@@ -101,6 +102,9 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [trialAreaOrder,setTrialAreaOrder]=useState("");
   const [trialAreaNames,setTrialAreaNames]=useState("");
   const [trialAreaReason,setTrialAreaReason]=useState("");
+  const [trialInvoiceOrder,setTrialInvoiceOrder]=useState("");
+  const [trialInvoiceReview,setTrialInvoiceReview]=useState("");
+  const [trialInvoiceReason,setTrialInvoiceReason]=useState("");
   const setTrialMenu=(patch:Partial<typeof trialMenu>)=>{
     if(selected)setTrialMenuDrafts(previous=>({...previous,[selected.id]:{...trialMenu,...patch}}));
   };
@@ -355,6 +359,20 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       if(selectedId.current===id){setTrialAreaOrder("");setTrialAreaNames("");setTrialAreaReason("");await refreshAfterCommand(id);}
     });
   }
+  async function registerTrialInvoiceColumns(event: FormEvent) {
+    event.preventDefault();
+    if(!selected || busy || controlling)return;
+    const id=selected.id;
+    await act(async()=>{
+      const review=JSON.parse(trialInvoiceReview);
+      const upgrade=selected.native_upgrade;
+      await assistantApi.post(`/assistant-trial/runs/${id}/trial-invoice-columns`,{
+        ...review,order_id:trialInvoiceOrder,reason:trialInvoiceReason,
+        ...(upgrade ? {native_upgrade:{generation:selected.generation,previous_sha256:upgrade.previous_sha256,current_sha256:upgrade.current_sha256}} : {}),
+      });
+      if(selectedId.current===id){setTrialInvoiceOrder("");setTrialInvoiceReview("");setTrialInvoiceReason("");await refreshAfterCommand(id);}
+    });
+  }
   const task = tasks.find(t => t.id === taskId && t.domain === domain);
   const targetsReady=taskId==="hospital_pending_faxes" ? !!selection : !!selection && (!task?.month || !!selection.inputs?.month) && !!targetKeys.length && (task?.target_kind!=="menu" || !!task?.date || !!layoutId);
   const ready = config && task && targetsReady && (!config.missing.length || task.requires_agent===false) && config.domains[domain]?.baseline_ready;
@@ -548,6 +566,14 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {adminView && controlNotice && <p className="assistant-notice" role="status" aria-live="polite">{controlNotice}</p>}
       {selected.provisional_menu_amount && <p role="status" className="assistant-notice">検証専用の仮設定：{selected.provisional_menu_amount.name} {selected.provisional_menu_amount.quantity}{selected.provisional_menu_amount.unit}（実運用の値は未確認）</p>}
       {selected.trial_area_names && <p role="status">試用注文 {selected.trial_area_names.order_id} の表示名：{Object.entries(selected.trial_area_names.names).map(([id,name])=>`${id} → ${name}`).join("、")}</p>}
+      {selected.trial_invoice_columns && <p role="status">試用注文 {selected.trial_invoice_columns.order_id} の納品書列：{selected.trial_invoice_columns.invoice_columns.filter(c=>c.source==="quantity").map(c=>c.name).join("、")}</p>}
+      {adminView && selected.task_id==="hospital_pending_faxes" && !terminal && <form className="assistant-notice" onSubmit={registerTrialInvoiceColumns}>
+        <h3>保存済み注文の納品書列訂正</h3>
+        <label>納品書訂正のコピー注文ID<input required value={trialInvoiceOrder} onChange={event=>setTrialInvoiceOrder(event.target.value)}/></label>
+        <label>原本・保存シートを照合した列定義（JSON）<textarea required value={trialInvoiceReview} onChange={event=>setTrialInvoiceReview(event.target.value)}/></label>
+        <label>納品書列訂正の根拠<input required maxLength={1000} value={trialInvoiceReason} onChange={event=>setTrialInvoiceReason(event.target.value)}/></label>
+        <button disabled={busy || controlling} type="submit">{selected.native_upgrade ? "修正版で納品書列を訂正して再開" : "納品書列を訂正して再開"}</button>
+      </form>}
       {adminView && selected.task_id==="hospital_pending_faxes" && !terminal && <form className="assistant-notice" onSubmit={registerTrialAreaNames}>
         <h3>試用注文のエリア表示名</h3>
         <label>コピー注文ID<input required value={trialAreaOrder} onChange={event=>setTrialAreaOrder(event.target.value)}/></label>

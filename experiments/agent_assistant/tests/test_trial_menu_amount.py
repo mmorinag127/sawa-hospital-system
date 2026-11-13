@@ -159,3 +159,92 @@ def test_unknown_area_registration_is_fenced_not_replayed(tmp_path, monkeypatch)
         assert web.post(path, json=body).status_code == 409
         assert len(native.area_writes) == 1
         assert app.state.store.get(run['id'])['status'] == 'reconciliation_required'
+
+
+INVOICE_BODY={'order_id':'OA','source_sha256':'a'*64,
+    'source_columns':[{'source_index':4,'header':'Regular','diet_type':'regular','area_id':'X'}],
+    'excluded_source_columns':[],
+    'invoice_columns':[{'name':'Regular','source':'quantity','diet_type':'regular','area_id':'X'}],
+    'reason':'Synthetic original and saved sheet reviewed independently'}
+
+
+def invoice_fixture(tmp_path,monkeypatch,*,lost=False,changed=False):
+    app,native,run=area_fixture(tmp_path,monkeypatch)
+    native.wfs['OA']['state']='confirmed'
+    asyncio.run(app.state.tools.faxes.refresh(run))
+    native.invoice_writes=[]
+    original=native.request
+    async def request(run,domain,method,path,**kwargs):
+        if path.endswith('/trial-invoice-columns'):
+            native.invoice_writes.append(kwargs['body'])
+            assert app.state.tools.workflow_locks[run['id']].locked()
+            if lost: raise httpx.ReadTimeout('Synthetic invoice reply lost')
+            if changed: native.sheets['OA']['rows'][0][1]=999
+            return httpx.Response(200,json={'order_id':'OA','columns':kwargs['body']['invoice_columns']})
+        return await original(run,domain,method,path,**kwargs)
+    native.request=request
+    return app,native,run
+
+
+def test_confirmed_copy_invoice_registration_retains_sheet_and_no_model_spend(tmp_path,monkeypatch):
+    app,native,run=invoice_fixture(tmp_path,monkeypatch)
+    with TestClient(app) as web:
+        web.headers['X-Trial-Token']=app.state.token
+        path='/runs/'+run['id']+'/trial-invoice-columns'
+        assert web.post(path,json={**INVOICE_BODY,'order_id':'OTHER'}).status_code==409
+        response=web.post(path,json=INVOICE_BODY)
+        assert response.status_code==200,response.text
+        assert len(native.invoice_writes)==1
+        assert native.invoice_writes[0]=={**{k:v for k,v in INVOICE_BODY.items() if k!='order_id'},'saved_sheet_id':'SOA'}
+        assert native.sheets['OA']['rows']==[['牛乳',0]]
+        assert native.wfs['OA']['saved_sheet_id']=='SOA'
+        assert app.state.store.get(run['id'])['spent']==0
+        assert app.state.store.latest_event(run['id'],'trial_invoice_columns')['payload']['saved_sheet_id']=='SOA'
+
+
+@pytest.mark.parametrize('lost,changed',[(True,False),(False,True)])
+def test_invoice_unknown_write_or_changed_saved_sheet_is_not_success(tmp_path,monkeypatch,lost,changed):
+    app,native,run=invoice_fixture(tmp_path,monkeypatch,lost=lost,changed=changed)
+    with TestClient(app,raise_server_exceptions=False) as web:
+        web.headers['X-Trial-Token']=app.state.token
+        response=web.post('/runs/'+run['id']+'/trial-invoice-columns',json=INVOICE_BODY)
+        assert response.status_code== (500 if lost else 409)
+        assert app.state.store.get(run['id'])['status']=='reconciliation_required'
+        assert app.state.store.latest_event(run['id'],'trial_invoice_columns') is None
+        assert web.post('/runs/'+run['id']+'/trial-invoice-columns',json=INVOICE_BODY).status_code==409
+        assert len(native.invoice_writes)==1
+
+
+def test_combined_upgrade_keeps_completion_locked_until_invoice_is_registered(tmp_path,monkeypatch):
+    from experiments.agent_assistant import execution_binding
+    app,native,run=invoice_fixture(tmp_path,monkeypatch)
+    app.state.store.update(run['id'],status='reconciliation_required')
+    calls=[]
+    def approve(*args,**kwargs):
+        assert app.state.tools.workflow_locks[run['id']].locked()
+        calls.append(('upgrade',kwargs))
+    async def resume(ident):
+        assert app.state.tools.workflow_locks[ident].locked()
+        assert not native.invoice_writes
+        calls.append(('resume',ident))
+    monkeypatch.setattr(execution_binding,'approve_native_upgrade',approve)
+    app.state.managed.resume=AsyncMock(side_effect=resume)
+    upgrade={'generation':run['generation'],'previous_sha256':'a'*64,'current_sha256':'b'*64}
+    with TestClient(app) as web:
+        web.headers['X-Trial-Token']=app.state.token
+        response=web.post('/runs/'+run['id']+'/trial-invoice-columns',json={**INVOICE_BODY,'native_upgrade':upgrade})
+        assert response.status_code==200,response.text
+        assert calls==[('upgrade',upgrade),('resume',run['id'])]
+        assert len(native.invoice_writes)==1
+
+
+def test_changed_execution_binding_rejects_invoice_before_native_write(tmp_path,monkeypatch):
+    from experiments.agent_assistant import execution_binding
+    app,native,run=invoice_fixture(tmp_path,monkeypatch)
+    app.state.store.event(run['id'],'execution_binding',{'synthetic':'old source'})
+    def reject(*args,**kwargs): raise Conflict('Source mismatch')
+    monkeypatch.setattr(execution_binding,'record',reject)
+    with TestClient(app) as web:
+        web.headers['X-Trial-Token']=app.state.token
+        assert web.post('/runs/'+run['id']+'/trial-invoice-columns',json=INVOICE_BODY).status_code==409
+        assert not native.invoice_writes

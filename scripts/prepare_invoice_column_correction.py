@@ -6,35 +6,10 @@ from datetime import date
 import hashlib
 import json
 from pathlib import Path
+import sys
 
-
-def prepare_correction(facility, *, source_columns, invoice_columns, excluded_source_columns=()):
-    """Require reviewed source identities; never infer aliases or aggregation."""
-    actual = facility.get("fax_template", {}).get("columns", [])
-    authored = [column for column in actual if column.get("role") == "quantity"
-                and (column.get("semantic") or {}).get("aggregation_role", "include") != "exclude"]
-    identities = lambda columns: [
-        (column.get("source_index"), column.get("header"),
-         column.get("diet_type"), column.get("area_id")) for column in columns
-    ]
-    reviewed = sorted([*source_columns, *excluded_source_columns], key=lambda column: column["source_index"])
-    if not source_columns or identities(authored) != identities(reviewed):
-        raise ValueError("reviewed_source_columns_changed")
-    expected = [(column["diet_type"], column.get("area_id")) for column in source_columns]
-    targets = [column for column in invoice_columns if column.get("source") == "quantity"]
-    if [(column.get("diet_type"), column.get("area_id")) for column in targets] != expected:
-        raise ValueError("invoice_requires_explicit_one_to_one_source_mapping")
-    if [column.get("name") for column in targets] != [column["header"] for column in source_columns]:
-        raise ValueError("invoice_headers_must_match_reviewed_original")
-    current = facility.get("invoice_template")
-    if not isinstance(current, dict):
-        raise ValueError("existing_invoice_template_required")
-    if [column for column in current["columns"] if column.get("source") != "quantity"] != [
-            column for column in invoice_columns if column.get("source") != "quantity"]:
-        raise ValueError("nonquantity_invoice_columns_must_be_preserved")
-    result = deepcopy(facility)
-    result["invoice_template"]["columns"] = deepcopy(invoice_columns)
-    return result
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'backend'))
+from src.services.invoice_column_correction_service import prepare_correction
 
 
 def prepare_source_labels(facility, review):

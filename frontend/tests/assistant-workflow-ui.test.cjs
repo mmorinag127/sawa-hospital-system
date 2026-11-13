@@ -20,6 +20,31 @@ for(const [id,domain,label,target_kind,month] of [
 const config={missing:[],domains:Object.fromEntries(['hospital','shift','school-lunch'].map(k=>[k,{baseline_ready:true}])),budget:{spent_cents:0,reserved_cents:0,monthly_cents:1000,available_cents:1000,notice:'synthetic'}};
 const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',instruction:'翌月のシフト案を作る',domains:['shift'],status,spent:0,cap:100,events:[],artifacts:[],conversation:[],task_inputs:{inputs:{month:'2026-11'},targets:[{label:'11月の勤務計画',data:{}}]},pending_question:{id:'q1',role:'assistant',question_id:'question-1',text:'登録内容で作成しますか？',options:['登録内容で進める','確認したい']}});
 
+test('owner invoice correction submits reviewed columns and displayed upgrade once without changing budget',async()=>{
+ const upgrade={previous_sha256:'a'.repeat(64),current_sha256:'b'.repeat(64),previous_sources:{hospital:{source_revision:'a'.repeat(40)}},current_sources:{hospital:{source_revision:'b'.repeat(40)}}};
+ const initial={...makeRun('reconciliation_required'),generation:14,task_id:'hospital_pending_faxes',domains:['hospital'],pending_question:null,native_upgrade:upgrade};
+ const review={source_sha256:'c'.repeat(64),source_columns:[{source_index:4,header:'Regular',diet_type:'regular',area_id:'X'}],excluded_source_columns:[],invoice_columns:[{name:'Regular',source:'quantity',diet_type:'regular',area_id:'X'}]};
+ const h=await mount({initial,adminView:true,beforePost:async(url,body)=>{
+  if(url.endsWith('/trial-invoice-columns')){h.setRun({...initial,native_upgrade:null,trial_invoice_columns:body});return {data:h.run};}
+ }});
+ try{
+  const form=[...h.document.querySelectorAll('form')].find(item=>item.textContent.includes('保存済み注文の納品書列訂正'));
+  assert.ok(form);
+  assert.equal(h.calls.filter(call=>call.url.endsWith('/trial-invoice-columns')).length,0);
+  const inputs=form.querySelectorAll('input');
+  await h.change(inputs[0],'OA');
+  await h.change(form.querySelector('textarea'),JSON.stringify(review));
+  await h.change(inputs[1],'Original and saved sheet reviewed; no aggregation');
+  await h.click(h.button('修正版で納品書列を訂正して再開'));
+  const requests=h.calls.filter(call=>call.url.endsWith('/trial-invoice-columns'));
+  assert.equal(requests.length,1);
+  assert.deepEqual(requests[0].body,{...review,order_id:'OA',reason:'Original and saved sheet reviewed; no aggregation',native_upgrade:{generation:14,previous_sha256:upgrade.previous_sha256,current_sha256:upgrade.current_sha256}});
+  assert.equal(requests[0].body.sheet,undefined);
+  assert.equal(requests[0].body.cap,undefined);
+  assert.ok(h.document.body.textContent.includes('の納品書列：Regular'));
+ }finally{await h.close();}
+});
+
 test('owner area display form sends only the selected copy mapping and reason',async()=>{
  const initial={...makeRun(),task_id:'hospital_pending_faxes',domains:['hospital'],pending_question:null};
  const h=await mount({initial,adminView:true,beforePost:async(url,body)=>{

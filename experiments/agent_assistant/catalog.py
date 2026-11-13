@@ -17,7 +17,7 @@ class Operation:
 
 
 OPERATIONS = {}
-OWNER_INPUT_OPERATIONS = frozenset({'hospital_create_menu_master', 'hospital_get_menu_master', 'hospital_register_trial_area_names'})
+OWNER_INPUT_OPERATIONS = frozenset({'hospital_create_menu_master', 'hospital_get_menu_master', 'hospital_register_trial_area_names', 'hospital_register_trial_invoice_columns'})
 READ_ONLY_WAITS = frozenset({'wait_for_task_decision', 'wait_for_native_job', 'wait_for_fax_work', 'wait_for_native_idle'})
 
 
@@ -50,6 +50,7 @@ for name, method, path, description in [
 add('hospital','create_menu_master','POST','/menu-masters','所有者が指定した試用コピーの一人量を登録する。モデルからは実行しない。')
 add('hospital','get_menu_master','GET','/menu-masters/{item_id}','所有者が登録した一人量を再読込みする。')
 add('hospital','register_trial_area_names','PUT','/orders/{order_id}/workflow-v2/trial-area-names','所有者が承認した試用コピー1件のエリア表示名を登録する。数量・保存シートは変更しない。')
+add('hospital','register_trial_invoice_columns','PUT','/orders/{order_id}/workflow-v2/trial-invoice-columns','所有者が原本・保存シートを照合した納品書列だけを訂正する。数量・施設名・履歴は変更しない。')
 for name, path, description in [
     ("set_context", "context", "施設・週・正本テンプレートを明示して設定する。推測や既定候補は禁止。"),
     ("run_ocr", "ocr-runs", "原本・施設・対象週が確認済みの場合にOCRを開始する。受付だけを成功としない。"),
