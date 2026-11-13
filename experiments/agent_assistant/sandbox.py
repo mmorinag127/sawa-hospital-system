@@ -136,6 +136,7 @@ class Sandbox:
         self.tokens = {}
         self.urls = {}
         self.logs = {}
+        self.completed_invoice_runs = set()
         self.lock = asyncio.Lock()
 
     def path(self, run_id):
@@ -283,6 +284,9 @@ class Sandbox:
         if self.run_store is None or run.get("purpose") == "target_lookup":
             return
         current = self.run_store.get(run["id"])
+        from .business_contracts import completed_invoice_order
+        if current['generation']==run['generation'] and completed_invoice_order(current):
+            return
         if current["generation"] != run["generation"] or current["status"] in (
                 "completed", "stopping", "stopped", "rolled_back", "stop_pending", "rollback_stop_pending"):
             raise Conflict("依頼は停止または変更されました")
@@ -429,6 +433,8 @@ class Sandbox:
         if run_id is None:
             candidates.update(marker.parent.name for marker in (self.root / 'runs').glob('*/*.process.json'))
         for ident in candidates:
+            if ident in self.completed_invoice_runs:
+                continue
             try:
                 current = await run_blocking(self.run_store.get, ident)
             except KeyError:

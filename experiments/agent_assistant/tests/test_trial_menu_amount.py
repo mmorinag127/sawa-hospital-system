@@ -248,3 +248,59 @@ def test_changed_execution_binding_rejects_invoice_before_native_write(tmp_path,
         web.headers['X-Trial-Token']=app.state.token
         assert web.post('/runs/'+run['id']+'/trial-invoice-columns',json=INVOICE_BODY).status_code==409
         assert not native.invoice_writes
+
+
+@pytest.mark.parametrize('failure',[None,'export','changed_sheet'])
+def test_completed_invoice_refresh_never_reopens_business_or_model(tmp_path,monkeypatch,failure):
+    from experiments.agent_assistant import execution_binding
+    from experiments.agent_assistant.business_contracts import completed_invoice_order
+    app,native,run=invoice_fixture(tmp_path,monkeypatch)
+    store=app.state.store
+    store.update(run['id'],status='completed')
+    store.event(run['id'],'execution_binding',{'synthetic':'pinned'})
+    before=store.get(run['id'])
+    approvals=[]
+    monkeypatch.setattr(execution_binding,'record',lambda *_:{'native_sources':{'hospital':'synthetic'}})
+    monkeypatch.setattr(execution_binding,'approve_native_upgrade',lambda *a,**kw:approvals.append(kw))
+    app.state.managed.resume=AsyncMock()
+    app.state.business.kick_many.reset_mock()
+    execute=app.state.tools.execute
+    exports=[]
+    async def dispatch(ident,generation,name,raw,command):
+        if name=='hospital_export_delivery_notes':
+            assert completed_invoice_order(store.get(ident))=='OA'
+            assert raw=={'parameters':{'query':{'order_id':'OA'}}}
+            exports.append(command)
+            if failure=='export': return {'ok':False,'status':400}
+            if failure=='changed_sheet': native.sheets['OA']['rows'][0][1]=999
+            return {'ok':True,'artifact':{'id':'synthetic-output','name':'synthetic.xlsx','sha256':'c'*64,'size':12}}
+        return await execute(ident,generation,name,raw,command)
+    app.state.tools.execute=dispatch
+    upgrade={'generation':run['generation'],'previous_sha256':'a'*64,'current_sha256':'b'*64}
+    with TestClient(app) as web:
+        web.headers['X-Trial-Token']=app.state.token
+        response=web.post('/runs/'+run['id']+'/trial-invoice-columns',json={**INVOICE_BODY,'native_upgrade':upgrade})
+        assert response.status_code==({None:200,'export':400,'changed_sheet':409}[failure]),response.text
+    assert approvals==[{**upgrade,'output_only':True}]
+    assert len(native.invoice_writes)==1 and len(exports)==1
+    after=store.get(run['id'])
+    assert {k:after[k] for k in ('status','generation','spent','cap','task_inputs')}=={k:before[k] for k in ('status','generation','spent','cap','task_inputs')}
+    app.state.managed.resume.assert_not_awaited()
+    app.state.business.kick_many.assert_not_awaited()
+    assert bool(store.latest_event(run['id'],'trial_invoice_output'))==(failure is None)
+
+
+@pytest.mark.parametrize('operation,target',[('hospital_bag_order','OA'),('hospital_export_aggregate','OA'),('hospital_register_trial_invoice_columns','OTHER')])
+def test_completed_invoice_scope_cannot_execute_other_operations_or_orders(tmp_path,monkeypatch,operation,target):
+    from experiments.agent_assistant.business_contracts import COMPLETED_INVOICE_EXECUTION,OWNER_INPUT_EXECUTION,SERVER_EXECUTION
+    app,_,run=invoice_fixture(tmp_path,monkeypatch)
+    app.state.store.update(run['id'],status='completed')
+    async def scenario():
+        tokens=(COMPLETED_INVOICE_EXECUTION.set((run['id'],run['generation'],'OA')),OWNER_INPUT_EXECUTION.set(True),SERVER_EXECUTION.set(True))
+        try:
+            with pytest.raises(Conflict):
+                await app.state.tools.execute(run['id'],run['generation'],operation,
+                    {'parameters':{'ids':{'order_id':target},'query':{'order_id':target}}},'forbidden-completed')
+        finally:
+            for var,token in zip((COMPLETED_INVOICE_EXECUTION,OWNER_INPUT_EXECUTION,SERVER_EXECUTION),tokens): var.reset(token)
+    asyncio.run(scenario())

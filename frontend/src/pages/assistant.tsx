@@ -558,7 +558,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {!adminView && <div className="assistant-footer"><span className="muted">回答した内容は保存されています。作業一覧へ戻っても、この作業は引き続き確認できます。</span><button className="primary" onClick={newTask}>{terminal || selected.status==="rollback_stop_pending" ? "別の作業を始める" : "作業一覧に戻る"}</button></div>}
       <details className="conversation-history"><summary>これまでのやり取り{messages?.length ? `（${messages.length}件）` : ""}</summary><div role="log">{messages?.map(message=><div className={message.role==="user" ? "chat-bubble user-message" : "chat-bubble"} key={message.id}><strong>{message.role==="user" ? "あなた" : "エージェント"}</strong><p>{message.text}</p></div>)}</div></details>
       {adminView && selected.status==="reconciliation_required" && <button className="primary" disabled={controlling || busy} onClick={()=>control("resume")}>保存済みの結果を確認して再開</button>}
-      {adminView && selected.native_upgrade && <section className="assistant-notice"><h3>業務APIの修正版があります</h3>
+      {adminView && selected.native_upgrade && !terminal && <section className="assistant-notice"><h3>業務APIの修正版があります</h3>
         {Object.entries(selected.native_upgrade.current_sources).map(([domain,source])=><p key={domain}>{labels[domain] || domain}：{selected.native_upgrade?.previous_sources[domain].source_revision.slice(0,8)} → {source.source_revision.slice(0,8)}</p>)}
         <p>開始時の版・処理履歴は保持します。原本と保存済みデータを引き継ぎ、結果未確定の更新は再送しません。</p>
         <button disabled={busy || controlling} onClick={()=>control("upgrade-native")}>修正版へ引き継いで再開</button></section>}
@@ -567,12 +567,12 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {selected.provisional_menu_amount && <p role="status" className="assistant-notice">検証専用の仮設定：{selected.provisional_menu_amount.name} {selected.provisional_menu_amount.quantity}{selected.provisional_menu_amount.unit}（実運用の値は未確認）</p>}
       {selected.trial_area_names && <p role="status">試用注文 {selected.trial_area_names.order_id} の表示名：{Object.entries(selected.trial_area_names.names).map(([id,name])=>`${id} → ${name}`).join("、")}</p>}
       {selected.trial_invoice_columns && <p role="status">試用注文 {selected.trial_invoice_columns.order_id} の納品書列：{selected.trial_invoice_columns.invoice_columns.filter(c=>c.source==="quantity").map(c=>c.name).join("、")}</p>}
-      {adminView && selected.task_id==="hospital_pending_faxes" && !terminal && <form className="assistant-notice" onSubmit={registerTrialInvoiceColumns}>
+      {adminView && selected.task_id==="hospital_pending_faxes" && (!terminal || selected.status==="completed") && <form className="assistant-notice" onSubmit={registerTrialInvoiceColumns}>
         <h3>保存済み注文の納品書列訂正</h3>
         <label>納品書訂正のコピー注文ID<input required value={trialInvoiceOrder} onChange={event=>setTrialInvoiceOrder(event.target.value)}/></label>
         <label>原本・保存シートを照合した列定義（JSON）<textarea required value={trialInvoiceReview} onChange={event=>setTrialInvoiceReview(event.target.value)}/></label>
         <label>納品書列訂正の根拠<input required maxLength={1000} value={trialInvoiceReason} onChange={event=>setTrialInvoiceReason(event.target.value)}/></label>
-        <button disabled={busy || controlling} type="submit">{selected.native_upgrade ? "修正版で納品書列を訂正して再開" : "納品書列を訂正して再開"}</button>
+        <button disabled={busy || controlling} type="submit">{selected.status==="completed" ? (selected.native_upgrade ? "修正版で納品書だけ再出力" : "納品書だけ再出力") : (selected.native_upgrade ? "修正版で納品書列を訂正して再開" : "納品書列を訂正して再開")}</button>
       </form>}
       {adminView && selected.task_id==="hospital_pending_faxes" && !terminal && <form className="assistant-notice" onSubmit={registerTrialAreaNames}>
         <h3>試用注文のエリア表示名</h3>

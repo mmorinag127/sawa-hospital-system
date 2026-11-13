@@ -3004,6 +3004,9 @@ def _apply_delivery_configured_headers(
                                 min_col=first, max_col=last):
             for cell in row:
                 cell.value = None
+        for col_idx in configured_indexes:
+            ws.merge_cells(start_row=header_row, end_row=data_start_row - 1,
+                           start_column=col_idx, end_column=col_idx)
     for col in columns:
         name = col.get("name")
         if not name:
@@ -3032,10 +3035,16 @@ def _apply_delivery_configured_headers(
                 continue
         if not isinstance(cell, MergedCell):
             cell.value = header
+            if replace_header_band:
+                alignment = copy(cell.alignment)
+                alignment.vertical = "center"
+                alignment.wrap_text = True
+                alignment.shrink_to_fit = True
+                cell.alignment = alignment
     start_row = data_start_row or _delivery_start_row(ws, header_row)
     for row_idx in range(header_row + 1, start_row):
         for col_idx in configured_indexes:
-            cell = _resolve_merged_cell(ws, row_idx, col_idx)
+            cell = ws.cell(row_idx, col_idx)
             if not isinstance(cell, MergedCell):
                 cell.value = ""
 
@@ -3814,6 +3823,7 @@ def _write_delivery_note(
                 worksheet_sources=worksheet_sources,
                 modified_worksheets={ws.title},
                 sync_removed_merges=True,
+                header_merge_rows=(header_row, min(slot_rows)-1),
             )
             return
         for idx, date_val in enumerate(dates):
@@ -3867,6 +3877,7 @@ def _write_delivery_note(
             worksheet_sources=worksheet_sources,
             modified_worksheets={name for name, source in worksheet_sources.items() if source == source_sheet_name},
             sync_removed_merges=True,
+            header_merge_rows=(header_row, min(slot_rows)-1),
         )
         return
 
@@ -4918,6 +4929,7 @@ def _patch_template_package_with_workbook_values(
     worksheet_sources: dict[str, str] | None = None,
     modified_worksheets: set[str] | None = None,
     sync_removed_merges: bool = False,
+    header_merge_rows: tuple[int, int] | None = None,
 ) -> None:
     parts = _xlsx_parts_from_bytes(template_bytes)
     _drop_calc_chain(parts)
@@ -5073,17 +5085,30 @@ def _patch_template_package_with_workbook_values(
             original_merges = original_root.find(_xlsx_tag("mergeCells"))
             recorded = {node.attrib["ref"] for node in original_merges} if original_merges is not None else set()
             current = {str(merged) for merged in ws.merged_cells.ranges}
-            if current - recorded:
-                raise ValueError("template_merge_addition_unsupported")
-            if recorded != current and merge_span is not None:
-                retained = deepcopy(original_merges)
+            added = current - recorded
+            if added:
+                from openpyxl.worksheet.cell_range import CellRange
+                if (header_merge_rows is None or not 1 <= header_merge_rows[0] <= header_merge_rows[1]
+                        or any((CellRange(ref).min_row, CellRange(ref).max_row) != header_merge_rows
+                               or CellRange(ref).min_col != CellRange(ref).max_col for ref in added)):
+                    raise ValueError("template_merge_addition_unsupported")
+            if recorded != current:
+                retained = deepcopy(original_merges) if original_merges is not None else ET.Element(_xlsx_tag("mergeCells"))
                 for node in list(retained):
                     if node.attrib["ref"] not in current:
                         retained.remove(node)
+                for ref in sorted(added):
+                    ET.SubElement(retained, _xlsx_tag("mergeCell"), {"ref": ref})
                 retained.set("count", str(len(retained)))
                 replacement = ET.tostring(retained, encoding="utf-8") if len(retained) else b""
-                sheet_xml = (content[:merge_span["start"]] + replacement
-                             + content[merge_span["end"]:]).decode("utf-8")
+                if merge_span is not None:
+                    content = content[:merge_span["start"]] + replacement + content[merge_span["end"]:]
+                elif replacement:
+                    prior = {"sheetData", "sheetCalcPr", "sheetProtection", "protectedRanges", "scenarios",
+                             "autoFilter", "sortState", "dataConsolidate", "customSheetViews"}
+                    index = max((node["end"] for node in spans["children"] if node["tag"].split("}")[-1] in prior), default=spans["open_end"])
+                    content = _template_xml_insert(content, spans, index, replacement)
+                sheet_xml = content.decode("utf-8")
         sheet_xml = _update_template_sheet_dimension(sheet_xml)
         for col_key, dim in ws.column_dimensions.items():
             col_idx = column_index_from_string(col_key)

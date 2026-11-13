@@ -7,6 +7,42 @@ from experiments.agent_assistant import execution_binding
 from experiments.agent_assistant.store import Conflict, Store
 
 
+@pytest.mark.parametrize('fault',[None,'stopped','mutation','tools','other_task'])
+def test_completed_native_upgrade_is_explicit_output_only_and_preserves_completion(tmp_path,monkeypatch,fault):
+    store=Store(tmp_path/'state')
+    store.set_budget(100)
+    run,_=store.create('operator','completed-invoice','test',['hospital'],15,provider='gemini',task_id='hospital_pending_faxes')
+    manifest=tmp_path/'manifest.json'
+    manifest.write_text(json.dumps({'source_revision':'a'*40,'files':{'api.py':'b'*64}}))
+    tools=SimpleNamespace(sandbox=SimpleNamespace(configs={'hospital':{'source_manifest':str(manifest)}}))
+    definitions=[{'name':'read'}]
+    monkeypatch.setattr(execution_binding,'model_definitions',lambda *_:definitions)
+    original=execution_binding.record(store,tools,run,'system',starting=True)
+    store.update(run['id'],status='completed')
+    manifest.write_text(json.dumps({'source_revision':'c'*40,'files':{'api.py':'d'*64}}))
+    run=store.get(run['id'])
+    assert execution_binding.native_upgrade(store,tools,run,'system') is None
+    plan=execution_binding.native_upgrade(store,tools,run,'system',output_only=True)
+    args={key:plan[key] for key in ('previous_sha256','current_sha256')}
+    args['generation']=run['generation']
+    with pytest.raises(Conflict):
+        execution_binding.approve_native_upgrade(store,tools,run,'system',**args)
+    if fault=='stopped': store.update(run['id'],status='stopped')
+    if fault=='mutation': store.command(run['id'],'unknown-write',{'name':'hospital_start_fax','arguments':{}})
+    if fault=='tools': definitions.append({'name':'write'})
+    changed={**store.get(run['id']), **({'task_id':'hospital_outputs'} if fault=='other_task' else {})}
+    if fault:
+        with pytest.raises(Conflict):
+            execution_binding.approve_native_upgrade(store,tools,changed,'system',**args,output_only=True)
+        assert store.latest_event(run['id'],'execution_binding')['payload']==original
+    else:
+        execution_binding.approve_native_upgrade(store,tools,run,'system',**args,output_only=True)
+        assert store.get(run['id'])['status']=='completed'
+        assert store.get(run['id'])['generation']==run['generation']
+        assert store.latest_event(run['id'],'native_runtime_upgrade')['payload']['output_only'] is True
+        assert len(store.events(run['id'],kinds=('execution_binding',)))==2
+
+
 def test_binding_pins_prompt_tools_source_and_provider_without_secrets(tmp_path, monkeypatch):
     store = Store(tmp_path/'state')
     store.set_budget(1000)

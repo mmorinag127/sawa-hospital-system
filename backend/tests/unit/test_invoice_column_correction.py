@@ -68,6 +68,8 @@ def test_trial_correction_preserves_inputs_and_renders_three_distinct_quantities
     workbook = load_workbook(path)
     ws = workbook['松岡会']
     assert [ws.cell(8,i).value for i in (4,5,6)] == ['常食','通所','職員']
+    assert all(f'{letter}8:{letter}11' in ws.merged_cells for letter in ('D','E','F'))
+    assert ws['D8'].alignment.vertical=='center' and ws['D8'].alignment.wrap_text
     assert [ws.cell(12,i).value for i in (4,5,6)] == [17,23,31]
     workbook.close()
     assert (candidate,sheet,body) == before
@@ -269,14 +271,27 @@ def test_final_xlsx_preserves_separate_headings_and_untouched_merges(tmp_path):
                                        data_start_row=12, replace_header_band=True)
     output = tmp_path / "delivery.xlsx"
     _patch_template_package_with_workbook_values(workbook, template_bytes=template.getvalue(),
-        output_path=output, modified_worksheets={ws.title}, sync_removed_merges=True)
+        output_path=output, modified_worksheets={ws.title}, sync_removed_merges=True, header_merge_rows=(8,11))
     restored = load_workbook(output)
     actual = restored.active
     assert [actual.cell(8, col).value for col in (7, 8)] == ["花", "月"]
     assert [actual.cell(12, col).value for col in (7, 8)] == [17, 23]
-    assert {str(merged) for merged in actual.merged_cells.ranges} == {"A1:I1"}
+    assert {str(merged) for merged in actual.merged_cells.ranges} == {"A1:I1","G8:G11","H8:H11"}
     assert actual.cell(1, 1).value == "unchanged title"
     restored.close()
+
+
+@pytest.mark.parametrize('merge',['D8:E11','D8:D12','D12:D14'])
+def test_only_independent_header_band_merges_can_be_added(tmp_path,merge):
+    from src.services.output_builder import _patch_template_package_with_workbook_values
+    workbook=Workbook()
+    workbook.active.cell(12,4,123)
+    template=BytesIO()
+    workbook.save(template)
+    workbook.active.merge_cells(merge)
+    with pytest.raises(ValueError,match='merge_addition_unsupported'):
+        _patch_template_package_with_workbook_values(workbook,template_bytes=template.getvalue(),
+            output_path=tmp_path/'rejected.xlsx',sync_removed_merges=True,header_merge_rows=(8,11))
 
 
 @pytest.mark.parametrize("facility", ["fureai", "kasuga"])
@@ -313,6 +328,7 @@ def test_original_workbook_invoice_output_and_readback(tmp_path, monkeypatch, fa
     ws = workbook["松岡会"]
     assert {column["name"]: ws.cell(8, column["column_index"]).value
             for column in columns if column["source"] == "quantity"} == {key: key for key in quantities}
+    assert all(f'{letter}8:{letter}11' in ws.merged_cells for letter in ('D','E','F'))
     assert {column["name"]: ws.cell(12, column["column_index"]).value
             for column in columns if column["source"] == "quantity"} == quantities
     assert ws.cell(4, 1).value == name

@@ -436,7 +436,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 current = store.get(ident, owner)
                 from .execution_binding import native_upgrade
                 from .managed import SYSTEM
-                upgrade = native_upgrade(store, tools, current, SYSTEM)
+                upgrade = native_upgrade(store, tools, current, SYSTEM,
+                    output_only=current['status']=='completed' and current.get('task_id')=='hospital_pending_faxes')
                 with store.read() as db:
                     artifact_rows = db.execute('SELECT rowid,id,name,sha256,size FROM artifacts '
                         'WHERE run_id=? AND rowid>? ORDER BY rowid LIMIT 51', (ident, artifacts_after)).fetchall()
@@ -671,7 +672,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         async with control_lock(ident):
             async with tools.workflow_locks.setdefault(ident, asyncio.Lock()):
                 run = await run_blocking(store.get, ident, owner)
-                if run['status'] in ('completed','stopped','rolled_back','stopping','stop_pending','rollback_stop_pending'):
+                output_only = invoice and run['status']=='completed'
+                if run['status'] in ('stopped','rolled_back','stopping','stop_pending','rollback_stop_pending') or (run['status']=='completed' and not output_only):
                     raise Conflict('停止済み・完了済みの試用コピーは変更しません')
                 items = await run_blocking(tools.faxes.items, ident)
                 matches = [item for item in items if item['snapshot'].get('order_id') == payload.order_id]
@@ -679,17 +681,24 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 if len(matches) != 1 or matches[0]['state'] not in allowed:
                     raise Conflict('この試用コピーの承認済み注文を指定してください')
                 tools.authorizations[ident] = request.headers.get('authorization', '')
+                if output_only and business.jobs.get(ident) and not business.jobs[ident].done():
+                    raise Conflict('元の帳票処理の終了確認が必要です。再開やOCRは実行しません')
                 from .execution_binding import approve_native_upgrade, record
                 from .managed import SYSTEM
                 upgrade = payload.native_upgrade if invoice else None
                 if upgrade is not None:
                     if managed.tasks.get(ident) and not managed.tasks[ident].done():
                         raise Conflict('処理中の依頼の業務API版は変更できません')
-                    await run_blocking(approve_native_upgrade, store, tools, run, SYSTEM, **upgrade.model_dump())
-                    await managed.resume(ident)
-                    run = await run_blocking(store.get, ident, owner)
+                    await run_blocking(approve_native_upgrade, store, tools, run, SYSTEM,
+                        **upgrade.model_dump(), **({'output_only':True} if output_only else {}))
+                    if not output_only:
+                        await managed.resume(ident)
+                        run = await run_blocking(store.get, ident, owner)
+                current_binding = None
                 if await run_blocking(store.latest_event, ident, 'execution_binding'):
-                    await run_blocking(record, store, tools, run, SYSTEM)
+                    current_binding = await run_blocking(record, store, tools, run, SYSTEM)
+                if output_only and not current_binding:
+                    raise Conflict('業務API版の記録がない完了済みコピーは再出力しません')
                 await run_blocking(business.require_copy, run)
                 before = await tools.faxes.capture(run, matches[0])
                 decision = matches[0].get('decision') or {}
@@ -705,7 +714,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 event_kind = 'trial_invoice_columns' if invoice else 'trial_area_names'
                 command = ('owner-invoice-' if invoice else 'owner-areas-') + hashlib.sha256(json.dumps({**values, 'saved_sheet_id':sheet_id}, sort_keys=True).encode()).hexdigest()
                 old_status = run['status']
-                await run_blocking(store.update, ident, expected_generation=run['generation'], status='running')
+                if not output_only:
+                    await run_blocking(store.update, ident, expected_generation=run['generation'], status='running')
                 owner_token, server_token = OWNER_INPUT_EXECUTION.set(True), SERVER_EXECUTION.set(True)
                 try:
                     operation = 'hospital_register_trial_invoice_columns' if invoice else 'hospital_register_trial_area_names'
@@ -713,23 +723,38 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                         'ids':{'order_id':payload.order_id}, 'body':{**{k:v for k,v in values.items() if k != 'order_id'},'saved_sheet_id':sheet_id},
                         'reason':payload.reason}}, command)
                     if result.get('ok') is not True:
-                        await run_blocking(store.update, ident, expected_generation=run['generation'], status=old_status)
+                        if not output_only:
+                            await run_blocking(store.update, ident, expected_generation=run['generation'], status=old_status)
                         raise HTTPException(status_code=400, detail=result)
                     after = await tools.faxes.capture(run, matches[0])
                     key, expected = ('columns',payload.invoice_columns) if invoice else ('names',payload.names)
                     if after['signature'] != before['signature'] or after['sheet'] != before['sheet'] or result.get('data', {}).get(key) != expected:
                         raise Conflict('保存済みシート・原本の照合が一致しません')
                     await run_blocking(store.event, ident, event_kind, {**values, 'saved_sheet_id':sheet_id, 'command_id':command})
+                    if output_only:
+                        binding_hash=hashlib.sha256(json.dumps(current_binding,sort_keys=True).encode()).hexdigest()
+                        exported=await tools.execute(ident,run['generation'],'hospital_export_delivery_notes',
+                            {'parameters':{'query':{'order_id':payload.order_id}}},command+'-output-'+binding_hash)
+                        if exported.get('ok') is not True or not exported.get('artifact'):
+                            raise HTTPException(status_code=400,detail=exported)
+                        final=await tools.faxes.capture(run,matches[0])
+                        if final['signature'] != before['signature'] or final['sheet'] != before['sheet']:
+                            raise Conflict('再出力後の保存済みシート・原本の照合が一致しません')
+                        await run_blocking(store.event,ident,'trial_invoice_output',{'order_id':payload.order_id,
+                            'artifact':exported['artifact'],'binding_sha256':binding_hash,'saved_sheet_id':sheet_id})
                 except HTTPException:
                     raise
                 except Exception:
-                    await run_blocking(store.update, ident, expected_generation=run['generation'], status='reconciliation_required')
+                    if not output_only:
+                        await run_blocking(store.update, ident, expected_generation=run['generation'], status='reconciliation_required')
                     raise
                 finally:
                     OWNER_INPUT_EXECUTION.reset(owner_token)
                     SERVER_EXECUTION.reset(server_token)
-                await run_blocking(business.begin_reconciliation, run)
-        await business.kick_many([ident], request.headers.get('authorization', ''))
+                if not output_only:
+                    await run_blocking(business.begin_reconciliation, run)
+        if not output_only:
+            await business.kick_many([ident], request.headers.get('authorization', ''))
         return await run_blocking(store.get, ident, owner)
 
     @app.post('/runs/{ident}/trial-area-names')
@@ -740,7 +765,21 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     @app.post('/runs/{ident}/trial-invoice-columns')
     @_complete_request
     async def trial_invoice_columns(ident: str, payload: TrialInvoiceColumns, request: Request):
-        return await register_trial_order_input(ident, payload, request, invoice=True)
+        run=await run_blocking(store.get,ident,owner)
+        if run['status']!='completed':
+            return await register_trial_order_input(ident,payload,request,invoice=True)
+        from .business_contracts import COMPLETED_INVOICE_EXECUTION,SERVER_EXECUTION,OWNER_INPUT_EXECUTION
+        scope=COMPLETED_INVOICE_EXECUTION.set((ident,run['generation'],payload.order_id))
+        server,owner_input=SERVER_EXECUTION.set(True),OWNER_INPUT_EXECUTION.set(True)
+        sandbox.completed_invoice_runs.add(ident)
+        try:
+            return await register_trial_order_input(ident,payload,request,invoice=True)
+        finally:
+            sandbox.completed_invoice_runs.discard(ident)
+            COMPLETED_INVOICE_EXECUTION.reset(scope)
+            SERVER_EXECUTION.reset(server)
+            OWNER_INPUT_EXECUTION.reset(owner_input)
+            await sandbox.release_completed(ident,expected_generation=run['generation'])
 
     @app.post("/runs/{ident}/stop")
     async def stop(ident: str):

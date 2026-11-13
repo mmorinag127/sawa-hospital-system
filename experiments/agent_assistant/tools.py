@@ -198,7 +198,14 @@ class Tools:
             return await self.wait_native_idle(run_id, generation, raw, command_id)
         async with self.lock(run_id):
             run = await run_blocking(self.store.get, run_id)
-            if run["generation"] != generation or run["status"] != "running":
+            from .business_contracts import completed_invoice_order
+            invoice_order = completed_invoice_order(run)
+            completed_invoice = False
+            if invoice_order and name in ('hospital_register_trial_invoice_columns','hospital_export_delivery_notes') and isinstance(raw,dict):
+                parameters = raw.get('parameters', {})
+                target = parameters.get('ids' if name=='hospital_register_trial_invoice_columns' else 'query', {}) if isinstance(parameters,dict) else {}
+                completed_invoice = isinstance(target,dict) and invoice_order==target.get('order_id')
+            if run["generation"] != generation or (run["status"] != "running" and not completed_invoice):
                 raise Conflict("この依頼は停止または変更されました。遅延した命令は実行しません")
             previous = await run_blocking(self.store.command, run_id, command_id, {"name": name, "arguments": raw})
             if previous is not None:
@@ -210,7 +217,8 @@ class Tools:
                     except Conflict as exc:
                         if (await run_blocking(self.store.get, run_id))["generation"] != generation:
                             raise Conflict("依頼は停止されました")
-                        await run_blocking(self.store.update, run_id, expected_generation=generation, status="waiting_input")
+                        if not completed_invoice:
+                            await run_blocking(self.store.update, run_id, expected_generation=generation, status="waiting_input")
                         result = {"ok": False, "needs_operator_confirmation": True, "question": str(exc), "command_id": command_id}
                         await run_blocking(self.store.finish_command, run_id, command_id, result)
                         await run_blocking(self.store.event, run_id, "tool_result", {"tool": name, "result": result})

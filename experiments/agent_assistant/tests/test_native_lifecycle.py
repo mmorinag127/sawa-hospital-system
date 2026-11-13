@@ -18,6 +18,36 @@ def owned(tmp_path):
     return store, sandbox, run
 
 
+def test_completed_invoice_scope_is_generation_fenced_and_protects_only_its_live_process(tmp_path):
+    from experiments.agent_assistant.store import Store
+    from experiments.agent_assistant.business_contracts import COMPLETED_INVOICE_EXECUTION,OWNER_INPUT_EXECUTION,SERVER_EXECUTION
+    async def scenario():
+        store=Store(tmp_path/'ledger')
+        store.set_budget(100)
+        run,_=store.create('operator','completed-native','test',['hospital'],15,task_id='hospital_pending_faxes')
+        store.update(run['id'],status='completed',task_inputs={'business_workflow':{'version':1,'phase':'completed'}})
+        run=store.get(run['id'])
+        sandbox=module.Sandbox(tmp_path/'native',{},run_store=store)
+        with pytest.raises(Conflict): sandbox.require_active_run(run)
+        tokens=(COMPLETED_INVOICE_EXECUTION.set((run['id'],run['generation'],'OA')),OWNER_INPUT_EXECUTION.set(True),SERVER_EXECUTION.set(True))
+        try:
+            sandbox.require_active_run(run)
+            with pytest.raises(Conflict): sandbox.require_active_run({**run,'generation':run['generation']+1})
+            sandbox.completed_invoice_runs.add(run['id'])
+            sandbox.stop=AsyncMock(return_value=True)
+            await sandbox.release_completed(run['id'])
+            sandbox.stop.assert_not_awaited()
+            sandbox.completed_invoice_runs.remove(run['id'])
+            await sandbox.release_completed(run['id'])
+            sandbox.stop.assert_awaited_once_with(run['id'],expected_generation=run['generation'])
+            store.update(run['id'],status='stopped')
+            with pytest.raises(Conflict): sandbox.require_active_run(run)
+        finally:
+            for var,token in zip((COMPLETED_INVOICE_EXECUTION,OWNER_INPUT_EXECUTION,SERVER_EXECUTION),tokens): var.reset(token)
+    from unittest.mock import AsyncMock
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('exited', [False, True])
 @pytest.mark.parametrize('method', ['GET', 'POST'])
 def test_native_request_starts_saved_copy_once_before_first_send(tmp_path, monkeypatch, exited, method):

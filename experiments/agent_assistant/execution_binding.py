@@ -63,8 +63,10 @@ def record(store, tools, run, system, *, starting=False):
     return current
 
 
-def native_upgrade(store, tools, run, system):
-    if run['status'] != 'reconciliation_required':
+def native_upgrade(store, tools, run, system, *, output_only=False):
+    if output_only and (run['status'] != 'completed' or run.get('task_id') != 'hospital_pending_faxes' or run['domains'] != ['hospital']):
+        return None
+    if not output_only and run['status'] != 'reconciliation_required':
         return None
     previous = store.latest_event(run['id'], 'execution_binding')
     if not previous:
@@ -79,8 +81,8 @@ def native_upgrade(store, tools, run, system):
             'previous_sources': before['native_sources'], 'current_sources': after['native_sources']}
 
 
-def approve_native_upgrade(store, tools, run, system, *, generation, previous_sha256, current_sha256):
-    plan = native_upgrade(store, tools, run, system)
+def approve_native_upgrade(store, tools, run, system, *, generation, previous_sha256, current_sha256, output_only=False):
+    plan = native_upgrade(store, tools, run, system, output_only=output_only)
     if (not plan or run['generation'] != generation or plan['previous_sha256'] != previous_sha256
             or plan['current_sha256'] != current_sha256):
         raise Conflict('表示後に依頼または業務API版が変更されています')
@@ -90,7 +92,7 @@ def approve_native_upgrade(store, tools, run, system, *, generation, previous_sh
     with store.tx() as db:
         saved = db.execute('SELECT generation,status FROM runs WHERE id=?', (run['id'],)).fetchone()
         prior = db.execute("SELECT payload FROM events WHERE run_id=? AND kind='execution_binding' ORDER BY id DESC LIMIT 1", (run['id'],)).fetchone()
-        if (saved['generation'] != generation or saved['status'] != 'reconciliation_required'
+        if (saved['generation'] != generation or saved['status'] != run['status']
                 or not prior or digest(json.loads(prior['payload'])) != previous_sha256):
             raise Conflict('版の引継ぎ中に依頼が変更されています')
         for row in db.execute("SELECT request FROM commands WHERE run_id=? AND status!='done'", (run['id'],)):
@@ -101,7 +103,7 @@ def approve_native_upgrade(store, tools, run, system, *, generation, previous_sh
                 raise Conflict('結果未確定の更新があるため業務API版を引き継げません')
         # Retain the historical binding; the owner starts a new native-code
         # epoch under the identical prompt, tools and provider.
-        for kind, payload in (('native_runtime_upgrade', {**plan, 'generation': generation}), ('execution_binding', current)):
+        for kind, payload in (('native_runtime_upgrade', {**plan, 'generation': generation, **({'output_only':True} if output_only else {})}), ('execution_binding', current)):
             db.execute('INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)',
                 (run['id'], kind, json.dumps(payload, ensure_ascii=False), now()))
     return plan

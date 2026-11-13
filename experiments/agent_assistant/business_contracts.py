@@ -6,6 +6,16 @@ from .tasks import TASKS
 
 SERVER_EXECUTION = ContextVar('sawa_business_execution', default=False)
 OWNER_INPUT_EXECUTION = ContextVar('sawa_owner_input_execution', default=False)
+COMPLETED_INVOICE_EXECUTION = ContextVar('sawa_completed_invoice_execution', default=None)
+
+
+def completed_invoice_order(run):
+    scope = COMPLETED_INVOICE_EXECUTION.get()
+    if (scope and scope[:2] == (run['id'], run['generation']) and run['status']=='completed'
+            and run.get('task_id')=='hospital_pending_faxes' and run['domains']==['hospital']
+            and owned(run) and SERVER_EXECUTION.get() and OWNER_INPUT_EXECUTION.get()):
+        return scope[2]
+    return None
 
 
 def server_tools(task_id):
