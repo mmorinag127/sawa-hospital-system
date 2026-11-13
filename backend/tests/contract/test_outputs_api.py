@@ -90,6 +90,25 @@ def test_delivery_html_render_uses_display_menu_name_with_garnish():
     )
 
 
+def test_delivery_html_area_names_do_not_replace_quantity_identities():
+    from copy import deepcopy
+
+    authored = [
+        {"name": "regular_hana", "source": "quantity", "diet_type": "regular",
+         "area_id": "hana", "area_name": "花"},
+        {"name": "regular_tsuki", "source": "quantity", "diet_type": "regular",
+         "area_id": "tsuki", "area_name": "月"},
+    ]
+    before = deepcopy(authored)
+    rendered = outputs_api._build_delivery_render_columns(authored)
+    quantities = [column for column in rendered if column["kind"] == "quantity"]
+    assert [column["header"] for column in quantities] == ["常食\n花", "常食\n月"]
+    assert [column["area"] for column in quantities] == ["hana", "tsuki"]
+    assert [outputs_api._delivery_render_cell_value(
+        {"regular_hana": 7, "regular_tsuki": 9}, column) for column in quantities] == [7, 9]
+    assert authored == before
+
+
 def test_delivery_html_facility_name_breaks_matsuokakai_name_into_two_lines():
     html = outputs_api._render_editable_delivery_note_html(  # noqa: SLF001
         "ORDTEST",

@@ -245,6 +245,7 @@ def _build_delivery_render_columns(columns: list | None) -> list[dict]:
                 "kind": "quantity",
                 "header_base": base,
                 "area": area,
+                "area_label": str(column.get("area_name") or area).strip() if area else "",
                 "source_names": [],
             },
         )
@@ -254,7 +255,7 @@ def _build_delivery_render_columns(columns: list | None) -> list[dict]:
         base_counts[str(group.get("header_base") or "")] = base_counts.get(str(group.get("header_base") or ""), 0) + 1
     for group in quantity_groups.values():
         base = str(group.get("header_base") or "")
-        area = str(group.get("area") or "")
+        area = str(group.get("area_label") or "")
         group["header"] = f"{base}\n{area}" if area and base_counts.get(base, 0) > 1 else base
         render_columns.append(group)
     render_columns.append({"kind": "field", "source": "note", "header": "備考欄"})

@@ -69,6 +69,7 @@ def test_real_captured_override_reaches_child_html_with_seven_and_unchanged_sour
     fixture = owned_bagging
     explicit_name = "Synthetic authored delivery display name"
     fixture.authored["delivery_note_facility_name"] = explicit_name
+    fixture.authored["areas"] = [{"id": "X", "name": "Authored area display name"}]
     fixture.authored["invoice_template"] = {
         "include_menu_name": True,
         "columns": [
@@ -91,6 +92,10 @@ def test_real_captured_override_reaches_child_html_with_seven_and_unchanged_sour
     ]
     before = preservation(fixture)
     candidate_before = deepcopy(candidate)
+    preview = output.build_delivery_preview(fixture.order_id, include_diagnostics=False)
+    quantity_column = next(column for column in preview["columns"] if column["source"] == "quantity")
+    assert quantity_column["area_id"] == "X"
+    assert quantity_column["area_name"] == "Authored area display name"
     day = date.fromisoformat(str(candidate["lines"][0]["date"])[:10])
     parsed = received_html(surface[1].get("/outputs/delivery-notes/html", params={
         "order_id": fixture.order_id, "date": day.isoformat(),

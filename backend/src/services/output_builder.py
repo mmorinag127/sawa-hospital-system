@@ -6606,7 +6606,16 @@ def build_delivery_preview(
     invoice_template = ctx["invoice_template"]
     quantity_rules = ctx["quantity_rules"]
     include_menu_name = bool(invoice_template.get("include_menu_name", False))
-    columns = invoice_template.get("columns", [])
+    area_names = {
+        _normalize_area_id(area.get("area_id", area.get("id"))): area["name"]
+        for area in ctx["facility_config"].get("areas") or []
+        if isinstance(area, dict) and isinstance(area.get("name"), str) and area["name"].strip()
+    }
+    columns = [
+        {**column, "area_name": area_names.get(_normalize_area_id(column.get("area_id")))}
+        if column.get("source") == "quantity" else dict(column)
+        for column in invoice_template.get("columns", [])
+    ]
     display_headers = []
     for col in columns:
         name = col.get("name")

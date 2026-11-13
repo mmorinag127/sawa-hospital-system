@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'ed03f88a8ee2d562f4acd10fb96a10043ef2f119'
 BASE_RUN = 42815316580
 ALLOWED = {
+    'backend/tests/contract/test_outputs_api.py',
+    'backend/tests/unit/test_modernization_delivery_name_identity.py',
     'backend/tests/fixtures/invoice-original-e0edc384.xlsx',
     'scripts/prepare_invoice_column_correction.py',
     'backend/tests/unit/test_invoice_column_correction.py',
@@ -97,7 +99,7 @@ ALLOWED = {
     'backend/tests/unit/test_modernization_real_bagging_confirmation.py',
     'docs/fax-bagging-completion-20261112.md',
 }
-BACKEND = ['backend/tests/unit/' + name for name in (
+BACKEND = ['backend/tests/contract/test_outputs_api.py'] + ['backend/tests/unit/' + name for name in (
     'test_workflow_ocr_reset.py', 'test_order_workflow_v2_service.py',
     'test_initial_saved_import_service.py', 'test_online_production_release.py',
     'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py','test_stg_ocr_restore_command.py',
@@ -106,7 +108,8 @@ BACKEND = ['backend/tests/unit/' + name for name in (
     'test_modernization_menu_amount_identity.py',
     'test_output_builder_diet_overrides.py', 'test_h2_monthly_source_date_boundary.py',
     'test_output_menu_metadata_validation.py', 'test_h2_output_source_capture.py',
-    'test_output_input_error_boundary.py', 'test_invoice_column_correction.py')]
+    'test_output_input_error_boundary.py', 'test_invoice_column_correction.py',
+    'test_modernization_delivery_name_identity.py')]
 AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_trial_menu_amount.py',
     'test_cloud_store_target.py', 'test_connection_pool.py', 'test_durable_postgres.py',
