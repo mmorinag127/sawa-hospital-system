@@ -11,7 +11,7 @@
 |対象|原本・不一致|対応状況|
 |---|---|---|
 |FAC00004 ふれあい|原本は常食・通所・職員。納品書は別施設形式の5列|stg専用コピーでOCR・保存・袋詰め・納品書HTML表示、実Excel受領と再読込まで実施。3列を確認|
-|FAC00003 春日苑松茂|原本は花・月。設定は2F・3F|花・月の新規IDへ変更。stg専用コピーでOCR・原本照合・保存・袋詰め・納品書HTMLまで実施。HTMLが表示名ではなく内部IDを表示する残件を検出し、共通修正のローカル検証準備中|
+|FAC00003 春日苑松茂|原本は花・月。設定は2F・3F|花・月の新規IDへ変更。stg専用コピーでOCR・原本照合・保存・再読込・袋詰め・納品書HTML/Excelを確認。HTMLの内部ID表示も共通修正してstg再確認済み|
 |FAC00011 ケアハウス四万十|OCR常食1列、納品書5列|原本未確認。FAC00015四万十ピアの原本を流用しない|
 |FAC00008/9/10|軟菜を2F・3Fから合算|業務上の合算判断は変更しない|
 |FAC00013/16|原本名と別登録名の対応不明|改称・統合・ID付替えをしない|
@@ -77,8 +77,8 @@ IAM追加、Cloud Runのローカル配信、本番操作、DB・数量の更新
 
 ## 残件
 
-1. 春日苑HTMLの内部ID表示を共通修正し、関連検証・正規stg反映後に納品書を再確認する。数量の集計キーはhana/tsukiのまま維持し、表示だけ登録済みの花/月を使う。
-2. FAC00011の正本FAXを確認して設定を確定する。追加のstg読取り調査でも該当注文0件・アップロード0件。証拠 `tmp/shimanto-stg-original-search-20261112.json`。FAC00015の原本を代用せず、原本提示待ち。
+1. FAC00011の正本FAXを確認して設定を確定する。追加のstg読取り調査でも該当注文0件・アップロード0件。証拠 `tmp/shimanto-stg-original-search-20261112.json`。FAC00015の原本を代用せず、原本提示待ち。
+2. トマトソースの実用一人量は未確定。通常stgの1gはユーザー承認の仮値であり、本番へ流用しない。既存6件エージェント試験の春日苑は旧エリアIDのため別途未完了。
 
 既存注文の選択版・保存済み数量は付け替えていないため、今回の新版追加を、過去注文の納品書が自動訂正された証拠にしない。全体完了とはしていない。
 
@@ -121,3 +121,15 @@ IAM追加、Cloud Runのローカル配信、本番操作、DB・数量の更新
 - 登録証拠 `tmp/stg-tomato-provisional-menu-20261113.json`、同名PNG。保存済みシートを再生成・変更せず、出力だけ再試行。
 - 春日苑の袋詰め `OBG851bc0c5bbf74350` と出力 `OOBb50cc1d06c1e4fd3` は生成成功、状態 `output_review`。選択OCRと保存シートIDは不変。
 - 納品書HTMLは表示できたが、見出し再構成が登録済み表示名を捨てて内部area_idを表示していた。captured facility内のarea名をpreviewへ渡し、集計IDを保持したままHTML表示に使用する修正を追加。未配信の修正をstg確認済みとはしない。
+
+### 表示名修正の最終確認
+
+- 実装修正・関連試験追加後に一括直列検証。backend 483件、agent 461件成功、スキップ0。frontend試験・型チェック・ビルドも成功。証拠 `tmp/invoice-area-release-proof-20261113/commands.json` とログ/JUnit。
+- 試験記録の自動生成は公開鍵環境変数未指定で停止したため、実成功ログとJUnitのハッシュ・同一clean sourceを照合して署名を生成。元の配信済みversion10 baselineを使用し、試験再実行・未実施の成功化はしていない。署名付き記録 `tmp/invoice-area-release-proof-20261113/receipt.json`、記録処理 `tmp/finalize_invoice_area_receipt_20261113.py`。
+- develop統合・配信ソース `9f8b674ed0a57be07b1f34069ffe947ca320ac21`。正規stg run `43335089074` success。今回のworkflow起動は1回。本番・予算増額・IAM追加なし。
+- worker `worker-stg-00961-qhn`、100% traffic、image `backend@sha256:4931d7b52538b477d6fc98850b06f3323429567b5ca264d9eff7d094c87b71d4`。
+- web `web-stg-00521-bsm`、100% traffic、image `frontend@sha256:d1b050723378a0b067e4a47258235e06a4e6dc506cdb0e7fed69b78767cf25e3`。実画面footerも9f8b674ed0a5。
+- 春日苑HTMLは常食 花/月・軟菜・ミキサー 花/月を表示。修正前後の56行は見出し以外すべて完全一致。証拠 `tmp/spring-delivery-html-before-area-label-20261113.json`、`tmp/spring-delivery-html-after-area-label-20261113.json`、対応PNG。
+- 配信後に実受領した `/Users/mmorinag/Downloads/ORDc348d8ac_delivery (1).xlsx` は、配信前受領Excelと全シートの全セル値が一致。対象施設7日分の見出しが常食 花/月・軟菜・ミキサー 花/月であることも確認。
+- workflow画面の再読込後も選択OCR `OEV7a4cedb49b51`、保存シート `ODS96788b067fd04083`、袋詰め `OBG851bc0c5bbf74350`、出力 `OOBb50cc1d06c1e4fd3` を保持。今回の2件納品書確認を、旧エージェント6件の全確定成功とは扱わない。
+- Dockerは使用せず、一時ローカルPostgreSQLを使用。終了後に停止・削除し、診断用の約315MB DB複製もSHA照合後に削除。診断ログと元の既存ローカルデータは保持。
