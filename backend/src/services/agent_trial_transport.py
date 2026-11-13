@@ -134,6 +134,59 @@ def load_source_asset(uri, generation=None):
     return None
 
 
+def _area_name_context(order_id):
+    from src.db import SessionLocal
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.models.order_workflow_state import OrderWorkflowState
+    with SessionLocal() as session:
+        state = session.get(OrderWorkflowState, order_id)
+        draft = session.get(OrderSheetDraft, state.draft_id) if state and state.draft_id else None
+        if not draft or draft.order_id != order_id or draft.base_evidence_run_id != state.evidence_run_id:
+            raise ValueError('trial_area_saved_sheet_required')
+        return {'order_id': order_id, 'saved_sheet_id': draft.id,
+                'evidence_run_id': state.evidence_run_id, 'template_version_id': draft.template_version_id,
+                'sheet_sha256': hashlib.sha256(json.dumps(draft.draft_sheet_json, sort_keys=True,
+                    ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()}
+
+
+def trial_area_names(order_id, registration=None):
+    """Explicit display-only owner input, bound to one isolated saved sheet."""
+    root = Path(configuration()['root'])
+    if not isinstance(order_id, str) or not order_id or any(c not in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-' for c in order_id):
+        raise ValueError('trial_area_order_invalid')
+    folder = root / 'owner-area-names'
+    path = folder / (order_id + '.json')
+    if registration is None and not path.exists():
+        return {}
+    context = _area_name_context(order_id)
+    if registration is not None:
+        if set(registration) != {'saved_sheet_id', 'names', 'reason'} or registration['saved_sheet_id'] != context['saved_sheet_id']:
+            raise ValueError('trial_area_saved_sheet_changed')
+        names = registration['names']
+        if (not isinstance(names, dict) or not names or len(names) > 30
+                or any(not isinstance(k, str) or not k.strip() or k != k.strip()
+                       or not isinstance(v, str) or not v.strip() or len(v) > 100 for k, v in names.items())
+                or not isinstance(registration['reason'], str) or not registration['reason'].strip()):
+            raise ValueError('trial_area_names_invalid')
+        record = {**context, 'names': names, 'reason': registration['reason']}
+        folder.mkdir(exist_ok=True)
+        temporary = folder / ('.register-' + secrets.token_hex(8))
+        try:
+            temporary.write_text(json.dumps(record, ensure_ascii=False, sort_keys=True))
+            temporary.chmod(0o600)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                if json.loads(path.read_text()) != record:
+                    raise ValueError('trial_area_registration_already_exists')
+        finally:
+            temporary.unlink(missing_ok=True)
+    saved = json.loads(path.read_text())
+    if any(saved.get(key) != value for key, value in context.items()):
+        raise ValueError('trial_area_saved_sheet_changed')
+    return saved['names']
+
+
 def contract(identity, generation, kind):
     cfg = configuration()
     if kind not in {"ingest", "workflow", "auto-llm"} or not identity or type(generation) is not int or generation < 1:

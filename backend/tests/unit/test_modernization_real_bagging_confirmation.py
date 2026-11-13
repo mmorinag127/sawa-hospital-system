@@ -23,6 +23,25 @@ from src.services import order_service as orders
 from src.services import order_workflow_v2_service as workflow
 
 
+def test_trial_display_registration_reads_actual_saved_sheet_without_mutation(owned_bagging, tmp_path, monkeypatch):
+    from src.services import agent_trial_transport as local
+    import src.db as db
+    fixture = owned_bagging
+    monkeypatch.setattr(db, 'SessionLocal', fixture.session_scope)
+    monkeypatch.setattr(local, 'configuration', lambda: {'root':str(tmp_path)})
+    before = database_snapshot()
+    saved = fixture.saved()
+    approved = {'saved_sheet_id':fixture.draft_id, 'names':{'2F':'Flower','3F':'Moon'}, 'reason':'Owner-approved display only'}
+    assert local.trial_area_names(fixture.order_id, approved) == approved['names']
+    assert database_snapshot() == before
+    assert fixture.saved() == saved
+    with fixture.session_scope() as session:
+        draft = session.get(OrderSheetDraft, fixture.draft_id)
+        draft.draft_sheet_json = {**draft.draft_sheet_json, 'remarks':'Changed after display approval'}
+    with pytest.raises(ValueError, match='saved_sheet_changed'):
+        local.trial_area_names(fixture.order_id)
+
+
 @pytest.mark.parametrize('reason',['monthly_entry_source_row_unresolved','private arbitrary text'])
 def test_rejection_logs_only_symbolic_cause(monkeypatch,reason):
     from types import SimpleNamespace

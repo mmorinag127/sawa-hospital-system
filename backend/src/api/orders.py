@@ -1417,6 +1417,17 @@ def read_order_facility_config(order_id: str):
                             detail={"error": str(exc)}) from exc
 
 
+@router.put("/{order_id}/workflow-v2/trial-area-names", dependencies=[Depends(require_role("operator"))])
+def register_trial_area_names(order_id: str, body: dict):
+    from src.services import agent_trial_transport
+    if not agent_trial_transport.enabled():
+        raise HTTPException(status_code=404, detail="isolated_trial_only")
+    try:
+        return {'order_id': order_id, 'names': agent_trial_transport.trial_area_names(order_id, body)}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 def _raise_legacy_order_workflow_gone(endpoint: str) -> None:
     raise HTTPException(
         status_code=410,

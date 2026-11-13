@@ -1,5 +1,6 @@
 """Owner HTTP/control guards with synthetic native transport, not live proof."""
 from types import SimpleNamespace
+import asyncio
 from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
@@ -102,3 +103,57 @@ def test_model_cannot_access_owner_operations(tmp_path,monkeypatch):
     for operation in OWNER_INPUT_OPERATIONS:
         with pytest.raises(Conflict,match='所有者'):
             require_server(run,operation)
+
+
+def area_fixture(tmp_path, monkeypatch, *, lost=False):
+    app, native, run = fixture(tmp_path, monkeypatch)
+    tools = app.state.tools
+    native.sources['A']['status'] = 'completed'
+    native.saved.add('OA')
+    native.wfs['OA']['saved_sheet_id'] = 'SOA'
+    async def approve():
+        await tools.faxes.refresh(run)
+        review = (await tools.faxes.submit(run, 'A', 'Synthetic review'))['review']
+        await tools.faxes.decide(run, 'A', review['id'], True, '')
+    asyncio.run(approve())
+    original = native.request
+    native.area_writes = []
+    async def request(run, domain, method, path, **kwargs):
+        if path.endswith('/trial-area-names'):
+            native.area_writes.append((path, kwargs['body']))
+            if lost:
+                raise httpx.ReadTimeout('synthetic area response loss')
+            return httpx.Response(200, json={'order_id':'OA','names':kwargs['body']['names']})
+        return await original(run, domain, method, path, **kwargs)
+    native.request = request
+    return app, native, run
+
+
+def test_area_registration_preserves_approved_sheet_and_is_copy_scoped(tmp_path, monkeypatch):
+    app, native, run = area_fixture(tmp_path, monkeypatch)
+    with TestClient(app) as web:
+        web.headers['X-Trial-Token'] = app.state.token
+        path = '/runs/'+run['id']+'/trial-area-names'
+        body = {'order_id':'OA','names':{'2F':'Flower','3F':'Moon'},'reason':'Explicit approval'}
+        assert web.post(path, json={**body,'order_id':'OTHER'}).status_code == 409
+        assert not native.area_writes
+        response = web.post(path, json=body)
+        assert response.status_code == 200, response.text
+        assert native.area_writes == [('/orders/OA/workflow-v2/trial-area-names', {
+            'saved_sheet_id':'SOA','names':body['names'],'reason':body['reason']})]
+        assert native.sheets['OA']['rows'] == [['牛乳',0]]
+        assert native.wfs['OA']['saved_sheet_id'] == 'SOA'
+        assert app.state.store.get(run['id'])['spent'] == 0
+        assert app.state.store.latest_event(run['id'],'trial_area_names')['payload']['saved_sheet_id'] == 'SOA'
+
+
+def test_unknown_area_registration_is_fenced_not_replayed(tmp_path, monkeypatch):
+    app, native, run = area_fixture(tmp_path, monkeypatch, lost=True)
+    with TestClient(app, raise_server_exceptions=False) as web:
+        web.headers['X-Trial-Token'] = app.state.token
+        path = '/runs/'+run['id']+'/trial-area-names'
+        body = {'order_id':'OA','names':{'2F':'Flower'},'reason':'Explicit approval'}
+        assert web.post(path, json=body).status_code == 500
+        assert web.post(path, json=body).status_code == 409
+        assert len(native.area_writes) == 1
+        assert app.state.store.get(run['id'])['status'] == 'reconciliation_required'

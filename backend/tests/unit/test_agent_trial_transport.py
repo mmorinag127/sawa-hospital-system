@@ -9,6 +9,51 @@ import pytest
 from src.services import agent_trial_transport as local
 
 
+def test_owner_display_names_are_order_and_saved_sheet_bound(local_root, monkeypatch):
+    from src.services.output_builder import _bind_label_area_names
+    contexts = {key: {'order_id':key, 'saved_sheet_id':'S'+key, 'sheet_sha256':'unchanged'} for key in ('OA','OB')}
+    monkeypatch.setattr(local, '_area_name_context', lambda key: contexts[key])
+    approved = {'saved_sheet_id':'SOA','names':{'2F':'Flower','3F':'Moon'},'reason':'Explicit owner approval for OA only'}
+    assert local.trial_area_names('OA', approved) == approved['names']
+    assert local.trial_area_names('OA', approved) == approved['names']
+    assert local.trial_area_names('OB') == {}
+    bags = [{'order_id':'OA','area_id':'2F','quantity':7}, {'order_id':'OA','area_id':'3F','quantity':3}]
+    assert _bind_label_area_names(bags, {'areas':[]}) == [
+        {**bags[0], 'area_name':'Flower'}, {**bags[1], 'area_name':'Moon'}]
+    assert 'area_name' not in bags[0]
+    with pytest.raises(ValueError, match='label_area_identity_unresolved'):
+        _bind_label_area_names([{**bags[0], 'order_id':'OB'}], {'areas':[]})
+    with pytest.raises(ValueError, match='already_exists'):
+        local.trial_area_names('OA', {**approved, 'names':{'2F':'Different'}})
+    contexts['OA']['sheet_sha256'] = 'edited-after-approval'
+    with pytest.raises(ValueError, match='saved_sheet_changed'):
+        local.trial_area_names('OA')
+    monkeypatch.delenv('SAWA_AGENT_TRIAL_TRANSPORT')
+    with pytest.raises(ValueError, match='label_area_identity_unresolved'):
+        _bind_label_area_names(bags, {'areas':[]})
+    with pytest.raises(ValueError, match='not_enabled'):
+        local.trial_area_names('OA', approved)
+
+
+@pytest.mark.parametrize('patch', [
+    {'saved_sheet_id':'another-sheet'}, {'names':{}}, {'names':{'2F':''}},
+    {'names':{' 2F':'Flower'}}, {'reason':''}, {'unexpected':True}])
+def test_owner_display_invalid_registration_is_not_persisted(local_root, monkeypatch, patch):
+    monkeypatch.setattr(local, '_area_name_context', lambda key: {'saved_sheet_id':'S1'})
+    with pytest.raises(ValueError):
+        local.trial_area_names('OA', {'saved_sheet_id':'S1','names':{'2F':'Flower'},'reason':'Owner approval', **patch})
+    assert not (local_root/'owner-area-names'/'OA.json').exists()
+
+
+def test_area_registration_endpoint_is_absent_outside_isolated_runtime(monkeypatch):
+    from fastapi import HTTPException
+    from src.api.orders import register_trial_area_names
+    monkeypatch.delenv('SAWA_AGENT_TRIAL_TRANSPORT', raising=False)
+    with pytest.raises(HTTPException) as caught:
+        register_trial_area_names('OA', {'saved_sheet_id':'S1','names':{'2F':'Flower'},'reason':'Not allowed here'})
+    assert caught.value.status_code == 404
+
+
 @pytest.fixture
 def local_root(tmp_path, monkeypatch):
     root = tmp_path / "request" / "data" / "hospital"

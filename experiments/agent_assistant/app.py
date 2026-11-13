@@ -103,6 +103,13 @@ class TrialMenuAmount(BaseModel):
     reason: str = Field(min_length=1,max_length=1000)
 
 
+class TrialAreaNames(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    order_id: str = Field(pattern=r'^[A-Za-z0-9_-]+$')
+    names: dict[str, str] = Field(min_length=1, max_length=30)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class NativeUpgrade(BaseModel):
     model_config = ConfigDict(extra='forbid')
     generation: StrictInt = Field(ge=0)
@@ -439,7 +446,9 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 fax_labels = tools.faxes.labels(ident, events)
                 source_event = store.latest_event(ident, 'source')
                 provisional = store.latest_event(ident, 'trial_provisional_menu_amount')
-                current = {**current, 'provisional_menu_amount':provisional['payload'] if provisional else None}
+                area_names = store.latest_event(ident, 'trial_area_names')
+                current = {**current, 'provisional_menu_amount':provisional['payload'] if provisional else None,
+                           'trial_area_names':area_names['payload'] if area_names else None}
                 # Old clients also use this immutable binding to distinguish a
                 # source-upload question from an ordinary operator question.
                 context = [source_event] if source_event and all(event['id'] != source_event['id'] for event in events) else []
@@ -640,6 +649,56 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 await run_blocking(business.begin_reconciliation,run)
         await business.kick_many([ident],request.headers.get('authorization',''))
         return await run_blocking(store.get,ident,owner)
+
+    @app.post('/runs/{ident}/trial-area-names')
+    @_complete_request
+    async def trial_area_names(ident: str, payload: TrialAreaNames, request: Request):
+        run = await run_blocking(store.get, ident, owner)
+        await authorize(request.headers.get('authorization', ''), run['domains'])
+        if not owned(run) or run.get('task_id') != 'hospital_pending_faxes' or run['domains'] != ['hospital']:
+            raise Conflict('病院試用コピーだけ変更できます')
+        async with control_lock(ident):
+            async with tools.workflow_locks.setdefault(ident, asyncio.Lock()):
+                run = await run_blocking(store.get, ident, owner)
+                if run['status'] in ('completed','stopped','rolled_back','stopping','stop_pending','rollback_stop_pending'):
+                    raise Conflict('停止済み・完了済みの試用コピーは変更しません')
+                await run_blocking(business.require_copy, run)
+                items = await run_blocking(tools.faxes.items, ident)
+                matches = [item for item in items if item['snapshot'].get('order_id') == payload.order_id]
+                if len(matches) != 1 or matches[0]['state'] != 'approved':
+                    raise Conflict('この試用コピーの承認済み・未確定注文を指定してください')
+                tools.authorizations[ident] = request.headers.get('authorization', '')
+                before = await tools.faxes.capture(run, matches[0])
+                sheet_id = before['workflow'].get('saved_sheet_id')
+                if not sheet_id:
+                    raise Conflict('保存済みシートが必要です')
+                from .business_contracts import OWNER_INPUT_EXECUTION, SERVER_EXECUTION
+                command = 'owner-areas-' + hashlib.sha256(json.dumps({**payload.model_dump(), 'saved_sheet_id':sheet_id}, sort_keys=True).encode()).hexdigest()
+                old_status = run['status']
+                await run_blocking(store.update, ident, expected_generation=run['generation'], status='running')
+                owner_token, server_token = OWNER_INPUT_EXECUTION.set(True), SERVER_EXECUTION.set(True)
+                try:
+                    result = await tools.execute(ident, run['generation'], 'hospital_register_trial_area_names', {'parameters':{
+                        'ids':{'order_id':payload.order_id}, 'body':{'saved_sheet_id':sheet_id, 'names':payload.names, 'reason':payload.reason},
+                        'reason':payload.reason}}, command)
+                    if result.get('ok') is not True:
+                        await run_blocking(store.update, ident, expected_generation=run['generation'], status=old_status)
+                        raise HTTPException(status_code=400, detail=result)
+                    after = await tools.faxes.capture(run, matches[0])
+                    if after['signature'] != before['signature'] or after['sheet'] != before['sheet'] or result.get('data', {}).get('names') != payload.names:
+                        raise Conflict('保存済みシート・原本の照合が一致しません')
+                    await run_blocking(store.event, ident, 'trial_area_names', {**payload.model_dump(), 'saved_sheet_id':sheet_id, 'command_id':command})
+                except HTTPException:
+                    raise
+                except Exception:
+                    await run_blocking(store.update, ident, expected_generation=run['generation'], status='reconciliation_required')
+                    raise
+                finally:
+                    OWNER_INPUT_EXECUTION.reset(owner_token)
+                    SERVER_EXECUTION.reset(server_token)
+                await run_blocking(business.begin_reconciliation, run)
+        await business.kick_many([ident], request.headers.get('authorization', ''))
+        return await run_blocking(store.get, ident, owner)
 
     @app.post("/runs/{ident}/stop")
     async def stop(ident: str):

@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'ed03f88a8ee2d562f4acd10fb96a10043ef2f119'
 BASE_RUN = 42815316580
 ALLOWED = {
+    'docs/six-agent-bagging-confirmation-20261113.md',
     'backend/tests/contract/test_outputs_api.py',
     'backend/tests/unit/test_modernization_delivery_name_identity.py',
     'backend/tests/fixtures/invoice-original-e0edc384.xlsx',

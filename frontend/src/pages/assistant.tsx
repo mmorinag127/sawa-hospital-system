@@ -14,7 +14,7 @@ const BUSINESS_TIMEOUT = 300000;
 const terminalRun = (status: string) => ["completed", "rolled_back", "stopped", "failed"].includes(status);
 const assistantApi = {
   post<T=any>(url:string,data?:unknown,options?:AxiosRequestConfig) {
-    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage|reconcile-business|trial-menu-amount)|faxes\/[^/]+\/decision)$/.test(url);
+    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage|reconcile-business|trial-menu-amount|trial-area-names)|faxes\/[^/]+\/decision)$/.test(url);
     return apiClient.post<T>(url,data,business ? {...options,timeout:BUSINESS_TIMEOUT} : options);
   },
 };
@@ -28,6 +28,7 @@ type Run = { business?:BusinessProgress; business_messages?:ChatMessage[]; reque
   events?: { id: number; kind: string; payload: Record<string, any> }[];
   source_attached?:boolean;
   provisional_menu_amount?:{name:string;quantity:number;unit:string;provisional:true}|null;
+  trial_area_names?:{order_id:string;names:Record<string,string>}|null;
   generation?:number;
   native_upgrade?:{previous_sha256:string;current_sha256:string;previous_sources:Record<string,{source_revision:string}>;current_sources:Record<string,{source_revision:string}>}|null;
   event_page?:AssistantEventPage;
@@ -97,6 +98,9 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [controlNotice,setControlNotice]=useState("");
   const [trialMenuDrafts,setTrialMenuDrafts]=useState<Record<string,{name:string;quantity:string;unit:string}>>({});
   const trialMenu=trialMenuDrafts[selected?.id || ""] || {name:"",quantity:"",unit:"g"};
+  const [trialAreaOrder,setTrialAreaOrder]=useState("");
+  const [trialAreaNames,setTrialAreaNames]=useState("");
+  const [trialAreaReason,setTrialAreaReason]=useState("");
   const setTrialMenu=(patch:Partial<typeof trialMenu>)=>{
     if(selected)setTrialMenuDrafts(previous=>({...previous,[selected.id]:{...trialMenu,...patch}}));
   };
@@ -339,6 +343,18 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       if(selectedId.current===id){setTrialMenuDrafts(previous=>{const copy={...previous};delete copy[id];return copy;});await refreshAfterCommand(id);}
     });
   }
+  async function registerTrialAreaNames(event: FormEvent) {
+    event.preventDefault();
+    if(!selected || busy || controlling)return;
+    const id=selected.id;
+    await act(async()=>{
+      const names=JSON.parse(trialAreaNames);
+      await assistantApi.post(`/assistant-trial/runs/${id}/trial-area-names`,{
+        order_id:trialAreaOrder,names,reason:trialAreaReason,
+      });
+      if(selectedId.current===id){setTrialAreaOrder("");setTrialAreaNames("");setTrialAreaReason("");await refreshAfterCommand(id);}
+    });
+  }
   const task = tasks.find(t => t.id === taskId && t.domain === domain);
   const targetsReady=taskId==="hospital_pending_faxes" ? !!selection : !!selection && (!task?.month || !!selection.inputs?.month) && !!targetKeys.length && (task?.target_kind!=="menu" || !!task?.date || !!layoutId);
   const ready = config && task && targetsReady && (!config.missing.length || task.requires_agent===false) && config.domains[domain]?.baseline_ready;
@@ -531,6 +547,14 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {adminView && selected.business?.state==="checking" && <section className="assistant-notice"><h3>管理者による確認が必要な業務</h3>{selected.events?.filter(event=>event.kind==="business_support").slice(-1).map(event=><p key={event.id}>{event.payload.message}</p>)}<button disabled={busy || controlling} onClick={()=>control("reconcile-business")}>業務結果を再照合する</button><p>結果未確定の更新は再送せず、保存済みの証跡を確認します。</p></section>}
       {adminView && controlNotice && <p className="assistant-notice" role="status" aria-live="polite">{controlNotice}</p>}
       {selected.provisional_menu_amount && <p role="status" className="assistant-notice">検証専用の仮設定：{selected.provisional_menu_amount.name} {selected.provisional_menu_amount.quantity}{selected.provisional_menu_amount.unit}（実運用の値は未確認）</p>}
+      {selected.trial_area_names && <p role="status">試用注文 {selected.trial_area_names.order_id} の表示名：{Object.entries(selected.trial_area_names.names).map(([id,name])=>`${id} → ${name}`).join("、")}</p>}
+      {adminView && selected.task_id==="hospital_pending_faxes" && !terminal && <form className="assistant-notice" onSubmit={registerTrialAreaNames}>
+        <h3>試用注文のエリア表示名</h3>
+        <label>コピー注文ID<input required value={trialAreaOrder} onChange={event=>setTrialAreaOrder(event.target.value)}/></label>
+        <label>列IDと表示名（JSON）<textarea required value={trialAreaNames} onChange={event=>setTrialAreaNames(event.target.value)}/></label>
+        <label>承認された対応の根拠<input required maxLength={1000} value={trialAreaReason} onChange={event=>setTrialAreaReason(event.target.value)}/></label>
+        <button disabled={busy || controlling} type="submit">表示名を登録して再開</button>
+      </form>}
       {adminView && selected.task_id==="hospital_pending_faxes" && !terminal && <form className="assistant-notice" onSubmit={registerTrialMenuAmount}>
         <h3>試用コピー専用の仮一人量</h3>
         <label>品名<input required maxLength={200} value={trialMenu.name} onChange={event=>setTrialMenu({name:event.target.value})}/></label>

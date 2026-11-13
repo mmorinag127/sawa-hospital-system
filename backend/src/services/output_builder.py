@@ -580,6 +580,11 @@ def _bind_label_area_names(bags: list[dict], facility_config: dict | None) -> li
             raise ValueError("label_area_mapping_ambiguous: 施設のエリア正本が一意ではありません")
         names[identity] = name
     aliases = _build_area_alias_map(facility_config) if isinstance(facility_config, dict) else {}
+    from src.services import agent_trial_transport
+    trial_names = {}
+    if agent_trial_transport.enabled():
+        for order_id in {bag.get('order_id') for bag in bags if bag.get('order_id')}:
+            trial_names[order_id] = agent_trial_transport.trial_area_names(order_id)
     result: list[dict] = []
     for bag in bags:
         updated = dict(bag)
@@ -587,6 +592,11 @@ def _bind_label_area_names(bags: list[dict], facility_config: dict | None) -> li
         if identity in {None, "X"}:
             updated["area_name"] = ""
         else:
+            approved = trial_names.get(bag.get('order_id'), {})
+            if identity in approved:
+                updated['area_name'] = approved[identity]
+                result.append(updated)
+                continue
             canonical = aliases.get(identity)
             if canonical not in names:
                 raise ValueError("label_area_identity_unresolved: 注文のエリアを施設正本で確認してください")
