@@ -28,6 +28,7 @@ for(const completed of [false,true])test(`owner invoice correction submits revie
   if(url.endsWith('/trial-invoice-columns')){h.setRun({...initial,native_upgrade:null,trial_invoice_columns:body});return {data:h.run};}
  }});
  try{
+  if(completed)await h.click(h.document.querySelector('.history-row'));
   const form=[...h.document.querySelectorAll('form')].find(item=>item.textContent.includes('保存済み注文の納品書列訂正'));
   assert.ok(form);
   assert.equal(h.calls.filter(call=>call.url.endsWith('/trial-invoice-columns')).length,0);

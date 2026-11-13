@@ -173,6 +173,24 @@ class WorkflowCompletion:
                 'sheet': {'fields': sheet['fields'], 'rows': sheet['rows']},
                 'next_step': 'read_artifact_pageで原本を読み、数量を照合して業務上の不明点を質問する。変更なしはrequest_fax_approvalへfax_idとsummaryだけ渡す。利用者の手動訂正はcell_editsでdate_mmdd・daypart・menu・field（qty.regular_x等）・value（文字列）を指定する。未変更のsheetは転記しない。'}
 
+    async def owner_amount_evidence(self, run, command):
+        from .business_contracts import OWNER_INPUT_EXECUTION
+        events=await run_blocking(self.tools.store.events,run['id'],kinds=('trial_provisional_menu_amount',))
+        settings={event['payload']['menu_master_id']:event['payload'] for event in events}
+        evidence=[]
+        for item_id,expected in settings.items():
+            token=OWNER_INPUT_EXECUTION.set(True)
+            try:
+                result=await self.call(run,command,'owner-amount:'+item_id,'hospital_get_menu_master',{'ids':{'item_id':item_id}})
+            finally:
+                OWNER_INPUT_EXECUTION.reset(token)
+            actual=result.get('data',{}).get('item',{})
+            if (actual.get('id')!=item_id or actual.get('name')!=expected['name'].strip()
+                    or actual.get('qty_per_serving')!=expected['quantity'] or actual.get('unit_type')!=expected['unit']):
+                raise Conflict('所有者が登録した一人量の再取得が一致しません。数量を推測せず確認が必要です')
+            evidence.append(result['command_id'])
+        return evidence
+
     async def complete_faxes(self, ident, generation, raw, command):
         if raw:
             raise ValueError('入力項目はありません')
@@ -245,4 +263,5 @@ class WorkflowCompletion:
                 json.dumps(blocked,ensure_ascii=False))
         if not evidence:
             evidence.append((await self.call(run, command, 'empty', 'hospital_pending_faxes'))['command_id'])
+        evidence.extend(await self.owner_amount_evidence(run,command))
         return await self.call(run, command, 'finish', 'finish_work', raw={'summary': '承認したFAX注文を確定し、正規のラベル・納品書・製造集計を出力・照合しました。', 'evidence_commands': evidence, 'artifact_ids': artifacts})

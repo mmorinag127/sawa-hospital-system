@@ -46,6 +46,38 @@ def fixture(tmp_path,monkeypatch,*,lost=False):
 BODY={'name':'Synthetic sauce','quantity':1,'unit':'g','provisional':True,'reason':'Test-only placeholder, not a business serving amount'}
 
 
+@pytest.mark.parametrize('changed',[False,True])
+def test_fax_completion_includes_fresh_owner_amount_read_receipt_without_weakening_write_guard(tmp_path,monkeypatch,changed):
+    from experiments.agent_assistant.business_contracts import SERVER_EXECUTION
+    from experiments.agent_assistant.workflow_completion import WorkflowCompletion
+    app,native,run=fixture(tmp_path,monkeypatch)
+    with TestClient(app) as web:
+        web.headers['X-Trial-Token']=app.state.token
+        assert web.post('/runs/'+run['id']+'/trial-menu-amount',json=BODY).status_code==200
+        if changed: native.created['qty_per_serving']=2
+        reads_before=native.reads
+        async def check():
+            token=SERVER_EXECUTION.set(True)
+            try:
+                return await WorkflowCompletion(app.state.tools).owner_amount_evidence(app.state.store.get(run['id']),'completion-test')
+            finally:
+                SERVER_EXECUTION.reset(token)
+        if changed:
+            with pytest.raises(Conflict,match='一人量の再取得が一致しません'): asyncio.run(check())
+        else:
+            evidence=asyncio.run(check())
+            assert len(evidence)==1
+            event=app.state.store.latest_event(run['id'],'trial_provisional_menu_amount')['payload']
+            with app.state.store.read() as db:
+                row=db.execute('SELECT rowid,request,result FROM commands WHERE run_id=? AND id=?',(run['id'],evidence[0])).fetchone()
+                write=db.execute('SELECT rowid FROM commands WHERE run_id=? AND id=?',(run['id'],event['command_id'])).fetchone()
+            import json
+            assert row['rowid']>write['rowid']
+            assert json.loads(row['request'])['name']=='hospital_get_menu_master'
+            assert json.loads(row['result'])['data']['item']['qty_per_serving']==1
+        assert native.reads==reads_before+1 and native.posts==1
+
+
 def test_owner_registration_replays_write_but_freshly_reads_setting(tmp_path,monkeypatch):
     app,native,run=fixture(tmp_path,monkeypatch)
     with TestClient(app) as web:
