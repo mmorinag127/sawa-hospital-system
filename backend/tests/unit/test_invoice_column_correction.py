@@ -43,6 +43,7 @@ def trial_invoice(tmp_path, monkeypatch):
     context = {'order_id':'OA','saved_sheet_id':'S1','source_sha256':'a'*64,'sheet_sha256':'original-sheet','candidate_sha256':'accepted'}
     body = {key:deepcopy(reviewed[key]) for key in ('source_columns','excluded_source_columns','invoice_columns')}
     body.update(saved_sheet_id='S1',source_sha256='a'*64,reason='Synthetic original and saved-sheet review')
+    (tmp_path/'trial-manifest.json').write_text('{"purpose":"sawa-agent-isolated-trial"}')
     monkeypatch.setattr(local,'enabled',lambda:True)
     monkeypatch.setattr(local,'configuration',lambda:{'root':str(tmp_path)})
     monkeypatch.setattr(service,'_binding',lambda oid,accepted:(deepcopy(context),deepcopy(sheet)))
