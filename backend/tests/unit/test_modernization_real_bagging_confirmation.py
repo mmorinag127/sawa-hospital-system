@@ -25,9 +25,7 @@ from src.services import order_workflow_v2_service as workflow
 
 def test_trial_display_registration_reads_actual_saved_sheet_without_mutation(owned_bagging, tmp_path, monkeypatch):
     from src.services import agent_trial_transport as local
-    import src.db as db
     fixture = owned_bagging
-    monkeypatch.setattr(db, 'SessionLocal', fixture.session_scope)
     monkeypatch.setattr(local, 'configuration', lambda: {'root':str(tmp_path)})
     before = database_snapshot()
     saved = fixture.saved()

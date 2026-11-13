@@ -108,6 +108,8 @@ def test_model_cannot_access_owner_operations(tmp_path,monkeypatch):
 def area_fixture(tmp_path, monkeypatch, *, lost=False):
     app, native, run = fixture(tmp_path, monkeypatch)
     tools = app.state.tools
+    app.state.store.update(run['id'], status='running')
+    run = app.state.store.get(run['id'])
     native.sources['A']['status'] = 'completed'
     native.saved.add('OA')
     native.wfs['OA']['saved_sheet_id'] = 'SOA'
