@@ -13395,7 +13395,10 @@ def _finalize_async_first_pass_side_effects(
                 message_id=normalized_message_id,
                 error=str(exc),
             )
-    if order_id:
+    # Native completion publishes workflow-v2 atomically with its evidence.
+    # The legacy projection can open another fenced session while holding the
+    # ingest locks, waiting on its own transaction and blocking operator edits.
+    if order_id and not strict_native:
         try:
             workflow_state_service.refresh_workflow_state(order_id)
         except Exception as exc:  # noqa: BLE001

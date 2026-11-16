@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'ed03f88a8ee2d562f4acd10fb96a10043ef2f119'
 BASE_RUN = 42815316580
 ALLOWED = {
+    'backend/tests/unit/test_native_ingest_boundary.py',
     'scripts/stg_image_protection.py',
     'scripts/stg_ocr_producer_deploy.py',
     'backend/tests/unit/test_stg_web_image_recovery.py',
@@ -120,7 +121,7 @@ BACKEND = ['backend/tests/contract/test_outputs_api.py',
     'test_workflow_ocr_reset.py', 'test_order_workflow_v2_service.py',
     'test_initial_saved_import_service.py', 'test_online_production_release.py',
     'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py','test_stg_ocr_restore_command.py',
-    'test_native_ingest_sql_component.py','test_hakodate_order_sheet_evidence_projection.py',
+    'test_native_ingest_sql_component.py','test_native_ingest_boundary.py','test_hakodate_order_sheet_evidence_projection.py',
     'test_modernization_real_bagging_confirmation.py',
     'test_modernization_menu_amount_identity.py',
     'test_output_builder_diet_overrides.py', 'test_h2_monthly_source_date_boundary.py',

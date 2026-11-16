@@ -10,12 +10,14 @@
 
 |項目|状態|内容|
 |---|---|---|
-|備考の低信頼文字による全体拒否|既存develop実装あり・今回の実データ確認は未実施|note/quantityは文字内容や信頼度で配置不正にしない|
-|数量記号による受付失敗|既存develop実装あり・今回の実データ確認は未実施|認識原文をready evidenceへ保存し、数値注文行へ推測変換しない|
-|重複アップロードによる原本世代消失|実装済み・未検証|同じobjectへgeneration=0条件で作成。同内容は既存generationを照合して再利用、異内容は拒否|
+|備考の低信頼文字による全体拒否|stg反映済み・実操作進行中|captured実データ11件を現コードへ渡し配置blocker 0。note/quantityは文字内容や信頼度で配置不正にしない|
+|数量記号による受付失敗|stg反映済み・実操作進行中|認識原文をready evidenceへ保存し、数値注文行へ推測変換しない|
+|重複アップロードによる原本世代消失|stg実確認済み|ORDda5a9803の同一PDF再受付後も実GCS世代1794818318683609不変、注文1件・OCRジョブ1件|
 |期間・施設不一致|原因調査済み・既存注文変更なし|下記参照|
-|以前の施設名メモが残る不具合|実装済み・未検証|施設変更で補助メモをクリアし、canonical施設選択から独立した古い名前を送らない|
-|ローカル一括検証・stg確認|開始前|既知の実装修正完了。回帰を直列実行してから配信|
+|以前の施設名メモが残る不具合|stg実確認済み|ふれあいでメモ入力後に四万十ピアへ変更し、メモが空になることを確認|
+|ローカル一括検証|完了|backend687・agent482・frontend315成功、skip 0。型チェック・build成功|
+|stg確認|進行中|配信成功。専用注文のOCR完了後にシート編集・保存・再読込を確認する|
+|ネイティブOCR完了後の旧状態更新|追加修正済み・一括検証前|完了状態はworkflow-v2で原子的に確定済み。重複した旧projectionで別接続が自分のingestロックを待つため、native完了から旧projectionを呼ばない。元のlease・upload終端検査は維持|
 
 ## 不一致の原因
 
@@ -37,7 +39,7 @@ PDF登録APIは施設と対象週の明示選択を要求するが、入力さ�
 ## 証拠と未確認
 
 追加配信阻害: run43827591571はcandidate producerがOCI index digestだったため、保護タグのLinux/amd64 digestとの比較で停止。
-stg worker/webは7e9fc8d9のまま。原本・注文には影響なし。事前報告の「backend反映済み」は誤りで訂正済み。
+当該失敗時点のstg worker/webは7e9fc8d9のまま。原本・注文には影響なし。事前報告の「backend反映済み」は誤りで訂正済み。
 実registryのindex8b127bd6...を読取り、Linux実体00603f5e...との相違を確認。
 保護とproducer配信の両方で既存のmanifest検証を通して同じLinux実体へ解決するよう修正。
 checkout/sourceラベル/署名/OIDC/IAM/環境設定比較/実Ready digest検査は維持。
@@ -45,4 +47,10 @@ checkout/sourceラベル/署名/OIDC/IAM/環境設定比較/実Ready digest検�
 調査正本: /Users/mmorinag/Sawa/2025.12/docs/PROD_OCR_20261129_1205_AUDIT_20261116.md
 実データの読取り証跡: /Users/mmorinag/Sawa/2025.12/tmp/prod-nov29-audit-20261116/
 サブエージェント指定gpt-5.6-terra/lowは現在の利用可能一覧にないため、代替モデルは起動せず主担当で作業。
+配信成功: run43830443689 / source548ee1ddec8155cff9bb18672a07d1b18829cecc。
+worker-stg-00965-z85 / web-stg-00525-4qbへ反映。最終ローカル証跡はtmp/ocr-editable-deploy-fixed-proof-20261116/、昇格済み署名記録はtmp/ocr-editable-staging-proof-20261116/receipt.json。
+専用注文ORDda5a9803、受付UPL2bac2d7f、FAC00015、2026-12-01〜12-05。
+原本SHA256:e6aa194d0606286e0bf66d8f5011ff4500e713a587016b0c9a0316f41b9206e8。
 今回のstg編集・保存・再読込はまだ未確認。既存配信や単体試験を代用しない。
+専用注文のOCRはdone、結果OEVc4a400dcec9fはready。数量記号24セルを原文保持している。
+後続採用操作では、Cloud Run容量待ち429を検出。DBの読取りでnative完了後の旧projection接続がingestロックを保持し、別接続のFOR SHAREを待つ自己待機を確認。採用要求も同じ注文ロックを待っている。既存本番・別注文には操作しない。

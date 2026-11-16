@@ -245,6 +245,31 @@ def test_native_settlement_errors_are_not_warning_only(monkeypatch):
         order_service.finalize_first_pass_side_effects(job_id='job', order_id='order', message_id='message')
 
 
+@pytest.mark.parametrize('mode', ['hakodate', None])
+@pytest.mark.parametrize('status', ['done', 'failed'])
+def test_native_completion_does_not_reenter_legacy_locked_projection(monkeypatch, mode, status):
+    from src.services.workflow_attempt_guard_service import nonworkflow_execution_context
+    from src.services import uploaded_pdf_service
+    upload = {'id': 'upload', 'lease_owner': 'owner'}
+    execution = {'job_id': 'job', 'order_id': 'order', 'ingest_ocr_mode': mode,
+        'ingest_lease': {'id': 'message', 'uploaded_lease': upload}}
+    calls = []
+    def settle(value):
+        assert value == execution
+        calls.append('settle')
+        return {'lease': execution['ingest_lease'], 'status': status, 'error': None if status == 'done' else 'review'}
+    monkeypatch.setattr(ingest, 'settle_ingest_ocr_terminal', settle)
+    monkeypatch.setattr(uploaded_pdf_service, 'mark_uploaded_pdf_completed_by_message_id_if_ready',
+        lambda *args, **kwargs: calls.append('upload-done') or {'id': 'upload'})
+    monkeypatch.setattr(uploaded_pdf_service, 'schedule_uploaded_pdf_retry',
+        lambda *args, **kwargs: calls.append('upload-failed') or {'id': 'upload'})
+    monkeypatch.setattr(order_service.workflow_state_service, 'refresh_workflow_state',
+        lambda *args, **kwargs: calls.append('legacy-projection'))
+    with nonworkflow_execution_context(execution):
+        order_service.finalize_first_pass_side_effects(job_id='job', order_id='order', message_id='message')
+    assert calls == ['settle', 'upload-' + status] + ([] if mode == 'hakodate' else ['legacy-projection'])
+
+
 def test_native_dispatch_does_not_enter_old_pipeline_or_auto_adopt(monkeypatch):
     capture = {'ingest_ocr_mode': 'hakodate', 'intake_protocol': 'native_ingest_v2',
         'ingest_lease': {'payload': {'intake_protocol': 'native_ingest_v2'}}, 'orders': {'order': {
