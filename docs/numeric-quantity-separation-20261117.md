@@ -16,7 +16,7 @@
 | Read-only saved-sheet projection and strict aggregate parsing | Implemented |
 | Pending-cell editor, explicit blank confirmation, output boundary | Implemented |
 | Regression fixtures and mounted save/reload coverage | Updated; not executed |
-| Serial local verification | Pending |
+| Serial local verification | First batch: backend 910 passed / 4 failed; agent 482 passed; frontend 317 passed / 2 failed; types/build passed. Native intake raw-review preservation fixed; output blocker fixture and explicit review-before-save fixture updated. Final batch pending. |
 | Develop integration and manual staging deployment | Pending |
 | Staging save/reload and historical preservation | Pending |
 

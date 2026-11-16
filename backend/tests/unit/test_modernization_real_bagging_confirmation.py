@@ -213,7 +213,7 @@ def test_real_bagging_then_final_confirmation_persist_owned_quantities_and_snaps
 
 
 @pytest.mark.parametrize("quantities,error", [
-    (["7", "?", "", "0"], "sheet_ocr_review_required"),
+    (["7", "?", "", "0"], "sheet_quantity_review_required"),
     (["", "", "", ""], "draft_lines_empty"),
 ])
 def test_unresolved_or_empty_saved_quantities_stop_before_real_artifacts(owned_bagging, quantities, error):

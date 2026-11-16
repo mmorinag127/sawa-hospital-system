@@ -13016,6 +13016,12 @@ def _persist_ocr_rerun_completion(
                 configured = original["configured_input"]
                 quantity_review = _materialization_quantity_cell_issues(fields=sheet.get('fields'),
                     rows_payload=sheet.get('rows'), template=configured['facility']['fax_template'])
+                from src.services.sheet_quantity_value_service import pending_cells
+                quantity_review.extend({
+                    'row_index': item['row_index'], 'column_index': item['col_index'],
+                    'field': item['field'], 'issue_code': 'review_required', 'severity': 'warning',
+                    'source': 'ocr_original', 'raw': item['raw_text'], 'value': item['raw_text'],
+                } for item in pending_cells(sheet))
                 if quantity_review:
                     # Recognition text belongs to the editor. Do not turn an
                     # unreadable quantity into a failed OCR or a guessed number.

@@ -342,7 +342,10 @@ test(`uncertain original survives ${resolution} resolution, save and reload with
       assert.ok(button);
       await f.h.settle(() => button.click());
     }
+    await f.h.settle(() => f.probe.current.runAnomalyReview());
+    await f.h.settle(() => f.probe.current.showSheetReview());
     await f.h.settle(() => f.probe.current.saveSheet());
+    assert.equal(calls(f, 'put', `${BASE}/sheet`).length, 1, f.probe.current.error);
     await f.h.settle(() => f.probe.current.refreshAll());
     assert.equal(f.probe.current.sheetPayload.rows[0][6], resolution === 'number' ? '9' : '');
     assert.equal(f.probe.current.sheetPayload.quantity_ocr_review[0].raw_text, '?');
