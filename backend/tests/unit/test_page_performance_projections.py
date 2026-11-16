@@ -276,6 +276,42 @@ def test_saved_output_display_does_not_materialize_and_sheet_scope_preserves_edi
     assert all(row["detail_state"] == "not_loaded" for row in saved["ocr_candidates"]["results"])
 
 
+@pytest.mark.parametrize('scope', ['initial', 'sheet', 'output', 'inspection'])
+@pytest.mark.parametrize('current_review', [False, True])
+def test_display_binds_anomaly_to_numeric_projection_without_rewriting_history(history_case, scope, current_review):
+    from copy import deepcopy
+    from src.db import session_scope
+    from src.models.order_workflow_state import OrderWorkflowState
+    from src.models.order_sheet_draft import OrderSheetDraft
+    from src.services import order_workflow_v2_service as workflow
+    from src.services import workflow_display_read_service as display
+    from src.services.sheet_quantity_value_service import editable_sheet
+
+    case = history_case()
+    source = case.produce(cell_values='5')
+    case.save(source['sheet'])
+    with session_scope() as session:
+        state = session.get(OrderWorkflowState, case.id)
+        draft_id = state.draft_id
+        draft = session.get(OrderSheetDraft, draft_id)
+        raw = deepcopy(draft.draft_sheet_json)
+        column = next(c for c, field in enumerate(raw['fields']) if field.startswith('qty.'))
+        raw['rows'][0][column] = '11月20日に配送'
+        draft.draft_sheet_json = raw
+        meta = workflow._workflow_meta(state)
+        review = {'sheet_hash': workflow._stable_json_hash(editable_sheet(raw) if current_review else raw),
+                  'warnings': [] if current_review else [{'value':1120}]}
+        meta['anomaly_review'] = review
+        workflow._write_workflow_meta(state, meta)
+    with case.readonly():
+        result, error = display.get_display(case.id, scope=scope)
+    assert error is None
+    assert result['anomaly_review'] == (review if current_review else None)
+    with session_scope() as session:
+        assert session.get(OrderSheetDraft, draft_id).draft_sheet_json == raw
+        assert workflow._workflow_meta(session.get(OrderWorkflowState, case.id))['anomaly_review'] == review
+
+
 @pytest.mark.parametrize("scope", ["initial", "sheet", "inspection"])
 @pytest.mark.parametrize("anomaly,sheet_review", [(False, False), (True, False), (False, True), (True, True)])
 def test_unsaved_display_preserves_actual_pre_save_checks(history_case, scope, anomaly, sheet_review):

@@ -4184,6 +4184,15 @@ def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
     session.flush()
 
 
+def _anomaly_review_for_sheet(meta: dict[str, Any], sheet: dict[str, Any] | None):
+    from src.services.sheet_quantity_value_service import editable_sheet
+    review = meta.get('anomaly_review')
+    if (not isinstance(review, dict) or not isinstance(sheet, dict)
+            or review.get('sheet_hash') != _stable_json_hash(editable_sheet(sheet))):
+        return None
+    return copy.deepcopy(review)
+
+
 def _serialize_saved_sheet(row: OrderSheetDraft) -> dict[str, Any]:
     from src.services.sheet_quantity_value_service import editable_sheet
     return {
@@ -5260,11 +5269,9 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
             else {}
         )
         _inspection_next("response_serialization")
-        current_anomaly_review = _workflow_meta(workflow).get('anomaly_review') if workflow is not None else None
-        if (saved_sheet_hash and isinstance(current_anomaly_review, dict)
-                and current_anomaly_review.get('sheet_hash')
-                and current_anomaly_review['sheet_hash'] != saved_sheet_hash):
-            current_anomaly_review = None
+        current_anomaly_review = _anomaly_review_for_sheet(
+            _workflow_meta(workflow), draft.draft_sheet_json if workflow.draft_id and draft is not None else None,
+        ) if workflow is not None else None
         if workflow is not None:
             checked_workflow = _inspection_call(
                 "workflow_serialize", _serialize_workflow_checked, session,

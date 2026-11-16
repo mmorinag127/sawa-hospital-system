@@ -18,6 +18,8 @@ ALLOWED = {
     'AGENTS.md',
     'backend/src/services/sheet_quantity_value_service.py',
     'backend/src/services/workflow_v2_sheet_review_service.py',
+    'backend/src/services/workflow_display_read_service.py',
+    'backend/tests/unit/test_page_performance_projections.py',
     'backend/tests/unit/test_sheet_quantity_values.py',
     'backend/tests/unit/test_ocr_quantity_content_editable_sheet.py',
     'frontend/src/features/orders/sheetQuantities.ts',
@@ -151,6 +153,7 @@ BACKEND += ['backend/tests/unit/test_stg_web_image_recovery.py',
     'backend/tests/unit/test_sheet_quantity_values.py',
     'backend/tests/unit/test_ocr_quantity_content_editable_sheet.py',
     'backend/tests/unit/test_workflow_v2_sheet_review_service.py',
+    'backend/tests/unit/test_page_performance_projections.py',
     'backend/tests/unit/test_stg_ocr_producer_deploy.py', 'backend/tests/unit/test_registry_image_digest.py']
 AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_trial_menu_amount.py',

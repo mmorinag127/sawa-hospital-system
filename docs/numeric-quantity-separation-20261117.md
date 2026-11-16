@@ -18,7 +18,7 @@
 | Regression fixtures and mounted save/reload coverage | Updated; not executed |
 | Serial local verification | First batch: backend 910 passed / 4 failed; agent 482 passed; frontend 317 passed / 2 failed; types/build passed. Native intake raw-review preservation fixed; output blocker fixture and explicit review-before-save fixture updated. Final batch pending. |
 | Develop integration and manual staging deployment | Pending |
-| Staging save/reload and historical preservation | Pending |
+| Staging save/reload and historical preservation | Initial staging run 43907946814 succeeded on attempt 2 (attempt 1 failed PostgreSQL key download TLS EOF; failed backend job only retried). Live sheet had 19 pending cells and all other values unchanged. Live initial/output display exposed a sibling stale-anomaly read path; fixed with shared sheet-hash binding for every display scope. Final verification and follow-up staging pending. |
 
 ## Known Separate Accuracy Issue
 

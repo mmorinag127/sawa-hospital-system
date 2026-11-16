@@ -379,6 +379,7 @@ def get_display(order_id, *, scope="summary", history_before_id=None, selected_d
                     "saved_sheet_id": state.draft_id if state else None,
                     "confirmed_snapshot_id": state.confirmed_snapshot_id if state else None,
                     "bagging_result_id": meta.get("bagging_result_id"), "output_bundle_id": meta.get("output_bundle_id")}}
+        review_sheet = None
         if state and state.draft_id:
             saved = reads.get("saved_sheet") if "saved_sheet" in reads else _saved_reference(
                 session, OrderSheetDraft, state.draft_id, order.id,
@@ -408,6 +409,7 @@ def get_display(order_id, *, scope="summary", history_before_id=None, selected_d
                     workflow._saved_sheet_with_target_cell_map(order=order, workflow=state,
                         saved_sheet=draft, evidence_payload=evidence.payload_json if evidence and evidence.order_id == order.id else None))
                 sheet = result["saved_sheet"].get("sheet")
+                review_sheet = draft.draft_sheet_json if draft is not None else None
                 result["pre_save_status"] = workflow._pre_save_status_for_sheet(meta, workflow._stable_json_hash(sheet)) if isinstance(sheet, dict) else None
             else:
                 result["saved_sheet"] = None
@@ -434,8 +436,13 @@ def get_display(order_id, *, scope="summary", history_before_id=None, selected_d
                     return None, "bagging_result_artifact_missing"
                 if meta.get("output_bundle_id") and result["output_bundle"] is None:
                     return None, "output_bundle_artifact_missing"
-            result["anomaly_review"] = deepcopy(meta.get("anomaly_review"))
             result["loaded_sections"].append("output")
+        if scope in {"sheet", "output", "inspection"}:
+            if review_sheet is None and isinstance(meta.get('anomaly_review'), dict) and state and state.draft_id:
+                draft = session.get(OrderSheetDraft, state.draft_id)
+                if draft is not None and draft.order_id == order.id:
+                    review_sheet = draft.draft_sheet_json
+            result['anomaly_review'] = workflow._anomaly_review_for_sheet(meta, review_sheet)
         if scope in {"sheet", "inspection"} and state and state.evidence_run_id:
             workflow._inspection_next("display_overlay")
             evidence = reads.get("selected_evidence") if "selected_evidence" in reads else _saved_reference(
