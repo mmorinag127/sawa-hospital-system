@@ -20,6 +20,7 @@ ALLOWED = {
     'backend/tests/integration/test_storage_service.py',
     'frontend/src/pages/pdf-upload.tsx',
     'frontend/tests/pdf-upload-facility-selection.test.cjs',
+    'frontend/tests/pdf-upload-input-ownership.test.cjs',
     'docs/ocr-editable-intake-20261116.md',
     'backend/src/services/invoice_column_correction_service.py',
     'docs/fureai-old-copy-invoice-20261113.md',

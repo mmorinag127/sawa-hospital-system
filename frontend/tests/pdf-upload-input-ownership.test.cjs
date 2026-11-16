@@ -284,7 +284,8 @@ test('explicitly unchecked flags retain omission semantics and blank received_at
     await ui.submit();
     const fields = Object.fromEntries(ui.posts[0].entries);
     assert.equal(fields.force, undefined); assert.equal(fields.skip_ocr, undefined); assert.equal(fields.received_at, undefined);
-    assert.equal(fields.facility_name, 'Component F');
+    assert.equal(fields.facility_name, undefined);
+    assert.equal(fields.facility_hint, 'F');
     await ui.settle(() => ui.saves[0].resolve({ data: { existing_order_preview: { order_id: 'order-A' }, order_id: 'order-A' } }));
     assert.ok(ui.text().includes('対象注文と差し替え内容を確認'));
   } finally { await ui.close(); }
