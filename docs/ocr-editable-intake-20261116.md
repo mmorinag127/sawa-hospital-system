@@ -10,14 +10,14 @@
 
 |項目|状態|内容|
 |---|---|---|
-|備考の低信頼文字による全体拒否|stg反映済み・実操作進行中|captured実データ11件を現コードへ渡し配置blocker 0。note/quantityは文字内容や信頼度で配置不正にしない|
-|数量記号による受付失敗|stg反映済み・実操作進行中|認識原文をready evidenceへ保存し、数値注文行へ推測変換しない|
+|備考の低信頼文字による全体拒否|stg確認済み|captured実データ11件の配置blocker 0。実OCRの備考記号3セルを保持してreadyへ進み、編集・保存・再読込できた|
+|数量記号による受付失敗|stg確認済み|実OCRの数量記号24セルを原文保持。1セルを手動訂正し、残り23セルを記号のまま保存・再読込できた|
 |重複アップロードによる原本世代消失|stg実確認済み|ORDda5a9803の同一PDF再受付後も実GCS世代1794818318683609不変、注文1件・OCRジョブ1件|
 |期間・施設不一致|原因調査済み・既存注文変更なし|下記参照|
 |以前の施設名メモが残る不具合|stg実確認済み|ふれあいでメモ入力後に四万十ピアへ変更し、メモが空になることを確認|
-|ローカル一括検証|完了|backend687・agent482・frontend315成功、skip 0。型チェック・build成功|
-|stg確認|進行中|配信成功。専用注文のOCR完了後にシート編集・保存・再読込を確認する|
-|ネイティブOCR完了後の旧状態更新|追加修正済み・一括検証前|完了状態はworkflow-v2で原子的に確定済み。重複した旧projectionで別接続が自分のingestロックを待つため、native完了から旧projectionを呼ばない。元のlease・upload終端検査は維持|
+|ローカル一括検証|完了|最終backend760・agent482・frontend315成功、skip 0。型チェック・build成功|
+|stg確認|完了|専用注文をOCRからシート生成・手動編集・保存・再読込まで実操作し、読取り照合した。確定・出力・本番操作はしていない|
+|ネイティブOCR完了後の旧状態更新|修正・stg反映済み|完了状態はworkflow-v2で原子的に確定済み。重複した旧projectionで別接続が自分のingestロックを待つため、native完了から旧projectionを呼ばない。元のlease・upload終端検査を維持し、成功・失敗と旧経路の4分岐を一括検証|
 
 ## 不一致の原因
 
@@ -47,10 +47,30 @@ checkout/sourceラベル/署名/OIDC/IAM/環境設定比較/実Ready digest検�
 調査正本: /Users/mmorinag/Sawa/2025.12/docs/PROD_OCR_20261129_1205_AUDIT_20261116.md
 実データの読取り証跡: /Users/mmorinag/Sawa/2025.12/tmp/prod-nov29-audit-20261116/
 サブエージェント指定gpt-5.6-terra/lowは現在の利用可能一覧にないため、代替モデルは起動せず主担当で作業。
-配信成功: run43830443689 / source548ee1ddec8155cff9bb18672a07d1b18829cecc。
-worker-stg-00965-z85 / web-stg-00525-4qbへ反映。最終ローカル証跡はtmp/ocr-editable-deploy-fixed-proof-20261116/、昇格済み署名記録はtmp/ocr-editable-staging-proof-20261116/receipt.json。
+初回配信成功: run43830443689 / source548ee1ddec8155cff9bb18672a07d1b18829cecc。
+この版で専用注文のOCRが完了し、備考・数量の記号を原文保持したready evidenceを作成した。
 専用注文ORDda5a9803、受付UPL2bac2d7f、FAC00015、2026-12-01〜12-05。
 原本SHA256:e6aa194d0606286e0bf66d8f5011ff4500e713a587016b0c9a0316f41b9206e8。
-今回のstg編集・保存・再読込はまだ未確認。既存配信や単体試験を代用しない。
-専用注文のOCRはdone、結果OEVc4a400dcec9fはready。数量記号24セルを原文保持している。
-後続採用操作では、Cloud Run容量待ち429を検出。DBの読取りでnative完了後の旧projection接続がingestロックを保持し、別接続のFOR SHAREを待つ自己待機を確認。採用要求も同じ注文ロックを待っている。既存本番・別注文には操作しない。
+
+後続採用操作では、Cloud Run容量待ち429を検出。DB読取りでnative完了後の旧projection接続995600がingestロックを保持し、別接続995624のFOR SHAREを待つ自己待機を確認。採用要求も同じ注文ロックを待っていた。
+stgのこの専用注文のmessage_id・business_generation・blocking PIDが一致する待機SELECTだけをpg_cancel_backendで取り消し、旧projectionの未コミット変更をロールバックさせた。OCR evidenceは既にコミット済みで保持。解消後に待機SQLなし、upload completed、OCR doneを確認した。他注文や本番の接続は取り消していない。
+
+最終配信成功: [run43835580245](https://github.com/mmorinag127/sawa-hospital-system/actions/runs/43835580245) / source86f411ba072a7d5017cafb7892c58e75e682020d。
+worker-stg-00966-cjm / web-stg-00526-6k9、双方100% traffic。
+backend image: sha256:1881f9e9da83e3d86754f393391454713138251e3aebe3514561969fe2a08635。
+frontend image: sha256:8097f0016dbfbdaff2ea56d39a03ae5d2980a6190bb9005491e8de40f9b567a4。
+最終ローカル証跡: tmp/ocr-editable-native-completion-proof-20261116/。
+昇格済み署名記録: tmp/ocr-editable-native-staging-proof-20261116/receipt.json。
+今回のActionsは3回（配信前停止1回、stg配信成功2回）。追加予算・IAM変更なし。
+
+## stg編集・保存・再読込の実証
+
+- 修正版86f411baの画面で、選択OCR OEVc4a400dcec9fから40行・400セルのシートを生成した。
+- 原本で空欄のF12（数量）とK15（備考）だけを「-」から空欄へ手動訂正。他セルの記号・数量は変更していない。AI補正や候補の自動採用はしていない。
+- 通常の異常チェック・シート確認を通し、ODS4e0feb7a5b7046a8として保存。workflow=sheet_saved、revision=10、blockers=[]。
+- ページ再読込後に編集欄400セルを読取り照合。手動訂正2セルが保持され、数量記号23セル、備考「-」「---」2セルも編集可能なまま残っている。
+- OCR証拠280セルとの全セル比較で、手動訂正2セル以外は認識原文と一致。OCR evidence自体・注文レコード・原本GCS世代は変更前と完全一致。
+- 署名付きローカル検証と実画面確認を区別する。最終版で新たなOCRを重複実行せず、同一専用注文の既存認識結果を生成・編集・保存・再読込した。
+- 読取り照合: tmp/verify_ocr_editable_live_20261116.py、tmp/ocr-editable-live-proof-20261116.json。
+- 再読込画面: tmp/ocr-editable-stg-reloaded-20261116.jpg。全400セル: tmp/ocr-editable-stg-reloaded-cells-20261116.json。
+- 期間不一致4件・施設不一致1件・消失済み本番原本世代は付け替えていない。本番の停止注文を再実行・復旧したという意味ではない。
