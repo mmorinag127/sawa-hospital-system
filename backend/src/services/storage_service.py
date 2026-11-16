@@ -297,6 +297,7 @@ def save_bytes_to_gcs(
     *,
     client=None,
     pin_generation: bool = False,
+    immutable: bool = False,
 ) -> str:
     if not bucket or not object_path:
         raise ValueError("bucket and object_path are required")
@@ -304,7 +305,20 @@ def save_bytes_to_gcs(
     format_gcs_uri(bucket, object_path)
     client = client or _get_thread_gcs_client()
     blob = client.bucket(bucket).blob(object_path)
-    blob.upload_from_string(data, content_type=content_type)
+    if immutable:
+        from google.api_core.exceptions import PreconditionFailed
+
+        try:
+            blob.upload_from_string(data, content_type=content_type, if_generation_match=0)
+        except PreconditionFailed:
+            # Duplicate intake must not replace a generation already owned by an order.
+            blob.reload(timeout=30, retry=None)
+            existing_generation = validate_generation(blob.generation)
+            existing = blob.download_as_bytes(if_generation_match=int(existing_generation), timeout=30, retry=None)
+            if existing != data:
+                raise ValueError("immutable_storage_content_conflict") from None
+    else:
+        blob.upload_from_string(data, content_type=content_type)
     generation = validate_generation(blob.generation) if pin_generation else None
     return format_gcs_uri(bucket, object_path, generation)
 

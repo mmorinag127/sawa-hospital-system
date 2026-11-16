@@ -417,9 +417,9 @@ function PdfUploadScreen() {
   }, [targetMonth]);
 
   useEffect(() => {
-    if (facilityName || !selectedFacility?.name) return;
-    uploadForm.setValue("facility_name", selectedFacility.name);
-  }, [facilityName, selectedFacility]);
+    // This optional memo belongs to the selected facility, not the previous upload.
+    uploadForm.setValue("facility_name", "");
+  }, [selectedFacilityId]);
 
   useEffect(() => {
     if (!selectedWeekHint) return;

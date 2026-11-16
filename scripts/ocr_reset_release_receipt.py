@@ -15,6 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'ed03f88a8ee2d562f4acd10fb96a10043ef2f119'
 BASE_RUN = 42815316580
 ALLOWED = {
+    'backend/src/services/manual_upload_service.py',
+    'backend/tests/integration/test_manual_upload_service.py',
+    'backend/tests/integration/test_storage_service.py',
+    'frontend/src/pages/pdf-upload.tsx',
+    'frontend/tests/pdf-upload-facility-selection.test.cjs',
+    'docs/ocr-editable-intake-20261116.md',
     'backend/src/services/invoice_column_correction_service.py',
     'docs/fureai-old-copy-invoice-20261113.md',
     'docs/six-agent-bagging-confirmation-20261113.md',
@@ -102,7 +108,10 @@ ALLOWED = {
     'backend/tests/unit/test_modernization_real_bagging_confirmation.py',
     'docs/fax-bagging-completion-20261112.md',
 }
-BACKEND = ['backend/tests/contract/test_outputs_api.py'] + ['backend/tests/unit/' + name for name in (
+BACKEND = ['backend/tests/contract/test_outputs_api.py',
+    'backend/tests/integration/test_manual_upload_service.py',
+    'backend/tests/integration/test_storage_service.py',
+    'backend/tests/unit/test_h2_storage_uri_contract.py'] + ['backend/tests/unit/' + name for name in (
     'test_workflow_ocr_reset.py', 'test_order_workflow_v2_service.py',
     'test_initial_saved_import_service.py', 'test_online_production_release.py',
     'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py','test_stg_ocr_restore_command.py',
@@ -125,7 +134,8 @@ COMMANDS = [
     ('agent', ['python', '-m', 'pytest', '-q', *AGENT, '--junitxml=agent.xml'], '.'),
     ('frontend', ['node', '--test', '--test-concurrency=1',
         'tests/workflow-demand-read-contract.test.cjs', 'tests/modernization-workflow-action-dom.test.cjs',
-        'tests/assistant-workflow-ui.test.cjs'], 'frontend'),
+        'tests/assistant-workflow-ui.test.cjs', 'tests/pdf-upload-facility-selection.test.cjs',
+        'tests/pdf-upload-input-ownership.test.cjs'], 'frontend'),
     ('types', ['node', 'node_modules/typescript/bin/tsc', '--noEmit', '--incremental', 'false'], 'frontend'),
     ('build', ['node', 'node_modules/next/dist/bin/next', 'build'], 'frontend'),
 ]

@@ -106,3 +106,25 @@ test('noncanonical or failed resolution never authorizes submit', async () => {
     } finally { await ui.close(); }
   }
 });
+
+test('facility memo is never auto-carried to a different explicit facility', async () => {
+  const f = fixture(), ui = await mount(f.api);
+  try {
+    await conditions(ui);
+    const memo = ui.document.querySelector('input[placeholder="例: 大和なでしこ"]');
+    assert.equal(memo.value, '');
+    await ui.change(memo, 'Memo for F');
+    assert.equal(memo.value, 'Memo for F');
+    await ui.select('facility_hint', 'G');
+    assert.equal(memo.value, '');
+    const request = f.resolutions.at(-1);
+    await ui.settle(() => request.resolve(resolved(request)));
+    await ui.click(ui.document.querySelector('form input[type="checkbox"]'));
+    await ui.click(ui.submit());
+    assert.equal(f.posts.length, 1);
+    assert.equal(f.posts[0].fields.facility_hint, 'G');
+    assert.equal(f.posts[0].fields.facility_name, undefined);
+    assert.equal(f.posts[0].fields.week_hint, '2026-01@2026-01-01~2026-01-03');
+    await ui.settle(() => f.saves[0].reject(new Error('component-only-stop')));
+  } finally { await ui.close(); }
+});

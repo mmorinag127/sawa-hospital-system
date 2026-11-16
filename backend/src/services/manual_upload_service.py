@@ -160,6 +160,7 @@ def _save_pdf_variant(
             pdf_bytes,
             content_type="application/pdf",
             pin_generation=True,
+            immutable=True,
         )
     elif storage_target.mode == "local_ephemeral":
         storage = storage_target.storage or StorageService(_local_storage_base())

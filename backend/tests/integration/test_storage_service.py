@@ -1,11 +1,79 @@
 import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from src.services import storage_service  # noqa: E402
+
+
+def test_immutable_source_duplicate_reuses_generation_and_verifies_bytes(monkeypatch):
+    from google.api_core.exceptions import PreconditionFailed
+
+    calls = []
+    objects = {}
+
+    class Blob:
+        generation = None
+
+        def upload_from_string(self, data, *, content_type, if_generation_match):
+            assert if_generation_match == 0
+            calls.append('create')
+            if objects:
+                raise PreconditionFailed('exists')
+            objects['data'], objects['generation'] = data, '101'
+            self.generation = '101'
+
+        def reload(self, **kwargs):
+            self.generation = objects['generation']
+
+        def download_as_bytes(self, *, if_generation_match, **kwargs):
+            assert if_generation_match == int(objects['generation'])
+            return objects['data']
+
+    client = SimpleNamespace(bucket=lambda name: SimpleNamespace(blob=lambda key: Blob()))
+    first = storage_service.save_bytes_to_gcs('bucket','original.pdf',b'original',client=client,
+        content_type='application/pdf',pin_generation=True,immutable=True)
+    again = storage_service.save_bytes_to_gcs('bucket','original.pdf',b'original',client=client,
+        content_type='application/pdf',pin_generation=True,immutable=True)
+    assert first == again == 'gs://bucket/original.pdf?generation=101'
+    assert calls == ['create','create']
+    with pytest.raises(ValueError, match='immutable_storage_content_conflict'):
+        storage_service.save_bytes_to_gcs('bucket','original.pdf',b'different',client=client,
+            content_type='application/pdf',pin_generation=True,immutable=True)
+    assert objects == {'data':b'original','generation':'101'}
+
+
+def test_immutable_source_does_not_hide_permission_or_generation_race():
+    from google.api_core.exceptions import Forbidden, PreconditionFailed
+
+    class Blob:
+        generation = '101'
+
+        def upload_from_string(self, *args, **kwargs):
+            raise PreconditionFailed('already exists')
+
+        def reload(self, **kwargs):
+            pass
+
+        def download_as_bytes(self, **kwargs):
+            raise PreconditionFailed('external writer replaced the generation')
+
+    client=SimpleNamespace(bucket=lambda name: SimpleNamespace(blob=lambda key: Blob()))
+    with pytest.raises(PreconditionFailed):
+        storage_service.save_bytes_to_gcs('bucket','original.pdf',b'original',client=client,immutable=True)
+
+    class Denied(Blob):
+        def upload_from_string(self, *args, **kwargs):
+            raise Forbidden('write forbidden')
+
+    client=SimpleNamespace(bucket=lambda name: SimpleNamespace(blob=lambda key: Denied()))
+    with pytest.raises(Forbidden):
+        storage_service.save_bytes_to_gcs('bucket','original.pdf',b'original',client=client,immutable=True)
 
 
 def test_load_bytes_from_uri_requires_configured_env_reference(monkeypatch):

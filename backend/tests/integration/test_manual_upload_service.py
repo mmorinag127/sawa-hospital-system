@@ -88,3 +88,22 @@ def test_validate_pdf_bytes_rejects_placeholder_page_marker_pdf():
 
 def test_validate_pdf_bytes_accepts_meaningful_single_page_pdf():
     manual_upload_service._validate_pdf_bytes(_meaningful_single_page_pdf_bytes())
+
+
+def test_each_manual_pdf_page_requests_immutable_generation_bound_storage(monkeypatch):
+    calls = []
+    target = manual_upload_service._ManualUploadStorageTarget(mode='gcs',bucket='raw',prefix='manual-uploads/2026/11/16')
+    monkeypatch.setattr(manual_upload_service,'_resolve_storage_target',lambda received:target)
+
+    def save(bucket, key, data, **kwargs):
+        calls.append((bucket,key,data,kwargs))
+        return 'gs://raw/'+key+'?generation=101'
+
+    monkeypatch.setattr(manual_upload_service,'save_bytes_to_gcs',save)
+    monkeypatch.setenv('MANUAL_UPLOAD_SAVE_WORKERS','1')
+    saved=manual_upload_service.save_uploaded_pdf_pages(pdf_bytes=_two_page_pdf_bytes(),
+        original_filename='original.pdf',received_at=datetime(2026,11,16))
+    assert len(saved)==len(calls)==2
+    assert all(call[3] == dict(content_type='application/pdf',pin_generation=True,immutable=True) for call in calls)
+    assert all(row.pdf_uri.endswith('?generation=101') for row in saved)
+    assert [row.page_number for row in saved]==[1,2]
