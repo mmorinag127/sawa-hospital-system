@@ -15,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'ed03f88a8ee2d562f4acd10fb96a10043ef2f119'
 BASE_RUN = 42815316580
 ALLOWED = {
+    'scripts/stg_image_protection.py',
+    'scripts/stg_ocr_producer_deploy.py',
+    'backend/tests/unit/test_stg_web_image_recovery.py',
+    'backend/tests/unit/test_stg_ocr_producer_deploy.py',
     'backend/src/services/manual_upload_service.py',
     'backend/tests/integration/test_manual_upload_service.py',
     'backend/tests/integration/test_storage_service.py',
@@ -123,6 +127,8 @@ BACKEND = ['backend/tests/contract/test_outputs_api.py',
     'test_output_menu_metadata_validation.py', 'test_h2_output_source_capture.py',
     'test_output_input_error_boundary.py', 'test_invoice_column_correction.py',
     'test_modernization_delivery_name_identity.py')]
+BACKEND += ['backend/tests/unit/test_stg_web_image_recovery.py',
+    'backend/tests/unit/test_stg_ocr_producer_deploy.py', 'backend/tests/unit/test_registry_image_digest.py']
 AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_trial_menu_amount.py',
     'test_cloud_store_target.py', 'test_connection_pool.py', 'test_durable_postgres.py',

@@ -132,6 +132,8 @@ def deploy(image, source_sha):
     global PHASE
     PHASE = 'source_identity_validation'
     environment = context(image, source_sha)
+    from registry_image_digest import resolve_image_digest
+    image = resolve_image_digest(image)
     target = 'ocr-pipeline-'+environment
     PHASE = 'capture_service_settings'
     initial = service(environment)

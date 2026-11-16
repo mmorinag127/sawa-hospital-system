@@ -92,6 +92,8 @@ def ensure_policy():
 
 def protect_image(image, component):
     immutable_image(image, component)
+    image = resolve_image_digest(image)
+    immutable_image(image, component)
     tag = image.split('@')[0] + ':stg-protected-' + image.split(':')[-1]
     command(['gcloud', 'artifacts', 'docker', 'tags', 'add', image, tag,
              f'--project={PROJECT}', '--quiet'])

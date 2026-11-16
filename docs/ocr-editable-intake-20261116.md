@@ -36,6 +36,12 @@ PDF登録APIは施設と対象週の明示選択を要求するが、入力さ�
 
 ## 証拠と未確認
 
+追加配信阻害: run43827591571はcandidate producerがOCI index digestだったため、保護タグのLinux/amd64 digestとの比較で停止。
+stg worker/webは7e9fc8d9のまま。原本・注文には影響なし。事前報告の「backend反映済み」は誤りで訂正済み。
+実registryのindex8b127bd6...を読取り、Linux実体00603f5e...との相違を確認。
+保護とproducer配信の両方で既存のmanifest検証を通して同じLinux実体へ解決するよう修正。
+checkout/sourceラベル/署名/OIDC/IAM/環境設定比較/実Ready digest検査は維持。
+
 調査正本: /Users/mmorinag/Sawa/2025.12/docs/PROD_OCR_20261129_1205_AUDIT_20261116.md
 実データの読取り証跡: /Users/mmorinag/Sawa/2025.12/tmp/prod-nov29-audit-20261116/
 サブエージェント指定gpt-5.6-terra/lowは現在の利用可能一覧にないため、代替モデルは起動せず主担当で作業。

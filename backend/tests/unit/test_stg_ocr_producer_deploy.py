@@ -65,6 +65,8 @@ def test_pinned_traffic_does_not_weaken_revision_readiness_checks(failure):
 
 @pytest.fixture
 def environment(monkeypatch, tmp_path):
+    import registry_image_digest
+    monkeypatch.setattr(registry_image_digest, 'resolve_image_digest', lambda image: image)
     for key, value in {'GITHUB_ACTIONS': 'true', 'GITHUB_REF': 'refs/heads/develop',
                        'GITHUB_REF_NAME': 'develop', 'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_RUN_ID': '123',
                        'GITHUB_REPOSITORY_OWNER': 'mmorinag127', 'GITHUB_ACTOR': 'mmorinag127', 'GITHUB_TRIGGERING_ACTOR': 'mmorinag127',
@@ -158,8 +160,13 @@ def test_actual_image_source_label(environment, monkeypatch, label_sha):
 
 
 @pytest.mark.parametrize('failure', [None, 'revision', 'settings', 'iam', 'digest', 'denied', 'namespace', 'not_ready'])
-def test_replace_verification_and_no_iam_repair(environment, monkeypatch, tmp_path, failure):
-    monkeypatch.setattr(mod, 'context', lambda *args: 'stg')
+@pytest.mark.parametrize('index_reference', [False, True])
+def test_replace_verification_and_no_iam_repair(environment, monkeypatch, tmp_path, failure, index_reference):
+    import registry_image_digest
+    source_image=mod.IMAGE_PREFIX+'@sha256:'+'9'*64 if index_reference else IMAGE
+    checked=[]
+    monkeypatch.setattr(mod, 'context', lambda image, sha: checked.append((image,sha)) or 'stg')
+    monkeypatch.setattr(registry_image_digest, 'resolve_image_digest', lambda image: IMAGE if image==source_image else pytest.fail('foreign source'))
     before = exported()
     if failure == 'namespace':
         before['metadata']['namespace'] = 'prod-project'
@@ -202,9 +209,10 @@ def test_replace_verification_and_no_iam_repair(environment, monkeypatch, tmp_pa
     monkeypatch.setattr(mod, 'cloud', cloud)
     if failure:
         with pytest.raises(mod.Blocked):
-            mod.deploy(IMAGE, SHA)
+            mod.deploy(source_image, SHA)
     else:
-        assert mod.deploy(IMAGE, SHA)['ready_revision'] == 'new'
+        assert mod.deploy(source_image, SHA)['ready_revision'] == 'new'
+    assert checked == [(source_image,SHA)]
     assert not any('add-iam-policy-binding' in args for args in calls)
     assert all(not path.exists() for path in paths)
     if failure in ('revision', 'namespace'):

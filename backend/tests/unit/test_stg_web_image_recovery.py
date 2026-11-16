@@ -218,18 +218,49 @@ def test_tag_digest_mismatch_or_registry_failure_stops(monkeypatch, status, mani
     monkeypatch.setattr(p, 'command', Mock(return_value=''))
     monkeypatch.setattr(r_digest, '_access_token', lambda: 'test-token')
     monkeypatch.setattr(r_digest, 'read_http', Mock(return_value=(status, manifest)))
-    expected = 'protected_tag_digest_mismatch' if status == 200 else 'registry_manifest_http_failure'
+    expected = 'registry_manifest_digest_mismatch' if status == 200 else 'registry_manifest_http_failure'
     with pytest.raises(r.Blocked, match=expected):
         p.protect_image(IMAGE, 'frontend')
 
 
 @pytest.mark.parametrize('manifest', [b'wrong manifest', b'[]', b'null'])
 def test_malformed_registry_body_is_blocked_at_protection_boundary(monkeypatch, manifest):
+    import hashlib
     monkeypatch.setattr(p, 'command', Mock(return_value=''))
     monkeypatch.setattr(r_digest, '_access_token', lambda: 'test-token')
     monkeypatch.setattr(r_digest, 'read_http', Mock(return_value=(200, manifest)))
     with pytest.raises(r.Blocked, match='registry_manifest_invalid'):
-        p.protect_image(IMAGE, 'frontend')
+        p.protect_image(p.PREFIX+'frontend@sha256:'+hashlib.sha256(manifest).hexdigest(), 'frontend')
+
+
+def test_index_candidate_is_protected_by_verified_linux_runtime_digest(monkeypatch):
+    import hashlib
+    child=b'{"schemaVersion":2,"config":{}}'
+    child_digest='sha256:'+hashlib.sha256(child).hexdigest()
+    index=json.dumps({'schemaVersion':2,'manifests':[{'digest':child_digest,
+        'platform':{'os':'linux','architecture':'amd64'}}]}).encode()
+    index_digest='sha256:'+hashlib.sha256(index).hexdigest()
+    requested=p.PREFIX+'ocr-pipeline@'+index_digest
+    runtime=p.PREFIX+'ocr-pipeline@'+child_digest
+    commands=[]
+    monkeypatch.setattr(p,'command',lambda args:commands.append(args) or '')
+    monkeypatch.setattr(r_digest,'_access_token',lambda:'test-token')
+    monkeypatch.setattr(r_digest,'read_http',lambda url,*args,**kwargs:(200,index if url.endswith(index_digest) else child))
+    p.protect_image(requested,'ocr-pipeline')
+    assert commands==[['gcloud','artifacts','docker','tags','add',runtime,
+        p.PREFIX+'ocr-pipeline:stg-protected-'+child_digest.split(':')[1],f'--project={p.PROJECT}','--quiet']]
+
+
+def test_protected_tag_repointing_still_fails_after_runtime_resolution(monkeypatch):
+    import hashlib
+    original=b'{"schemaVersion":2,"config":{}}'
+    wrong=b'{"schemaVersion":2,"config":{"wrong":true}}'
+    digest='sha256:'+hashlib.sha256(original).hexdigest()
+    monkeypatch.setattr(p,'command',Mock(return_value=''))
+    monkeypatch.setattr(r_digest,'_access_token',lambda:'test-token')
+    monkeypatch.setattr(r_digest,'read_http',lambda url,*args,**kwargs:(200,wrong if 'stg-protected-' in url else original))
+    with pytest.raises(r.Blocked,match='protected_tag_digest_mismatch'):
+        p.protect_image(p.PREFIX+'frontend@'+digest,'frontend')
 
 
 def test_protection_uses_web_ingress_digest_when_status_digest_is_absent(monkeypatch):
