@@ -1,6 +1,7 @@
 """Authored PDF/JSON component contracts; no live FAX or native recognition claim."""
 import sys
 import pathlib
+import json
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from hashlib import sha256
@@ -112,6 +113,17 @@ class _UploadCase:
     def upload(self, files, **overrides):
         return self.client.post("/ingest/upload", files=files,
             data={**self.form, **overrides}, headers=_operator_header())
+
+    def page_plan(self, files, included=(1,), **overrides):
+        response = self.client.post('/ingest/upload-preview', files=files,
+            data={**self.form, **overrides}, headers=_operator_header())
+        assert response.status_code == 200
+        preview = response.json()
+        plan = {'version': 1, 'facility_id': preview['facility_id'], 'week_hint': preview['week_hint'],
+            'files': [{'file_index': item['file_index'], 'sha256': item['sha256'],
+                'pages': [{'page_number': p['page_number'], 'sha256': p['sha256'],
+                    'include': p['page_number'] in included} for p in item['pages']]} for item in preview['files']]}
+        return json.dumps(plan)
 
     def finish(self, item):
         assert process_uploaded_original(item["uploaded_pdf_id"])["result"] == "business_done"
@@ -266,24 +278,30 @@ def test_ingest_week_options_returns_upload_week_choices(monkeypatch):
     assert calls == [("2026-02", "FAC001")]
 
 
-def test_ingest_upload_splits_two_page_pdf_into_two_items(upload_case):
+def test_ingest_upload_requires_page_confirmation_and_registers_only_selected_page(upload_case):
     case = upload_case()
-    res = case.upload({"pdf_file": ("multi.pdf", case.pdf(pages=2), "application/pdf")})
+    files = {"pdf_file": ("multi.pdf", case.pdf(pages=2), "application/pdf")}
+    before = _database_snapshot()
+    refused = case.upload(files)
+    assert refused.status_code == 409 and refused.json()['detail'] == 'fax_page_selection_required'
+    assert _database_snapshot() == before and case.transport.created == []
+    plan = case.page_plan(files, included=(2,))
+    assert _database_snapshot() == before and case.transport.created == []
+    res = case.upload(files, page_selection=plan)
     assert res.status_code == 202
     body = res.json()
-    assert body["count"] == 2
-    assert len(body["items"]) == 2
-    assert [item["page_number"] for item in body["items"]] == [1, 2]
+    assert body["count"] == 1
+    assert len(body["items"]) == 1
+    assert [item["page_number"] for item in body["items"]] == [2]
     assert all(item["total_pages"] == 2 for item in body["items"])
-    assert body["items"][0]["message_id"] != body["items"][1]["message_id"]
-    assert all(":split:" in item["message_id"] for item in body["items"])
+    assert ':period:' in body['items'][0]['message_id']
     orders = []
-    for index, item in enumerate(body["items"], 1):
+    for item in body["items"]:
         with fitz.open(item["pdf_uri"]) as saved:
             assert len(saved) == 1
-            assert f"authored page {index}" in saved[0].get_text()
+            assert 'authored page 2' in saved[0].get_text()
         orders.append(case.finish(item)["current_order_id"])
-    assert len(set(orders)) == 2
+    assert len(set(orders)) == 1
 
 
 def test_ingest_upload_multiple_files_preserves_request_order(upload_case):
@@ -358,15 +376,67 @@ def test_ingest_upload_creates_order_and_blocks_duplicate(upload_case):
 
 def test_ingest_upload_persists_split_pdf_total_page_count(upload_case):
     case = upload_case()
-    res = case.upload({"pdf_file": ("order.pdf", case.pdf(pages=2), "application/pdf")})
+    files = {"pdf_file": ("order.pdf", case.pdf(pages=2), "application/pdf")}
+    res = case.upload(files, page_selection=case.page_plan(files))
     assert res.status_code == 202
     items = res.json()["items"]
     with session_scope() as session:
         observed_page_counts = [session.get(UploadedPdf, item["uploaded_pdf_id"]).page_count for item in items]
-    assert observed_page_counts == [2, 2]
-    assert res.json()["count"] == 2
+    assert observed_page_counts == [2]
+    assert res.json()["count"] == 1
     for item in items:
         case.finish(item)
+
+
+@pytest.mark.parametrize('change', ['week', 'facility', 'parent', 'page', 'all', 'none', 'force'])
+def test_page_confirmation_is_checked_before_any_registration(upload_case, change):
+    case = upload_case()
+    files = {'pdf_file': ('original.pdf', case.pdf(pages=2), 'application/pdf')}
+    plan = json.loads(case.page_plan(files))
+    form = {}
+    if change == 'week': plan['week_hint'] = '2026-02@2026-02-22~2026-02-28'
+    if change == 'facility': plan['facility_id'] = 'foreign'
+    if change == 'parent': plan['files'][0]['sha256'] = '0'*64
+    if change == 'page': plan['files'][0]['pages'][0]['sha256'] = '0'*64
+    if change in ('all', 'none'):
+        for p in plan['files'][0]['pages']: p['include'] = change == 'all'
+    if change == 'force': form['force'] = 'true'
+    before = _database_snapshot()
+    response = case.upload(files, page_selection=json.dumps(plan), **form)
+    assert response.status_code == 409
+    assert _database_snapshot() == before and case.transport.created == []
+
+
+def test_monthly_intake_does_not_replace_existing_original(upload_case):
+    case = upload_case()
+    first = case.upload({'pdf_file': ('original.pdf', case.pdf('first'), 'application/pdf')})
+    order = case.finish(first.json())
+    files = {'pdf_file': ('different.pdf', case.pdf('different'), 'application/pdf')}
+    plan = case.page_plan(files)
+    before = _database_snapshot()
+    refused = case.upload(files, page_selection=plan)
+    assert refused.status_code == 409 and refused.json()['detail'] == 'fax_existing_order_requires_review'
+    assert _database_snapshot() == before
+    assert retry_uploads.get_uploaded_pdf(first.json()['uploaded_pdf_id'])['current_order_id'] == order['current_order_id']
+
+
+def _historical_split_intakes(case, label, count):
+    """Historical split receipts exercise recovery, not the new upload UI contract."""
+    from src.services.ingest_facility_selection_service import capture_selection
+    chosen = capture_selection(case.form['facility_hint'], case.form['effective_date'],
+        case.form['expected_canonical_revision'], case.form['selected_version_id'], case.form['week_hint'])
+    saved = manual_upload_service.save_uploaded_pdf_pages(pdf_bytes=case.pdf(label,pages=count),
+        original_filename=label+'.pdf', received_at=datetime.fromisoformat(case.form['received_at']))
+    items = []
+    for source in saved:
+        row, duplicate = retry_uploads.create_uploaded_pdf_from_upload(saved=source,
+            facility_hint=case.form['facility_hint'],week_hint=case.form['week_hint'],facility_name=None,
+            skip_ocr=False,source_kind='manual_upload',page_count=count,facility_selection=chosen)
+        assert duplicate is False
+        ingest_api.enqueue_uploaded_pdf_async(row['id'])
+        items.append({'uploaded_pdf_id':row['id'],'message_id':row['message_id'],
+            'ingest_job_id':row['message_id'],'pdf_uri':row['storage_uri']})
+    return items
 
 
 def test_ingest_upload_exposes_existing_order_preview_for_facility_week_match(upload_case):
@@ -693,9 +763,7 @@ def test_retry_uploaded_pdf_rejects_only_healthy_completed_rows(monkeypatch, tmp
 @pytest.mark.parametrize("limit", [20, 1])
 def test_recover_ready_bulk_runs_ingest_uploaded_and_ocr_recovery(upload_case, monkeypatch, limit):
     case = upload_case()
-    waiting = case.upload({"pdf_file": ("waiting.pdf", case.pdf("waiting", pages=4), "application/pdf")})
-    assert waiting.status_code == 202
-    waiting_items = waiting.json()["items"]
+    waiting_items = _historical_split_intakes(case, 'waiting', 4)
     provider = ingest_worker.run_ocr_pipeline
     provider_calls = []
 
@@ -724,9 +792,7 @@ def test_recover_ready_bulk_runs_ingest_uploaded_and_ocr_recovery(upload_case, m
         raise FileNotFoundError(uri)
 
     monkeypatch.setattr(ingest_worker, "load_bytes_from_uri", missing_output)
-    ready = case.upload({"pdf_file": ("ready.pdf", case.pdf("ready", pages=2), "application/pdf")})
-    assert ready.status_code == 202
-    ready_items = ready.json()["items"]
+    ready_items = _historical_split_intakes(case, 'ready', 2)
     originals = [retry_ingest_jobs.get_ingest_job_snapshot(x["ingest_job_id"]) for x in ready_items]
     identity, generation = retry_delivery.delivery_for_job(
         originals[0]["id"], originals[0]["generation"], originals[0]["input_digest"])

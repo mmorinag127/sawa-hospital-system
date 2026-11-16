@@ -4090,10 +4090,13 @@ def require_existing_ingest_selection(session, payload: IngestEmailPayload):
     from src.services.ingest_facility_selection_service import validate_selection, require_order_selection
     selection = validate_selection(payload.facility_selection, payload.facility_hint, payload.week_hint)
     existing, _, _ = _find_existing_order_for_ingest(session, payload)
+    from src.services.fax_intake_page_service import protect_monthly_existing_order
+    protect_monthly_existing_order(payload, existing)
     if existing is not None:
         existing = session.get(Order, existing.id, populate_existing=True, with_for_update=True)
         if existing is None:
             raise ValueError("ingest_order_selection_target_changed")
+        protect_monthly_existing_order(payload, existing)
         require_order_selection(session, existing, selection)
 
 
@@ -4528,7 +4531,14 @@ def create_order_from_ingest(
         existing, match_reason, effective_week_hint = _find_existing_order_for_ingest(
             session, payload, effective_week_hint=effective_week_hint,
         )
+        from src.services.fax_intake_page_service import protect_monthly_existing_order
+        protect_monthly_existing_order(payload, existing)
         if existing is not None:
+            if ':period:' in payload.message_id:
+                existing = session.get(Order, existing.id, populate_existing=True, with_for_update=True)
+                if existing is None:
+                    raise ValueError('ingest_registered_order_changed')
+                protect_monthly_existing_order(payload, existing)
             require_order_selection(session, existing, selection)
             selected_projection_id = existing.template_version_id
         else:

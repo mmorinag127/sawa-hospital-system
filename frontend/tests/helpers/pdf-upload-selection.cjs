@@ -44,8 +44,8 @@ async function mount(api) {
     if (name === '../components/TopNav') return { __esModule: true, default: () => null };
     if (name === '../services/apiClient') return { apiClient: api, hasActiveSessionAuthHeader: () => true };
     if (name === '../services/browserSession') return { browserSessionKey: () => 'owned-component', subscribeBrowserSession: () => () => {} };
-    if (name === '../hooks/useMenuInputOwner') {
-      const hookFile = path.resolve(__dirname, '../../src/hooks/useMenuInputOwner.ts');
+    if (name === '../hooks/useMenuInputOwner' || name === '../features/orders/faxUploadPages') {
+      const hookFile = path.resolve(__dirname, '../../src', `${name.slice(3)}.ts`);
       const hook = { exports: {} };
       const output = ts.transpileModule(fs.readFileSync(hookFile, 'utf8'), { compilerOptions: {
         target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS,

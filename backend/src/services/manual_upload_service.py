@@ -140,6 +140,7 @@ def _save_pdf_variant(
     split_group_id: str | None = None,
     page_number: int | None = None,
     total_pages: int | None = None,
+    source_scope: str | None = None,
 ) -> ManualUploadSavedFile:
     content_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
     message_id = _build_message_id(
@@ -148,6 +149,8 @@ def _save_pdf_variant(
         page_number=page_number,
         total_pages=total_pages,
     )
+    if source_scope:
+        message_id = f"upload:sha256:{content_sha256[:24]}:period:{source_scope}"
     safe_name = _sanitize_filename(original_filename)
     object_name = f"{content_sha256[:24]}-{safe_name}"
 
@@ -211,7 +214,7 @@ def _split_pdf_pages(pdf_bytes: bytes) -> list[bytes]:
             page_doc = fitz.open()
             try:
                 page_doc.insert_pdf(document, from_page=page_index, to_page=page_index)
-                pages.append(page_doc.tobytes(garbage=3, deflate=True))
+                pages.append(page_doc.tobytes(garbage=3, deflate=True, no_new_id=True))
             finally:
                 page_doc.close()
         return pages
@@ -224,11 +227,16 @@ def save_uploaded_pdf_pages(
     pdf_bytes: bytes,
     original_filename: str,
     received_at: datetime,
+    page_numbers: list[int] | None = None,
+    source_scope: str | None = None,
 ) -> list[ManualUploadSavedFile]:
     _validate_pdf_bytes(pdf_bytes)
     page_bytes_list = _split_pdf_pages(pdf_bytes)
     storage_target = _resolve_storage_target(received_at)
     total_pages = len(page_bytes_list)
+    if page_numbers is not None and (not page_numbers or len(set(page_numbers)) != len(page_numbers)
+            or any(type(n) is not int or not 1 <= n <= total_pages for n in page_numbers)):
+        raise ValueError('fax_page_selection_invalid')
     if total_pages <= 1:
         return [
             _save_pdf_variant(
@@ -238,6 +246,7 @@ def save_uploaded_pdf_pages(
                 storage_target=storage_target,
                 page_number=1,
                 total_pages=1,
+                source_scope=source_scope,
             )
         ]
     split_group_id = hashlib.sha256(pdf_bytes).hexdigest()[:24]
@@ -254,8 +263,10 @@ def save_uploaded_pdf_pages(
             "split_group_id": split_group_id,
             "page_number": index,
             "total_pages": total_pages,
+            "source_scope": source_scope,
         }
         for index, page_bytes in enumerate(page_bytes_list, start=1)
+        if page_numbers is None or index in page_numbers
     ]
     max_workers = min(
         total_pages,

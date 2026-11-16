@@ -9,6 +9,7 @@ import { FormProvider, useForm } from "react-hook-form";
 import { apiClient } from "../services/apiClient";
 import { browserSessionKey, subscribeBrowserSession } from "../services/browserSession";
 import { useMenuInputOwner } from "../hooks/useMenuInputOwner";
+import { faxPageKey, faxPageSelection, faxWeekCrossesMonth, faxUploadError, type FaxUploadPreview } from "../features/orders/faxUploadPages";
 
 type UploadResponse = {
   accepted?: boolean;
@@ -257,7 +258,7 @@ function PdfUploadScreen() {
   const [retryBusyId, setRetryBusyId] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const fileSelection = useRef(0);
-  type RequestLane = "facilities" | "uploads" | "retry" | "upload";
+  type RequestLane = "facilities" | "uploads" | "retry" | "upload" | "pages";
   const requests = useRef<Partial<Record<RequestLane, ReturnType<typeof owner.capture>>>>({});
   const uploadsRequested = useRef(false);
   const beginRequest = (lane: RequestLane, bindInput = false) => {
@@ -281,9 +282,20 @@ function PdfUploadScreen() {
   const selectedWeek = weekOptions.find((option) => option.week_id === selectedWeekHint);
   const periodStart = selectedWeek?.date_from;
   const periodEnd = selectedWeek?.date_to;
+  const monthlyPageReview = faxWeekCrossesMonth(periodStart, periodEnd);
   const [selectionPreview, setSelectionPreview] = useState<FacilitySelectionPreview | null>(null);
   const [selectionConfirmed, setSelectionConfirmed] = useState(false);
   const [selectionError, setSelectionError] = useState("");
+  const [pagePreview, setPagePreview] = useState<(FaxUploadPreview & {selection: number; route: string; session: string}) | null>(null);
+  const [pageChoices, setPageChoices] = useState<Record<string, boolean>>({});
+  const [pagesLoading, setPagesLoading] = useState(false);
+  const [pagesError, setPagesError] = useState("");
+  const pagesCurrent = pagePreview?.facility_id === selectedFacilityId && pagePreview?.week_hint === selectedWeekHint
+    && pagePreview?.selection === fileSelection.current && pagePreview?.route === router.asPath && pagePreview?.session === sessionKey;
+  useEffect(() => {
+    delete requests.current.pages;
+    setPagePreview(null); setPageChoices({}); setPagesError(""); setPagesLoading(false);
+  }, [selectedFacilityId, selectedWeekHint, router.asPath, sessionKey]);
   const selectionCurrent = selectionPreview?.facilityId === selectedFacilityId
     && selectionPreview?.effectiveDate === effectiveDate
     && selectionPreview?.weekHint === selectedWeekHint
@@ -455,6 +467,33 @@ function PdfUploadScreen() {
     }
   };
 
+  const previewPages = async () => {
+    if (!pdfFiles.length || !selectedFacilityId || !selectedWeekHint || requests.current.pages?.active()) return;
+    const selected = fileSelection.current;
+    const current = beginRequest("pages", true);
+    setPagesLoading(true); setPagesError(""); setPagePreview(null); setPageChoices({});
+    try {
+      const form = new FormData();
+      pdfFiles.forEach(file => form.append("pdf_files", file));
+      form.append("facility_hint", selectedFacilityId); form.append("week_hint", selectedWeekHint);
+      const {data} = await apiClient.post<FaxUploadPreview>("/ingest/upload-preview", form,
+        {headers: {"Content-Type": "multipart/form-data"}});
+      if (!current() || selected !== fileSelection.current) return;
+      if (data.facility_id !== selectedFacilityId || data.week_hint !== selectedWeekHint
+        || !Array.isArray(data.files) || data.files.length !== pdfFiles.length
+        || data.files.some((file, index) => file.file_index !== index || !Array.isArray(file.pages) || !file.pages.length)) {
+        throw new Error("原本ページと対象期間を確認できません。");
+      }
+      setPagePreview({...data, selection: selected, route: router.asPath, session: sessionKey});
+      setPageChoices(Object.fromEntries(data.files.flatMap(file => file.pages.map(page =>
+        [faxPageKey(file.file_index, page.page_number), !data.requires_review]))));
+    } catch (error: any) {
+      if (current()) setPagesError(faxUploadError(error?.response?.data?.detail || error?.message));
+    } finally {
+      if (finishRequest("pages", current)) setPagesLoading(false);
+    }
+  };
+
   const submit = async (conditions: UploadConditions) => {
     if (requests.current.upload?.active()) return;
     if (JSON.stringify(conditions) !== JSON.stringify(uploadForm.getValues())) return;
@@ -471,6 +510,13 @@ function PdfUploadScreen() {
     if (!conditions.week_hint.trim()) {
       setMessage("対象週を選択してください。");
       return;
+    }
+    if (monthlyPageReview && (!pagesCurrent || !pagePreview)) {
+      setMessage("登録するページを確認してください。"); return;
+    }
+    const pagePlan = pagesCurrent && pagePreview ? faxPageSelection(pagePreview, pageChoices) : null;
+    if (pagePreview?.requires_review && pagePlan && !pagePlan.files.some(file => file.pages.some(page => page.include))) {
+      setMessage("対象期間が記入されたページを選択してください。"); return;
     }
     if (!selectionConfirmed || !selectionCurrent || !selectionPreview
         || selectionPreview.facilityId !== conditions.facility_hint
@@ -500,6 +546,7 @@ function PdfUploadScreen() {
         formData.append("expected_canonical_revision", selectionPreview.revision);
         formData.append("selected_version_id", selectionPreview.versionId);
         formData.append("week_hint", conditions.week_hint.trim());
+        if (pagePreview?.requires_review && pagePlan) formData.append("page_selection", JSON.stringify(pagePlan));
         if (conditions.facility_name.trim()) formData.append("facility_name", conditions.facility_name.trim());
         if (conditions.received_at.trim()) formData.append("received_at", new Date(conditions.received_at).toISOString());
         if (conditions.force) formData.append("force", "true");
@@ -521,7 +568,7 @@ function PdfUploadScreen() {
         const detail = err?.response?.data?.detail;
         uploadedResults = submittedFiles.map((file) => ({
           file_name: file.name,
-          error: detail ? `アップロードに失敗しました: ${detail}` : "アップロードに失敗しました。",
+          error: detail ? `アップロードに失敗しました: ${faxUploadError(detail)}` : "アップロードに失敗しました。",
         }));
         setResults(uploadedResults);
       }
@@ -553,6 +600,7 @@ function PdfUploadScreen() {
       if (submittedSelection === fileSelection.current) {
         fileSelection.current += 1;
         setPdfFiles([]);
+        setPagePreview(null); setPageChoices({});
         if (fileInputRef.current) fileInputRef.current.value = "";
       }
     } finally {
@@ -605,7 +653,7 @@ function PdfUploadScreen() {
         <header className="panel-header">
           <h2>アップロード</h2>
           <p className="subtle">
-            PDFのみ受け付けます。施設と対象週はすべての選択PDFへ同じ前提として適用されます。
+            対象期間の記入がある原本ページを登録します。
           </p>
         </header>
 
@@ -651,8 +699,11 @@ function PdfUploadScreen() {
               className="input"
               type="file"
               onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                owner.changed();
+                delete requests.current.pages;
                 fileSelection.current += 1;
                 setPdfFiles(Array.from(e.target.files || []));
+                setPagePreview(null); setPageChoices({}); setPagesError(""); setPagesLoading(false);
               }}
             />
           </label>
@@ -664,6 +715,26 @@ function PdfUploadScreen() {
           <span>対象週: {selectedWeek?.label || selectedWeekHint || "未選択"}</span>
           <span>PDF: {pdfFiles.length ? `${pdfFiles.length}件` : "未選択"}</span>
         </div>
+
+        <div className="actions">
+          <Button type="button" onClick={() => void previewPages()}
+            disabled={loading || pagesLoading || !pdfFiles.length || !selectedFacilityId || !selectedWeekHint}>
+            {pagesLoading ? "原本を確認中..." : "原本ページを確認"}
+          </Button>
+        </div>
+        {pagesError ? <p role="alert">{pagesError}</p> : null}
+        {pagesCurrent && pagePreview ? <fieldset className="fax-pages">
+          <legend>登録するページ: {pagePreview.date_from}〜{pagePreview.date_to}</legend>
+          <div className="fax-page-grid">{pagePreview.files.flatMap(file => file.pages.map(page => {
+            const key = faxPageKey(file.file_index, page.page_number);
+            return <div className="fax-page" key={key}>
+              <label><Checkbox checked={pageChoices[key] === true} disabled={loading || !pagePreview.requires_review}
+                onChange={event => {owner.changed(); setPageChoices(value => ({...value, [key]: event.target.checked}));}} />
+                {file.filename} {page.page_number}ページを対象期間に登録</label>
+              <img src={page.image_url} alt={`${file.filename} ${page.page_number}ページの原本`} />
+            </div>;
+          }))}</div>
+        </fieldset> : null}
 
         <details className="advanced">
           <summary>補助入力・管理者向け設定を開く</summary>
@@ -718,7 +789,7 @@ function PdfUploadScreen() {
         </details>
 
         <div className="actions">
-          <Button type="submit" variant="contained" disabled={loading || !selectionCurrent || !selectionConfirmed}>
+          <Button type="submit" variant="contained" disabled={loading || pagesLoading || (monthlyPageReview && !pagesCurrent) || !selectionCurrent || !selectionConfirmed}>
             {loading ? "受付中..." : pdfFiles.length > 1 ? `${pdfFiles.length}件のPDFを登録` : "PDFを登録"}
           </Button>
           <Link href="/orders" className="btn secondary">
@@ -1008,6 +1079,11 @@ function PdfUploadScreen() {
       </section>
 
       <style jsx>{`
+        .fax-pages { border: 0; padding: 0; margin: 0; min-width: 0; }
+        .fax-page-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; }
+        .fax-page { min-width: 0; }
+        .fax-page label { display: flex; align-items: center; overflow-wrap: anywhere; }
+        .fax-page img { display: block; width: 100%; height: auto; border: 1px solid #ccd2cf; }
         :global(body) {
           background: radial-gradient(circle at top left, #f8f4ea, #f4f7f6 40%, #eef1f0 100%);
           color: #1f2a2a;

@@ -30,8 +30,8 @@ function resolved(request, version = 'authored-A', revision = 'fixture-revision'
 async function conditions(ui) {
   await ui.change(ui.document.querySelector('input[type="month"]'), '2026-01');
   await ui.select('facility_hint', 'F');
-  await ui.select('week_hint', '2026-01@2026-01-01~2026-01-03');
-  await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-02');
+  await ui.select('week_hint', '2026-01@2026-01-04~2026-01-10');
+  await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-05');
   await ui.file();
 }
 
@@ -42,7 +42,7 @@ test('explicit date/confirmation, input invalidation, period bounds and stale pr
     assert.equal(ui.submit().disabled, true);
     await conditions(ui);
     const old = f.resolutions.at(-1);
-    await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-03');
+    await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-06');
     const current = f.resolutions.at(-1);
     await ui.settle(() => current.resolve(resolved(current, 'authored-current')));
     await ui.settle(() => old.resolve(resolved(old, 'authored-stale')));
@@ -57,10 +57,10 @@ test('explicit date/confirmation, input invalidation, period bounds and stale pr
     const next = f.resolutions.at(-1);
     await ui.settle(() => next.resolve(resolved(next)));
     await ui.click(ui.document.querySelector('form input[type="checkbox"]'));
-    await ui.select('week_hint', '2026-01@2026-01-04~2026-01-10');
+    await ui.select('week_hint', '2026-01@2026-01-11~2026-01-17');
     assert.equal(ui.submit().disabled, true);
     assert.ok(ui.document.body.textContent.includes('適用日は対象週の期間内'));
-    assert.equal(ui.document.querySelector('input[name="effective_date"]').value, '2026-01-03');
+    assert.equal(ui.document.querySelector('input[name="effective_date"]').value, '2026-01-06');
     assert.equal(f.posts.length, 0);
   } finally { await ui.close(); }
 });
@@ -79,14 +79,14 @@ test('confirmed capture sent unchanged once, failed save shown without fabricati
     await ui.click(ui.submit());
     assert.equal(f.posts.length, 1);
     assert.equal(f.posts[0].fields.facility_hint, 'F');
-    assert.equal(f.posts[0].fields.week_hint, '2026-01@2026-01-01~2026-01-03');
-    assert.equal(f.posts[0].fields.effective_date, '2026-01-02');
+    assert.equal(f.posts[0].fields.week_hint, '2026-01@2026-01-04~2026-01-10');
+    assert.equal(f.posts[0].fields.effective_date, '2026-01-05');
     assert.equal(f.posts[0].fields.selected_version_id, 'authored-A');
     assert.equal(f.posts[0].fields.expected_canonical_revision, 'fixture-revision');
     await ui.settle(() => f.saves[0].reject({ response: { data: { detail: 'canonical_revision_changed' } } }));
     assert.ok(ui.document.body.textContent.includes('canonical_revision_changed'));
     assert.equal(ui.document.body.textContent.includes('受付しました。'), false);
-    assert.equal(ui.document.querySelector('input[name="effective_date"]').value, '2026-01-02');
+    assert.equal(ui.document.querySelector('input[name="effective_date"]').value, '2026-01-05');
     assert.equal(f.posts.length, 1);
   } finally { await ui.close(); }
 });
@@ -102,7 +102,7 @@ test('noncanonical or failed resolution never authorizes submit', async () => {
       await ui.settle(() => failure === 'rejected' ? request.reject(new Error('unresolved')) : request.resolve(response));
       assert.equal(ui.submit().disabled, true);
       assert.equal(f.posts.length, 0);
-      assert.equal(ui.document.querySelector('input[name="effective_date"]').value, '2026-01-02');
+      assert.equal(ui.document.querySelector('input[name="effective_date"]').value, '2026-01-05');
     } finally { await ui.close(); }
   }
 });
@@ -124,7 +124,7 @@ test('facility memo is never auto-carried to a different explicit facility', asy
     assert.equal(f.posts.length, 1);
     assert.equal(f.posts[0].fields.facility_hint, 'G');
     assert.equal(f.posts[0].fields.facility_name, undefined);
-    assert.equal(f.posts[0].fields.week_hint, '2026-01@2026-01-01~2026-01-03');
+    assert.equal(f.posts[0].fields.week_hint, '2026-01@2026-01-04~2026-01-10');
     await ui.settle(() => f.saves[0].reject(new Error('component-only-stop')));
   } finally { await ui.close(); }
 });

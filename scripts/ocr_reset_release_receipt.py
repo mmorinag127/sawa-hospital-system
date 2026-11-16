@@ -15,6 +15,14 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'ed03f88a8ee2d562f4acd10fb96a10043ef2f119'
 BASE_RUN = 42815316580
 ALLOWED = {
+    'backend/src/api/ingest.py',
+    'backend/src/services/fax_intake_page_service.py',
+    'backend/tests/unit/test_fax_intake_pages.py',
+    'backend/tests/contract/test_ingest.py',
+    'frontend/src/features/orders/faxUploadPages.ts',
+    'frontend/tests/helpers/pdf-upload-selection.cjs',
+    'frontend/tests/pdf-upload-month-pages.test.cjs',
+    'docs/month-spanning-fax-20261116.md',
     'backend/tests/unit/test_native_ingest_boundary.py',
     'scripts/stg_image_protection.py',
     'scripts/stg_ocr_producer_deploy.py',
@@ -115,6 +123,7 @@ ALLOWED = {
     'docs/fax-bagging-completion-20261112.md',
 }
 BACKEND = ['backend/tests/contract/test_outputs_api.py',
+    'backend/tests/contract/test_ingest.py',
     'backend/tests/integration/test_manual_upload_service.py',
     'backend/tests/integration/test_storage_service.py',
     'backend/tests/unit/test_h2_storage_uri_contract.py'] + ['backend/tests/unit/' + name for name in (
@@ -122,6 +131,7 @@ BACKEND = ['backend/tests/contract/test_outputs_api.py',
     'test_initial_saved_import_service.py', 'test_online_production_release.py',
     'test_ocr_reset_release_receipt.py','test_agent_trial_transport.py','test_stg_ocr_restore_command.py',
     'test_native_ingest_sql_component.py','test_native_ingest_boundary.py','test_hakodate_order_sheet_evidence_projection.py',
+    'test_fax_intake_pages.py', 'test_hakodate_physical_menu_row_service.py', 'test_hakodate_observed_fax_rows.py',
     'test_modernization_real_bagging_confirmation.py',
     'test_modernization_menu_amount_identity.py',
     'test_output_builder_diet_overrides.py', 'test_h2_monthly_source_date_boundary.py',
@@ -143,6 +153,7 @@ COMMANDS = [
     ('frontend', ['node', '--test', '--test-concurrency=1',
         'tests/workflow-demand-read-contract.test.cjs', 'tests/modernization-workflow-action-dom.test.cjs',
         'tests/assistant-workflow-ui.test.cjs', 'tests/pdf-upload-facility-selection.test.cjs',
+        'tests/pdf-upload-month-pages.test.cjs',
         'tests/pdf-upload-input-ownership.test.cjs'], 'frontend'),
     ('types', ['node', 'node_modules/typescript/bin/tsc', '--noEmit', '--incremental', 'false'], 'frontend'),
     ('build', ['node', 'node_modules/next/dist/bin/next', 'build'], 'frontend'),

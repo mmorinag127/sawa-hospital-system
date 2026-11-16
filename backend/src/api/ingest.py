@@ -1,6 +1,7 @@
 from src.staging_data import order_runtime_setting as _runtime_setting
 
 import asyncio
+import json
 from datetime import datetime
 from typing import Any
 
@@ -230,7 +231,19 @@ def _handle_uploaded_pdf_bytes(
     skip_ocr_value: bool,
     facility_selection: dict,
     intake_protocol: str | None = None,
+    page_selection: dict | None = None,
+    file_index: int = 0,
 ) -> dict[str, Any]:
+    from src.services.fax_intake_page_service import selected_pages, period_source_scope
+    try:
+        numbers = selected_pages(file_bytes, raw_filename, file_index, facility_id=facility_hint,
+                                 week_hint=week_hint, plan=page_selection)
+    except ValueError as exc:
+        raise HTTPException(status_code=400 if str(exc).startswith('pdf_file ') else 409, detail=str(exc)) from exc
+    if numbers == []:
+        return {'accepted': False, 'count': 0, 'items': [], 'excluded': True}
+    if page_selection is not None and force_value:
+        raise HTTPException(status_code=409, detail='fax_page_selection_force_not_allowed')
     from src.services.ingest_facility_selection_service import validate_selection
     try:
         facility_selection = validate_selection(facility_selection, facility_hint, week_hint)
@@ -241,6 +254,8 @@ def _handle_uploaded_pdf_bytes(
             pdf_bytes=file_bytes,
             original_filename=raw_filename,
             received_at=received_at_value,
+            **({'page_numbers': numbers, 'source_scope': period_source_scope(facility_hint, week_hint)}
+               if page_selection is not None else {}),
         )
         if isinstance(saved_result, list):
             saved_items = saved_result
@@ -285,7 +300,7 @@ def _handle_uploaded_pdf_bytes(
                 intake_protocol=intake_protocol,
             )
         except ValueError as exc:
-            if str(exc).startswith(("ingest_facility_", "ingest_order_", "uploaded_pdf_original_",
+            if str(exc).startswith(("fax_", "ingest_facility_", "ingest_order_", "uploaded_pdf_original_",
                                     "uploaded_pdf_facility_")):
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             raise
@@ -295,6 +310,8 @@ def _handle_uploaded_pdf_bytes(
         if not duplicate_blocked:
             enqueue_uploaded_pdf_async(uploaded_pdf["id"])
             order_service.invalidate_orders_cache()
+        if page_selection is not None and duplicate_blocked:
+            existing_order_preview = None
         order_id = uploaded_pdf["current_order_id"] if enqueued and not duplicate_blocked else None
         existing_order_id = uploaded_pdf["current_order_id"] if duplicate_blocked else None
         items.append(
@@ -335,6 +352,8 @@ async def _handle_uploaded_pdf(
     skip_ocr_value: bool,
     facility_selection: dict,
     intake_protocol: str | None = None,
+    page_selection: dict | None = None,
+    file_index: int = 0,
 ) -> dict[str, Any]:
     raw_filename = str(pdf_file.filename or "").strip()
     if not raw_filename:
@@ -352,7 +371,28 @@ async def _handle_uploaded_pdf(
         skip_ocr_value=skip_ocr_value,
         facility_selection=facility_selection,
         intake_protocol=intake_protocol,
+        page_selection=page_selection,
+        file_index=file_index,
     )
+
+
+@router.post('/upload-preview', dependencies=[Depends(require_role('operator'))])
+async def preview_upload_pages(request: Request, pdf_file: UploadFile | None = File(None),
+    pdf_files: list[UploadFile] | None = File(None), facility_hint: str | None = Form(None),
+    week_hint: str | None = Form(None)):
+    from src.services.fax_intake_page_service import period_context, inspect_pages
+    _enforce_upload_content_length(request)
+    files = _normalize_upload_files(pdf_file, pdf_files)
+    try:
+        context = period_context(facility_hint, week_hint)
+        previews = []
+        for index, file in enumerate(files):
+            data = await file.read()
+            previews.append(await asyncio.to_thread(inspect_pages, data, file.filename, index, render=True))
+        return {**context, 'files': previews,
+            'requires_review': context['cross_month'] or any(len(f['pages']) > 1 for f in previews)}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.post("/upload", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_role("operator"))])
@@ -369,6 +409,7 @@ async def ingest_upload(
     effective_date: str | None = Form(None),
     expected_canonical_revision: str | None = Form(None),
     selected_version_id: str | None = Form(None),
+    page_selection: str | None = Form(None),
 ):
     intake_protocol = _intake_protocol(request)
     _enforce_upload_content_length(request)
@@ -389,8 +430,32 @@ async def ingest_upload(
     received_at_value = _parse_optional_datetime(received_at)
     force_value = _parse_form_bool(force, default=False)
     skip_ocr_value = _parse_form_bool(skip_ocr, default=False)
+    from src.services.fax_intake_page_service import selected_pages
+    try:
+        plan = json.loads(page_selection) if page_selection is not None else None
+        if page_selection is not None and (not isinstance(plan, dict) or not isinstance(plan.get('files'), list)
+                or len(plan['files']) != len(upload_files)):
+            raise ValueError('fax_page_selection_original_changed')
+        selected_hashes = set()
+        for index, file in enumerate(upload_files):
+            content = await file.read()
+            numbers = await asyncio.to_thread(selected_pages, content, file.filename, index,
+                facility_id=facility_hint, week_hint=week_hint, plan=plan)
+            await file.seek(0)
+            if plan is not None:
+                choice = plan['files'][index]
+                if choice.get('file_index') != index:
+                    raise ValueError('fax_page_selection_original_changed')
+                selected_hashes.update(p['sha256'] for p in choice['pages'] if p['page_number'] in numbers)
+        if plan is not None and len(selected_hashes) != 1:
+            raise ValueError('fax_target_page_ambiguous' if selected_hashes else 'fax_target_page_required')
+        if plan is not None and force_value:
+            raise ValueError('fax_page_selection_force_not_allowed')
+    except (ValueError, TypeError, KeyError) as exc:
+        detail = str(exc) if isinstance(exc, ValueError) and str(exc).startswith(('fax_', 'pdf_file ')) else 'fax_page_selection_invalid'
+        raise HTTPException(400 if detail.startswith('pdf_file ') else 409, detail) from exc
     results: list[dict[str, Any]] = []
-    for current_file in upload_files:
+    for file_index, current_file in enumerate(upload_files):
         results.append(
             await _handle_uploaded_pdf(
                 pdf_file=current_file,
@@ -402,10 +467,14 @@ async def ingest_upload(
                 skip_ocr_value=skip_ocr_value,
                 facility_selection=facility_selection,
                 intake_protocol=intake_protocol,
+                page_selection=plan,
+                file_index=file_index,
             )
         )
     items: list[dict[str, Any]] = []
     for result in results:
+        if result.get('excluded'):
+            continue
         nested_items = result.get("items")
         if isinstance(nested_items, list) and nested_items:
             items.extend(nested_items)

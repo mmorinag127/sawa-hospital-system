@@ -151,8 +151,8 @@ async function mount(config = {}) {
   async function ready(names = ['A.bin']) {
     await change(document.querySelector('input[type="month"]'), '2026-01');
     await select('facility_hint', 'F');
-    await select('week_hint', '2026-01@2026-01-01~2026-01-03');
-    await change(document.querySelector('input[name="effective_date"]'), '2026-01-02');
+    await select('week_hint', '2026-01@2026-01-04~2026-01-10');
+    await change(document.querySelector('input[name="effective_date"]'), '2026-01-05');
     const selected = await files(names);
     const request = resolutions.at(-1);
     await settle(() => request.resolve({ data: { source: 'canonical_json', facility_id: 'F', effective_date: request.date,
@@ -207,9 +207,9 @@ test('actual RHF advanced values, canonical receipt and normal FormData are sent
     assert.equal(ui.posts.length, 1);
     const post = ui.posts[0], fields = Object.fromEntries(post.entries);
     assert.equal(fields.pdf_file, file);
-    assert.deepEqual({ ...fields, pdf_file: file.name }, { pdf_file: 'A.bin', facility_hint: 'F', effective_date: '2026-01-02',
+    assert.deepEqual({ ...fields, pdf_file: file.name }, { pdf_file: 'A.bin', facility_hint: 'F', effective_date: '2026-01-05',
       expected_canonical_revision: 'component-revision', selected_version_id: 'component-version',
-      week_hint: '2026-01@2026-01-01~2026-01-03', facility_name: '0',
+      week_hint: '2026-01@2026-01-04~2026-01-10', facility_name: '0',
       received_at: new Date('2026-01-02T09:30').toISOString(), force: 'true', skip_ocr: 'true' });
     assert.deepEqual(post.options, { params: { intake_protocol: 'native_ingest_v2' }, headers: { 'Content-Type': 'multipart/form-data' } });
     await ui.settle(() => ui.saves[0].resolve({ data: { duplicate_blocked: true, existing_order_id: 'existing-A' } }));
@@ -356,7 +356,7 @@ test('canonical changes retire confirmation; stale/missing/foreign resolution ca
     await ui.ready();
     await ui.select('facility_hint', 'G');
     const old = ui.resolutions.at(-1);
-    await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-03');
+    await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-06');
     const latest = ui.resolutions.at(-1);
     await ui.settle(() => old.resolve({ data: { source: 'canonical_json', facility_id: 'G', effective_date: old.date,
       revision: 'stale', version: { version_id: 'stale' } } }));
@@ -365,7 +365,7 @@ test('canonical changes retire confirmation; stale/missing/foreign resolution ca
       revision: null, version: { version_id: '' } } }));
     await ui.submit(); assert.equal(ui.posts.length, 0);
     assert.ok(ui.text().includes('正本施設版を確認できません'));
-    await ui.select('week_hint', '2026-01@2026-01-04~2026-01-10');
+    await ui.select('week_hint', '2026-01@2026-01-11~2026-01-17');
     await ui.submit(); assert.equal(ui.posts.length, 0);
     assert.ok(ui.text().includes('適用日は対象週の期間内'));
     await ui.change(ui.document.querySelector('input[type="month"]'), '2026-02');
@@ -392,18 +392,18 @@ for (const invalid of ['source', 'facility', 'date', 'revision', 'version', 'htt
   const ui = await mount();
   try {
     await ui.ready();
-    await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-03');
+    await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-06');
     const request = ui.resolutions.at(-1);
     const data = { source: 'canonical_json', facility_id: 'F', effective_date: request.date,
       revision: 'current-revision', version: { version_id: 'current-version' } };
     if (invalid === 'source') data.source = 'database';
     if (invalid === 'facility') data.facility_id = 'G';
-    if (invalid === 'date') data.effective_date = '2026-01-02';
+    if (invalid === 'date') data.effective_date = '2026-01-05';
     if (invalid === 'revision') data.revision = null;
     if (invalid === 'version') data.version.version_id = '';
     await ui.settle(() => invalid === 'http' ? request.reject({ response: { status: 503 } }) : request.resolve({ data }));
     await ui.submit(); assert.equal(ui.posts.length, 0);
-    assert.equal(ui.document.querySelector('input[name="effective_date"]').value, '2026-01-03');
+    assert.equal(ui.document.querySelector('input[name="effective_date"]').value, '2026-01-06');
     assert.ok(ui.text().includes('選択中: A.bin'));
     assert.equal(ui.document.querySelector('form button[type="submit"]').disabled, true);
   } finally { await ui.close(); }
@@ -458,7 +458,7 @@ for (const boundary of ['route', 'session']) for (const failed of [false, true])
     try {
       const [file] = await ui.ready();
       await ui.change(ui.document.querySelector('input[placeholder="例: 大和なでしこ"]'), 'operator retained');
-      await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-03');
+      await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-06');
       const old = ui.resolutions.at(-1), form = ui.getForm();
       if (boundary === 'route') await ui.route('/pdf-upload?preview=B'); else await ui.session();
       assert.equal(ui.getForm(), form);
@@ -551,7 +551,7 @@ for (const boundary of ['route', 'session']) test(`late preview and facility res
   try {
     await ui.settle(() => ui.facilityReads[0].resolve({ data: { facilities: [{ id: 'F', name: 'Component F' }] } }));
     await ui.ready();
-    await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-03');
+    await ui.change(ui.document.querySelector('input[name="effective_date"]'), '2026-01-06');
     const oldPreview = ui.resolutions.at(-1);
     if (boundary === 'route') await ui.route('/pdf-upload?source=B'); else await ui.session();
     const oldFacilities = ui.facilityReads.at(-1);
