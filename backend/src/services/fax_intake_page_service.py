@@ -48,8 +48,16 @@ def inspect_pages(pdf_bytes, filename, file_index, *, render=False):
 
 
 def selected_pages(pdf_bytes, filename, file_index, *, facility_id, week_hint, plan=None):
-    context = period_context(facility_id, week_hint)
     actual = inspect_pages(pdf_bytes, filename, file_index)
+    month, start, end = parse_sheet_week_value(require_explicit_ingest_week(week_hint))
+    first, last = full_week_fax_period(start, start)
+    # Keep legacy single-page, non-boundary intake unchanged. Confirmed monthly
+    # intake below always uses the seven physical Sunday-Saturday positions.
+    if (plan is None and len(actual['pages']) == 1
+            and start.strftime('%Y-%m') == end.strftime('%Y-%m') == month
+            and first.strftime('%Y-%m') == last.strftime('%Y-%m')):
+        return None
+    context = period_context(facility_id, week_hint)
     required = context['cross_month'] or len(actual['pages']) > 1
     if plan is None:
         if required:

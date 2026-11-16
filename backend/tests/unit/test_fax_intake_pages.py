@@ -103,6 +103,11 @@ def test_explicitly_excluded_page_is_not_registered():
         plan=selected_plan(data, include=())) == []
 
 
+def test_existing_nonboundary_single_page_intake_keeps_its_explicit_period():
+    assert pages.selected_pages(original(1), 'original.pdf', 0, facility_id='F',
+        week_hint='2025-12@2025-12-22~2025-12-28') is None
+
+
 def test_preview_is_read_only_and_shows_every_page():
     data = original()
     preview = pages.inspect_pages(data, 'original.pdf', 0, render=True)

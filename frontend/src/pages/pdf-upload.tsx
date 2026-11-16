@@ -699,7 +699,6 @@ function PdfUploadScreen() {
               className="input"
               type="file"
               onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                owner.changed();
                 delete requests.current.pages;
                 fileSelection.current += 1;
                 setPdfFiles(Array.from(e.target.files || []));
