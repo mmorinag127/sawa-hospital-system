@@ -20,6 +20,8 @@
 | Develop integration and manual staging deployment | Pending |
 | Staging save/reload and historical preservation | Initial staging run 43907946814 succeeded on attempt 2 (attempt 1 failed PostgreSQL key download TLS EOF; failed backend job only retried). Live sheet had 19 pending cells and all other values unchanged. Live initial/output display exposed a sibling stale-anomaly read path; fixed with shared sheet-hash binding for every display scope. Final verification and follow-up staging pending. |
 
+Display follow-up batch: backend 957 passed / 2 failed; agent 482 and frontend 319 passed, types/build passed. The two failures were legitimate unsaved-review persistence. Current numeric-policy unsaved reviews now carry an explicit version and remain available without a saved draft; legacy unbound reports do not. Review, confirmation and save hashes all use the same numeric projection. Final batch pending.
+
 ## Known Separate Accuracy Issue
 
 Numeric OCR `909` remains unchanged. The source has a crossed-out 90 and red 92; the red correction intersects a column edge. This change does not invent 92 or claim to fix that recognition geometry defect. See the December anomaly audit for source comparisons.

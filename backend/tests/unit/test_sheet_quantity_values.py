@@ -77,3 +77,12 @@ def test_review_metadata_cannot_target_another_field():
     clean[values.KEY][0]['field']='remarks'
     with pytest.raises(ValueError,match='identity'):
         values.editable_sheet(clean)
+
+
+def test_only_current_numeric_policy_unsaved_review_survives_without_a_saved_draft():
+    report={'source':'unsaved_sheet','sheet_hash':'source-hash','warnings':[]}
+    assert workflow._anomaly_review_for_sheet({'anomaly_review':report},None) is None
+    report['quantity_value_version']=1
+    assert workflow._anomaly_review_for_sheet({'anomaly_review':report},None)==report
+    report['source']='saved_sheet'
+    assert workflow._anomaly_review_for_sheet({'anomaly_review':report},None) is None

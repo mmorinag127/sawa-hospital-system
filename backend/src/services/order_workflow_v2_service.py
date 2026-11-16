@@ -3795,6 +3795,8 @@ def confirm_sheet_review(
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(sheet, dict):
         return None, "sheet_required"
+    from src.services.sheet_quantity_value_service import editable_sheet
+    sheet = editable_sheet(sheet)
     sheet_hash = _stable_json_hash(sheet)
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
@@ -4187,8 +4189,12 @@ def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
 def _anomaly_review_for_sheet(meta: dict[str, Any], sheet: dict[str, Any] | None):
     from src.services.sheet_quantity_value_service import editable_sheet
     review = meta.get('anomaly_review')
-    if (not isinstance(review, dict) or not isinstance(sheet, dict)
-            or review.get('sheet_hash') != _stable_json_hash(editable_sheet(sheet))):
+    if not isinstance(review, dict):
+        return None
+    if sheet is None:
+        return copy.deepcopy(review) if (review.get('source') == 'unsaved_sheet'
+            and review.get('quantity_value_version') == 1 and review.get('sheet_hash')) else None
+    if review.get('sheet_hash') != _stable_json_hash(editable_sheet(sheet)):
         return None
     return copy.deepcopy(review)
 
@@ -4898,6 +4904,8 @@ def run_sheet_anomaly_review(
                 return None, "saved_sheet_template_mismatch"
             review_sheet = draft.draft_sheet_json if isinstance(draft.draft_sheet_json, dict) else {}
             source_saved_sheet_id = draft.id
+        from src.services.sheet_quantity_value_service import editable_sheet
+        review_sheet = editable_sheet(review_sheet)
         anomaly_review = workflow_v2_sheet_review_service.build_sheet_anomaly_report(
             sheet=review_sheet,
             evidence_payload=None,
@@ -4911,6 +4919,7 @@ def run_sheet_anomaly_review(
         anomaly_review["source"] = "unsaved_sheet" if sheet is not None else "saved_sheet"
         anomaly_review["source_bagging_result_id"] = None
         anomaly_review["sheet_hash"] = sheet_hash
+        anomaly_review['quantity_value_version'] = 1
         meta = _workflow_meta(workflow)
         if sheet is None:
             meta["anomaly_review_id"] = anomaly_review_id
@@ -4947,6 +4956,8 @@ def dismiss_sheet_anomaly_warning(
         return None, "sheet_required"
     if not isinstance(warning, dict):
         return None, "anomaly_warning_required"
+    from src.services.sheet_quantity_value_service import editable_sheet
+    sheet = editable_sheet(sheet)
     sheet_hash = _stable_json_hash(sheet)
     with session_scope() as session:
         order, error = _get_order_or_error(session, order_id)
