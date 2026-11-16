@@ -1,5 +1,11 @@
 # workspace Development Guidelines
 
+## Quantity Values And Recognition Originals (2026-11-17)
+
+- 数量欄には数値だけを渡す。非数値のOCR原文は別の確認情報に保持し、数量は未確定・編集可能にする。生成・編集・保存は止めない。
+- 日本語・記号・文章から数字を抜き出したり連結して数量化しない。中央値・推測値・0で自動補完しない。空欄の確定は利用者の明示操作とする。
+- 既存の保存済み数値・履歴を自動更新しない。読取り表示、新規生成、再読込、集計、確定の共通経路で原文と数量を分離する。数量内容による受付停止禁止は、非数値を数量として確定する許可ではない。
+
 Auto-generated from all feature plans. Last updated: 2026-01-05
 
 ## Active Technologies

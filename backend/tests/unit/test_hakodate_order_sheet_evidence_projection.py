@@ -986,7 +986,9 @@ def test_hakodate_component_raw_quantity_and_explicit_manual_value_survive_proje
         )
 
     projected = project()
-    assert projected["rows"] == [["4/26", "朝", "献立A", raw]]
+    assert projected["rows"] == [["4/26", "朝", "献立A", '' if raw=='?' else raw]]
+    if raw=='?':
+        assert projected['quantity_ocr_review'][0]['raw_text']==raw
     assert projected["blockers"] == []
     assert projected["hakodate_evidence_projection"]["metrics"]["deferred_count"] == 0
     # Explicit authored operator edit at the component API, not a fabricated receipt.

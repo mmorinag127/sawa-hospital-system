@@ -15,6 +15,15 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = 'ed03f88a8ee2d562f4acd10fb96a10043ef2f119'
 BASE_RUN = 42815316580
 ALLOWED = {
+    'AGENTS.md',
+    'backend/src/services/sheet_quantity_value_service.py',
+    'backend/src/services/workflow_v2_sheet_review_service.py',
+    'backend/tests/unit/test_sheet_quantity_values.py',
+    'backend/tests/unit/test_ocr_quantity_content_editable_sheet.py',
+    'frontend/src/features/orders/sheetQuantities.ts',
+    'frontend/tests/modernization-workflow-action-dom.test.cjs',
+    'docs/december-quantity-anomalies-20261117.md',
+    'docs/numeric-quantity-separation-20261117.md',
     'backend/src/api/ingest.py',
     'backend/src/services/fax_intake_page_service.py',
     'backend/tests/unit/test_fax_intake_pages.py',
@@ -139,6 +148,9 @@ BACKEND = ['backend/tests/contract/test_outputs_api.py',
     'test_output_input_error_boundary.py', 'test_invoice_column_correction.py',
     'test_modernization_delivery_name_identity.py')]
 BACKEND += ['backend/tests/unit/test_stg_web_image_recovery.py',
+    'backend/tests/unit/test_sheet_quantity_values.py',
+    'backend/tests/unit/test_ocr_quantity_content_editable_sheet.py',
+    'backend/tests/unit/test_workflow_v2_sheet_review_service.py',
     'backend/tests/unit/test_stg_ocr_producer_deploy.py', 'backend/tests/unit/test_registry_image_digest.py']
 AGENT = ['experiments/agent_assistant/tests/' + name for name in (
     'test_trial_menu_amount.py',

@@ -5818,6 +5818,10 @@ def _build_materialization_candidate_from_draft_record(
     draft_sheet = draft_record.get("draft_sheet_json")
     if not isinstance(draft_sheet, dict):
         return None
+    from src.services.sheet_quantity_value_service import pending_cells
+    if pending_cells(draft_sheet):
+        return {"source":"draft_sheet", "draft_id":draft_record.get("id"),
+            "error":"sheet_quantity_review_required", "line_count":0, "lines":[]}
     rows_payload = draft_sheet.get("rows")
     if not isinstance(rows_payload, list) or not rows_payload:
         return {
@@ -24008,7 +24012,8 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
         )
     )
     projected["review_state"] = "blocked" if projected["blockers"] else str(assignment.get("status") or "review_required")
-    return projected
+    from src.services.sheet_quantity_value_service import editable_sheet
+    return editable_sheet(projected)
 
 
 def _build_hakodate_weekly_menu_base_sheet(order_id: str, *, synchronous_write_input: dict[str, Any] | None = None, processing_read_input: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:

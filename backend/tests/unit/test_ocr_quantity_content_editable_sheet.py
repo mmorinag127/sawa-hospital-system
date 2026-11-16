@@ -51,7 +51,13 @@ def test_historic_content_rejection_builds_editable_sheet_without_acceptance(rev
     sheet = result["sheet"]
     quantity_columns = [index for index, field in enumerate(sheet["fields"]) if field.startswith("qty.")]
     raw = review["review_cells"][0]["raw_text"]
-    assert raw in [row[index] for row in sheet["rows"] for index in quantity_columns]
+    from src.services.sheet_quantity_value_service import numeric_value
+    if raw and numeric_value(raw) is None:
+        assert raw in [item['raw_text'] for item in sheet['quantity_ocr_review']]
+        assert all(numeric_value(row[index]) is not None or row[index]==''
+                   for row in sheet['rows'] for index in quantity_columns)
+    else:
+        assert raw in [row[index] for row in sheet["rows"] for index in quantity_columns]
     saved, error = workflow.save_sheet(order_id=identity, sheet=sheet, edited_by="component-operator",
                                       expected_revision=selected["revision"])
     assert error is None, error

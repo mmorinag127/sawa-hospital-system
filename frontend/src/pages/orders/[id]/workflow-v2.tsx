@@ -15,6 +15,7 @@ import TopNav from "../../../components/TopNav";
 import { useH1LeaveGuard } from "../../../hooks/useH1LeaveGuard";
 import OutputHistoryPanel from "../../../components/OutputHistoryPanel";
 import { nativeOcrOwner, type NativeOcrOwner } from "../../../features/orders/nativeOcrOwner";
+import { editableQuantities, isNumericQuantity, isQuantityField, pendingQuantities, quantityReview } from "../../../features/orders/sheetQuantities";
 import {
   deriveWeekValueFromCalendarRange,
   formatWeekLabel,
@@ -362,7 +363,7 @@ const normalizeSheetPayload = (value: unknown): SheetPayload | null => {
     const valueAtIndex = Array.isArray(raw.header) ? raw.header[idx] : undefined;
     return String(valueAtIndex ?? fields[idx] ?? `col${idx + 1}`);
   });
-  return {
+  return editableQuantities({
     ...raw,
     fields,
     header,
@@ -386,7 +387,7 @@ const normalizeSheetPayload = (value: unknown): SheetPayload | null => {
     target_cell_map: Array.isArray(raw.target_cell_map)
       ? raw.target_cell_map.filter((item): item is TargetCellMapItem => Boolean(item && typeof item === "object"))
       : undefined,
-  };
+  });
 };
 
 const stateLabel = (state?: string | null) => {
@@ -410,6 +411,7 @@ const stateLabel = (state?: string | null) => {
 const describeWorkflowBlocker = (code: string) => {
   const normalized = String(code || "").trim();
   const labels: Record<string, string> = {
+    sheet_quantity_review_required: "未確定の数量があります。Step3で原本を確認し、数字を入力するか空欄として確認してください。",
     menu_amount_unresolved: "月次メニューの一人量または単位を確認してください。確定するまで量計算と出力はできません。",
     selected_pdf_document_required: "注文に紐づくFAX PDFを確認してください。",
     ocr_result_saved_history_conflict: "このOCR結果に紐づく保存済みシート・修正候補・出力の履歴があるため、削除できません。現在選択中のOCRと保存内容は保持しています。",
@@ -850,7 +852,8 @@ export default function OrderWorkflowV2Page() {
   const [focusedSheetCell, setFocusedSheetCell] = useState<{ rowIndex: number; colIndex: number } | null>(null);
   const sheetPayloadRef = useRef<SheetPayload | null>(null);
   const setSheetPayload = (value: SheetPayload | null | ((current: SheetPayload | null) => SheetPayload | null)) => {
-    const next = typeof value === "function" ? value(sheetPayloadRef.current) : value;
+    const rawNext = typeof value === "function" ? value(sheetPayloadRef.current) : value;
+    const next = rawNext ? editableQuantities(rawNext) : null;
     sheetPayloadRef.current = next;
     setSheetPayloadState(next);
   };
@@ -1555,6 +1558,9 @@ export default function OrderWorkflowV2Page() {
       ? review as Record<string, unknown>
       : null;
   }, [inspection?.anomaly_review, localAnomalyReview]);
+
+  const pendingQuantityKeys = useMemo(() => new Set(pendingQuantities(sheetPayload)
+    .map(item => `${item.row_index}:${item.col_index}`)), [sheetPayload]);
 
   const anomalyWarnings = useMemo(() => {
     const warnings = anomalyReview?.warnings;
@@ -3515,11 +3521,16 @@ export default function OrderWorkflowV2Page() {
       }
       rows[edit.rowIndex][edit.colIndex] = edit.value;
     }
-    const nextSheet = { ...baseSheet, rows };
+    const edited = new Set(edits.map(edit => `${edit.rowIndex}:${edit.colIndex}`));
+    const nextSheet = { ...baseSheet, rows, ...(quantityReview(baseSheet).length ? {
+      quantity_ocr_review: quantityReview(baseSheet).map(item => edited.has(`${item.row_index}:${item.col_index}`)
+        ? {...item, confirmed_blank:false} : item),
+    } : {}) };
     pendingSheetCellEditsRef.current.clear();
-    setSheetPayload(nextSheet);
+    const cleanSheet = editableQuantities(nextSheet);
+    setSheetPayload(cleanSheet);
     markSheetJsonStale();
-    return nextSheet;
+    return cleanSheet;
   };
 
   const updateSheetCell = (rowIndex: number, colIndex: number, value: string) => {
@@ -3548,6 +3559,17 @@ export default function OrderWorkflowV2Page() {
       nextInput?.focus();
       nextInput?.select();
     });
+  };
+
+  const confirmQuantityBlank = (rowIndex: number, colIndex: number) => {
+    const current = flushPendingSheetCellEdits();
+    if (!current || String(current.rows[rowIndex]?.[colIndex] || '').trim()) return;
+    unsavedSessionRef.current = quadAuth();
+    ++workingInputGenerationRef.current;
+    setSheetPayload({...current, quantity_ocr_review: quantityReview(current).map(item =>
+      item.row_index === rowIndex && item.col_index === colIndex ? {...item, confirmed_blank:true} : item)});
+    markSheetDirty(); markSheetJsonStale(); invalidateSheetPreSaveChecks();
+    setLocalAnomalyReview(null);
   };
 
   const handleSheetInputKeyDown = (event: KeyboardEvent<HTMLInputElement>, rowIndex: number, colIndex: number) => {
@@ -4001,6 +4023,7 @@ export default function OrderWorkflowV2Page() {
   const runBagging = () =>
     runAction("Step4 bagging", async ({ adopt }) => {
       if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker(menuAmountBlocker));
+      if (pendingQuantities(sheetPayloadRef.current).length) throw new Error(describeWorkflowBlocker("sheet_quantity_review_required"));
       await executeWorkflowMutation("bagging", (config) => apiClient.post(`/orders/${orderId}/workflow-v2/bagging`, undefined, config), adopt);
     }, {
       successMessage: "出力確認を作成しました",
@@ -4058,6 +4081,7 @@ export default function OrderWorkflowV2Page() {
           return;
         }
         if (menuAmountUnresolved) throw new Error(describeWorkflowBlocker(menuAmountBlocker));
+        if (pendingQuantities(sheetPayloadRef.current).length) throw new Error(describeWorkflowBlocker("sheet_quantity_review_required"));
         leavingAfterConfirmRef.current = true;
         let confirmed = false;
         try {
@@ -5579,6 +5603,25 @@ export default function OrderWorkflowV2Page() {
           <fieldset disabled={displayLoading || displayReadyRef.current !== "sheet"} style={{border: 0, margin: 0, padding: 0, minWidth: 0}}>
           <p className="step-tag">Step3</p>
           <h2>選択 OCR からシート作成 / 編集 / 保存</h2>
+          {quantityReview(sheetPayload).length ? <details className="quantity-original-review">
+            <summary>未確定の数量 {pendingQuantities(sheetPayload).length}件 / OCR原文を確認</summary>
+            <div className="table-wrap"><table>
+              <thead><tr><th>行</th><th>日付・献立</th><th>列</th><th>認識原文（数量には不採用）</th><th>確認</th></tr></thead>
+              <tbody>{quantityReview(sheetPayload).map(item => {
+                const value = sheetPayload?.rows[item.row_index]?.[item.col_index] || '';
+                return <tr key={`${item.row_index}:${item.col_index}`}>
+                  <td>{item.row_index + 1}</td>
+                  <td>{sheetPayload?.rows[item.row_index]?.slice(0,3).join(' / ')}</td>
+                  <td>{sheetPayload?.header[item.col_index] || item.field}</td>
+                  <td style={{whiteSpace:'normal',overflowWrap:'anywhere',maxWidth:300}}>{item.raw_text}</td>
+                  <td>{value ? '入力済み' : item.confirmed_blank ? '空欄確認済み' : <>
+                    <Button type="button" disabled={Boolean(busy)} onClick={() => focusSheetInput(item.row_index,item.col_index)}>数量を入力</Button>
+                    <Button type="button" disabled={Boolean(busy)} onClick={() => confirmQuantityBlank(item.row_index,item.col_index)}>空欄として確認</Button>
+                  </>}</td>
+                </tr>;
+              })}</tbody>
+            </table></div>
+          </details> : null}
           {!workflow?.selected_ocr_result_id ? (
             <div className="notice warning">
               正解OCRが未選択です。Step2でOCR結果を一つ選択するまで、シート生成・保存はできません。
@@ -6042,7 +6085,8 @@ export default function OrderWorkflowV2Page() {
                             const confidenceTier = String(sheetPayload.cell_confidence_rows?.[rowIdx]?.[colIdx] || "").trim();
                             const belowThreshold = confidenceTier && !confidenceTierVisible(confidenceTier, ocrConfidenceDisplayMode);
                             const overlayItem = !String(row[colIdx] || "").trim() ? ocrOverlayItemMap.get(`${rowIdx}:${colIdx}`) : null;
-                            const overlayValue = String(overlayItem?.value || "").trim();
+                            const rawOverlayValue = String(overlayItem?.value || "").trim();
+                            const overlayValue = isQuantityField(field) && !isNumericQuantity(rawOverlayValue) ? '' : rawOverlayValue;
                             const autoEditCell = autoEditCellMap.get(`${rowIdx}:${colIdx}`);
                             const autoEditSelected = autoEditCell && selectedAutoEditIndex === autoEditCell.index;
                             const autoEditCurrent = autoEditCell ? String(autoEditCell.patch.current_value ?? row[colIdx] ?? "").trim() : "";
@@ -6086,12 +6130,21 @@ export default function OrderWorkflowV2Page() {
                                     data-sheet-col={colIdx}
                                     defaultValue={pendingSheetCellEditsRef.current.get(`${rowIdx}:${colIdx}`)?.value ?? row[colIdx] ?? ""}
                                     readOnly={isLockedSheetField(field)}
+                                    inputMode={isQuantityField(field) ? "decimal" : undefined}
+                                    placeholder={pendingQuantityKeys.has(`${rowIdx}:${colIdx}`) ? "未確定" : undefined}
                                     onFocus={() => setFocusedSheetCell({ rowIndex: rowIdx, colIndex: colIdx })}
                                     onBlur={() => {
                                       flushPendingSheetCellEdits();
                                     }}
                                     onKeyDown={(event) => handleSheetInputKeyDown(event, rowIdx, colIdx)}
-                                    onChange={(event) => updateSheetCell(rowIdx, colIdx, event.target.value)}
+                                    onChange={(event) => {
+                                      const value = event.target.value;
+                                      if (isQuantityField(field) && !/^-?[0-9０-９,]*(?:[.．][0-9０-９]*)?$/.test(value)) {
+                                        event.target.value = pendingSheetCellEditsRef.current.get(`${rowIdx}:${colIdx}`)?.value ?? row[colIdx] ?? '';
+                                        return;
+                                      }
+                                      updateSheetCell(rowIdx, colIdx, value);
+                                    }}
                                   />
                                 </div>
                               </td>
@@ -6146,14 +6199,18 @@ export default function OrderWorkflowV2Page() {
               <p className="subtle">袋分け、ラベル、納品書、総量をまとめて確認して、問題なければ注文を確定します。</p>
             </div>
             <div className="row-actions">
-              <Button className="btn primary workflow-ordinary-control" type="button" onClick={runBagging} disabled={Boolean(busy || displayLoading || displayReadyRef.current !== "output" || menuAmountUnresolved || !workflow?.saved_sheet_id)}>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={runBagging} disabled={Boolean(busy || displayLoading || displayReadyRef.current !== "output" || menuAmountUnresolved || pendingQuantityKeys.size || !workflow?.saved_sheet_id)}>
                 出力確認を作成
               </Button>
-              <Button className="btn primary workflow-ordinary-control" type="button" onClick={finalConfirm} disabled={Boolean(busy || displayLoading || displayReadyRef.current !== "output" || (workflow?.state !== "confirmed" && (menuAmountUnresolved || !workflow?.output_bundle_id)))}>
+              <Button className="btn primary workflow-ordinary-control" type="button" onClick={finalConfirm} disabled={Boolean(busy || displayLoading || displayReadyRef.current !== "output" || (workflow?.state !== "confirmed" && (menuAmountUnresolved || pendingQuantityKeys.size || !workflow?.output_bundle_id)))}>
                 {workflow?.state === "confirmed" ? "一覧にもどる" : "確定して一覧にもどる"}
               </Button>
             </div>
           </header>
+          {pendingQuantityKeys.size ? <div role="status" className="notice warning">
+            未確定の数量 {pendingQuantityKeys.size}件
+            <Button type="button" onClick={() => setVisibleStep(3)}>数量を確認</Button>
+          </div> : null}
           {displayLoading ? <p role="status">保存出力を取得中...</p> : null}
           {inspection?.bagging_result ? (
             <div className="result-summary">

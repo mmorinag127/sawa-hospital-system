@@ -58,23 +58,9 @@ def _normalize_text(value: object) -> str:
     return str(value or "").strip()
 
 
-def _normalize_numeric_text(value: object) -> str:
-    text = _normalize_text(value).translate(str.maketrans("０１２３４５６７８９．－", "0123456789.-"))
-    text = re.sub(r"[^\d.\-]", "", text)
-    if text.count(".") > 1:
-        head, *tail = text.split(".")
-        text = head + "." + "".join(tail)
-    return text
-
-
 def _numeric_value(value: object) -> float | None:
-    text = _normalize_numeric_text(value)
-    if not text or text in {"-", ".", "-."}:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
+    from src.services.sheet_quantity_value_service import numeric_value
+    return numeric_value(value)
 
 
 def _numeric_display(value: object) -> str:
@@ -1790,6 +1776,8 @@ def build_sheet_anomaly_report(
 ) -> dict[str, Any]:
     if not isinstance(sheet, dict):
         return {"status": "error", "error": "sheet_required", "warnings": [], "rule_warnings": [], "llm": {"status": "not_run"}}
+    from src.services.sheet_quantity_value_service import editable_sheet, pending_cells
+    sheet = editable_sheet(sheet)
     fields, header, _rows = _sheet_dimensions(sheet)
     computed_context = _aggregate_quantity_context(sheet)
     rule_warnings = _rule_based_anomaly_warnings(sheet)
@@ -1853,6 +1841,7 @@ def build_sheet_anomaly_report(
             "quantity_cell_count": computed_context.get("quantity_cell_count"),
         },
         "computed_context": computed_context,
+        "quantity_review": pending_cells(sheet),
         "llm": llm_meta,
         "llm_raw": llm_payload if os.getenv("WORKFLOW_V2_LLM_DEBUG_RAW", "").strip() == "1" else None,
     }

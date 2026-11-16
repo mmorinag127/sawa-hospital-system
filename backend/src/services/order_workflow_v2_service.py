@@ -3699,6 +3699,8 @@ def save_sheet(
 ) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(sheet, dict):
         return None, "sheet_required"
+    from src.services.sheet_quantity_value_service import editable_sheet
+    sheet = editable_sheet(sheet)
     sheet_hash = _stable_json_hash(sheet)
 
     with session_scope() as session:
@@ -4183,12 +4185,13 @@ def _delete_downstream_after_sheet_change(session: Any, order_id: str) -> None:
 
 
 def _serialize_saved_sheet(row: OrderSheetDraft) -> dict[str, Any]:
+    from src.services.sheet_quantity_value_service import editable_sheet
     return {
         "saved_sheet_id": row.id,
         "order_id": row.order_id,
         "template_version_id": row.template_version_id,
         "source_ocr_result_id": row.base_evidence_run_id,
-        "sheet": row.draft_sheet_json if isinstance(row.draft_sheet_json, dict) else {},
+        "sheet": editable_sheet(row.draft_sheet_json) if isinstance(row.draft_sheet_json, dict) else {},
         "state": row.draft_state,
         "edited_by": row.edited_by,
         "edited_at": _serialize_datetime(row.edited_at),
@@ -4304,6 +4307,9 @@ def _build_materialization_candidate_for_saved_sheet(
     _for_read_projection: bool = False,
     _read_operation=None,
 ) -> dict[str, Any]:
+    from src.services.sheet_quantity_value_service import pending_cells
+    if pending_cells(saved_sheet.draft_sheet_json or {}):
+        return {"error": "sheet_quantity_review_required", "lines": []}
     workflow = _get_workflow_readonly(session, order.id)
     if workflow is None:
         return {"error": "workflow_not_initialized", "lines": []}
@@ -4568,7 +4574,7 @@ def _recover_confirmed_artifacts_from_snapshot(
 
 
 def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    from copy import deepcopy
+    from src.services.sheet_quantity_value_service import editable_sheet
     with session_scope() as session, session.no_autoflush:
         order, error = _get_order_or_error(session, order_id)
         if error:
@@ -4580,7 +4586,7 @@ def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
             return {"saved_sheet_id": draft["id"], "order_id": draft["order_id"],
                     "template_version_id": draft["template_version_id"],
                     "source_ocr_result_id": draft["base_evidence_run_id"],
-                    "sheet": deepcopy(draft["draft_sheet_json"]), "state": draft["draft_state"],
+                    "sheet": editable_sheet(draft["draft_sheet_json"]), "state": draft["draft_state"],
                     "edited_by": draft["edited_by"], "edited_at": draft["edited_at"],
                     "created_at": draft["created_at"]}, None
         workflow = _get_workflow_readonly(session, order.id)
@@ -5254,6 +5260,11 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
             else {}
         )
         _inspection_next("response_serialization")
+        current_anomaly_review = _workflow_meta(workflow).get('anomaly_review') if workflow is not None else None
+        if (saved_sheet_hash and isinstance(current_anomaly_review, dict)
+                and current_anomaly_review.get('sheet_hash')
+                and current_anomaly_review['sheet_hash'] != saved_sheet_hash):
+            current_anomaly_review = None
         if workflow is not None:
             checked_workflow = _inspection_call(
                 "workflow_serialize", _serialize_workflow_checked, session,
@@ -5313,7 +5324,7 @@ def get_inspection(order_id: str, *, include_ocr_results: bool = False, history_
                 ),
             },
             "bagging_result": inspection_meta.get("bagging_result") if workflow is not None else None,
-            "anomaly_review": _workflow_meta(workflow).get("anomaly_review") if workflow is not None else None,
+            "anomaly_review": current_anomaly_review,
             "pre_save_checks": _workflow_pre_save_checks(_workflow_meta(workflow)) if workflow is not None else {},
             "pre_save_status": (
                 _pre_save_status_for_sheet(_workflow_meta(workflow), saved_sheet_hash)

@@ -14,6 +14,8 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const fields = ['date', 'daypart', 'category', 'menu_name',
   'qty.regular_x', 'qty.no_meat_x', 'qty.no_fish_x', 'qty.staff_x'];
 const RAW = ['7', '0', '?', ''];
+const CLEAN = ['7', '0', '', ''];
+const NUMERIC = ['7', '0', '9', ''];
 const checks = { anomaly_review: { confirmed: true }, sheet_review: { confirmed: true } };
 const status = { anomaly_review_confirmed: true, sheet_review_confirmed: true, ready: true };
 const warning = { type: 'quantity', row_index: 0, col_index: 4, field: fields[4],
@@ -160,7 +162,7 @@ test('canonical source reads retain validation budget and show pending generatio
     assert.equal(calls(f, 'get', `${BASE}/sheet-source`).at(-1).config.timeout, 180000);
     await f.h.settle(() => pending.resolve(f.source()));
     await f.h.waitFor(() => !f.probe.current.busy);
-    assert.deepEqual(f.probe.current.sheetPayload.rows[0].slice(4), RAW);
+    assert.deepEqual(f.probe.current.sheetPayload.rows[0].slice(4), CLEAN);
     assert.equal(calls(f, 'put', `${BASE}/sheet`).length, 0);
   } finally {await f.h.close();}
 });
@@ -306,16 +308,47 @@ async function settleOld(f, pending, operation, outcome, value) {
   await operation.promise;
 }
 
-test('owned sheet-source exact envelope adopts raw 7/0/?/blank with real rendered cells', async () => {
+test('owned sheet-source separates uncertain original from numeric cells without stopping the editor', async () => {
   const f = await setup();
   try {
     await f.h.settle(() => f.probe.current.generateSheetFromSelectedOcr());
-    assert.deepEqual(clone(f.probe.current.sheetPayload.rows[0].slice(4)), RAW);
+    assert.deepEqual(clone(f.probe.current.sheetPayload.rows[0].slice(4)), CLEAN);
+    assert.equal(f.probe.current.sheetPayload.quantity_ocr_review[0].raw_text, '?');
     assert.deepEqual(clone(f.probe.current.sheetPayload.unknown), { zero: 0, nullable: null });
     assert.equal(f.probe.current.sheetDirty, true); assert.equal(f.probe.current.busy, '');
     const inputs = fields.slice(4).map((_, index) => f.h.document.querySelector(`[data-sheet-row="0"][data-sheet-col="${index + 4}"]`));
-    assert.ok(inputs.every(Boolean)); assert.deepEqual(inputs.map(input => input.value), RAW);
+    assert.ok(inputs.every(Boolean)); assert.deepEqual(inputs.map(input => input.value), CLEAN);
+    assert.equal(inputs[2].placeholder,'未確定');
     assert.match(f.h.document.body.textContent, /選択OCRからシートを生成しました/);
+  } finally { await f.h.close(); }
+});
+for (const resolution of ['number', 'blank'])
+test(`uncertain original survives ${resolution} resolution, save and reload without guessed quantities`, async () => {
+  const f = await setup();
+  try {
+    await f.h.settle(() => f.probe.current.generateSheetFromSelectedOcr());
+    await f.h.settle(() => f.probe.current.runBagging());
+    assert.equal(calls(f, 'post', `${BASE}/bagging`).length, 0);
+    assert.match(f.probe.current.error, /未確定の数量/);
+    await f.h.settle(() => f.probe.current.setVisibleStep(3));
+    if (resolution === 'number') {
+      const input = f.h.document.querySelector('[data-sheet-row="0"][data-sheet-col="6"]');
+      await f.h.change(input, '11月20日');
+      assert.equal(input.value, '');
+      await f.h.change(input, '9');
+      await f.h.settle(() => f.probe.current.flushPendingSheetCellEdits());
+    } else {
+      const button = [...f.h.document.querySelectorAll('button')].find(item => item.textContent.trim() === '空欄として確認');
+      assert.ok(button);
+      await f.h.settle(() => button.click());
+    }
+    await f.h.settle(() => f.probe.current.saveSheet());
+    await f.h.settle(() => f.probe.current.refreshAll());
+    assert.equal(f.probe.current.sheetPayload.rows[0][6], resolution === 'number' ? '9' : '');
+    assert.equal(f.probe.current.sheetPayload.quantity_ocr_review[0].raw_text, '?');
+    assert.equal(f.probe.current.sheetPayload.quantity_ocr_review[0].confirmed_blank, resolution === 'blank');
+    assert.equal(f.state.saved.quantity_ocr_review[0].raw_text, '?');
+    assert.equal(f.probe.current.sheetDirty, false);
   } finally { await f.h.close(); }
 });
 for (const boundary of ['route', 'order', 'pdf', 'auth', 'session', 'selected', 'input', 'operation', 'busy'])
@@ -358,7 +391,7 @@ test('normal sheet save flushes raw inputs, retains pre-save checks, sends exact
     assert.equal(f.probe.current.preSaveChecks, originalChecks, 'b8c8d743 edit-surviving checks');
     await f.h.settle(() => f.probe.current.saveSheet());
     const [put] = calls(f, 'put', `${BASE}/sheet`); assert.ok(put);
-    assert.deepEqual(clone(put.body.sheet.rows[0].slice(4)), RAW);
+    assert.deepEqual(clone(put.body.sheet.rows[0].slice(4)), CLEAN);
     assert.equal(put.body.edited_by, 'operator'); assert.equal(put.config.headers['If-Match'], '"7"');
     assert.equal(f.probe.current.workflow.revision, 8); assert.equal(f.probe.current.sheetDirty, false);
     assert.equal(f.probe.current.visibleStep, 4); assert.equal(f.probe.current.busy, '');
@@ -697,7 +730,7 @@ for (const [code, label] of [
     await f.h.settle(() => f.probe.current.setVisibleStep(4));
     assert.equal(f.probe.current.workflow.menu_amount_resolution.blocker, code);
     const original = clone(f.probe.current.sheetPayload.rows);
-    assert.deepEqual(original[0].slice(4), RAW);
+    assert.deepEqual(original[0].slice(4), CLEAN);
     assert.ok(f.h.document.body.textContent.includes(label));
     if (code !== 'menu_amount_unresolved') {
       assert.ok(!f.h.document.body.textContent.includes('月次メニューの一人量または単位を確認してください'));
@@ -716,7 +749,7 @@ for (const [code, label] of [
       assert.equal(calls(f, 'post', `${BASE}/confirm`).length, 0);
       assert.equal(f.h.nav.router.asPath, `/orders/${ORDER}/workflow-v2`);
     }
-    assert.deepEqual(clone(f.state.saved.rows), original);
+    assert.deepEqual(clone(f.state.saved.rows[0].slice(4)), RAW);
   } finally { await f.h.close(); }
 });
 
@@ -724,11 +757,11 @@ for (const action of ['runBagging', 'finalConfirm'])
 test(`resolved receipt boundary retains ordinary ${action} output and raw cells`, async () => {
   const f = await setup();
   try {
-    f.state.saved = sheet(RAW);
+    f.state.saved = sheet(NUMERIC);
     await f.h.settle(() => f.probe.current.refreshAll());
     await f.h.settle(() => f.probe.current.setVisibleStep(4));
     const original = clone(f.probe.current.sheetPayload.rows);
-    assert.deepEqual(original[0].slice(4), RAW);
+    assert.deepEqual(original[0].slice(4), NUMERIC);
     for (const text of ['出力確認を作成', '確定して一覧にもどる']) {
       const button = [...f.h.document.querySelectorAll('button')].find(item => item.textContent.trim() === text);
       assert.ok(button, text);
