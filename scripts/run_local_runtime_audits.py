@@ -72,7 +72,7 @@ def audit_runtime(image, name, interpreter, source, directory):
     report = directory / (name + ".audit.json")
     code = subprocess.run([
         sys.executable, "-m", "pip_audit", "--disable-pip", "--no-deps",
-        "--progress-spinner", "off", "--format", "json", "--aliases", "on",
+        "--progress-spinner", "off", "--format", "json", "--aliases", "on", "--timeout", "60",
         "--requirement", str(requirements), "--output", str(report),
     ]).returncode
     if code:

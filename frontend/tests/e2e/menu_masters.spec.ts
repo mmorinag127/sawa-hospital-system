@@ -455,9 +455,13 @@ test("unknown dirty history stops without guessed delta and recovers after becom
   const s = await fixture(page, info); await open(page);
   await page.getByRole("link", { name: "メニュールール", exact: true }).click();
   await expect(page.getByRole("heading", { name: "メニュールール管理", exact: true })).toBeVisible();
+  await expect.poll(async () => (await position(page)).position?.token).toBeTruthy();
   await page.evaluate(() => (window as any).removeOwnedMenuPosition()); const unknownURL = page.url();
+  expect((await position(page)).position).toBeUndefined();
   await page.getByRole("link", { name: "メニューマスター", exact: true }).click(); await select(page);
   await field(editForm(page), "分類").fill("未知履歴で保持");
+  await expect.poll(() => page.evaluate(() =>
+    !window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(true);
   const historyLength = await page.evaluate(() => history.length);
   await historyGo(page, -1);
   await expect(page.getByRole("alert").filter({ hasText: "履歴の位置を確認できません" })).toBeVisible();
