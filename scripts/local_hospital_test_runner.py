@@ -18,7 +18,6 @@ MANIFEST = ROOT / "scripts/local_hospital_test_manifest.json"
 
 READ_ONLY_AUDITS = {
     'backend-audit': 'cd backend && python3 -m pip_audit --local --skip-editable',
-    'runtime-image-audits': 'python3 scripts/run_local_runtime_audits.py',
 }
 AUDIT_TRANSPORT_ERRORS = (
     b'requests.exceptions.ReadTimeout:',

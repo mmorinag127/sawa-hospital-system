@@ -52,6 +52,29 @@ class RuntimeAuditContractTest(unittest.TestCase):
             self.assertIn("--disable-pip", arguments)
             self.assertNotIn("--ignore-vuln", arguments)
 
+    def test_audit_retries_only_transport_failures_without_a_report(self):
+        timeout = b"requests.exceptions.ReadTimeout: advisory request timed out"
+        for first_stderr, first_wrote_report, expected_calls in (
+            (timeout, False, 2),
+            (timeout, True, 1),
+            (b"Found 1 known vulnerability", False, 1),
+        ):
+            with self.subTest(stderr=first_stderr, report=first_wrote_report), \
+                    tempfile.TemporaryDirectory() as directory:
+                report = Path(directory) / "audit.json"
+                results = iter([(1, first_stderr, first_wrote_report), (0, b"", True)])
+
+                def run(arguments, **kwargs):
+                    code, stderr, write_report = next(results)
+                    if write_report:
+                        report.write_text("{}")
+                    return subprocess.CompletedProcess(arguments, code, stderr=stderr)
+
+                with patch.object(audit.subprocess, "run", side_effect=run) as mock:
+                    self.assertEqual(audit.run_dependency_audit(Path(directory) / "requirements.txt", report),
+                                     0 if expected_calls == 2 else 1)
+                self.assertEqual(mock.call_count, expected_calls)
+
     def test_cpu_lookup_is_recorded_and_skipped_or_missing_packages_fail(self):
         identity, source = "sha256:" + "a" * 64, "b" * 40
         inspected = json.dumps({"Id": identity, "Os": "linux", "Architecture": "amd64",
@@ -60,7 +83,7 @@ class RuntimeAuditContractTest(unittest.TestCase):
         for dependencies in ([{"name": "torch", "version": "2.13.0", "vulns": []}],
                              [{"name": "torch", "skip_reason": "unavailable"}], []):
             with self.subTest(dependencies=dependencies), tempfile.TemporaryDirectory() as directory:
-                def save_report(arguments):
+                def save_report(arguments, **kwargs):
                     Path(arguments[arguments.index("--output") + 1]).write_text(json.dumps({"dependencies": dependencies}))
                     return subprocess.CompletedProcess(arguments, 0)
                 with patch.object(audit.subprocess, "check_output", side_effect=[inspected, inventory]), \

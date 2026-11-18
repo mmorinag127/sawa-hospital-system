@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-from local_hospital_test_runner import git, reject_hosted_runner
+from local_hospital_test_runner import AUDIT_TRANSPORT_ERRORS, git, reject_hosted_runner
 
 
 INVENTORY = (
@@ -22,6 +22,24 @@ ENVIRONMENTS = (
     ("AGENT_RUNTIME", "agent-shift", "/opt/agent/shift/bin/python"),
     ("AGENT_RUNTIME", "agent-school", "/opt/agent/school-lunch/bin/python"),
 )
+
+
+def run_dependency_audit(requirements, report):
+    command = [
+        sys.executable, "-m", "pip_audit", "--disable-pip", "--no-deps",
+        "--progress-spinner", "off", "--format", "json", "--aliases", "on", "--timeout", "60",
+        "--requirement", str(requirements), "--output", str(report),
+    ]
+    for attempt in range(2):
+        result = subprocess.run(command, stderr=subprocess.PIPE)
+        if result.stderr:
+            sys.stderr.buffer.write(result.stderr)
+            sys.stderr.buffer.flush()
+        if result.returncode == 0 or attempt or report.exists() or not any(
+            error in (result.stderr or b"") for error in AUDIT_TRANSPORT_ERRORS
+        ):
+            return result.returncode
+        print(f"{report.stem}: retrying advisory lookups after a transport error", flush=True)
 
 
 def audit_runtime(image, name, interpreter, source, directory):
@@ -70,11 +88,7 @@ def audit_runtime(image, name, interpreter, source, directory):
     requirements = directory / (name + ".requirements.txt")
     requirements.write_text("\n".join(packages[key] for key in sorted(packages)) + "\n")
     report = directory / (name + ".audit.json")
-    code = subprocess.run([
-        sys.executable, "-m", "pip_audit", "--disable-pip", "--no-deps",
-        "--progress-spinner", "off", "--format", "json", "--aliases", "on", "--timeout", "60",
-        "--requirement", str(requirements), "--output", str(report),
-    ]).returncode
+    code = run_dependency_audit(requirements, report)
     if code:
         return code
     dependencies = json.loads(report.read_text())["dependencies"]
