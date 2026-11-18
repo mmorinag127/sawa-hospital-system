@@ -293,26 +293,18 @@ class Managed:
                     await run_blocking(self.store.update, run_id, expected_stop_generation=generation, session_id=matches[0])
             except Exception:
                 pass
+        failure = None
         if run["session_id"]:
             try:
-                session = await self.stop_session(run_id, run['session_id'])
-                await run_blocking(self.store.usage, run_id, session.usage.model_dump(mode='json'), terminal=native_stopped, terminal_generation=generation)
+                await self.stop_session(run_id, run['session_id'])
             except Exception:
-                await run_blocking(self.store.update, run_id, expected_stop_generation=generation, status=pending_status)
-                local_status = "業務書込みは停止しました。" if native_stopped else "業務APIの停止は未確認です。"
-                await run_blocking(self.store.event, run_id, "notice", {"message": local_status + "Claude側の停止・料金確認は未完了で、予算予約を保持しています。"})
-                return
-        else:
-            # No remote call was made only when local preparation failed before dispatch.
-            if previous["status"] not in ("failed", "preparing") and not (previous.get("task_id")=="lunch_import" and previous["status"]=="waiting_input"):
-                await run_blocking(self.store.update, run_id, expected_stop_generation=generation, status=pending_status)
-                return
-            if native_stopped:
-                await run_blocking(self.store.update, run_id, expected_stop_generation=generation, reserved=0)
-        if not native_stopped:
-            await run_blocking(self.store.update, run_id, expected_stop_generation=generation, status=pending_status)
-            return
-        await run_blocking(self.store.update, run_id, expected_stop_generation=generation, status="rolled_back" if restored else "stopped")
+                failure = "Claude側の停止または料金を確認できませんでした。"
+        elif previous["status"] not in ("failed", "preparing") and not (
+            previous.get("task_id") == "lunch_import" and previous["status"] == "waiting_input"
+        ):
+            failure = "ClaudeのセッションIDが不明で、停止と料金を確認できませんでした。"
+        await run_blocking(self.store.finish_stop, run_id, generation,
+                           native_stopped=native_stopped, restored=restored, failure=failure)
 
     async def reply(self, run_id, message, question_id=None, option=None):
         old = self.tasks.get(run_id)

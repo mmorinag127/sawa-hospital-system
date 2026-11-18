@@ -127,14 +127,15 @@ def test_stop_cancels_remote_polling_and_prevents_late_tool_write(tmp_path, monk
     asyncio.run(scenario())
 
 
-def test_unknown_create_outcome_is_not_replayed_or_refunded(tmp_path, monkeypatch):
+def test_unknown_create_outcome_is_logged_without_replay_or_reservation_after_stop(tmp_path, monkeypatch):
     calls=[]
     async def handler(request): calls.append(request);raise httpx.ReadTimeout('synthetic secret must never be logged')
     agent,store,_,_,run=fixture(tmp_path,monkeypatch,handler)
     async def scenario():
         await agent.start(run);await agent.tasks[run['id']]
-        assert len(calls)==1 and store.get(run['id'])['status']=='stop_pending'
-        assert store.get(run['id'])['reserved']==100
+        assert len(calls)==1 and store.get(run['id'])['status']=='stopped'
+        assert store.get(run['id'])['reserved']==0
+        assert store.latest_event(run['id'], 'error')['payload']['code']=='provider_stop_or_usage_failed'
         assert 'synthetic secret' not in json.dumps(store.events(run['id']))
         await agent.stop(run['id']);assert len(calls)==1
         await agent.client.aclose()
@@ -297,9 +298,9 @@ def test_stop_during_create_keeps_receipt_without_executing_late_tools(tmp_path,
         release.set();await stop
         assert not native and len(posts)==1
         if outcome=='timeout':
-            assert agent.unsettled(run['id']) and store.get(run['id'])['status']=='stop_pending'
-            assert store.get(run['id'])['reserved']==100
-            assert '応答記録がなく' in store.latest_event(run['id'], 'notice')['payload']['message']
+            assert agent.unsettled(run['id']) and store.get(run['id'])['status']=='stopped'
+            assert store.get(run['id'])['reserved']==0
+            assert '応答記録がなく' in store.latest_event(run['id'], 'error')['payload']['message']
         else:
             assert not agent.unsettled(run['id']) and store.get(run['id'])['status']=='stopped'
             assert store.get(run['id'])['reserved']==0

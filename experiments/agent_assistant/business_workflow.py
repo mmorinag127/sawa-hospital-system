@@ -548,7 +548,7 @@ class BusinessWorkflow:
         if run['status'] == 'completed':
             status, title, message, action = 'completed', '作業が完了しました', '承認した内容の保存と、必要な出力の確認が完了しました。', 'outputs'
         elif run['status'] in ('stop_pending', 'rollback_stop_pending', 'stopping'):
-            status, title, message, action = 'archived', '停止と料金を確定できていません', 'この依頼は処理を続けません。接続先の停止・料金が確定するまで予約額は解放されません。', 'none'
+            status, title, message, action = 'archived', '停止の確認が必要です', 'この依頼は処理を続けません。業務側の停止が確認できれば、料金が未確定でも予約枠は解放されます。', 'none'
         elif run['status'] in ('stopped', 'rolled_back'):
             status, title, message, action = 'archived', '作業を停止しました', 'この依頼は処理を続けません。実行履歴は保持されています。', 'none'
         elif run['status'] == 'budget_reached':

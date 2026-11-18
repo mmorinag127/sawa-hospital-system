@@ -309,6 +309,7 @@ class Gemini(Managed):
         pending_status = 'rollback_stop_pending' if restored else 'stop_pending'
         native_stopped = await self.stop_native(ident, pending_status, generation)
         pending_reason = 'Gemini側の停止・料金確認は未完了です。'
+        failure = None
         try:
             for interaction_id in ids:
                 path = '/' + quote(interaction_id, safe='')
@@ -322,14 +323,11 @@ class Gemini(Managed):
                         if value.get('status') in QUIET: break
                         await asyncio.sleep(.25)
                     else: raise Conflict('Geminiの停止確認待ちです')
+                await run_blocking(self.record_usage, ident, value)
             if await run_blocking(self.unsettled, ident):
                 pending_reason = 'Geminiへ送信した依頼の応答記録がなく、停止と料金を確定できません。'
                 raise Conflict(pending_reason)
-            if ids: await self.refresh_usage(ident, release=native_stopped, terminal_generation=generation)
-            elif native_stopped: await run_blocking(self.store.update, ident, expected_stop_generation=generation, reserved=0)
         except Exception:
-            await run_blocking(self.store.update, ident, expected_stop_generation=generation, status=pending_status)
-            local_status = '業務書込みは停止しました。' if native_stopped else '業務APIの停止は未確認です。'
-            await run_blocking(self.store.event, ident, 'notice', {'message': local_status + pending_reason + '予約額を保持しています。'})
-            return
-        await run_blocking(self.store.update, ident, expected_stop_generation=generation, status=('rolled_back' if restored else 'stopped') if native_stopped else pending_status)
+            failure = pending_reason
+        await run_blocking(self.store.finish_stop, ident, generation,
+                           native_stopped=native_stopped, restored=restored, failure=failure)

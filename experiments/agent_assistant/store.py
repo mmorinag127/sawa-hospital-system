@@ -330,6 +330,21 @@ class Store:
                 row = db.execute("UPDATE runs SET generation=generation+1,status='stopping',updated=? WHERE id=? RETURNING generation", (now(), ident)).fetchone()
             return (self.decode(previous), row['generation']) if row else None
 
+    def finish_stop(self, ident, generation, *, native_stopped, restored, failure=None):
+        status = ('rolled_back' if restored else 'stopped') if native_stopped else (
+            'rollback_stop_pending' if restored else 'stop_pending')
+        with self.tx() as db:
+            changed = db.execute("UPDATE runs SET status=?,reserved=CASE WHEN ? THEN 0 ELSE reserved END,updated=? "
+                "WHERE id=? AND generation=? AND status IN ('stopping','stop_pending','rollback_stop_pending')",
+                (status, native_stopped, now(), ident, generation))
+            if changed.rowcount != 1:
+                raise Conflict('停止対象の世代が変更されています')
+            if failure:
+                suffix = '業務停止と予約枠の解放は完了しました。' if native_stopped else '業務停止を確認できないため、予約枠は保持しています。'
+                db.execute("INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)",
+                    (ident, 'error', json.dumps({'code': 'provider_stop_or_usage_failed',
+                        'generation': generation, 'message': failure + suffix}, ensure_ascii=False), now()))
+
     def event(self, ident, kind, payload, provider_id=None):
         with self.tx() as db:
             cur = db.execute("INSERT OR IGNORE INTO events(run_id,provider_id,kind,payload,created) VALUES(?,?,?,?,?)",

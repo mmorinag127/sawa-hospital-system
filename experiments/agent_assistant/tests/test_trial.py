@@ -264,6 +264,29 @@ def test_budget_rejection_and_reservation_breakdown(tmp_path, monkeypatch):
         assert store.find_request("user", "second-run") is None
 
 
+def test_budget_can_be_restored_below_recorded_use_and_reservations(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAWA_TRIAL_OPERATOR_ACCOUNT", "user")
+    async def close():
+        pass
+    app = create_app({}, tmp_path, managed_client=SimpleNamespace(close=close))
+    store = app.state.store
+    store.set_budget(1030)
+    first, _ = store.create("user", "first-run", "FAX", ["hospital"], 1030)
+    store.update(first["id"], status="waiting_input", spent=716, reserved=287)
+    with TestClient(app) as client:
+        client.get("/")
+        response = client.put("/budget", json={"monthly_cents": 1000})
+        assert response.status_code == 200
+        assert response.json()["available_cents"] == 0
+        assert response.json()["spent_cents"] == 716
+        assert response.json()["reserved_cents"] == 287
+        assert store.get(first["id"])["status"] == "waiting_input"
+        rejected = client.post("/runs", json={"request_key": "second-run", "instruction": "FAX",
+                                             "domains": ["hospital"], "cap_cents": 1})
+        assert rejected.status_code == 409
+        assert rejected.json()["code"] == "monthly_budget_unavailable"
+
+
 @pytest.mark.parametrize("status,phase,release", [
     ("completed", "completed", True),
     ("completed", "saving", False),
@@ -400,7 +423,7 @@ def test_managed_stream_opens_before_message_and_waits_for_human(tmp_path):
 
 def test_stop_reaps_local_writes_even_when_provider_stop_unknown(tmp_path):
     store, sandbox, tools, run = prepared(tmp_path)
-    store.update(run["id"], session_id="sesn-unknown")
+    store.update(run["id"], session_id="sesn-unknown", spent=13, reserved=87, status="stop_pending")
     calls = []
     async def local_stop(ident, *, expected_generation=None):
         assert expected_generation == store.get(ident)["generation"]
@@ -412,9 +435,11 @@ def test_stop_reaps_local_writes_even_when_provider_stop_unknown(tmp_path):
     managed = Managed(store, sandbox, tools, build_mcp(tools), {}, client=SimpleNamespace(beta=SimpleNamespace(sessions=Sessions())))
     asyncio.run(managed.stop(run["id"]))
     assert calls == [run["id"]]
-    assert store.get(run["id"])["status"] == "stop_pending"
+    assert store.get(run["id"])["status"] == "stopped"
     assert store.get(run["id"])["generation"] == 1
-    assert store.get(run["id"])["reserved"] == run["cap"]
+    assert store.get(run["id"])["reserved"] == 0
+    assert store.get(run["id"])["spent"] == 13
+    assert store.latest_event(run["id"], "error")["payload"]["code"] == "provider_stop_or_usage_failed"
 
 
 def test_retrying_remote_stop_preserves_completed_local_rollback(tmp_path):

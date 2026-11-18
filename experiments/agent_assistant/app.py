@@ -310,14 +310,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
 
     @app.put("/budget")
     def set_budget(payload: Budget):
-        # Local operator only; this trial is deliberately not a shared production service.
-        month = store.budget()["month"]
-        with store.tx() as db:
-            allocated = db.execute("SELECT COALESCE(SUM(spent+reserved),0) FROM runs WHERE month=?", (month,)).fetchone()[0]
-            if allocated > payload.monthly_cents:
-                raise Conflict("使用済み・予約中の合計より小さく設定できません。実行中の依頼を停止してください")
-            db.execute("UPDATE settings SET monthly_cents=? WHERE id=1", (payload.monthly_cents,))
-        return store.budget()
+        return store.set_budget(payload.monthly_cents)
 
     @app.get("/runs")
     async def runs(request: Request):
