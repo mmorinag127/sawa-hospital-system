@@ -2,6 +2,9 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),ts=require('typescript');
 const source=fs.readFileSync(path.join(__dirname,'../src/pages/orders/[id]/workflow-v2.tsx'),'utf8');
 const ast=ts.createSourceFile('workflow.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+const quantities={};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../src/features/orders/sheetQuantities.ts'),'utf8'),
+  {compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS}}).outputText,{exports:quantities});
 function actual(name,context){
   let expression;
   function visit(node){if(ts.isVariableDeclaration(node)&&node.name.getText(ast)===name)expression=node.initializer?.getText(ast);ts.forEachChild(node,visit);}
@@ -49,6 +52,7 @@ function harness(){
     setSheetAutoEditResult:()=>{},setLocalAnomalyReview:()=>{},setSelectedAnomalyIndex:()=>{},setSelectedAutoEditIndex:()=>{},
     refreshAll:async current=>{if(current&&!current())throw Error('retired refresh');},loadFacilityTemplateStatus:async()=>{},
     defaultSheet:{},formatJson:value=>JSON.stringify(value),invalidateSheetPreSaveChecks:()=>{},
+    quantityReview:quantities.quantityReview,editableQuantities:quantities.editableQuantities,
     isPositiveWorkflowRevision:value=>Number.isInteger(value)&&value>0,workflowRevisionTokenFromRead:value=>({revision:value.revision,bootstrap:false}),setWorkflow:value=>{context.workflow=value;},
     formatApiError:(error,message)=>`${message}:${error.message}`,
     apiClient:{get:async(url,config)=>{state.calls.push({method:'GET',url,config});return{data:review};},
@@ -228,7 +232,8 @@ for(const kind of ['pdf','order','route','auth','manual','sheet','unmount','busy
 test('normal columns/copy retain original payload and null/zero values; actual runOcr uses explicit PDF and CAS',async()=>{
   const columns=harness();await actual('saveFacilityTemplateColumns',columns.context)();
   assert.deepEqual(columns.state.calls[0].body,{columns:[{quantity:0,unknown:null}]});assert.equal(columns.state.calls[0].config.headers['If-Match'],'"8"');assert.equal(columns.state.discard,1);
-  const copy=harness(),savedSheet={base_evidence_run_id:'own-evidence',template_version_id:'own-template',rows:[['7','1',0,null,'']],unknown:{zero:0,value:null}};
+  const copy=harness(),savedSheet={base_evidence_run_id:'own-evidence',template_version_id:'own-template',
+    fields:['qty.breakfast','qty.lunch','source_zero','source_null','remarks'],rows:[['7','1',0,null,'']],unknown:{zero:0,value:null}};
   const originalSheet=plain(savedSheet);
   copy.context.sheetPayload=copy.context.sheetPayloadRef.current=savedSheet;
   copy.context.workflow={order_id:'order-A',revision:8,saved_sheet_id:'own-saved',selected_ocr_result_id:'own-evidence',template_version_id:'own-template'};

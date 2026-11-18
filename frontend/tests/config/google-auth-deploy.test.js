@@ -145,11 +145,13 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.match(prodWorkflow, /--deploy-verification-token "\$DEPLOY_ID_TOKEN"/);
   assert.equal((prodWorkflow.match(/DEPLOY_ID_TOKEN:/g) || []).length, 3);
   assertOidcContract(stgWorkflow, [
+    { jobName: "restore-ocr-selection", id: "auth", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
     { jobName: "rehearse-retained-worker", id: "auth", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}", audience: "${{ env.WORKER_URL }}", healthOnly: true },
     { jobName: "deploy-backend", id: "auth-backend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
     { jobName: "deploy-frontend", id: "auth-frontend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STG }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_STG }}" },
   ]);
   assertOidcContract(prodWorkflow, [
+    { jobName: "online-production", id: "auth", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}" },
     { jobName: "prod-db-bootstrap-gate", id: "auth-db", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}" },
     { jobName: "deploy-backend", id: "auth-backend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}" },
     { jobName: "deploy-frontend", id: "auth-frontend", provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}", serviceAccount: "${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT_PROD }}" },
@@ -157,8 +159,11 @@ test("deploy verification uses ephemeral Google OIDC and keeps positive safety g
   assert.match(prodWorkflow, /test "\$EVENT_NAME" = "workflow_dispatch"/);
   assert.match(prodWorkflow, /test "\$ACTOR" = "\$OWNER"/);
   assert.match(prodWorkflow, /test "\$PRODUCTION_CONFIRMATION" = "DEPLOY_PRODUCTION"/);
+  assert.equal(yaml.load(prodWorkflow).jobs["online-production"].environment, "production");
   assert.match(stgWorkflow, /bash scripts\/bootstrap_automation_user\.sh stg/);
   const jobs = yaml.load(stgWorkflow).jobs;
+  assert.equal(jobs["restore-ocr-selection"].needs, "source-gate");
+  assert.equal(jobs["restore-ocr-selection"].if, "inputs.mode == 'restore-ocr-selection'");
   const backendChanged = "needs.source-gate.outputs.backend_changed == 'true'";
   assert.deepEqual(jobs["menu-master-migration"].needs, ["source-gate", "automation-bootstrap", "build-backend"]);
   assert.equal(jobs["menu-master-migration"].if, backendChanged);

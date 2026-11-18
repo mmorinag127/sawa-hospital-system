@@ -113,7 +113,7 @@ for (const kind of ['quad', 'header', 'row']) test(`actual DOM ${kind} normal re
       assert.deepEqual(copy(put.body.day_labels), ['2026-10-25', '2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31']);
     }
     assert.equal(put.config.headers['If-Match'], '"7"'); assert.equal(post.config.headers['If-Match'], '"8"');
-    assert.deepEqual(copy(post.body), { stale_action: 'retry', force: true, mode: 'hakodate', document_id: documentId });
+    assert.deepEqual(copy(post.body), { stale_action: 'retry', force: true, mode: 'hakodate', document_id: documentId, rotation_degrees: 0 });
     assert.equal(probe.current.workflow.revision, 9); assert.equal(probe.current.visibleStep, 2);
     assert.equal(probe.current.busy, ''); assert.equal(loadingOf(probe.current, kind), false);
   } finally { await h.close(); }

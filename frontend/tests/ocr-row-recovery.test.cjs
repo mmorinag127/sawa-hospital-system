@@ -29,6 +29,7 @@ function fixture() {
   const noop = () => {};
   const context = {
     setHeaderAxisMessage: noop, setRowAxisMessage: value => messages.push(value),
+    effectiveFaxRotation: 0,
     headerAxisReview: null, rowAxisReview: review, headerAxisXs: [], rowAxisYs: Array.from({length: 57}, (_, index) => index * 10),
     rowDayBoundaries: ['0', '8', '16', '24', '32', '40', '48', '56'],
     axisSourceRef: {current: {row: {review, own}}}, ownsPageContext: () => true,
@@ -58,6 +59,7 @@ test('row save sends explicit day labels and boundaries and retires consented lo
   assert.equal(f.calls[0].body.day_labels[3], '2026-10-28');
   assert.deepEqual(Array.from(f.calls[0].body.corrected_ys), Array.from({length: 57}, (_, index) => index * 10));
   assert.equal(f.calls[1].body.document_id, 'original-pdf');
+  assert.equal(f.calls[1].body.rotation_degrees, 0);
   assert.deepEqual(f.retired, ['row']);
 });
 test('declined replacement preserves input and never saves or reruns', async () => {
@@ -101,8 +103,11 @@ for (const [stage, action, label] of [
     routerState: {isReady: true, query: {id}}});
   try {
     await h.waitFor(() => h.document.body.textContent.includes('exact-original-cause'));
-    const alert = [...h.document.querySelectorAll('[role="alert"]')].find(node => node.textContent.includes('exact-original-cause'));
+    const geometry = stage === 'row_day_boundaries' || stage === 'quad_estimation';
+    const alert = [...h.document.querySelectorAll(geometry ? '[role="status"]' : '[role="alert"]')]
+      .find(node => node.textContent.includes('exact-original-cause'));
     assert.ok(alert);
-    assert.deepEqual([...alert.querySelectorAll('button')].map(node => node.textContent.trim()), label ? [label] : []);
+    assert.deepEqual([...alert.querySelectorAll('button')].map(node => node.textContent.trim()),
+      geometry ? ['原本の位置を確認する', label] : label ? [label] : []);
   } finally {await h.close();}
 });

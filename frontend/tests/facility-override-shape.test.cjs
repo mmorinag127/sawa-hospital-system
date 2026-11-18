@@ -38,8 +38,8 @@ test('missing or invalid outer config is never optional override absence', () =>
 function liveDeclaration(name) {
   const root = path.join(__dirname, '../..');
   const file = 'frontend/src/pages/orders/[id]/workflow-v2.tsx';
-  const reference = '227cae9:' + file;
-  execFileSync('git', ['merge-base', '--is-ancestor', '227cae9', 'HEAD'], { cwd: root });
+  const reference = '9e3b6793:' + file;
+  execFileSync('git', ['merge-base', '--is-ancestor', '9e3b6793', 'HEAD'], { cwd: root });
   const base = execFileSync('git', ['show', reference], { cwd: root, encoding: 'utf8' });
   const declaration = text => {
     const parsed = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -62,6 +62,7 @@ test('live geometry handler retains exact PDF source receipt, ownership and revi
   assert.ok(save.includes('geometry_source_digest'));
   assert.ok(save.includes('workflowMutationConfig(captured)'));
   assert.ok(save.includes('ownsQuadInput(own)'));
+  assert.ok(save.includes('rotation_degrees: effectiveFaxRotation'));
 });
 test('live facility columns handler retains exact canonical facility and command ownership', () => {
   const save = liveDeclaration('saveFacilityTemplateColumns');
