@@ -20,7 +20,7 @@ const assistantApi = {
 };
 
 type Task = { requires_agent?:boolean; id: string; domain: string; label: string; description: string; steps: string[]; target_kind?: string; month?: boolean; date?:boolean; default_month?: string };
-type Fax = { fax_id: string; state: string; snapshot: { name: string; facility: string; week: string }; decision?: { message: string }; review?: { id: string; summary: string; sheet: { header?: any[]; fields?: any[]; rows?: any[][] }; original: { id: string; name: string } } };
+type Fax = { fax_id: string; state: string; snapshot: { name: string; facility: string; week: string }; decision?: { message: string }; review?: { id: string; summary: string; sheet: { header?: any[]; fields?: any[]; rows?: any[][] }; original: { id: string; name: string }; quantity_review?: {cell_issues:{row_index:number;column_index:number}[]} } };
 type Selection = { hospital_source?:HospitalSource; inputs?:Record<string,any>; month_choices?:{month:string;label:string;reason:string}[]; batches?:{label:string;keys:string[];reason:string}[]; absence_days?:{date:string;label:string}[]; selection_id: string; choices: {key:string;label:string;data:Record<string,any>}[]; schools:{id:number;name:string}[]; layouts:{id:number;name:string;version:number}[]; work_days?:{service_date:string;menu_names:string[];menu_count:number;reason:string;missing:string[]}[] };
 type TaskReview = {id:string;state:string;summary:string;evidence:{operation:string;data:any}[];actions:{operation:string;parameters:any}[];decision?:{approve:boolean;message:string}};
 type ChatMessage = {question_map?:QuestionMap;id:string;role:"assistant"|"user";text:string;question_id?:string;options?:string[];process_context?:{answered:number;total:number;kind?:string}};
@@ -36,7 +36,8 @@ type Run = { business?:BusinessProgress; business_messages?:ChatMessage[]; reque
   fax_page?:{next_after:number|null;state:string;summary:{total:number;states:Record<string,number>}};
   artifact_page?:{next_after:number|null};
   artifacts?: { id: string; name: string; size: number }[] };
-type Budget = { monthly_cents: number; spent_cents: number; reserved_cents: number; available_cents: number; notice: string };
+type Budget = { monthly_cents: number; spent_cents: number; reserved_cents: number; available_cents: number; notice: string;
+  reservations?: { id: string; instruction: string; status: string; reserved: number }[] };
 type HospitalSource = {uri:string;sha256:string;captured_at:string;orders:{order_id:string;facility_id:string;week:string}[]};
 type Configuration = { hospital_source?:HospitalSource; run_cap_cents?:number; provider_id?:string; provider?:string; providers?:{id:string;label:string;missing:string[]}[]; missing: string[]; domains: Record<string, { configured: boolean; baseline_ready: boolean; data?: string }>; budget: Budget };
 const labels: Record<string, string> = { hospital: "病院注文", shift: "シフト", "school-lunch": "学校給食" };
@@ -74,6 +75,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskId, setTaskId] = useState("");
   const [corrections, setCorrections] = useState<Record<string, string>>({});
+  const [editingFax, setEditingFax] = useState("");
   const [targetMonth,setTargetMonth]=useState("");
   const [serviceDate,setServiceDate]=useState("");
   const [absenceDate,setAbsenceDate]=useState("");
@@ -262,7 +264,18 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
 
   useEffect(()=>{setSource(null);setSourceChecked(false);setConfirmRollback(false);},[selected?.id]);
 
-  function showError(e: any) { const detail=e?.response?.data?.detail;const text=typeof detail==="string" ? detail : Array.isArray(detail) ? detail.map(item=>item.msg || item.message).filter(Boolean).join("。") : detail?.message || e?.message || "処理を進められませんでした。入力内容を確認してください。";setError(!adminView && /(?:API|revision|draft_id|If-Match|接続先|予算|token|timeout)/i.test(text) ? "処理状況をシステム側で確認しています。回答した内容はこの画面に保持されています。" : text); }
+  function showError(e: any) {
+    const data = e?.response?.data;
+    if (e?.response?.status === 409 && data?.code === "monthly_budget_unavailable" && data.budget) {
+      const budget = data.budget;
+      setError(`月次予算の空きが足りないため、依頼を開始していません。依頼上限 ${dollars(budget.requested_cents)}、利用可能 ${dollars(budget.available_cents)}（月次上限 ${dollars(budget.monthly_cents)}、使用済み ${dollars(budget.spent_cents)}、予約中 ${dollars(budget.reserved_cents)}）。`);
+      return;
+    }
+    const detail = data?.detail;
+    const text = typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map(item=>item.msg || item.message).filter(Boolean).join("。") : detail?.message || e?.message || "処理を進められませんでした。入力内容を確認してください。";
+    setError(!adminView && /(?:API|revision|draft_id|If-Match|接続先|token|timeout)/i.test(text)
+      ? "依頼を進められませんでした。入力は保持されています。管理画面で詳細を確認してください。" : text);
+  }
   async function act(fn: () => Promise<void>) {
     pendingRequests.current++;setError(""); setBusy(true);
     try { await fn(); } catch (e) { showError(e); } finally { pendingRequests.current--;setBusy(pendingRequests.current>0); }
@@ -420,6 +433,33 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     if (!selected || !fax.review) return;
     await act(async () => { await submitDecision(`/assistant-trial/runs/${selected.id}/faxes/${fax.fax_id}/decision`, { review_id: fax.review!.id, approve, message: approve ? "" : corrections[faxCorrectionKey(selected.id,fax)] || "" },fax.fax_id); await refreshAfterCommand(selected.id); });
   }
+  async function editFax(event:FormEvent<HTMLFormElement>, fax:Fax) {
+    event.preventDefault();
+    if (!selected || !fax.review) return;
+    const form = new FormData(event.currentTarget);
+    const {fields = [], rows = []} = fax.review.sheet;
+    const edits = rows.flatMap((row, i) => fields.flatMap((field, j) => {
+      const value = form.get(`cell-${i}-${j}`);
+      if (typeof value !== "string" || value === String(row[j] ?? "")) return [];
+      return [{date_mmdd: row[fields.indexOf("date_mmdd")], daypart: row[fields.indexOf("daypart")],
+        menu: row[fields.indexOf("menu")], field, value}];
+    }));
+    if (!edits.length) { setEditingFax(""); return; }
+    const id = selected.id;
+    const reviewId = fax.review.id;
+    await act(async () => {
+      try {
+        await assistantApi.post(`/assistant-trial/runs/${id}/faxes/${fax.fax_id}/decision`,
+          {review_id:reviewId, approve:false, cell_edits:edits});
+      } catch (e:any) {
+        if (e.response && e.response.status < 500) throw e;
+        await refreshAfterCommand(id);
+        throw new Error("訂正の受付結果を受信できませんでした。再送せず、現在の確認案を表示します。");
+      }
+      setEditingFax("");
+      await refreshAfterCommand(id);
+    });
+  }
   const view=selected ? businessProgress(selected) : null;
   const terminal=!!selected && (adminView ? ["completed","stopped","rolled_back","failed"].includes(selected.status) : ["completed","archived"].includes(view!.state));
   const awaitingSource=selected?.status==="waiting_input" && (adminView || view?.next_action==="source") && selected.task_id==="lunch_import" && !(selected.source_attached ?? selected.events?.some(event=>event.kind==="source"));
@@ -483,6 +523,15 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   return <main className="assistant-page" ref={pageRef}>
     <header className="assistant-heading"><div><p className="eyebrow">業務アシスタント</p><h1>{adminView ? "利用料金の管理" : "AIに依頼"} <span className="trial-tag">試用版</span></h1><p className="assistant-description">{adminView ? "利用金額と上限を確認できます。" : "作業を選んだら、あとは質問に答えるだけ。内容を確認してから保存します。"}</p></div><Link className="quiet-link" href={adminView ? "/assistant" : "/assistant-admin"}>{adminView ? "作業画面へ" : "利用料金・管理"}</Link></header>
     {error && <div role="alert" className="assistant-error">{error}</div>}
+    {adminView && !!config?.budget.reservations?.length && <section className="assistant-panel">
+      <h2>予約中の依頼</h2>
+      <ul>{config.budget.reservations.map(run => <li key={run.id}>
+        <button className="history-row" disabled={busy} onClick={() => openRun(run.id)}>
+          <span>{run.instruction} <small>{run.id.slice(0, 8)}</small></span>
+          <span>{states[run.status] || run.status} · {dollars(run.reserved)}</span>
+        </button>
+      </li>)}</ul>
+    </section>}
     {adminView && config && <section className="assistant-panel"><h2>病院注文の試用原本</h2>{config.hospital_source && <><p>{config.hospital_source.captured_at}</p><ul>{config.hospital_source.orders.map(order=><li key={order.order_id}>{order.order_id} / {order.facility_id} / {order.week}</li>)}</ul></>}<form onSubmit={event=>{event.preventDefault();void act(async()=>{await apiClient.put("/assistant-trial/hospital-source",{uri:hospitalSourceUri,sha256:hospitalSourceHash},{timeout:BUSINESS_TIMEOUT});resetTargets();await load(selected?.id);});}}><label>原本セットURI<input value={hospitalSourceUri} onChange={event=>setHospitalSourceUri(event.target.value)} required/></label><label>SHA-256<input value={hospitalSourceHash} onChange={event=>setHospitalSourceHash(event.target.value)} pattern="[0-9a-f]{64}" required/></label><button disabled={busy}>原本セットを登録する</button></form></section>}
     {pollNotice && <p role="status" className="muted">{pollNotice}</p>}
     {pendingCreate && <p className="assistant-notice">依頼の受付を確認しています。同じ依頼は再送していません。</p>}
@@ -499,6 +548,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
         <div className="assistant-fields">
           {["hospital_review_faxes","hospital_outputs"].includes(taskId) && <label>元にする依頼<select value={sourceRunId} onChange={e=>{setSourceRunId(e.target.value);resetTargets();}}><option value="">初期データ</option>{runs.filter(run=>["hospital_pending_faxes","hospital_review_faxes"].includes(run.task_id || "") && (taskId==="hospital_outputs" ? run.status==="completed" : ["running","waiting_input"].includes(run.status))).map(run=><option key={run.id} value={run.id}>{run.instruction}（{run.id.slice(0,8)}）</option>)}</select></label>}
           <label>この依頼の上限（USD）<input type="number" min="0.01" step="0.01" value={runCapUsd} placeholder={((config?.run_cap_cents ?? 100)/100).toFixed(2)} onChange={e=>{setRunCapUsd(e.target.value);setRequestKey("");}}/></label>
+          {config && <p>月次の利用可能額：{dollars(config.budget.available_cents)}。未入力時の依頼上限：{dollars(config.run_cap_cents ?? 100)}。</p>}
           {taskId==="shift_absence" && <section className="work-day-proposals"><h3>いつの欠勤ですか？</h3><div className="answer-options">{selection?.absence_days?.map(day=><button type="button" key={day.date} aria-pressed={(absenceDate || selection.inputs?.absence_date)===day.date} onClick={()=>{setAbsenceDate(day.date);resetTargets();}}>{day.label}</button>)}</div><label>別の日を指定する<input type="date" value={absenceDate || selection?.inputs?.absence_date || ""} onChange={e=>{setAbsenceDate(e.target.value);resetTargets();}}/></label><p className="muted">勤務期間は欠勤日から自動で確認します。</p></section>}
           {task?.domain==="school-lunch" && !!selection?.schools.length && <fieldset className="target-choices school-choices"><legend>どの学校の作業ですか？</legend>{selection.schools.map(x=><label className="target-choice" key={x.id}><input type="radio" name="school" value={x.id} checked={schoolId===String(x.id)} onChange={()=>{setSchoolId(String(x.id));setServiceDate("");setTargetMonth("");resetTargets();}}/><span>{x.name}</span></label>)}</fieldset>}
         </div>
@@ -535,18 +585,31 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
         {[...selected.fax_items].sort((a,b)=>Number(b.state==="awaiting_approval")-Number(a.state==="awaiting_approval")).map(fax=>{
           const correctionKey=faxCorrectionKey(selected.id,fax);
           const correction=corrections[correctionKey] || "";
+          const editing=editingFax===correctionKey && fax.state==="awaiting_approval" && selected.status==="running";
+          const issues=new Set(fax.review?.quantity_review?.cell_issues.map(issue=>`${issue.row_index}-${issue.column_index}`));
           return <article key={correctionKey} className="fax-item">
             <h4>{fax.snapshot.name}</h4>
             <p>{fax.snapshot.facility} ／ {fax.snapshot.week} ／ {({pending:"処理待ち",processing:"読み取り中",ready:"内容を照合中",awaiting_approval:"内容を確認してください",approved:"確定処理中",needs_correction:"訂正中",completed:"注文確定済み",blocked:"要確認"} as Record<string,string>)[fax.state] || fax.state}</p>
             {fax.review && <>
               <p>{fax.review.summary}</p>
               <button disabled={busy} onClick={()=>act(()=>download(fax.review!.original))}>原本PDFを開く</button>
-              <section><h4>読み取った数量</h4><div className="sheet"><table><thead><tr>{(fax.review.sheet.header || fax.review.sheet.fields || []).map((cell,i)=><th key={i}>{String(cell ?? "")}</th>)}</tr></thead><tbody>{fax.review.sheet.rows?.map((row,i)=><tr key={i}>{row.map((cell,j)=><td key={j}>{String(cell ?? "")}</td>)}</tr>)}</tbody></table></div></section>
+              <form onSubmit={event=>void editFax(event,fax)}>
+                <h4>読み取った数量</h4>
+                <div className="sheet"><table><thead><tr>{(fax.review.sheet.header || fax.review.sheet.fields || []).map((cell,i)=><th key={i}>{String(cell ?? "")}</th>)}</tr></thead>
+                <tbody>{fax.review.sheet.rows?.map((row,i)=><tr key={i}>{row.map((cell,j)=>{
+                  const field=fax.review!.sheet.fields?.[j];
+                  return <td key={j}>{editing && (String(field ?? "").startsWith("qty.") || field==="remarks")
+                    ? <input name={`cell-${i}-${j}`} aria-label={`${i+1}行目 ${fax.review!.sheet.header?.[j] ?? field}`} defaultValue={String(cell ?? "")} disabled={busy}/>
+                    : String(cell ?? "")}{issues.has(`${i}-${j}`) && <small> 要確認</small>}</td>;
+                })}</tr>)}</tbody></table></div>
+                {editing && <><button type="submit" disabled={busy}>確認案に訂正を反映</button><button type="button" disabled={busy} onClick={()=>setEditingFax("")}>取り消す</button></>}
+              </form>
               {fax.state==="awaiting_approval" && selected.status==="running" && <>
-                <button className="primary" disabled={busy || decisionPending} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button>
+                {editingFax!==correctionKey && <button disabled={busy || decisionPending} onClick={()=>setEditingFax(correctionKey)}>原本と照合して直接訂正</button>}
+                <button className="primary" disabled={busy || decisionPending || editingFax===correctionKey} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button>
                 <section className="correction-panel"><h4>訂正してほしい箇所がある</h4>
                   <label>訂正内容<textarea value={correction} disabled={busy || decisionPending} onChange={e=>setCorrections(c=>({...c,[correctionKey]:e.target.value}))}/></label>
-                  <button disabled={busy || decisionPending || !correction.trim()} onClick={()=>decide(fax,false)}>訂正を依頼する</button>
+                  <button disabled={busy || decisionPending || editingFax===correctionKey || !correction.trim()} onClick={()=>decide(fax,false)}>訂正を依頼する</button>
                 </section>
               </>}
             </>}

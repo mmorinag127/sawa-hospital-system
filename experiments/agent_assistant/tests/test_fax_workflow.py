@@ -294,6 +294,30 @@ def test_sparse_correction_is_grounded_preserved_and_requires_new_approval(setup
     asyncio.run(scenario())
 
 
+def test_operator_correction_updates_review_only_and_cannot_be_overwritten(setup):
+    async def scenario():
+        _, native, tools, run = setup
+        native.sources['A']['status'] = 'completed'
+        native.sheets['OA'] = {'fields': ['date_mmdd', 'daypart', 'menu', 'qty.regular_x'],
+                               'rows': [['01/08', '昼', '白菜', '20']]}
+        await tools.faxes.refresh(run)
+        first = (await tools.faxes.submit(run, 'A', '照合'))['review']
+        edits = [{'date_mmdd': '01/08', 'daypart': '昼', 'menu': '白菜', 'field': 'qty.regular_x', 'value': ''}]
+        updated = (await tools.faxes.submit(run, 'A', '利用者訂正', cell_edits=edits,
+                                           operator_review_id=first['id']))['review']
+        assert updated['id'] != first['id'] and updated['sheet']['rows'][0][3] == ''
+        assert tools.faxes.item(run['id'], 'A')['state'] == 'awaiting_approval'
+        assert native.sheets['OA']['rows'][0][3] == '20' and not native.writes
+        with pytest.raises(Conflict, match='古く'):
+            await tools.faxes.decide(run, 'A', first['id'], True, '')
+        with pytest.raises(Conflict, match='上書き'):
+            await tools.faxes.submit(run, 'A', 'モデル訂正', cell_edits=[{**edits[0], 'value': '30'}])
+        await tools.faxes.decide(run, 'A', updated['id'], True, '')
+        with pytest.raises(Conflict, match='古く'):
+            await tools.faxes.submit(run, 'A', '承認後訂正', cell_edits=edits, operator_review_id=updated['id'])
+    asyncio.run(scenario())
+
+
 def test_mcp_sparse_correction_schema_and_wire_preserve_the_requested_cell(setup):
     from experiments.agent_assistant.mcp_server import build_mcp, call_local
     async def scenario():

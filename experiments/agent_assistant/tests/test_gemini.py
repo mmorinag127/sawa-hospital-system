@@ -299,6 +299,7 @@ def test_stop_during_create_keeps_receipt_without_executing_late_tools(tmp_path,
         if outcome=='timeout':
             assert agent.unsettled(run['id']) and store.get(run['id'])['status']=='stop_pending'
             assert store.get(run['id'])['reserved']==100
+            assert '応答記録がなく' in store.latest_event(run['id'], 'notice')['payload']['message']
         else:
             assert not agent.unsettled(run['id']) and store.get(run['id'])['status']=='stopped'
             assert store.get(run['id'])['reserved']==0

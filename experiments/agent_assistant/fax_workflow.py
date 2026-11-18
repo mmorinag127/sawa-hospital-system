@@ -251,13 +251,18 @@ class FaxWorkflow:
                 await run_blocking(self.set_observed, run["id"], item, state="blocked", decision={"message": str(exc)})
         return {"ok": True, "items": await run_blocking(self.items, run["id"])}
 
-    async def submit(self, run, fax_id, summary, sheet=None, cell_edits=None):
+    async def submit(self, run, fax_id, summary, sheet=None, cell_edits=None, *, operator_review_id=None):
         item = await run_blocking(self.item, run["id"], fax_id)
         if not item or not summary.strip() or len(summary) > 4000:
             raise ValueError("対象FAXと照合結果が必要です")
         if sheet is not None and cell_edits is not None:
             raise ValueError("シート全体とセル訂正は同時に指定できません")
         old = item["review"]
+        if operator_review_id is not None and (
+            run["status"] != "running" or not self.active(run) or item["state"] != "awaiting_approval"
+            or not old or old["id"] != operator_review_id or cell_edits is None
+        ):
+            raise Conflict("確認画面が古くなっています。最新の内容を開いてください")
         if old and sheet is None and cell_edits is None and item["state"] in ("needs_correction", "awaiting_approval"):
             native = await self.capture(run, item)
             if old["native_signature"] != native["signature"] or old["revision"] != native["revision"]:
@@ -279,6 +284,8 @@ class FaxWorkflow:
         # An unchanged repeated request keeps the exact human review identity.
         if old and old["signature"] == captured["signature"] and old["revision"] == captured["revision"] and item["state"] in ("awaiting_approval", "approved"):
             return {"ok": True, "review": old, "state": item["state"]}
+        if old and old.get("operator_edited") and operator_review_id is None and item["state"] == "awaiting_approval":
+            raise Conflict("利用者が訂正した確認案は承認待ちです。自動で上書きできません")
         if item["state"] in ("approved", "completed"):
             raise Conflict("回答済みの確認案は変更できません")
         agent_summary = summary
@@ -302,7 +309,20 @@ class FaxWorkflow:
         if quantity_review['cell_issues']:
             review['summary'] += '\n保存は可能ですが袋詰め前に原本確認が必要です：' + json.dumps(
                 quantity_review['cell_issues'], ensure_ascii=False)
-        await run_blocking(self.set, run["id"], fax_id, state="awaiting_approval", review=review, decision=None)
+        if operator_review_id is not None:
+            review["operator_edited"] = True
+            def save_correction():
+                with self.store.tx() as db:
+                    result = db.execute("UPDATE fax_items SET review=? WHERE run_id=? AND fax_id=? "
+                        "AND state='awaiting_approval' AND review=? AND EXISTS "
+                        "(SELECT 1 FROM runs WHERE id=? AND generation=? AND status='running')",
+                        (json.dumps(review, ensure_ascii=False), run["id"], fax_id,
+                         json.dumps(old, ensure_ascii=False), run["id"], run["generation"]))
+                    if result.rowcount != 1:
+                        raise Conflict("依頼または確認案が変更されました。訂正は保存していません")
+            await run_blocking(save_correction)
+        else:
+            await run_blocking(self.set, run["id"], fax_id, state="awaiting_approval", review=review, decision=None)
         await run_blocking(self.store.event, run["id"], "fax_review", {"fax_id": fax_id, "review_id": review["id"], "summary":summary})
         return {"ok": True, "queued_for_human": True, "review": review}
 

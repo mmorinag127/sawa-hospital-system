@@ -778,6 +778,44 @@ test('known creation rejection is displayed and does not enter unknown-outcome p
 });
 
 
+test('operator edits a FAX cell without requesting AI or approving the order',async()=>{
+ const sheet={header:['日付','食事','献立','常食'],fields:['date_mmdd','daypart','menu','qty.regular'],rows:[['01/08','昼','白菜','20']]};
+ const fax={fax_id:'fax1',state:'awaiting_approval',snapshot:{name:'FAX',facility:'施設',week:'週'},
+   review:{id:'original-review',summary:'照合',sheet,original:{id:'artifact',name:'FAX.pdf'}}};
+ const initial={...makeRun('running'),task_id:'hospital_pending_faxes',domains:['hospital'],task_inputs:{},pending_question:null,fax_items:[fax]};
+ const h=await mount({initial,beforePost:async(url)=>{
+  if(url.endsWith('/faxes/fax1/decision')){
+   h.setRun({...initial,fax_items:[{...fax,review:{...fax.review,id:'new-review',sheet:{...sheet,rows:[['01/08','昼','白菜','18']]}}}]});
+   return {data:{ok:true}};
+  }
+ }});
+ try{
+  await h.click(h.button('原本と照合して直接訂正'));
+  assert.equal(h.button('この内容で確定へ進む').disabled,true);
+  await h.change(h.document.querySelector('[name="cell-0-3"]'),'18');
+  await h.click(h.button('確認案に訂正を反映'));
+  assert.deepEqual(h.calls.filter(call=>call.url.endsWith('/decision')).map(call=>call.body),[
+   {review_id:'original-review',approve:false,cell_edits:[{date_mmdd:'01/08',daypart:'昼',menu:'白菜',field:'qty.regular',value:'18'}]},
+  ]);
+  assert.ok(h.document.querySelector('.sheet').textContent.includes('18'));
+  assert.equal(h.button('この内容で確定へ進む').disabled,false);
+ }finally{await h.close();}
+});
+
+test('monthly budget rejection shows the live allocation and says work did not start',async()=>{
+ const budget={monthly_cents:1000,spent_cents:713,reserved_cents:287,available_cents:0,requested_cents:300};
+ const h=await mount({beforePost:async url=>{if(url===base+'/runs')throw {response:{status:409,data:{code:'monthly_budget_unavailable',budget}}};}});
+ try{
+  await h.click([...h.document.querySelectorAll('.assistant-task')].find(b=>b.textContent.includes('未処理FAX')));
+  await h.wait(()=>!h.button('この内容で始める').disabled);
+  await h.click(h.button('この内容で始める'));
+  const alert=h.document.querySelector('.assistant-error').textContent;
+  assert.match(alert,/依頼を開始していません/);
+  for(const value of ['$3.00','$0.00','$10.00','$7.13','$2.87'])assert.ok(alert.includes(value));
+  assert.doesNotMatch(h.document.body.textContent,/受付を確認しています/);
+ }finally{await h.close();}
+});
+
 test('creation reconciliation never overlaps a slow initial history lookup with polling',async()=>{
  let created=false,release,reads=0;
  const h=await mount({beforeGet:async url=>{if(created&&url===base+'/run-lookup'){reads++;await new Promise(r=>release=r);}},beforePost:async(url,body)=>{if(url===base+'/runs'){created=true;h.setRun({...makeRun(),request_key:body.request_key});throw new Error('timeout');}}});

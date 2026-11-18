@@ -239,6 +239,58 @@ def test_app_auth_csrf_budget_missing_provider_and_no_auto_spend(tmp_path, monke
         assert client.get("/runs").json() == []
 
 
+def test_budget_rejection_and_reservation_breakdown(tmp_path, monkeypatch):
+    monkeypatch.setenv("SAWA_TRIAL_OPERATOR_ACCOUNT", "user")
+    async def close():
+        pass
+    app = create_app({}, tmp_path, managed_client=SimpleNamespace(close=close))
+    store = app.state.store
+    store.set_budget(1000)
+    first, _ = store.create("user", "first-run", "FAX", ["hospital"], 300)
+    store.update(first["id"], status="stop_pending", spent=13, reserved=287)
+    with TestClient(app) as client:
+        client.get("/")
+        budget = client.get("/budget").json()
+        assert budget["reservations"] == [
+            {"id": first["id"], "instruction": "FAX", "reserved": 287, "status": "stop_pending"}
+        ]
+        assert store.reservations("other", budget["month"]) == []
+        response = client.post("/runs", json={"request_key": "second-run", "instruction": "FAX",
+                                             "domains": ["hospital"], "cap_cents": 701})
+        assert response.status_code == 409
+        assert response.json()["code"] == "monthly_budget_unavailable"
+        assert response.json()["budget"] == dict(monthly_cents=1000, spent_cents=13, reserved_cents=287,
+                                                available_cents=700, requested_cents=701)
+        assert store.find_request("user", "second-run") is None
+
+
+@pytest.mark.parametrize("status,phase,release", [
+    ("completed", "completed", True),
+    ("completed", "saving", False),
+    ("stop_pending", "completed", False),
+])
+def test_refresh_releases_only_confirmed_completed_work(tmp_path, monkeypatch, status, phase, release):
+    monkeypatch.setenv("SAWA_TRIAL_OPERATOR_ACCOUNT", "user")
+    app = create_app({}, tmp_path)
+    store = app.state.store
+    store.set_budget(1000)
+    run, _ = store.create("user", "first-run", "FAX", ["hospital"], 300,
+                          task_id="hospital_pending_faxes", task_inputs={"business_workflow": {"phase": phase}})
+    store.update(run["id"], status=status, spent=13, reserved=287, session_id="provider-session")
+    calls = []
+    async def refresh(ident, *, release, terminal_generation):
+        calls.append((ident, release, terminal_generation))
+        store.usage(ident, {"list_cost": {"currency": "USD", "amount": "13"}},
+                    terminal=release, terminal_generation=terminal_generation)
+    monkeypatch.setattr(app.state.managed, "refresh_usage", refresh)
+    with TestClient(app) as client:
+        client.get("/")
+        response = client.post(f"/runs/{run['id']}/refresh-usage")
+    assert response.status_code == 200
+    assert calls == [(run["id"], release, run["generation"])]
+    assert response.json()["run"]["reserved"] == (0 if release else 287)
+
+
 class Event:
     def __init__(self, **values): self.values = values
     def model_dump(self, **_): return self.values

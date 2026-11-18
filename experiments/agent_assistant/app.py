@@ -15,12 +15,12 @@ import httpx
 
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from .providers import Providers, LABELS
 from .mcp_server import build_mcp
 from .sandbox import Sandbox, run_blocking, settle_process_task
-from .store import Store, Conflict
+from .store import Store, Conflict, MonthlyBudgetConflict
 from .tools import Tools
 from .tasks import TASKS, public_tasks
 from .conversation import conversation, pending_question, business_conversation
@@ -75,6 +75,7 @@ class FaxDecision(BaseModel):
     review_id: str
     approve: bool
     message: str = Field(default="", max_length=4000)
+    cell_edits: list[dict[str, StrictStr]] | None = Field(default=None, min_length=1, max_length=200)
 
 
 class Budget(BaseModel):
@@ -231,6 +232,9 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
 
     @app.exception_handler(Conflict)
     async def conflict(_request, exc):
+        if isinstance(exc, MonthlyBudgetConflict):
+            return JSONResponse({"detail": str(exc), "code": "monthly_budget_unavailable",
+                                 "budget": exc.amounts}, status_code=409)
         return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.exception_handler(ValueError)
@@ -252,7 +256,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                              "ocr_pipeline_configured": bool(cfg.get("env", {}).get("OCR_PIPELINE_BUCKET")) if name == "hospital" else None}
         with store.snapshot(view='configuration'):
             provider = store.provider()
-            budget = store.budget()
+            budget = budget_details()
         return {"trial": True, "provider_id": provider, "provider": LABELS[provider], "providers": managed.choices(), "missing": managed.missing(), "domains": domains,
                 "hospital_source": store.hospital_source(owner),
                 "budget": budget, "run_cap_cents": config.get("run_cap_cents",100), "notice": "専用コピーを使用。既存環境への反映はありません。"}
@@ -299,8 +303,10 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         return lookups.result(row, authorization)
 
     @app.get("/budget")
-    def budget():
-        return store.budget()
+    def budget_details():
+        with store.snapshot(view='configuration'):
+            budget = store.budget()
+            return {**budget, "reservations": store.reservations(owner, budget["month"])}
 
     @app.put("/budget")
     def set_budget(payload: Budget):
@@ -493,6 +499,12 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await authorize(request.headers.get("authorization", ""), run["domains"])
         tools.authorizations[ident] = request.headers.get("authorization", "")
         async with tools.lock(ident):
+            if payload.cell_edits is not None:
+                if payload.approve or payload.message:
+                    raise ValueError("セル訂正と確定・訂正依頼は同時に行えません")
+                current = await asyncio.to_thread(store.get, ident, owner)
+                return await tools.faxes.submit(current, fax_id, "利用者が原本と照合してセルを訂正しました。確定前に確認してください。",
+                                                cell_edits=payload.cell_edits, operator_review_id=payload.review_id)
             item = await asyncio.to_thread(tools.faxes.item, ident, fax_id)
             decision = {'review_id': payload.review_id, 'approve': payload.approve, 'message': payload.message}
             if owned(run) and item and item.get('decision') and all(item['decision'].get(key) == value for key, value in decision.items()):
@@ -818,7 +830,13 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         run = await asyncio.to_thread(store.get, ident, owner)
         if run.get("task_id")=="lunch_import" and not run["session_id"] and run["status"] in ("waiting_input","stopped","rolled_back"):
             return {"run":run,"budget":await asyncio.to_thread(store.budget),"notice":"モデル開始前のためモデル利用料金はありません。"}
-        await managed.refresh_usage(ident)
+        release = (run["status"] == "completed"
+                   and run["task_inputs"].get("business_workflow", {}).get("phase") == "completed")
+        if run["reserved"] and release and not run["session_id"]:
+            await run_blocking(store.release_unstarted_model, ident, run["generation"])
+        else:
+            await managed.refresh_usage(ident, release=bool(run["reserved"] and release),
+                                        terminal_generation=run["generation"])
         return {"run": await asyncio.to_thread(store.get, ident), "budget": await asyncio.to_thread(store.budget)}
 
     @app.post("/runs/{ident}/sources")

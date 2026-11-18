@@ -547,11 +547,15 @@ class BusinessWorkflow:
         phase = state['phase']
         if run['status'] == 'completed':
             status, title, message, action = 'completed', '作業が完了しました', '承認した内容の保存と、必要な出力の確認が完了しました。', 'outputs'
-        elif run['status'] in ('stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending', 'stopping'):
-            status, title, message, action = 'archived', '作業記録', 'この依頼の作業記録です。処理状況は管理者が確認しています。', 'none'
+        elif run['status'] in ('stop_pending', 'rollback_stop_pending', 'stopping'):
+            status, title, message, action = 'archived', '停止と料金を確定できていません', 'この依頼は処理を続けません。接続先の停止・料金が確定するまで予約額は解放されません。', 'none'
+        elif run['status'] in ('stopped', 'rolled_back'):
+            status, title, message, action = 'archived', '作業を停止しました', 'この依頼は処理を続けません。実行履歴は保持されています。', 'none'
+        elif run['status'] == 'budget_reached':
+            status, title, message, action = 'checking', '依頼の利用上限に達しました', '追加のモデル処理は開始していません。保存済みの回答・承認は保持されています。', 'none'
         elif phase == 'source':
             status, title, message, action = 'source', '原本を添付してください', '選択した学校・対象月の献立・調理手配書を添付してください。', 'source'
-        elif phase == 'support' or run['status'] in ('reconciliation_required', 'budget_reached', 'failed'):
+        elif phase == 'support' or run['status'] in ('reconciliation_required', 'failed'):
             status, title, message, action = 'checking', '保存した内容を確認しています', '回答・承認した内容は保存されています。システム側で確認しており、操作は必要ありません。解決できない場合は管理者が対応します。', 'none'
         elif review and review['state'] == 'awaiting_approval' or (any(item['state'] == 'awaiting_approval' for item in faxes) if awaiting_fax is None else awaiting_fax):
             status, title, message, action = 'review', '内容を確認してください', '内容がよければ承認してください。その後は保存・帳票作成まで自動で進みます。', 'approve'

@@ -13,6 +13,13 @@ class Conflict(ValueError):
     pass
 
 
+class MonthlyBudgetConflict(Conflict):
+    def __init__(self, limit, spent, reserved, requested):
+        super().__init__("月次予算の空きが足りないため、依頼を開始していません。")
+        self.amounts = dict(monthly_cents=limit, spent_cents=spent, reserved_cents=reserved,
+                            available_cents=max(0, limit-spent-reserved), requested_cents=requested)
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -132,6 +139,12 @@ class Store:
                     basis="provider_list_cost_or_configured_token_estimate", final_invoice=False,
                     notice="Claudeは接続先の定価換算値、Geminiはトークン数と設定単価による概算です。実行中のモデル要求により上限超過が生じることがあります。請求額・付属クレジット残高とは異なります。")
 
+    def reservations(self, owner, month):
+        with self.read() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT id,instruction,status,reserved FROM runs WHERE month=? AND owner=? AND reserved>0 "
+                "ORDER BY reserved DESC,created DESC,id", (month, owner))]
+
     def hospital_source(self, owner, value=None):
         with (self.read() if value is None else self.tx()) as db:
             if value is not None:
@@ -173,9 +186,9 @@ class Store:
                 return self.decode(old), False
             month = billing_month()
             limit = db.execute("SELECT monthly_cents FROM settings").fetchone()[0]
-            total = db.execute("SELECT COALESCE(SUM(spent+reserved),0) FROM runs WHERE month=?", (month,)).fetchone()[0]
-            if total + cap > limit:
-                raise Conflict("月次予算の空きがありません。上限または実行中の依頼を確認してください")
+            spent, reserved = db.execute("SELECT COALESCE(SUM(spent),0),COALESCE(SUM(reserved),0) FROM runs WHERE month=?", (month,)).fetchone()
+            if spent + reserved + cap > limit:
+                raise MonthlyBudgetConflict(limit, spent, reserved, cap)
             # A frozen review fork may coexist only with its quiescent source.
             source = task_inputs.get('source_copy',{})
             for active in db.execute("SELECT id,status,owner,generation,task_inputs FROM runs WHERE status NOT IN ('rolled_back','stopped','failed','completed','waiting_input','budget_reached')"):
