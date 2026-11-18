@@ -23,18 +23,25 @@ class MemoryBlob:
         self.transport = transport
         self.key = key
 
-    def upload_from_string(self, data, content_type=None):
+    def upload_from_string(self, data, content_type=None, *, if_generation_match):
+        from google.api_core.exceptions import PreconditionFailed
+
+        assert if_generation_match == 0
         self.transport.events.append(("upload", self.key, bytes(data), content_type))
         if self.transport.failure is not None:
             raise self.transport.failure
+        if self.key in self.transport.objects:
+            raise PreconditionFailed("already exists")
         self.transport.objects[self.key] = bytes(data)
+        self.transport.generations[self.key] = "101"
 
-    def reload(self, *, retry):
+    def reload(self, *, retry, timeout=None):
         assert retry is None
         self.generation = self.transport.generations[self.key]
         self.transport.events.append(("reload", self.key, self.generation))
 
     def download_as_bytes(self, **kwargs):
+        kwargs.pop("timeout", None)
         if kwargs:
             generation = self.transport.generations[self.key]
             assert kwargs == {"if_generation_match": int(generation), "retry": None}
@@ -228,6 +235,11 @@ def test_actual_upload_materialize_and_workbook_validation(storage_component, mo
         ("upload", key, data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         ("download", key),
     ]
+    assert order_form_service.save_facility_source_workbook_upload(
+        facility_id="synthetic-storage", filename="authored.xlsx", data=data,
+    ) == result
+    assert client.objects == {key: data}
+    assert client.generations[key] == "101"
     files = list(materialized.iterdir())
     assert files == [materialized / f"{digest}.xlsx"]
     assert files[0].read_bytes() == data

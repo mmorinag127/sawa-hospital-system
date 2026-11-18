@@ -426,7 +426,7 @@ def save_artifact_bytes_to_gcs(
     bucket: str, job_id: str, name: str, data: bytes, content_type: str | None = None
 ) -> str:
     object_path = build_artifact_path(job_id, name)
-    return save_bytes_to_gcs(bucket, object_path, data, content_type=content_type)
+    return save_bytes_to_gcs(bucket, object_path, data, content_type=content_type, immutable=True)
 
 
 def save_output_bytes_to_gcs(

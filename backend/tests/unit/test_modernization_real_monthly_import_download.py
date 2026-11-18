@@ -8,7 +8,7 @@ Archive tampering below is a restored component fault, not an operator action.
 """
 
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -27,6 +27,24 @@ from src.services import menu_upload_archive_service as archive
 
 MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 FILENAME = "synthetic-monthly-menu.xlsx"
+
+
+def test_cloud_archive_requires_immutable_write(monkeypatch):
+    calls = []
+    monkeypatch.setattr(archive, "get_manual_upload_storage_status", lambda: {"mode": "gcs", "bucket": "test-archive"})
+
+    def save(bucket, path, data, *, content_type, immutable):
+        assert immutable is True
+        calls.append((bucket, path, data, content_type))
+        return f"gs://{bucket}/{path}"
+
+    monkeypatch.setattr(archive, "save_bytes_to_gcs", save)
+    original = synthetic_workbook(11)
+    inputs = dict(month_id="2026-11", file_bytes=original,
+                  original_filename=FILENAME, uploaded_at=datetime(2026, 11, 18))
+    assert archive.save_monthly_menu_upload(**inputs) == archive.save_monthly_menu_upload(**inputs)
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert calls[0][2:] == (original, MIME)
 
 
 def synthetic_workbook(month):

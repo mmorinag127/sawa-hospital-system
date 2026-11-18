@@ -73,7 +73,7 @@ def save_monthly_menu_upload(
     if storage_status.get("mode") == "gcs":
         bucket = str(storage_status.get("bucket") or "").strip()
         object_path = f"{prefix}/{object_name}"
-        file_uri = save_bytes_to_gcs(bucket, object_path, file_bytes, content_type=media_type)
+        file_uri = save_bytes_to_gcs(bucket, object_path, file_bytes, content_type=media_type, immutable=True)
     elif storage_status.get("mode") == "local_ephemeral":
         storage = StorageService(_local_storage_base())
         file_uri = storage.save_bytes(f"{prefix}/{object_name}", file_bytes)
