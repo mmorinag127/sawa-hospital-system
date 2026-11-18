@@ -715,7 +715,7 @@ def audit(event, args):
                 caller = sys._getframe(1)
                 kind = ('directory-names' if event == 'os.listdir' else
                     'walk-directory' if caller.f_globals.get('__name__') == 'os'
-                        and caller.f_code.co_name == '_walk' else 'directory')
+                        and caller.f_code.co_name in {'_walk', 'walk'} else 'directory')
                 name = kind + ':' + str(path.relative_to(ROOT))
                 value = input_digest(name)
                 if value is None:

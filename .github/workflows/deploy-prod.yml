@@ -430,6 +430,8 @@ jobs:
           id_token_include_email: true
       - uses: google-github-actions/setup-gcloud@v3
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.4"
       - name: Verify and roll out without maintenance
         env:
           ONLINE_RELEASE: "true"

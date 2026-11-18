@@ -122,7 +122,7 @@ test('source routes, lifecycle and no-action boundary remain grounded in current
   const shipping = read('../../src/pages/shipping.tsx');
   for (const disabled of ['pdfLoading', 'excelLoading', 'trackingLoading']) assert.ok(shipping.includes(`disabled={${disabled}}`));
   const pdf = read('../../src/pages/pdf-upload.tsx');
-  assert.ok(pdf.includes('disabled={loading || !selectionCurrent || !selectionConfirmed}'));
+  assert.ok(pdf.includes('disabled={loading || pagesLoading || (monthlyPageReview && !pagesCurrent) || !selectionCurrent || !selectionConfirmed}'));
   assert.ok(pdf.includes('初期表示では重い一覧取得を行いません。'));
   const helper = read('../../scripts/operator-entry-readonly-pages.mjs');
   assert.doesNotMatch(helper, /\.post\(|\.put\(|\.delete\(|setInputFiles|request\.get|fetch\(/);

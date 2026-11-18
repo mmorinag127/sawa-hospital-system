@@ -44,7 +44,10 @@ for (const status of [200, 409] as const) test(`current OCR selection uses the e
     await expect(page.locator('[data-sheet-row="0"][data-sheet-col="2"]')).toHaveValue("Selected Menu A");
     await expect(page.locator('[data-sheet-row="0"][data-sheet-col="3"]')).toHaveValue("21");
     await expect(page.locator('[data-sheet-row="0"][data-sheet-col="4"]')).toHaveValue("0");
-    await expect(page.locator('[data-sheet-row="1"][data-sheet-col="3"]')).toHaveValue("?");
+    await expect(page.locator('[data-sheet-row="1"][data-sheet-col="3"]')).toHaveValue("");
+    const review = page.locator(".quantity-original-review");
+    await review.getByText(/未確定の数量.*OCR原文を確認/).click();
+    await expect(review.getByRole("cell", {name: "?", exact: true})).toBeVisible();
     await expect(page.locator('[data-sheet-row="1"][data-sheet-col="4"]')).toHaveValue("");
     expect(sheetReads).toBe(1);
   } else {

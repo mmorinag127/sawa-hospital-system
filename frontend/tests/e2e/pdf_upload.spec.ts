@@ -122,6 +122,16 @@ test("pdf upload form sends the explicitly selected MUI facility and week", asyn
         version: { version_id: "upload-version-1" } } });
       return;
     }
+    if (url.pathname.endsWith("/ingest/upload-preview") && method === "POST") {
+      await route.fulfill({ status: 200, json: {
+        facility_id: "FAC-E2E", week_hint: "2026-05@2026-05-01~2026-05-02",
+        date_from: "2026-05-01", date_to: "2026-05-02", calendar_from: "2026-04-26", calendar_to: "2026-05-02",
+        cross_month: true, requires_review: true,
+        files: [{file_index: 0, filename: "selected.pdf", sha256: "a".repeat(64),
+          pages: [{page_number: 1, sha256: "a".repeat(64), image_url: ""}]}],
+      } });
+      return;
+    }
     if (url.pathname.endsWith("/ingest/upload") && method === "POST") {
       multipartPayload = route.request().postData() || "";
       await route.fulfill({ status: 200, json: { accepted: true, filename: "selected.pdf" } });
@@ -138,10 +148,14 @@ test("pdf upload form sends the explicitly selected MUI facility and week", asyn
   await page.getByLabel("施設版の適用日", { exact: true }).fill("2026-05-01");
   await page.getByText("この施設版を使用する", { exact: true }).locator("..").getByRole("checkbox").check();
   await page.locator('input[type="file"]').setInputFiles({ name: "selected.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4") });
+  await expect(page.getByRole("button", { name: "PDFを登録" })).toBeDisabled();
+  await page.getByRole("button", { name: "原本ページを確認" }).click();
+  await page.getByRole("checkbox", { name: "selected.pdf 1ページを対象期間に登録" }).check();
   await page.getByRole("button", { name: "PDFを登録" }).click();
   expect(multipartPayload).toContain("FAC-E2E");
   expect(multipartPayload).toContain("2026-05@");
   expect(multipartPayload).toContain("2026-05-01");
   expect(multipartPayload).toContain("upload-facilities-1");
   expect(multipartPayload).toContain("upload-version-1");
+  expect(multipartPayload).toContain("page_selection");
 });
