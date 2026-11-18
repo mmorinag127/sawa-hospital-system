@@ -213,7 +213,10 @@ def test_tag_exact_digest_no_delete_or_iam(monkeypatch):
     assert read.call_args.args == (f'https://{r_digest.REGISTRY}/v2/{p.PROJECT}/backend/frontend/manifests/stg-protected-{digest}', 'test-token')
 
 
-@pytest.mark.parametrize('status,manifest', [(404, b'not found'), (403, b'denied'), (200, b'{"schemaVersion":2,"config":{}}')])
+@pytest.mark.parametrize('status,manifest', [
+    (404, b'not found'), (403, b'denied'),
+    (200, b'wrong manifest'), (200, b'{"schemaVersion":2,"config":{}}'),
+])
 def test_tag_digest_mismatch_or_registry_failure_stops(monkeypatch, status, manifest):
     monkeypatch.setattr(p, 'command', Mock(return_value=''))
     monkeypatch.setattr(r_digest, '_access_token', lambda: 'test-token')
