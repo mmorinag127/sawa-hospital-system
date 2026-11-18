@@ -222,8 +222,10 @@ test("workflow-v2 sheet checks advance the edited sheet revision before save", a
 
   await page.getByRole("button", { name: "異常チェック" }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(1);
+  await expect(page.getByText("数量異常チェックを実行しました", { exact: true })).toBeVisible();
   await page.locator(".step3-top-actions-left").getByRole("button", { name: /^シート確認(?:済み)?$/ }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(2);
+  await expect(page.getByText("シート確認を記録しました", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "シートを保存" }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(3);
 
