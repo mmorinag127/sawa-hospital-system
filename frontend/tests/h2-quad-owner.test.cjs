@@ -23,7 +23,7 @@ function harness(){
     selected_version_input:null,input_digest:'actual-input',geometry_source_digest:'recorded-geometry-proof',configured_input_digest:'actual-config',order_input_identity:{facility_code:'A',week_code:'W'},suggested_quad_px:[[0,0],[10,0],[10,20],[0,20]],unknown:{zero:0}};
   const review={order_id:'order-A',source_receipt:receipt,saved_override:{quad_px:receipt.suggested_quad_px,source_receipt:plain(receipt)},image_png_base64:'own-image',calendar_days:Array.from({length:7},(_,index)=>({date:`2026-10-${25+index}`,expected_band_count:8}))};
   const context={orderId:'order-A',effectiveSelectedDocumentId:'pdf-A',router:{asPath:'/orders/order-A/workflow-v2'},quadContextRef:{current:{orderId:'order-A',documentId:'pdf-A',route:'/orders/order-A/workflow-v2'}},
-    quadContextGenerationRef:{current:0},quadReadGenerationRef:{current:0},quadCommandGenerationRef:{current:0},quadAliveRef:{current:true},quadBusyOwnerRef:{current:null},busyGenerationRef:{current:0},
+    quadContextGenerationRef:{current:0},quadReadGenerationRef:{current:0},quadCommandGenerationRef:{current:0},quadAliveRef:{current:true},quadBusyOwnerRef:{current:null},busyGenerationRef:{current:0},busyActionRef:{current:''},
     workingInputGenerationRef:{current:0},pageOperationGenerationRef:{current:0},facilitySaveGenerationRef:{current:0},copySaveGenerationRef:{current:0},facilityReadGenerationRef:{current:0},facilitySaveReadOwnerRef:{current:null},
     axisReadGenerationRef:{current:{header:0,row:0}},axisSourceRef:{current:{}},
     quadSourceRef:{current:null},sheetEditGenerationRef:{current:0},activeOrderIdRef:{current:'order-A'},workflowRevisionRef:{current:{revision:8,bootstrap:false}},workflowEditorVersionsRef:{current:{}},
@@ -32,7 +32,7 @@ function harness(){
     currentDocumentId:'pdf-A',summaryDocumentRef:{current:null},
     CANONICAL_SOURCE_READ_TIMEOUT_MS:actual('CANONICAL_SOURCE_READ_TIMEOUT_MS',{}),
     WORKFLOW_READ_PENDING_MESSAGE:actual('WORKFLOW_READ_PENDING_MESSAGE',{}),
-    rawInspectionRequestRef:{current:0},setRawInspection:()=>{},
+    rawInspectionRequestRef:{current:0},setRawInspection:()=>{},setSheetConflict:()=>{},setQuantityOutputBlocked:()=>{},
     setSheetPayload:value=>{if(value===null)state.discard++;state.sheetPayload=value;context.sheetPayload=value;context.sheetPayloadRef.current=value;},setSheetDirty:value=>{state.sheetDirty=value;},setSheetJson:value=>{state.sheetJson=value;},setSheetJsonStale:value=>{state.sheetJsonStale=value;},
     workflow:null,outputGenerationsRef:{current:{download:0,preview:0}},outputOwnersRef:{current:{}},
     setDownloadMessage:value=>{state.downloadMessage=value;},setOutputPreviewLoading:value=>{state.outputPreviewLoading=value;},setOutputPreviewMessage:value=>{state.outputPreviewMessage=value;},setOutputPreview:value=>{state.outputPreview=value;},

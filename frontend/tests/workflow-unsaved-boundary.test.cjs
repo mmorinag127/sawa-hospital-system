@@ -474,11 +474,14 @@ test(`ordinary ${action} writes canonical ref and state together; immediate acti
     }
     if (action.startsWith('ai-')) {
       f.t.on('post', `${ROOT}/sheet/auto-edit`, () => {
-        f.state.workflow.revision = 8; return { data: { workflow: clone(f.state.workflow), job: { job_id: 'component-ai', order_id: ORDER, status: 'running' } } };
+        f.state.workflow.revision = 8; return { data: { workflow: clone(f.state.workflow), job: {
+          job_id: 'component-ai', order_id: ORDER, status: 'running', workflow_completion_revision: 8,
+        } } };
       });
       f.t.on('get', `${ROOT}/sheet/auto-edit/component-ai`, () => {
         f.state.workflow.revision = 9;
-        return { data: { job: { job_id: 'component-ai', order_id: ORDER, status: 'done', workflow_result_revision: 9 },
+        return { data: { job: { job_id: 'component-ai', order_id: ORDER, status: 'done',
+          workflow_completion_revision: 8, workflow_result_revision: 9 },
           result: { status: 'done', patches: [{ row_index: 0, col_index: 4, suggested_value: '12' }] } } };
       });
       await f.h.settle(() => f.probe.current.proposeSheetAutoEdit());

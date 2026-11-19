@@ -837,7 +837,8 @@ export default function OrderWorkflowV2Page() {
   const busyGenerationRef = useRef(0);
   const quadContextGenerationRef = useRef(0), quadReadGenerationRef = useRef(0), quadCommandGenerationRef = useRef(0);
   const quadAliveRef = useRef(false), quadBusyOwnerRef = useRef<number | null>(null);
-  const setBusy = (value:string) => { ++busyGenerationRef.current; setBusyState(value); };
+  const busyActionRef = useRef("");
+  const setBusy = (value:string) => { ++busyGenerationRef.current; busyActionRef.current = value; setBusyState(value); };
   const setSelectedDocumentId = (value:string) => {
     retireOutput("download"); retireOutput("preview");
     ++quadContextGenerationRef.current; ++quadReadGenerationRef.current; ++quadCommandGenerationRef.current;
@@ -845,6 +846,9 @@ export default function OrderWorkflowV2Page() {
   };
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
+  const [sheetConflict, setSheetConflict] = useState<{ orderId: string; documentId: string; revision: number | null; details: string[] } | null>(null);
+  const [quantityOutputBlocked, setQuantityOutputBlocked] = useState(false);
+  const quantityJumpRef = useRef<{orderId: string; documentId: string} | null>(null);
   const [step3LayoutMode, setStep3LayoutMode] = useState<Step3LayoutMode>("side-by-side");
   const [ocrPreviewMode, setOcrPreviewMode] = useState<OcrPreviewMode>("overlay");
   const [preSaveChecks, setPreSaveChecks] = useState<PreSaveChecks>({});
@@ -895,6 +899,8 @@ export default function OrderWorkflowV2Page() {
     editorGeneration: number;
     baseRevision: number | null;
     isCurrent: (() => boolean) | null;
+    ownsContext: () => boolean;
+    selectedOcrResultId: string | null | undefined;
   } | null>(null);
   const selectedOcr = useMemo(
     () => ocrResults.find((item) => item.selected || item.ocr_result_id === workflow?.selected_ocr_result_id) || null,
@@ -1256,6 +1262,8 @@ export default function OrderWorkflowV2Page() {
           && detail.workflow?.revision === captured.revision! + 1) {
         adopt(() => { adoptOwnWorkflowCommandResponse(detail.workflow, captured); });
       }
+      // Output commands have no editable draft to keep pinned to a rejected revision.
+      if (editor === "bagging" || editor === "finalConfirm") adopt(() => finishWorkflowEditorEdit(editor));
       throw error;
     }
     adopt(() => {
@@ -1295,12 +1303,18 @@ export default function OrderWorkflowV2Page() {
     onSuccess: ((captured: ReturnType<typeof captureWorkflowInputVersion>, response: T) => void) | undefined,
     adopt: ActionAdoption,
   ) => {
-    const wasDirty = sheetDirtyRef.current;
+    const wasDirty = editorVersion("sheet").dirty;
     const captured = adopt(() => {
       if (!wasDirty) beginWorkflowEditorEdit("sheet", true);
       return captureWorkflowInputVersion("sheet");
     });
-    const response = await request(workflowMutationConfig(captured));
+    let response: T;
+    try {
+      response = await request(workflowMutationConfig(captured));
+    } catch (error) {
+      if (!wasDirty) adopt(() => finishWorkflowEditorEdit("sheet"));
+      throw error;
+    }
     adopt(() => {
       if (!adoptOwnWorkflowCommandResponse(response.data, captured)) {
         throw new Error("シート確認中に注文または入力が変更されました。再読込してから操作してください。");
@@ -1561,6 +1575,21 @@ export default function OrderWorkflowV2Page() {
 
   const pendingQuantityKeys = useMemo(() => new Set(pendingQuantities(sheetPayload)
     .map(item => `${item.row_index}:${item.col_index}`)), [sheetPayload]);
+  useEffect(() => {
+    const target = quantityJumpRef.current;
+    if (!target || visibleStep !== 3 || displayLoading || displayReadyRef.current !== "sheet") return;
+    quantityJumpRef.current = null;
+    if (target.orderId !== orderId || target.documentId !== effectiveSelectedDocumentId) return;
+    const first = pendingQuantities(sheetPayload)[0];
+    if (!first) return;
+    document.querySelector<HTMLInputElement>(
+      `[data-sheet-row="${first.row_index}"][data-sheet-col="${first.col_index}"]`,
+    )?.focus();
+  }, [visibleStep, displayLoading, sheetPayload, orderId, effectiveSelectedDocumentId]);
+  const jumpToQuantityReview = () => {
+    quantityJumpRef.current = {orderId, documentId: effectiveSelectedDocumentId};
+    setVisibleStep(3);
+  };
 
   const anomalyWarnings = useMemo(() => {
     const warnings = anomalyReview?.warnings;
@@ -2137,6 +2166,9 @@ export default function OrderWorkflowV2Page() {
     sheetDirtyRef.current = false;
     workflowEditorVersionsRef.current = {};
     sheetAutoEditJobInputRef.current = null;
+    quantityJumpRef.current = null;
+    setQuantityOutputBlocked(false);
+    setSheetConflict(null);
     pendingSheetCellEditsRef.current.clear();
     ocrCompletionRefreshRef.current = null;
     ocrDetailRequestRef.current += 1;
@@ -2631,6 +2663,7 @@ export default function OrderWorkflowV2Page() {
   const runAction = async (
     label: string,
     action: (boundary: {
+      current: () => boolean;
       assertCurrent: () => void;
       adopt: ActionAdoption;
       captureContinuation: () => () => boolean;
@@ -2659,9 +2692,15 @@ export default function OrderWorkflowV2Page() {
     setRawInspection(null);
     setError("");
     setMessage("");
+    setSheetConflict(null);
+    setQuantityOutputBlocked(false);
+    const sheetAction = label.startsWith("Step3 ") || label.startsWith("Step4 ");
     try {
       if (!current()) return;
-      await action({ assertCurrent, adopt, captureContinuation });
+      if (sheetAction && sheetAutoEditJobInputRef.current?.ownsContext()) {
+        await settleOwnedSheetJob(adopt, current);
+      }
+      await action({ current, assertCurrent, adopt, captureContinuation });
       if (!current()) return;
       if (options.refreshAfter !== false) {
         await refreshAll(current, null, adopt);
@@ -2673,6 +2712,18 @@ export default function OrderWorkflowV2Page() {
       setMessage(options.successMessage || `${label} が完了しました`);
     } catch (err: any) {
       if (!current()) return;
+      const detail = err?.response?.data?.detail;
+      if (sheetAction && (detail === "sheet_quantity_review_required" || detail?.error === "sheet_quantity_review_required")) {
+        setQuantityOutputBlocked(true);
+        setError(describeWorkflowBlocker("sheet_quantity_review_required"));
+        return;
+      }
+      if (sheetAction && err?.response?.status === 409
+        && detail?.error === "workflow_revision_conflict") {
+        await readSheetConflict(current);
+        if (current()) setError("注文の状態が変わりました。入力は保持しています。下の差分を確認してください。");
+        return;
+      }
       if (err?.response?.data?.detail === "facility_template_unresolved") {
         setVisibleStep(1);
         await refreshAll(current, null, adopt).catch(() => undefined);
@@ -3662,112 +3713,140 @@ export default function OrderWorkflowV2Page() {
     });
   };
 
-  const pollSheetAutoEditJob = (jobId: string, attempt = 0) => {
-    if (!orderId || !jobId) return;
-    const expected = sheetAutoEditJobInputRef.current;
-    if (!expected || expected.jobId !== jobId || expected.orderId !== orderId) return;
-    const current = () => expected.isCurrent?.() === true
-      && sheetAutoEditJobInputRef.current === expected
-      && expected.orderId === activeOrderIdRef.current
-      && expected.sheetGeneration === sheetEditGenerationRef.current
-      && expected.editorGeneration === editorVersion("sheet").generation
-      && expected.baseRevision === editorVersion("sheet").baseRevision;
-    if (!current()) return;
-    if (sheetAutoEditPollRef.current !== null) {
-      window.clearTimeout(sheetAutoEditPollRef.current);
-      sheetAutoEditPollRef.current = null;
+  type OwnedSheetJob = NonNullable<typeof sheetAutoEditJobInputRef.current>;
+  type SheetJobRead = { job?: SheetAutoEditResult["job"]; result?: SheetAutoEditResult | null; diagnostic?: { error?: string } };
+  const readOwnedSheetJob = (expected: OwnedSheetJob) => apiClient.get<SheetJobRead>(
+    `/orders/${expected.orderId}/workflow-v2/sheet/auto-edit/${expected.jobId}`,
+    {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS},
+  );
+
+  const acceptSheetJobStatus = (expected: OwnedSheetJob, data: SheetJobRead) => {
+    const job = data.job;
+    const base = expected.baseRevision;
+    if (sheetAutoEditJobInputRef.current !== expected || !expected.ownsContext()
+      || !job || job.job_id !== expected.jobId || job.order_id !== expected.orderId
+      || expected.selectedOcrResultId !== selectedOcrResultRef.current
+      || data.diagnostic?.error || !isPositiveWorkflowRevision(base)
+      || job.workflow_completion_revision !== base) return "conflict";
+    if (job.status !== "done" && job.status !== "failed") {
+      return job.status === "running" ? "pending" : "conflict";
     }
-    sheetAutoEditPollRef.current = window.setTimeout(async () => {
-      if (!current()) return;
-      try {
-        const response = await apiClient.get<{
-          job?: SheetAutoEditResult["job"];
-          result?: SheetAutoEditResult | null;
-          diagnostic?: { error?: string };
-        }>(`/orders/${orderId}/workflow-v2/sheet/auto-edit/${jobId}`);
-        if (!current()) return;
-        const job = response.data.job || null;
-        if (job?.job_id !== jobId || response.data.diagnostic?.error) {
-          sheetAutoEditJobInputRef.current = null;
-          setSheetAutoEditResult((previous) => previous ? { ...previous, status: "stopped" } : previous);
-          setError(response.data.diagnostic?.error
-            ? "AI自動編集の基準版を確認できません。再読込してから確認してください。"
-            : "AI自動編集 job が一致しない応答は採用していません。再読込してから確認してください。");
-          return;
-        }
-        const sheetEditor = editorVersion("sheet");
-        const terminal = job?.status === "done" || job?.status === "failed" || job?.status === "stopped";
-        if (terminal) {
-          if (sheetAutoEditPollRef.current !== null) {
-            window.clearTimeout(sheetAutoEditPollRef.current);
-            sheetAutoEditPollRef.current = null;
-          }
-          sheetAutoEditJobInputRef.current = null;
-          if (job?.status === "stopped") {
-            setSheetAutoEditResult({
-              status: "stopped",
-              patches: [],
-              llm: { status: "stopped", error: job.error || "AI自動編集は停止しました" },
-              job,
-            });
-            setError(job.error || "AI自動編集は停止しました。入力は保持されています。");
-            return;
-          }
-          const completionRevision = Number(job?.workflow_result_revision);
-          const currentRevision = workflowRevisionRef.current?.revision;
-          if (!isPositiveWorkflowRevision(completionRevision)
-            || !isPositiveWorkflowRevision(currentRevision) || completionRevision < currentRevision) {
-            setError("AI自動編集の完了 revision を取得できません。再読込してから確認してください。");
-            return;
-          }
-          sheetEditor.baseRevision = completionRevision;
-          if (!sameRecordedValue(workflowRevisionRef.current,{revision:completionRevision,bootstrap:false})) {
-            retireOutput("download"); retireOutput("preview");
-          }
-          workflowRevisionRef.current = { revision: completionRevision, bootstrap: false };
-        }
-        if (job?.status === "done") {
-          if (response.data.result) {
-            setSheetAutoEditResult({ ...response.data.result, job });
-            setSelectedAutoEditIndex(null);
-            setMessage("AI自動編集の候補を作成しました");
-          } else {
-            setError("AI自動編集の候補結果を取得できません。入力は保持されています。");
-          }
-          return;
-        }
-        if (job?.status === "failed") {
-          setSheetAutoEditResult({
-            status: "failed",
-            patches: [],
-            llm: { status: "failed", error: job.error || "AI自動編集に失敗しました" },
-            job,
-          });
-          setError(job.error || "AI自動編集に失敗しました");
-          return;
-        }
-        setSheetAutoEditResult((current) => ({
-          ...(current || {}),
-          status: "running",
-          patches: current?.patches || [],
-          llm: { ...(current?.llm || {}), status: "running" },
-          job,
+    const revision = job.workflow_result_revision;
+    const observed = workflowRevisionRef.current?.revision;
+    const editor = editorVersion("sheet");
+    if (!isPositiveWorkflowRevision(revision) || revision !== base + 1
+      || (observed !== base && observed !== revision)
+      || (editor.dirty && editor.baseRevision !== base && editor.baseRevision !== revision)) return "conflict";
+
+    const sameInput = expected.isCurrent?.() === true
+      && expected.sheetGeneration === sheetEditGenerationRef.current
+      && expected.editorGeneration === editor.generation && (!editor.dirty || expected.baseRevision === editor.baseRevision);
+    sheetAutoEditJobInputRef.current = null;
+    if (editor.dirty) { editor.baseRevision = revision; editor.baseIsBootstrap = false; }
+    if (observed !== revision) { retireOutput("download"); retireOutput("preview"); }
+    workflowRevisionRef.current = {revision, bootstrap: false};
+    setWorkflow(previous => previous?.order_id === expected.orderId
+      && (previous.revision === base || previous.revision === revision)
+      ? {...previous, revision} : previous);
+    if (job.status === "done" && data.result && sameInput) {
+      setSheetAutoEditResult({...data.result, job});
+      setMessage("AI自動編集の候補を作成しました");
+    } else {
+      setSheetAutoEditResult({status: job.status === "failed" ? "failed" : "stopped",
+        patches: [], job, llm: job.status === "failed" ? {status: "failed", error: job.error} : null});
+      if (job.status === "failed") setError(job.error || "AI自動編集に失敗しました。入力は保持しています。");
+      else setMessage("AI実行後に入力が変わったため、古い補正候補は表示しません。現在の入力で続けられます。");
+    }
+    setSelectedAutoEditIndex(null);
+    return "settled";
+  };
+
+  const readSheetConflict = async (current: () => boolean) => {
+    const own = capturePageOwner();
+    const params = new URLSearchParams({scope: "sheet"});
+    if (own.context.documentId) params.set("selected_document_id", own.context.documentId);
+    const latest = await apiClient.get<InspectionPayload>(`/orders/${orderId}/workflow-v2/display?${params}`,
+      {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS}).then(response => response.data).catch(() => null);
+    if (!current() || !ownsPageInput(own)) return;
+    const remote = latest?.workflow;
+    const localSheet = sheetPayloadRef.current;
+    const rawSaved = latest?.saved_sheet?.sheet;
+    const saved = rawSaved && Array.isArray(rawSaved.fields) && Array.isArray(rawSaved.rows)
+      ? normalizeSheetPayload(rawSaved) : null;
+    const details: string[] = [];
+    if (!remote || remote.order_id !== own.context.orderId) {
+      details.push("最新状態を取得できませんでした。編集中の入力はそのままです。");
+    } else {
+      if (remote.selected_ocr_result_id !== selectedOcrResultRef.current) details.push("採用されているOCRが変わっています。");
+      if (remote.template_version_id !== workflow?.template_version_id) details.push("施設の帳票設定が変わっています。");
+      if (remote.saved_sheet_id !== workflow?.saved_sheet_id) details.push("保存済みシートが更新されています。");
+      if (saved && localSheet && sameRecordedValue(localSheet.fields, saved.fields)
+        && localSheet.row_ids?.length === localSheet.rows.length && saved.rows.length === localSheet.rows.length
+        && localSheet.row_ids.every(Boolean) && new Set(localSheet.row_ids).size === localSheet.rows.length
+        && sameRecordedValue(localSheet.row_ids, saved.row_ids)) {
+        let differenceCount = 0;
+        localSheet.rows.forEach((row, r) => localSheet.fields.forEach((field, c) => {
+          if (isLockedSheetField(field)) return;
+          const input = pendingSheetCellEditsRef.current.get(`${r}:${c}`)?.value ?? row[c];
+          const stored = saved.rows[r]?.[c];
+          if (String(input ?? "") === String(stored ?? "")) return;
+          differenceCount++;
+          if (differenceCount <= 8) details.push(`${r + 1}行目 ${localSheet.header[c] || field}：編集中「${String(input ?? "") || "空欄"}」／最新保存「${String(stored ?? "") || "空欄"}」`);
         }));
-        pollSheetAutoEditJob(jobId, attempt + 1);
-      } catch (err) {
+        if (differenceCount > 8) details.push(`ほか ${differenceCount - 8} 件の差分があります。`);
+      } else if (saved && localSheet) {
+        details.push("行・列を同じセルとして照合できません。最新画面と原本を確認してください。");
+      }
+      if (!details.length) details.push("表示できる数量差分はありません。最新の注文状態を確認してから再開してください。");
+    }
+    setSheetConflict({orderId: own.context.orderId, documentId: own.context.documentId,
+      revision: remote?.order_id === own.context.orderId ? remote.revision ?? null : null, details});
+  };
+
+  const settleOwnedSheetJob = async (adopt: ActionAdoption, current = () => true) => {
+    const expected = sheetAutoEditJobInputRef.current;
+    if (!expected || !expected.ownsContext()) return;
+    let data: SheetJobRead;
+    try { data = (await readOwnedSheetJob(expected)).data; }
+    catch { throw new Error("AI自動編集の状態を確認できません。入力は保持しており、操作は送信していません。"); }
+    const status = adopt(() => acceptSheetJobStatus(expected, data));
+    if (status === "pending") throw new Error("AI自動編集を実行中です。入力は保持しています。完了後にもう一度操作してください。");
+    if (status === "conflict") {
+      await readSheetConflict(current);
+      throw new Error("AI自動編集と最新の注文状態が一致しません。入力を保持し、操作は送信していません。");
+    }
+  };
+
+  const pollSheetAutoEditJob = (jobId: string, attempt = 0) => {
+    const expected = sheetAutoEditJobInputRef.current;
+    // Background polling owns candidate presentation only. An explicit sheet action
+    // can still reconcile the job's revision after the operator edits the input.
+    const current = () => expected && expected.jobId === jobId && expected.ownsContext()
+      && expected.isCurrent?.() === true && sheetAutoEditJobInputRef.current === expected;
+    if (!expected || !current()) return;
+    if (sheetAutoEditPollRef.current !== null) window.clearTimeout(sheetAutoEditPollRef.current);
+    sheetAutoEditPollRef.current = window.setTimeout(async () => {
+      sheetAutoEditPollRef.current = null;
+      if (!current()) return;
+      if (busyActionRef.current) { pollSheetAutoEditJob(jobId, attempt + 1); return; }
+      try {
+        const {data} = await readOwnedSheetJob(expected);
         if (!current()) return;
-        if (attempt < 3) {
-          pollSheetAutoEditJob(jobId, attempt + 1);
-          return;
+        if (busyActionRef.current) { pollSheetAutoEditJob(jobId, attempt + 1); return; }
+        const status = acceptSheetJobStatus(expected, data);
+        if (status === "pending") pollSheetAutoEditJob(jobId, attempt + 1);
+        else if (status === "conflict") {
+          sheetAutoEditJobInputRef.current = null;
+          setSheetAutoEditResult(previous => previous ? {...previous, status:"stopped", patches:[]} : previous);
+          setError("AI自動編集と注文の最新状態が一致しません。編集中の入力は保持しています。");
         }
-        const formatted = formatApiError(err, "AI自動編集の状態取得に失敗しました");
-        setSheetAutoEditResult({
-          status: "failed",
-          patches: [],
-          llm: { status: "failed", error: formatted },
-          job: { job_id: jobId, status: "failed", error: formatted },
-        });
-        setError(formatted);
+      } catch {
+        if (!current()) return;
+        if (attempt < 3) pollSheetAutoEditJob(jobId, attempt + 1);
+        else {
+          setSheetAutoEditResult(previous => previous ? {...previous, status: "failed", patches: []} : previous);
+          setError("AI自動編集の状態を取得できません。編集中の入力は保持しています。");
+        }
       }
     }, attempt === 0 ? 1200 : 3000);
   };
@@ -3801,6 +3880,8 @@ export default function OrderWorkflowV2Page() {
           editorGeneration: sheetEditor.generation,
           baseRevision: sheetEditor.baseRevision,
           isCurrent: null,
+          ownsContext: () => ownsPageContext(captured.owner),
+          selectedOcrResultId: started.data.workflow?.selected_ocr_result_id,
         };
       }, adopt);
       adopt(() => {
@@ -3811,7 +3892,6 @@ export default function OrderWorkflowV2Page() {
         }
         sheetAutoEditJobInputRef.current = {
           ...started,
-          baseRevision: editorVersion("sheet").baseRevision,
           isCurrent: captureContinuation(),
         };
         setSheetAutoEditResult({
@@ -3977,15 +4057,15 @@ export default function OrderWorkflowV2Page() {
     });
 
   const saveSheet = () =>
-    runAction("Step3 sheet save", async ({ adopt }) => {
+    runAction("Step3 sheet save", async ({ adopt, assertCurrent, current }) => {
       const latestWorkflow = await apiClient.get<WorkflowV2>(`/orders/${orderId}/workflow-v2`, {timeout: CANONICAL_SOURCE_READ_TIMEOUT_MS});
-      adopt(() => {
-        if (latestWorkflow.data.order_id !== orderId
-          || latestWorkflow.data.selected_ocr_result_id !== selectedOcrResultRef.current) {
-          throw new Error("シート保存前に注文または選択OCRが変更されました。再読込してから操作してください。");
-        }
-        adoptReadWorkflow(latestWorkflow.data);
-      });
+      assertCurrent();
+      if (latestWorkflow.data.order_id !== orderId
+        || latestWorkflow.data.selected_ocr_result_id !== selectedOcrResultRef.current
+        || !sameRecordedValue(workflowRevisionTokenFromRead(latestWorkflow.data), workflowRevisionRef.current)) {
+        await readSheetConflict(current);
+        throw new Error("注文の状態が変わりました。入力は保持しています。下の差分を確認してください。");
+      }
       if (!latestWorkflow.data?.selected_ocr_result_id) {
         setVisibleStep(2);
         throw new Error("正解OCRが未選択です。Step2で使用するOCR結果を一つ選んでから、シートを保存してください。");
@@ -3998,23 +4078,17 @@ export default function OrderWorkflowV2Page() {
       if (!effectiveAnomalyReviewConfirmed || !effectiveSheetReviewConfirmed) {
         throw new Error("シート保存前に、異常チェックとシート確認を完了してください。");
       }
-      const sheetInputVersion = adopt(() => {
-        beginWorkflowEditorEdit("sheet", true);
-        return captureWorkflowInputVersion("sheet");
-      });
-      const saveResponse = await apiClient.put<{ workflow?: WorkflowV2 }>(`/orders/${orderId}/workflow-v2/sheet`, {
+      await executeSheetValidation((config) => apiClient.put<{ workflow?: WorkflowV2 }>(`/orders/${orderId}/workflow-v2/sheet`, {
         sheet: parsed,
         edited_by: "operator",
-      }, workflowMutationConfig(sheetInputVersion));
-      adopt(() => {
-        if (sheetEditGeneration === sheetEditGenerationRef.current && adoptOwnWorkflowCommandResponse(saveResponse.data, sheetInputVersion)) {
-          markSheetClean();
-        } else {
+      }, config), () => {
+        if (sheetEditGeneration !== sheetEditGenerationRef.current) {
           throw new Error("シート保存中に注文または入力が変更されました。再読込してから操作してください。");
         }
+        markSheetClean();
         setSelectedAnomalyIndex(null);
         setSelectedAutoEditIndex(null);
-      });
+      }, adopt);
     }, {
       successMessage: "シートを保存しました",
       nextStep: 4,
@@ -4504,6 +4578,13 @@ export default function OrderWorkflowV2Page() {
 
       {message ? <div className="notice success">{message}</div> : null}
       {error ? <div className="notice error">{error}</div> : null}
+      {sheetConflict?.orderId === orderId && sheetConflict.documentId === effectiveSelectedDocumentId ? (
+        <section className="notice warning" aria-label="編集中と最新保存の差分">
+          <strong>編集中と最新保存の差分{sheetConflict.revision !== null ? `（最新版 ${sheetConflict.revision}）` : ""}</strong>
+          <ul>{sheetConflict.details.map((detail, index) => <li key={index}>{detail}</li>)}</ul>
+          <a href={router.asPath} target="_blank" rel="noopener noreferrer">最新の注文を別タブで開く</a>
+        </section>
+      ) : null}
       {ocrJobErrorMessage && (workflow?.ocr_job?.status === "failed" || ocrBindingError) ? (
         <div className={recognitionReviewPending || geometryReviewPending ? "notice warning" : "notice error"}>
           {geometryReviewPending ? <><strong>原本の位置確認待ち</strong> {ocrJobErrorMessage}</> : recognitionReviewPending ? <><strong>読み取り結果の確認待ち</strong><details><summary>認識実行時のエラー詳細</summary>{ocrJobErrorMessage}</details></> : <><strong>{ocrBindingError ? "OCR参照エラー:" : "OCR失敗:"}</strong> {ocrJobErrorMessage}</>}
@@ -5714,6 +5795,7 @@ export default function OrderWorkflowV2Page() {
                       <Button
                         className={(ocrPreviewMode === "overlay" ? "active" : "") + " workflow-ordinary-control"}
                         type="button"
+                        aria-pressed={ocrPreviewMode === "overlay"}
                         onClick={() => setOcrPreviewMode("overlay")}
                       >
                         オーバーレイ
@@ -5721,6 +5803,7 @@ export default function OrderWorkflowV2Page() {
                       <Button
                         className={(ocrPreviewMode === "original" ? "active" : "") + " workflow-ordinary-control"}
                         type="button"
+                        aria-pressed={ocrPreviewMode === "original"}
                         onClick={() => setOcrPreviewMode("original")}
                       >
                         原本PDF
@@ -5728,6 +5811,7 @@ export default function OrderWorkflowV2Page() {
                       <Button
                         className={(ocrPreviewMode === "sheet" ? "active" : "") + " workflow-ordinary-control"}
                         type="button"
+                        aria-pressed={ocrPreviewMode === "sheet"}
                         onClick={() => setOcrPreviewMode("sheet")}
                       >
                         シート確認
@@ -6131,7 +6215,8 @@ export default function OrderWorkflowV2Page() {
                                     defaultValue={pendingSheetCellEditsRef.current.get(`${rowIdx}:${colIdx}`)?.value ?? row[colIdx] ?? ""}
                                     readOnly={isLockedSheetField(field)}
                                     inputMode={isQuantityField(field) ? "decimal" : undefined}
-                                    placeholder={pendingQuantityKeys.has(`${rowIdx}:${colIdx}`) ? "未確定" : undefined}
+                                    aria-label={pendingQuantityKeys.has(`${rowIdx}:${colIdx}`)
+                                      ? `${rowIdx + 1}行目 ${sheetPayload.header[colIdx] || field}の要確認数量` : undefined}
                                     onFocus={() => setFocusedSheetCell({ rowIndex: rowIdx, colIndex: colIdx })}
                                     onBlur={() => {
                                       flushPendingSheetCellEdits();
@@ -6147,6 +6232,16 @@ export default function OrderWorkflowV2Page() {
                                     }}
                                   />
                                 </div>
+                                {pendingQuantityKeys.has(`${rowIdx}:${colIdx}`) ? (
+                                  <div className="sheet-quantity-actions">
+                                    <span>要確認</span>
+                                    <button type="button" onClick={() => {
+                                      setFocusedSheetCell({rowIndex: rowIdx, colIndex: colIdx});
+                                      setOcrPreviewMode("original");
+                                    }}>原本を見る</button>
+                                    <button type="button" disabled={Boolean(busy)} onClick={() => confirmQuantityBlank(rowIdx, colIdx)}>空欄として確定</button>
+                                  </div>
+                                ) : null}
                               </td>
                             );
                           })}
@@ -6207,9 +6302,9 @@ export default function OrderWorkflowV2Page() {
               </Button>
             </div>
           </header>
-          {pendingQuantityKeys.size ? <div role="status" className="notice warning">
-            未確定の数量 {pendingQuantityKeys.size}件
-            <Button type="button" onClick={() => setVisibleStep(3)}>数量を確認</Button>
+          {pendingQuantityKeys.size || quantityOutputBlocked ? <div role="status" className="notice warning">
+            {pendingQuantityKeys.size ? `未確定の数量 ${pendingQuantityKeys.size}件` : "保存済みシートに要確認の数量があります。"}
+            <Button type="button" onClick={jumpToQuantityReview}>最初の要確認セルへ</Button>
           </div> : null}
           {displayLoading ? <p role="status">保存出力を取得中...</p> : null}
           {inspection?.bagging_result ? (
@@ -7453,6 +7548,17 @@ export default function OrderWorkflowV2Page() {
         }
         .sheet-table thead th.sticky-structural-col {
           z-index: 3;
+        }
+        .sheet-quantity-actions {
+          display: grid;
+          gap: 3px;
+          font-size: 11px;
+          color: #8a4b12;
+          padding: 3px;
+        }
+        .sheet-quantity-actions button {
+          padding: 2px 3px;
+          white-space: normal;
         }
         .sheet-input-wrap {
           position: relative;

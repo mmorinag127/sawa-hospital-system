@@ -12,10 +12,11 @@ const filename = "frontend/src/pages/orders/[id]/workflow-v2.tsx";
 const original = cp.execFileSync("git", ["show", base + ":" + filename], { cwd: root, encoding: "utf8" });
 const migration = 'd55763365c3d2159dc976b130e0cc7a6de5f162f';
 const current = cp.execFileSync('git', ['show', migration + ':' + filename], { cwd: root, encoding: 'utf8' });
-test('current mutation, quantity and owner declarations remain exact while reads can evolve', () => {
+test('unmodified mutation and owner declarations remain exact', () => {
   const declarations = require('./helpers/owned-declarations.cjs');
-  const names = ['executeWorkflowMutation', 'workflowMutationConfig', 'adoptOwnWorkflowCommandResponse',
-    'createActionBoundary', 'saveSheet', 'finalConfirm', 'runOcr', 'selectOcr', 'deleteOcr',
+  // The revised save and rejected-output command paths are exercised through the real DOM/browser.
+  const names = ['workflowMutationConfig', 'adoptOwnWorkflowCommandResponse',
+    'createActionBoundary', 'finalConfirm', 'runOcr', 'selectOcr', 'deleteOcr',
     'saveFacilityTemplateColumns', 'runBagging'];
   assert.deepEqual(declarations(fs.readFileSync(path.join(root, filename), 'utf8'), names),
     declarations(cp.execFileSync('git', ['show', '9e3b6793:' + filename], {cwd: root, encoding: 'utf8'}), names));

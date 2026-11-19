@@ -242,11 +242,108 @@ test("workflow-v2 auto-edit completion advances only the matching sheet input re
   await firstQuantity.fill("123");
   await page.getByRole("button", { name: "AI自動補正を提案" }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(1);
-  await page.waitForTimeout(1300);
+  await expect(page.getByText("AI自動編集の候補を作成しました", {exact: true})).toBeVisible();
   await page.locator(".step3-top-actions-left").getByRole("button", { name: /シート確認(?:済み)?$/, exact: true }).click();
   await expect.poll(() => mounted.getWorkflowMutationHeaders().length).toBe(2);
   expect(mounted.getWorkflowMutationHeaders()).toEqual([
     { path: `/api/orders/${mounted.orderId}/workflow-v2/sheet/auto-edit`, ifMatch: '"7"' },
     { path: `/api/orders/${mounted.orderId}/workflow-v2/sheet/review-confirm`, ifMatch: '"9"' },
   ]);
+});
+
+test("workflow-v2 keeps edits made during its own AI job and saves on the returned revision", async ({ page }) => {
+  let done = false;
+  const mounted = await mountWorkflowV2SheetPage(page, {autoEditIsDone: () => done});
+  const firstQuantity = page.locator('[data-sheet-row="0"][data-sheet-col="3"]');
+  await page.getByRole("button", {name: "AI自動補正を提案"}).click();
+  await expect(page.getByText("AI自動編集を開始しました", {exact: true})).toBeVisible();
+  await firstQuantity.fill("123");
+  await page.getByRole("button", {name: "異常チェック"}).click();
+  await expect(page.getByText(/AI自動編集を実行中です。入力は保持しています/)).toBeVisible();
+  expect(mounted.getWorkflowMutationHeaders()).toHaveLength(1);
+
+  done = true;
+  await page.getByRole("button", {name: "異常チェック"}).click();
+  await expect(page.getByText("数量異常チェックを実行しました", {exact: true})).toBeVisible();
+  await expect(firstQuantity).toHaveValue("123");
+  await page.locator(".step3-top-actions-left").getByRole("button", {name: /^シート確認(?:済み)?$/}).click();
+  await expect(page.getByText("シート確認を記録しました", {exact: true})).toBeVisible();
+  await page.getByRole("button", {name: "シートを保存"}).click();
+  await expect(page.getByText("シートを保存しました", {exact: true})).toBeVisible();
+  expect(mounted.getWorkflowMutationHeaders().map(({ifMatch}) => ifMatch)).toEqual(['"7"', '"9"', '"10"', '"11"']);
+  expect(mounted.getSavePayload().sheet.rows[0][3]).toBe("123");
+  await page.reload();
+  await expect(firstQuantity).toHaveValue("123");
+});
+
+test("workflow-v2 preserves local input and compares the latest saved cells on a real conflict", async ({ page }) => {
+  const mounted = await mountWorkflowV2SheetPage(page);
+  let writes = 0;
+  await page.route(`**/orders/${mounted.orderId}/workflow-v2/sheet/anomaly-review`, async (route) => {
+    writes++;
+    expect(route.request().headers()["if-match"]).toBe('"7"');
+    mounted.workflow.revision = 8;
+    mounted.workflow.saved_sheet_id = "SHEET-ANOTHER-OPERATOR";
+    mounted.sheet.rows[0][3] = "456";
+    await route.fulfill({status: 409, json: {detail: {error: "workflow_revision_conflict"}}});
+  });
+  const firstQuantity = page.locator('[data-sheet-row="0"][data-sheet-col="3"]');
+  await firstQuantity.fill("123");
+  await page.getByRole("button", {name: "異常チェック"}).click();
+  const diff = page.getByRole("region", {name: "編集中と最新保存の差分"});
+  await expect(diff).toContainText("最新版 8");
+  await expect(diff).toContainText("1行目 常食：編集中「123」／最新保存「456」");
+  await expect(firstQuantity).toHaveValue("123");
+  expect(writes).toBe(1);
+});
+
+test("workflow-v2 does not silently replace a newer saved sheet during save preflight", async ({ page }) => {
+  const mounted = await mountWorkflowV2SheetPage(page);
+  const firstQuantity = page.locator('[data-sheet-row="0"][data-sheet-col="3"]');
+  await expect(firstQuantity).toHaveValue("1");
+  mounted.workflow.revision = 8;
+  mounted.workflow.saved_sheet_id = "SHEET-ANOTHER-OPERATOR";
+  mounted.sheet.rows[0][3] = "456";
+  await page.getByRole("button", {name: "シートを保存"}).click();
+  await expect(page.getByRole("region", {name: "編集中と最新保存の差分"})).toContainText("最新保存「456」");
+  await expect(firstQuantity).toHaveValue("1");
+  expect(mounted.getWorkflowMutationHeaders()).toEqual([]);
+});
+
+test("workflow-v2 lets operators resolve a blocked output cell without inventing zero", async ({ page }) => {
+  const mounted = await mountWorkflowV2SheetPage(page, {quantityPending: true, workflowState: "sheet_saved"});
+  await page.route(`**/orders/${mounted.orderId}/workflow-v2/bagging`, async (route) => {
+    if (!mounted.sheet.quantity_ocr_review[0].confirmed_blank) {
+      await route.fulfill({status: 400, json: {detail: "sheet_quantity_review_required"}});
+      return;
+    }
+    expect(route.request().headers()["if-match"]).toBe(`"${mounted.workflow.revision}"`);
+    mounted.workflow.revision++;
+    await route.fulfill({status: 200, json: {workflow: mounted.workflow}});
+  });
+  await page.getByRole("button", {name: "出力確認を作成"}).click();
+  await page.getByRole("button", {name: "最初の要確認セルへ"}).click();
+  const firstQuantity = page.locator('[data-sheet-row="0"][data-sheet-col="3"]');
+  await expect(firstQuantity).toBeFocused();
+  await expect(firstQuantity).toHaveValue("");
+  await expect(firstQuantity).not.toHaveAttribute("placeholder", "未確定");
+  await page.getByRole("button", {name: "原本を見る"}).click();
+  await expect(page.locator('[aria-label="Step3 preview display mode"]').getByRole("button", {name: "原本PDF"})).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", {name: "空欄として確定"}).click();
+  await page.getByRole("button", {name: "異常チェック"}).click();
+  await expect(page.getByText("数量異常チェックを実行しました", {exact: true})).toBeVisible();
+  await page.locator(".step3-top-actions-left").getByRole("button", {name: /^シート確認(?:済み)?$/}).click();
+  await expect(page.getByText("シート確認を記録しました", {exact: true})).toBeVisible();
+  await page.getByRole("button", {name: "シートを保存"}).click();
+  await expect(page.getByText("シートを保存しました", {exact: true})).toBeVisible();
+  expect(mounted.getSavePayload().sheet.quantity_ocr_review).toEqual([
+    {row_index: 0, col_index: 3, field: "qty.regular", raw_text: "OCR-DASH", confirmed_blank: true},
+  ]);
+  expect(mounted.getSavePayload().sheet.rows[0][3]).toBe("");
+  await page.getByRole("button", {name: "出力確認を作成"}).click();
+  await expect(page.getByText("出力確認を作成しました", {exact: true})).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", {name: /Step3.*シート/}).click();
+  await expect(firstQuantity).toHaveValue("");
+  await expect(page.getByRole("button", {name: "空欄として確定"})).toHaveCount(0);
 });

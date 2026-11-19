@@ -21,6 +21,8 @@ export type WorkflowMountOptions = {
   polledOcrResults?: Array<Record<string, unknown>>;
   entryPath?: "legacy";
   documentStatus?: 404 | 500;
+  quantityPending?: boolean;
+  autoEditIsDone?: () => boolean;
   targetCells?: Array<{ target_row_index: number; target_col_index: number; field: string; bbox: number[] }>;
 };
 
@@ -31,13 +33,16 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
     fields: ["date_mmdd", "daypart", "menu", "qty.regular", "qty.soft"],
     header: ["日付", "区分", "メニュー", "常食", "軟菜"],
     rows: [
-      ["05/22", "朝", "Menu A", "1", "2"],
+      ["05/22", "朝", "Menu A", options.quantityPending ? "" : "1", "2"],
       ["05/22", "昼", "Menu B", "3", "4"],
       ["05/22", "夕", "Menu C", "5", "6"],
     ],
     row_ids: ["row-1", "row-2", "row-3"],
     target_cell_map: options.targetCells ?? [],
     ocr_numeric_cell_summary: {},
+    quantity_ocr_review: options.quantityPending ? [{
+      row_index: 0, col_index: 3, field: "qty.regular", raw_text: "OCR-DASH", confirmed_blank: false,
+    }] : [],
     base_evidence_run_id: "OCR-E2E-001",
     template_version_id: "TEMPLATE-E2E-001",
   };
@@ -82,6 +87,7 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
     sheet_review_base_url: "" }];
   let savePayload: any = null;
   let nextWorkflowRevision = workflowPayload.revision;
+  let autoEditBase: number | null = null;
   const requestCounts: Record<string, number> = {};
   const workflowMutationHeaders: Array<{ path: string; ifMatch: string | undefined }> = [];
   let progressRead = false;
@@ -257,13 +263,24 @@ export async function mountWorkflowV2SheetPage(page: Page, options: WorkflowMoun
       workflowMutationHeaders.push({ path, ifMatch: route.request().headers()["if-match"] });
       nextWorkflowRevision += 1;
       workflowPayload.revision = nextWorkflowRevision;
-      await route.fulfill({ status: 200, json: { workflow: workflowPayload, job: { job_id: "AUTO-E2E-001", status: "running" } } });
+      autoEditBase = nextWorkflowRevision;
+      await route.fulfill({ status: 200, json: { workflow: workflowPayload, job: {
+        job_id: "AUTO-E2E-001", order_id: orderId, status: "running", workflow_completion_revision: autoEditBase,
+      } } });
       return;
     }
     if (path.endsWith(`/orders/${orderId}/workflow-v2/sheet/auto-edit/AUTO-E2E-001`) && method === "GET") {
-      nextWorkflowRevision = Math.max(nextWorkflowRevision, 9);
-      workflowPayload.revision = nextWorkflowRevision;
-      await route.fulfill({ status: 200, json: { job: { job_id: "AUTO-E2E-001", status: "done", workflow_result_revision: 9 }, result: { status: "done", patches: [] } } });
+      if (autoEditBase === null) throw new Error("AI job was not started");
+      const done = options.autoEditIsDone?.() ?? true;
+      if (done) {
+        nextWorkflowRevision = Math.max(nextWorkflowRevision, autoEditBase + 1);
+        workflowPayload.revision = nextWorkflowRevision;
+      }
+      await route.fulfill({ status: 200, json: {
+        job: { job_id: "AUTO-E2E-001", order_id: orderId, status: done ? "done" : "running",
+          workflow_completion_revision: autoEditBase, workflow_result_revision: done ? autoEditBase + 1 : null },
+        ...(done ? {result: { status: "done", patches: [] }} : {}),
+      } });
       return;
     }
     if (path.endsWith(`/orders/${orderId}/workflow-v2/quad-review`) && method === "GET") {

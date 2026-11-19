@@ -352,11 +352,13 @@ export type SheetAutoEditResult = {
   llm?: Record<string, unknown> | null;
   job?: {
     job_id?: string | null;
+    order_id?: string | null;
     status?: string | null;
     started_at?: string | null;
     updated_at?: string | null;
     finished_at?: string | null;
     error?: string | null;
+    workflow_completion_revision?: number | null;
     workflow_result_revision?: number | null;
   } | null;
 };

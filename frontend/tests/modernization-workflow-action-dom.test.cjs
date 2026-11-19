@@ -44,7 +44,7 @@ function probeFor() {
     'proposeSheetAutoEdit', 'dismissSingleAnomalyWarning', 'saveSheet', 'runBagging',
     'runAnomalyReview', 'showSheetReview', 'finalConfirm', 'saveFacilityTemplateColumns',
     'updateExpandedCellCopyMode', 'refreshAll', 'updateSheetCell', 'setSelectedDocumentId',
-    'setBusy', 'setMessage', 'setError', 'setVisibleStep', 'editorVersion',
+    'setBusy', 'setMessage', 'setError', 'setVisibleStep', 'editorVersion', 'runAction',
     'ocrResults', 'inspection', 'applyWeekValue', 'flushPendingSheetCellEdits',
   ] };
 }
@@ -318,7 +318,11 @@ test('owned sheet-source separates uncertain original from numeric cells without
     assert.equal(f.probe.current.sheetDirty, true); assert.equal(f.probe.current.busy, '');
     const inputs = fields.slice(4).map((_, index) => f.h.document.querySelector(`[data-sheet-row="0"][data-sheet-col="${index + 4}"]`));
     assert.ok(inputs.every(Boolean)); assert.deepEqual(inputs.map(input => input.value), CLEAN);
-    assert.equal(inputs[2].placeholder,'未確定');
+    assert.equal(inputs[2].value, '');
+    assert.equal(inputs[2].placeholder, '');
+    assert.match(inputs[2].getAttribute('aria-label'), /要確認数量/);
+    assert.ok(Array.from(inputs[2].closest('td').querySelectorAll('button')).some(button =>
+      button.textContent === '空欄として確定'));
     assert.match(f.h.document.body.textContent, /選択OCRからシートを生成しました/);
   } finally { await f.h.close(); }
 });
@@ -588,7 +592,12 @@ for (const stage of ['timer', 'retry', 'success', 'error']) test(`AI ${stage} af
       operation = await start(f.h, () => clock.fire());
       assert.equal(calls(f, 'get', `${BASE}/sheet/auto-edit/${JOB}`).length, 1);
     }
-    await retire(f, boundary); const before = snapshot(f);
+    if (boundary === 'operation') {
+      // Another page action retires the old candidate without joining its held status read.
+      await f.h.settle(() => f.probe.current.runAction('別の操作', async () => {}, {refreshAfter: false}));
+      await feedback(f);
+    } else await retire(f, boundary);
+    const before = snapshot(f);
     if (stage === 'timer' || stage === 'retry') await f.h.settle(() => clock.fire());
     else await settleOld(f, pending, operation, stage, jobReply());
     unchanged(f, before); assert.equal(clock.queue.size, 0, 'no retired retry');
