@@ -80,6 +80,7 @@
     "backend/src/services/order_workflow_v2_service.py": ["revision-history-and-output-isolation", "ocr-original-targets-artifacts-and-operator-values"],
     "backend/src/services/output_history_service.py": ["revision-history-and-output-isolation", "scaling-storage-and-history"],
     "backend/src/services/output_builder.py": ["generated-display-storage-and-deferred-workbooks"],
+    "backend/src/services/config_service.py": ["revision-history-and-output-isolation", "ocr-original-targets-artifacts-and-operator-values"],
     "backend/src/services/order_form_service.py": ["generated-display-storage-and-deferred-workbooks"],
     "backend/src/services/total_service.py": ["generated-display-storage-and-deferred-workbooks"],
     "backend/src/services/menu_service.py": ["scaling-storage-and-history", "upload-route-contracts"],

@@ -102,6 +102,7 @@ def capture_authored_processing_config(facility_id: str, *, selected_authored_ve
 
 def captured_processing_config_matches(facility_id: str, captured: Any) -> bool:
     """Validate the saved selected source; the unversioned root is not authority."""
+    from src.services.canonical_facility_store import selected_version_matches
     from src.services.workflow_attempt_guard_service import snapshots_equal
 
     if (not isinstance(captured, dict)
@@ -114,14 +115,13 @@ def captured_processing_config_matches(facility_id: str, captured: Any) -> bool:
     original_versions = envelope.get("versions")
     original_matches = [item for item in original_versions if isinstance(item, dict) and item.get("version_id") == authored.get("version_id")] if isinstance(original_versions, list) else []
     if (envelope.get("facility_id") != facility_id or len(original_matches) != 1
-            or not snapshots_equal(original_matches[0], authored)):
+            or not selected_version_matches(original_matches[0], authored)):
         return False
     master = load_facility_master()
     matches = [item for item in master.get("facilities", []) if isinstance(item, dict) and item.get("facility_id") == facility_id]
     if len(matches) != 1 or not isinstance(matches[0].get("versions"), list):
         return False
     versions = [item for item in matches[0]["versions"] if isinstance(item, dict) and item.get("version_id") == authored.get("version_id")]
-    from src.services.canonical_facility_store import selected_version_matches
     return (len(versions) == 1 and selected_version_matches(versions[0], authored)
             and isinstance(authored.get("facility"), dict)
             and authored["facility"].get("facility_id") == facility_id

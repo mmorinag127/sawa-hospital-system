@@ -105,6 +105,7 @@ def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_baggi
         fixture.republish()
     if missing_label_policy:
         del fixture.authored["daily_label_comparable_diet_types"]
+        fixture.master["facilities"][0]["versions"][0]["valid_to"] = None
         fixture.republish()
     with fixture.session_scope() as session:
         session.add(MenuRule(id='UNIT-COMMON',rule_type='global',daypart='朝',category=None,
@@ -129,6 +130,7 @@ def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_baggi
             "version_id": "published-label-policy", "valid_from": "2026-11-19",
             "valid_to": None, "facility": new_facility,
         })
+        assert entry["versions"][0]["valid_to"] == "2026-11-18"
         fixture.write_master()
     bagged,error=workflow.run_bagging(fixture.order_id,expected_revision=revision(fixture))
     assert error is None,error
