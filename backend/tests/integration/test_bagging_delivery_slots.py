@@ -252,7 +252,7 @@ def test_delivery_slot_template_writes_menu_display_and_clears_unassigned(isolat
     assert ws_out.cell(row=3, column=4).value in ("", None)
 
 
-def test_delivery_slot_template_preserves_authored_fixed_headers(tmp_path):
+def test_delivery_slot_template_replaces_reused_headers_without_changing_source(tmp_path):
     template_path = tmp_path / "delivery_slot_headers.xlsx"
     wb = Workbook()
     ws = wb.active
@@ -270,6 +270,7 @@ def test_delivery_slot_template_preserves_authored_fixed_headers(tmp_path):
     ws.cell(row=3, column=2, value="朝")
     ws.cell(row=3, column=3, value="主菜")
     wb.save(template_path)
+    original = template_path.read_bytes()
 
     output_path = tmp_path / "delivery_out.xlsx"
     output_builder._write_delivery_note(
@@ -301,9 +302,12 @@ def test_delivery_slot_template_preserves_authored_fixed_headers(tmp_path):
     actual = load_workbook(output_path)
     assert actual.sheetnames == ["Template"]
     ws_out = actual["Template"]
-    authored = load_workbook(template_path)["Template"]
-    assert [[ws_out.cell(row=row, column=col).value for col in range(1, 9)] for row in (1, 2)] == [
-        [authored.cell(row=row, column=col).value for col in range(1, 9)] for row in (1, 2)]
+    assert [ws_out.cell(row=1, column=col).value for col in range(1, 9)] == [
+        "日付", "区分", "献立", "常食", "肉禁", "魚禁", "変更1", "変更2"]
+    assert all(ws_out.cell(row=2, column=col).value is None for col in range(1, 9))
+    assert "G1:H2" not in ws_out.merged_cells
+    assert ws_out["D3"].value == 48
+    assert template_path.read_bytes() == original
 
 
 def test_label_expiry_plus_three_months_uses_explicit_recipe_amount(isolated_formal_schema, monkeypatch, tmp_path):

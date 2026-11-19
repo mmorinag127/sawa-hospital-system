@@ -552,14 +552,14 @@ def _selected_output(monkeypatch, tmp_path, engine, *, quantity=4, day=TARGET_DA
                            observations=[])
 
 
-def _save_output(f, sheet):
+def _save_output(f, sheet, *, expected_sheet=None):
     from src.services import order_workflow_v2_service as workflow
     current, error = workflow.get_workflow_readonly(f.id)
     assert error is None
     saved, error = workflow.save_sheet(order_id=f.id, sheet=sheet,
                                       expected_revision=current["revision"])
     assert error is None, error
-    assert saved["saved_sheet"]["sheet"] == sheet
+    assert saved["saved_sheet"]["sheet"] == (sheet if expected_sheet is None else expected_sheet)
     f.revision = saved["workflow"]["revision"]
     f.saved_id = saved["saved_sheet"]["saved_sheet_id"]
     return saved
@@ -630,15 +630,22 @@ def test_build_order_lines_for_outputs_does_not_force_materialization_for_apply_
 
 
 def test_build_order_lines_for_outputs_blocks_when_newer_draft_cannot_materialize(monkeypatch, tmp_path, isolated_formal_schema):
+    from copy import deepcopy
     from src.services import order_workflow_v2_service as workflow
     from tests.contract.test_saved_sheet_quantity_schema import unchanged_after_refusal
     f = _selected_output(monkeypatch, tmp_path, isolated_formal_schema)
     f.sheet["rows"][0][-1] = "?"
-    _save_output(f, f.sheet)
+    expected = deepcopy(f.sheet)
+    expected["rows"][0][-1] = ""
+    expected["quantity_ocr_review"] = [{
+        "row_index": 0, "col_index": 3, "field": "qty.regular_x",
+        "raw_text": "?", "confirmed_blank": False,
+    }]
+    _save_output(f, f.sheet, expected_sheet=expected)
     with unchanged_after_refusal(f, f.revision):
         result, error = workflow.run_bagging(f.id, expected_revision=f.revision)
     assert result is None
-    assert error == "sheet_ocr_review_required"
+    assert error == "sheet_quantity_review_required"
     order = order_service.get_order_by_id(f.id)
     assert order["lines"] == []
     _assert_unaccepted_output(f, order)
