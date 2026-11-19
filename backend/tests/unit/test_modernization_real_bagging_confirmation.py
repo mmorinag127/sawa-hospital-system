@@ -87,15 +87,24 @@ def revision(fixture):
         return session.get(OrderWorkflowState, fixture.order_id).revision
 
 
-@pytest.mark.parametrize('diet,column',[('diabetes',6),('staff',7)])
-def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_bagging,diet,column):
+@pytest.mark.parametrize('diet,column,missing_label_policy', [
+    ('diabetes', 6, False), ('staff', 7, False), ('staff', 7, True),
+])
+def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_bagging, diet, column,
+                                                                    missing_label_policy, monkeypatch):
     from src.models.menu import MenuRule
+    from src.services import canonical_facility_store as canonical, output_builder
+    from datetime import date
+
     fixture=owned_bagging
     # Forbidden-diet quantities are intentionally excluded from materialization.
     # Publish a distinct synthetic diabetes column to exercise a counted diet.
     if diet == 'diabetes':
         fixture.authored['fax_template']['columns'][column]['diet_type'] = diet
         fixture.authored['daily_label_comparable_diet_types'].append(diet)
+        fixture.republish()
+    if missing_label_policy:
+        del fixture.authored["daily_label_comparable_diet_types"]
         fixture.republish()
     with fixture.session_scope() as session:
         session.add(MenuRule(id='UNIT-COMMON',rule_type='global',daypart='朝',category=None,
@@ -111,9 +120,30 @@ def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_baggi
     _,error=workflow.save_sheet(order_id=fixture.order_id,sheet=sheet,
         require_pre_save_checks=True,expected_revision=revision(fixture))
     assert error is None,error
+    if missing_label_policy:
+        monkeypatch.setattr(canonical, "facility_change_today", lambda: date(2026, 11, 19))
+        entry = fixture.master["facilities"][0]
+        historical = entry["versions"][0]
+        new_facility = {**historical["facility"], "daily_label_comparable_diet_types": ["staff"]}
+        entry["versions"] = canonical.append_facility_version(entry["versions"], {
+            "version_id": "published-label-policy", "valid_from": "2026-11-19",
+            "valid_to": None, "facility": new_facility,
+        })
+        fixture.write_master()
     bagged,error=workflow.run_bagging(fixture.order_id,expected_revision=revision(fixture))
     assert error is None,error
-    lines=bagged['bagging_result']['materialization_candidate']['output_lines']
+    candidate = bagged['bagging_result']['materialization_candidate']
+    lines=candidate['output_lines']
+    if missing_label_policy:
+        assert "daily_label_comparable_diet_types" not in candidate["configured_input"]["facility"]
+        assert candidate["label_comparison"] == {
+            "facility_id": "F", "effective_date": "2026-11-19", "version_id": "published-label-policy",
+            "daily_label_comparable_diet_types": ["staff"],
+        }
+        assert output_builder._label_config_with_receipt(candidate["configured_input"]["facility"],
+                                                        candidate["label_comparison"])["daily_label_comparable_diet_types"] == ["staff"]
+    else:
+        assert "label_comparison" not in candidate
     specific=[line for line in lines if (line.get('source_diet_type') or line.get('diet_type'))==diet]
     assert specific and all(line['menu_qty_per_serving']==17 for line in specific)
     assert sum(row['quantity'] for row in bagged['bagging_result']['bag_rows'] if (row.get('source_diet_type') or row.get('diet_type'))==diet)==1
@@ -123,6 +153,8 @@ def test_shared_registered_rule_passes_real_bagging_and_confirmation(owned_baggi
     with fixture.session_scope() as session:
         state=session.get(OrderWorkflowState,fixture.order_id)
         assert session.get(OrderSheetDraft,state.draft_id).draft_sheet_json==sheet
+        assert state.evidence_run_id == fixture.evidence_id
+        assert state.template_version_id == fixture.projection_id
 
 
 def assert_no_confirmation(fixture):

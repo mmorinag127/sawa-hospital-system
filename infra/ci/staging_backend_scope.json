@@ -77,6 +77,7 @@
     "backend/scripts/cleanup_order_operational_data.py": ["scaling-storage-and-history"],
     "backend/scripts/cleanup_order_operational_data_cloudsql.py": ["scaling-storage-and-history"],
     "backend/src/services/order_output_artifact_service.py": ["revision-history-and-output-isolation"],
+    "backend/src/services/order_workflow_v2_service.py": ["revision-history-and-output-isolation", "ocr-original-targets-artifacts-and-operator-values"],
     "backend/src/services/output_history_service.py": ["revision-history-and-output-isolation", "scaling-storage-and-history"],
     "backend/src/services/output_builder.py": ["generated-display-storage-and-deferred-workbooks"],
     "backend/src/services/order_form_service.py": ["generated-display-storage-and-deferred-workbooks"],

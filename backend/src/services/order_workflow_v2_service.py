@@ -4424,7 +4424,13 @@ def _build_bag_rows_for_candidate(*, order: Order, lines: list[dict[str, Any]], 
         materialization_candidate["output_lines"] = copy.deepcopy(enriched_lines)
         materialization_candidate["output_menu_entries"] = copy.deepcopy(producer_input["output_menu_entries"])
         materialization_candidate["output_source_snapshot"] = copy.deepcopy(producer_input["output_source_snapshot"])
-        bag_rows = output_builder.build_bag_payload_for_materialization(order_payload, order_lines=enriched_lines, configured_input=materialization_candidate["configured_input"])
+        configured = materialization_candidate["configured_input"]
+        label_comparison = output_builder.capture_missing_label_comparison(configured, order.facility_code, enriched_lines)
+        if label_comparison is not None:
+            materialization_candidate["label_comparison"] = label_comparison
+        bag_rows = output_builder.build_bag_payload_for_materialization(
+            order_payload, order_lines=enriched_lines, configured_input=configured, label_comparison=label_comparison,
+        )
         if not isinstance(bag_rows, list):
             raise BaggingOutputUnresolved("bagging_output_invalid")
         return bag_rows
@@ -4836,6 +4842,8 @@ def run_bagging(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         from src.services import output_builder
         try:
             output_builder._validate_output_sources(materialization_candidate["output_source_snapshot"])
+            if materialization_candidate.get("label_comparison") is not None:
+                output_builder.validate_output_label_comparison(materialization_candidate["label_comparison"])
         except ValueError as exc:
             return None, str(exc)
         order_output_artifact_service.save_bagging_result_artifact(session, payload=bagging_result)

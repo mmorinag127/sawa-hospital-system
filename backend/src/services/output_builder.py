@@ -654,6 +654,53 @@ def _daily_label_comparable_diet_types_for_facility(facility_config: dict | None
     return resolve_daily_label_comparable_diet_types(facility_config)
 
 
+_LABEL_COMPARISON_KEY = "daily_label_comparable_diet_types"
+
+
+def capture_missing_label_comparison(configured: dict, facility_id: str, lines: list[dict]) -> dict | None:
+    """Read display-only policy from the same canonical envelope captured for output."""
+    if _LABEL_COMPARISON_KEY in configured["facility"] or not any(
+        _daily_label_display_diet_key(line) not in {"", "regular", "standard", "regular_bag"} for line in lines
+    ):
+        return None
+    envelope = configured.get("authored_source_envelope")
+    if not isinstance(envelope, dict) or envelope.get("facility_id") != facility_id:
+        return None
+    from src.services import canonical_facility_store as canonical
+
+    day = canonical.facility_change_today().isoformat()
+    return _label_comparison_receipt({"facilities": [envelope]}, facility_id, day)
+
+
+def _label_comparison_receipt(master: dict, facility_id: str, day: str) -> dict | None:
+    from src.services import canonical_facility_store as canonical
+
+    selected = canonical.resolve_facility_version(canonical.MasterSnapshot(master, "", "canonical_json"),
+                                                  facility_id, day)
+    config = selected["facility"]
+    if _LABEL_COMPARISON_KEY not in config:
+        return None
+    return {"facility_id": facility_id, "effective_date": day, "version_id": selected["version"]["version_id"],
+            _LABEL_COMPARISON_KEY: _daily_label_comparable_diet_types_for_facility(config, facility_id)}
+
+
+def validate_output_label_comparison(receipt: dict) -> None:
+    from src.services import canonical_facility_store as canonical
+
+    current = _label_comparison_receipt(canonical.read_snapshot().master, receipt["facility_id"],
+                                        receipt["effective_date"])
+    if current != receipt:
+        raise ValueError("bagging_source_changed")
+
+
+def _label_config_with_receipt(config: dict, receipt: dict | None) -> dict:
+    if receipt is None or _LABEL_COMPARISON_KEY in config:
+        return config
+    if receipt.get("facility_id") != config.get("facility_id"):
+        raise ValueError("label_comparison_facility_mismatch")
+    return {**config, _LABEL_COMPARISON_KEY: _daily_label_comparable_diet_types_for_facility(receipt, None)}
+
+
 def _apply_daily_label_facility_rules_to_bags(
     bags: list[dict],
     facility_config: dict | None,
@@ -2543,11 +2590,13 @@ def build_bag_rows_for_outputs(
 
     if accepted.get("initial_saved_import") is not None:
         return _initial_saved_bag_rows(accepted, native_dates=True)
-    return build_bag_rows_for_materialization(order, order_lines=frozen_lines, configured_input=configured)
+    return build_bag_rows_for_materialization(order, order_lines=frozen_lines, configured_input=configured,
+                                              label_comparison=accepted.get("label_comparison"))
 
 
 def build_bag_rows_for_materialization(
     order: dict, *, order_lines: list[dict], configured_input: dict, facility_config: dict | None = None,
+    label_comparison: dict | None = None,
 ) -> list[dict]:
     """Generate new rows only for an explicit materialization command."""
     if not isinstance(order_lines, list):
@@ -2578,14 +2627,16 @@ def build_bag_rows_for_materialization(
         quantity_rules=quantity_rules,
         week_value=week_value,
         facility_id=facility_id,
-        facility_config=resolved_facility_config,
+        facility_config=_label_config_with_receipt(resolved_facility_config, label_comparison),
     )
 
 
-def build_bag_payload_for_materialization(order: dict, *, order_lines: list[dict], configured_input: dict) -> list[dict]:
+def build_bag_payload_for_materialization(
+    order: dict, *, order_lines: list[dict], configured_input: dict, label_comparison: dict | None = None,
+) -> list[dict]:
     """Explicit producer for a new command, never an accepted saved-data read."""
     return _serialize_bag_payload_rows(build_bag_rows_for_materialization(
-        order, order_lines=order_lines, configured_input=configured_input,
+        order, order_lines=order_lines, configured_input=configured_input, label_comparison=label_comparison,
     ))
 
 
@@ -6460,6 +6511,7 @@ def _prepare_output_context(
     label_profile = facility_config.get("label_profile", {})
     invoice_template = _resolve_captured_invoice_template(facility_config, order_id=order_id,
         accepted_candidate=accepted_candidate) if require_invoice else None
+    facility_config = _label_config_with_receipt(facility_config, accepted_candidate.get("label_comparison"))
     policy_started = time.perf_counter()
     quantity_rules = accepted_candidate["configured_input"]["policy"].get("quantity_rules", {})
     if timings is not None:
@@ -6837,7 +6889,8 @@ def rebuild_bags(order_id: str, *, write_session=None, original_adoption: dict |
     with daily_output_override_service.use_write_session(write_session):
         order_lines = daily_output_override_service.apply_overrides_to_lines(order_lines, facility_id)
     bags = build_bag_rows_for_materialization(order, order_lines=order_lines,
-                             configured_input=accepted_candidate["configured_input"])
+                             configured_input=accepted_candidate["configured_input"],
+                             label_comparison=accepted_candidate.get("label_comparison"))
     payload = []
 
     with nullcontext(write_session) as session:
