@@ -5,7 +5,7 @@ import re
 
 KEY = 'quantity_ocr_review'
 _NUMBER = re.compile(r'-?(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?')
-_DIGITS = str.maketrans('０１２３４５６７８９．－', '0123456789.-')
+_DIGITS = str.maketrans('０１２３４５６７８９．－，', '0123456789.-,')
 
 
 def numeric_value(value):

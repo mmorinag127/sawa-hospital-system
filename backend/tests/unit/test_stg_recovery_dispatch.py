@@ -65,7 +65,9 @@ def test_recovery_is_in_authorized_workflow_with_original_steps():
     assert 'uses' not in recovery
     inputs = current[True]['workflow_dispatch']['inputs']
     assert inputs['mode']['default'] == 'normal'
-    assert inputs['mode']['options'] == ['normal', 'recover-web-image', 'rehearse-retained-worker']
+    assert inputs['mode']['options'] == [
+        'normal', 'recover-web-image', 'rehearse-retained-worker', 'restore-ocr-selection',
+    ]
 
 
 def environment():

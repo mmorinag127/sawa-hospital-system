@@ -211,7 +211,12 @@ def test_raw_normalized_alias_conflicts_stay_visible(raw, normalized):
     assert saved[0]["raw_text"] == raw
     assert saved[0]["engine_metadata"]["source_values"]["normalized_value"] == normalized
     assert not result["blockers"] and result["review_state"] == "auto_assignable"
-    assert [row[4] for row in result["rows"]] == [raw] * 4
+    if raw == "7?":
+        assert [row[4] for row in result["rows"]] == [""] * 4
+        assert [(item["row_index"], item["col_index"], item["raw_text"], item["confirmed_blank"])
+                for item in result["quantity_ocr_review"]] == [(row, 4, raw, False) for row in range(4)]
+    else:
+        assert [row[4] for row in result["rows"]] == [raw] * 4
 
 
 @pytest.mark.parametrize("raw, expected", [("１，００７", "1007"), ("1,007", "1007"), ("7.0", "7"), ("０", "0")])
@@ -544,7 +549,7 @@ def test_public_candidate_real_capture_original_saved_quantities(public_saved, e
     result = orders.build_confirm_materialization_candidate(public_saved.order_id)
     assert public_saved.saved() == original
     if "?" in quantities:
-        assert result["error"] == "sheet_ocr_review_required" and result["lines"] == []
+        assert result["error"] == "sheet_quantity_review_required" and result["lines"] == []
         assert [(issue["row_index"], issue["column_index"], issue["raw"]) for issue in result["cell_issues"]] == [(1, 4, "?")]
     else:
         assert result["error"] is None

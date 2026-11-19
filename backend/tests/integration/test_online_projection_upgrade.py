@@ -21,9 +21,13 @@ def database(monkeypatch):
     uri = os.environ.get('ONLINE_TEST_PG_URI')
     assert uri, 'explicit owned local PostgreSQL required; no skip'
     url = sa.engine.make_url(uri)
-    assert not url.host and url.query.get('port') == '55489'
+    pg = Path(os.environ['SAWA_OWNED_PG_ROOT']).resolve(strict=True)
+    assert pg.name == 'pg' and (pg / 'OWNER').read_text() == str(ROOT)
+    assert Path(os.environ['SAWA_OWNED_PG_SOURCE']).resolve(strict=True) == ROOT
+    assert not url.host and not url.password and url.username == 'mmorinag'
+    assert url.database == 'postgres' and url.query.get('port') == os.environ['SAWA_OWNED_PG_PORT']
     socket = Path(url.query['host']).resolve()
-    assert socket == (ROOT / 'tmp/online-release-pg/socket').resolve()
+    assert socket == pg / 'socket'
     admin = sa.create_engine(url, isolation_level='AUTOCOMMIT')
     name = 'online_' + uuid4().hex
     with admin.connect() as c:

@@ -3,7 +3,7 @@ import type { SheetPayload } from './workflowTypes';
 export type QuantityReview = {row_index: number; col_index: number; field: string; raw_text: string; confirmed_blank: boolean};
 export const isQuantityField = (field: string) => /^(qty\.|qty_|quantity)/.test(field);
 export const isNumericQuantity = (value: string) => {
-  const text = value.trim().replace(/[０-９]/g, digit => String(digit.charCodeAt(0)-0xff10)).replace(/．/g,'.').replace(/－/g,'-');
+  const text = value.trim().replace(/[０-９]/g, digit => String(digit.charCodeAt(0)-0xff10)).replace(/．/g,'.').replace(/－/g,'-').replace(/，/g,',');
   return /^-?(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?$/.test(text) && Number.isFinite(Number(text.replace(/,/g,'')));
 };
 

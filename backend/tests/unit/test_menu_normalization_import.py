@@ -1,6 +1,5 @@
 """Pure canonical normalization and standalone cleanup import regressions."""
 import ast
-import hashlib
 from contextlib import nullcontext
 import os
 from pathlib import Path
@@ -21,10 +20,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT))
 from src.services import menu_name_normalization as pure
 from scripts import stg_menu_master_safety as safety
-
-
-def ast_hash(tree):
-    return hashlib.sha256(ast.dump(tree).encode()).hexdigest()
+from tests.helpers.pinned_ast import pinned_ast_hash
 
 
 def normalization_nodes(tree):
@@ -37,8 +33,8 @@ def test_exact_prechange_ast_and_normalization_parity():
     fixture = Path(__file__).with_name("fixtures") / "menu_normalization_prechange.py"
     nodes = normalization_nodes(ast.parse(fixture.read_text()))
     current = normalization_nodes(ast.parse(Path(pure.__file__).read_text()))
-    assert ast_hash(ast.Module(body=nodes, type_ignores=[])) == NORMALIZATION_AST_SHA256
-    assert ast_hash(ast.Module(body=current, type_ignores=[])) == NORMALIZATION_AST_SHA256
+    assert pinned_ast_hash(ast.Module(body=nodes, type_ignores=[])) == NORMALIZATION_AST_SHA256
+    assert pinned_ast_hash(ast.Module(body=current, type_ignores=[])) == NORMALIZATION_AST_SHA256
     assert [ast.dump(n) for n in current] == [ast.dump(n) for n in nodes]
     namespace = dict(re=re, unicodedata=unicodedata)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "frozen-normalization", "exec"), namespace)
@@ -66,7 +62,7 @@ def test_cleanup_all_existing_guards_unchanged():
                     child.module = "src.services.menu_service"
                     changed_imports += 1
     assert changed_imports == 1
-    assert ast_hash(after) == SAFETY_AST_SHA256
+    assert pinned_ast_hash(after) == SAFETY_AST_SHA256
 
 
 def cleanup_probe():

@@ -5,6 +5,12 @@ const ast=ts.createSourceFile('workflow.tsx',source,ts.ScriptTarget.Latest,true,
 const quantities={};
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../src/features/orders/sheetQuantities.ts'),'utf8'),
   {compilerOptions:{target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.CommonJS}}).outputText,{exports:quantities});
+test('grouped full-width quantities stay editable without accepting malformed grouping', () => {
+  assert.equal(quantities.isNumericQuantity('１，００７'), true);
+  for (const value of ['１，０７', '１，，００７', '７？']) {
+    assert.equal(quantities.isNumericQuantity(value), false);
+  }
+});
 function actual(name,context){
   let expression;
   function visit(node){if(ts.isVariableDeclaration(node)&&node.name.getText(ast)===name)expression=node.initializer?.getText(ast);ts.forEachChild(node,visit);}

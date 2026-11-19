@@ -436,7 +436,7 @@ def _assert_owned_workflow_failure_receipt(claim, result, error):
         job = session.get(OcrJob, JOB)
         delivery = session.get(WorkflowOcrDelivery, claim["delivery_id"])
         assert state.state == "ocr_failed"
-        assert state.primary_action == "run_ocr"
+        assert state.primary_action == "review_or_edit_quad"
         assert state.blockers_json == [error]
         assert state.revision == claim["workflow_revision"] + 1
         assert state.evidence_run_id is None

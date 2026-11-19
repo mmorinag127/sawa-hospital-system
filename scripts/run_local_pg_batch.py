@@ -10,7 +10,7 @@ def main():
     reject_hosted_runner()
     suites = ['readonly', 'c1', 'c1-guards', 'menu-identity', 'output']
     if not focused_staging():
-        suites.append('formal')
+        suites.extend(('formal', 'online-projection'))
     return run(ROOT, os.environ['SAWA_LOCAL_RUN_ID'], '1', 'batch', suites=suites)
 
 

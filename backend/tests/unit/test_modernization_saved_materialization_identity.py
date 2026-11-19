@@ -221,7 +221,7 @@ def test_public_uncertain_quantity_uses_original_preflight_without_identity_resc
     rows[1][4] = "?"
     original = save_rows(saved, rows)
     result = captured_candidate(saved, original)
-    assert result["error"] == "sheet_ocr_review_required"
+    assert result["error"] == "sheet_quantity_review_required"
     assert result["line_count"] == 0 and result["lines"] == []
     assert [(issue["row_index"], issue["column_index"], issue["raw"])
             for issue in result["cell_issues"]] == [(1, 4, "?")]

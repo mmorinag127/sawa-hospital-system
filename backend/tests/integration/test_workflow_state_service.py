@@ -856,13 +856,19 @@ def test_owned_low_score_and_nonnumeric_cells_remain_editable_without_position_g
         case.evidence = evidence["id"]
         projected = case.get("workflow-v2/sheet-source")
         assert projected["selected_ocr_result_id"] == evidence["id"]
-        assert projected["sheet"]["rows"] == declared
+        expected_rows = [["03/22", "朝", "献立A", "" if literal == "?" else literal, "4", "3", "2", "1", "1"]]
+        assert projected["sheet"]["rows"] == expected_rows
+        if literal == "?":
+            assert projected["sheet"]["quantity_ocr_review"] == [{
+                "row_index": 0, "col_index": 3, "field": "qty.regular_2f",
+                "raw_text": "?", "confirmed_blank": False,
+            }]
         records = evidence["payload_json"]["hakodate_ocr_evidence_records"]
         assert any(record["engine_metadata"]["recognizer_score"] == 0.09 for record in records)
         assert literal in [record["raw_text"] for record in records]
         case.save(projected["sheet"])
         with case.readonly():
-            assert order_service.get_current_sheet_context(case.id)["rows"] == declared
+            assert order_service.get_current_sheet_context(case.id)["rows"] == expected_rows
     with case.readonly():
         state = workflow_state_service.project_workflow_state(case.id)
         assert state["candidate_resolution"]["resolutions"]["column_mapping"]["decision_source"] != "position_fallback"

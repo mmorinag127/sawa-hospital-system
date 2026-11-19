@@ -103,10 +103,11 @@ def assert_failed_terminal(claim, result):
         assert job.error_message == receipt["error"]
         assert job.metrics["processing_stage"] == "quad_estimation"
         assert "edge locked quad estimation failed" in job.metrics["error_detail"]
-        assert job.metrics["result_state"] == "hard_failed"
+        assert job.metrics["result_state"] == "review_required"
         assert job.metrics["recognition_review"] is None
         assert job.metrics["recovery_action"] == "review_or_edit_quad"
         assert state.state == "ocr_failed"
+        assert state.primary_action == "review_or_edit_quad"
         assert state.revision == claim["workflow_revision"] + 1
         assert state.blockers_json == [receipt["error"]]
         assert state.evidence_run_id is None and state.draft_id is None

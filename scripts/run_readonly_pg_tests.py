@@ -24,6 +24,7 @@ MODULES = {
     'output': ['backend/tests/integration/pg_output_boundary_cases.py',
                'backend/tests/unit/test_ocr_history_postgresql.py'],
     'formal': ['backend/tests/integration/test_formal_alembic_fresh_chain.py'],
+    'online-projection': ['backend/tests/integration/test_online_projection_upgrade.py'],
 }
 DATABASES = {
     'readonly': {'C2_MENU_READONLY_PG_URI': 'postgres'},
@@ -36,6 +37,7 @@ DATABASES = {
     'menu-identity': {'C2_MENU_PG_URI': 'postgres'},
     'output': {'MODERNIZATION_PG_TEST_URI': 'sawa_modernization_output_test'},
     'formal': {'C2_FORMAL_PG_URI': 'postgres'},
+    'online-projection': {'ONLINE_TEST_PG_URI': 'postgres'},
 }
 
 
@@ -46,7 +48,8 @@ def owned_root(run_id, attempt, suite='readonly'):
         raise ValueError('explicit numeric local run identity required')
     prefix = {'readonly': 'sawa-ro', 'c1': 'sawa-c1',
               'c1-guards': 'sawa-c1-guards', 'menu-identity': 'sawa-menu-identity',
-              'output': 'sawa-output', 'formal': 'sawa-formal', 'batch': 'sawa-pg-batch'}[suite]
+              'output': 'sawa-output', 'formal': 'sawa-formal',
+              'online-projection': 'sawa-online', 'batch': 'sawa-pg-batch'}[suite]
     return Path('/tmp').resolve() / f'{prefix}-{run_id}-{attempt}'
 
 
@@ -89,7 +92,7 @@ def run(source, run_id, attempt, suite='readonly', *, suites=None):
         owner.write_text(str(source))
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(('PG', 'C1_', 'C2_', 'SAWA_OWNED_PG_'))
-           and key not in ('TEST_BOOTSTRAP_DB_URI', 'MODERNIZATION_PG_TEST_URI', 'OCR_HISTORY_PROJECTION_POSTGRES_URL', 'PYTEST_ADDOPTS', 'PYTEST_PLUGINS')}
+           and key not in ('TEST_BOOTSTRAP_DB_URI', 'MODERNIZATION_PG_TEST_URI', 'OCR_HISTORY_PROJECTION_POSTGRES_URL', 'ONLINE_TEST_PG_URI', 'PYTEST_ADDOPTS', 'PYTEST_PLUGINS')}
     uri = 'sqlite:///' + str(root / 'bootstrap.sqlite3')
     env.update({key: uri for key in ('DB_URI', 'DATABASE_URL', 'ALEMBIC_DB_URI')})
     env.update({

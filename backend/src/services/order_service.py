@@ -5819,9 +5819,15 @@ def _build_materialization_candidate_from_draft_record(
     if not isinstance(draft_sheet, dict):
         return None
     from src.services.sheet_quantity_value_service import pending_cells
-    if pending_cells(draft_sheet):
+    pending = pending_cells(draft_sheet)
+    if pending:
         return {"source":"draft_sheet", "draft_id":draft_record.get("id"),
-            "error":"sheet_quantity_review_required", "line_count":0, "lines":[]}
+            "error":"sheet_quantity_review_required", "line_count":0, "lines":[],
+            "cell_issues": [{
+                "row_index": item["row_index"], "column_index": item["col_index"],
+                "field": item["field"], "raw": item["raw_text"], "value": item["raw_text"],
+                "issue_code": "review_required", "severity": "warning", "source": "draft_sheet",
+            } for item in pending]}
     rows_payload = draft_sheet.get("rows")
     if not isinstance(rows_payload, list) or not rows_payload:
         return {
@@ -13721,9 +13727,6 @@ def _rerun_ocr_evidence_only_with_input(
                 "recovery_action": "review_recognition_cells",
                 "error_user_message": "文字認識で停止しました。保存したセル画像から確認・訂正できます。",
             }
-        geometry_failure = failure_details(raw_message)
-        if geometry_failure is not None:
-            return geometry_failure
         if isinstance(exc, QuadEstimationError):
             return {
                 "error": "quad_estimation_failed",
@@ -13732,6 +13735,9 @@ def _rerun_ocr_evidence_only_with_input(
                 "recovery_action": "review_or_edit_quad",
                 "processing_stage": "quad_estimation",
             }
+        geometry_failure = failure_details(raw_message)
+        if geometry_failure is not None and geometry_failure["error"] != "quad_estimation_failed":
+            return geometry_failure
         if "template_version" in raw_message or "template" in raw_message:
             return {
                 "error": "template_resolution_failed",

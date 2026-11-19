@@ -432,7 +432,8 @@ class ReceiptContractTest(unittest.TestCase):
             self.assertEqual(commands[command], 'python3 scripts/run_local_pg_batch.py')
         self.assertIn('test_live_schema_adoption.py', ' '.join(BACKEND_RUNNER.DEDICATED_MODULES['live-schema-adoption']))
         self.assertEqual(BACKEND_RUNNER.DEDICATED_MODULES['modernization-pg-output'],
-                         BACKEND_RUNNER.MODULES['output'] + BACKEND_RUNNER.MODULES['formal'])
+                         BACKEND_RUNNER.MODULES['output'] + BACKEND_RUNNER.MODULES['formal']
+                         + BACKEND_RUNNER.MODULES['online-projection'])
         def execute_backend(argv, env):
             state = Path(env['SAWA_IMPACT_STATE'])
             (state / 'selection.json').write_text(json.dumps({

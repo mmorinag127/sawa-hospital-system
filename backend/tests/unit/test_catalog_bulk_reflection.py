@@ -94,7 +94,9 @@ def test_full_reflected_fixture_native_views_and_order_equal(monkeypatch):
     assert actual == expected
     assert list(actual['tables']) == ['a', 'z']
     assert [call[0] for call in inspector.calls] == list(METHODS)
-    assert len(connection.sql) == 8
+    # Extension inventory is required even when pg_trgm is not installed.
+    assert sum('FROM pg_extension' in query for query in connection.sql) == 1
+    assert len(connection.sql) == 9
 
 
 def test_empty_tables_do_not_trigger_unfiltered_multi_reflection(monkeypatch):

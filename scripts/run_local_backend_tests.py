@@ -23,7 +23,7 @@ DEDICATED_MODULES = {
         "readonly": "hospital-readonly-pg", "c1": "hospital-c1-pg",
         "c1-guards": "hospital-c1-guard-pg", "menu-identity": "hospital-menu-identity-pg",
     }.items()},
-    "modernization-pg-output": MODULES["output"] + MODULES["formal"],
+    "modernization-pg-output": MODULES["output"] + MODULES["formal"] + MODULES["online-projection"],
     "live-schema-adoption": ["backend/tests/integration/test_live_schema_adoption.py",
                              "backend/tests/unit/test_prepare_stg_saved_import.py",
                              "backend/tests/integration/test_stg_saved_import_transport.py"],

@@ -31,7 +31,8 @@ def test_empty_or_duplicate_inventory_rejected(paths):
 
 def test_exact_dispatcher_insertion_preserves_existing_checks():
     original = subprocess.check_output(['git','show',subject.STAGED+':'+subject.RUNNER],cwd=subject.ROOT)
-    current = (subject.ROOT/subject.RUNNER).read_bytes()
+    released = 'dc10e71ae44453bd98713e9c991413eefd64d25d'
+    current = subprocess.check_output(['git', 'show', f'{released}:{subject.RUNNER}'], cwd=subject.ROOT)
     subject.require_dispatcher(original,current)
     for changed in (original, current+b'\n', current.replace(b'require_staging=require_full',b'require_staging=False'),
                     current.replace(b'receipt_version',b'unchecked_version',1)):

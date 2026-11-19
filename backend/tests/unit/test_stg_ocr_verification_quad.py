@@ -152,6 +152,7 @@ def row_for(function, argument, **values):
 def test_actual_serializer_contracts(monkeypatch):
     monkeypatch.syspath_prepend(str(SCRIPT.parent.parent / 'backend'))
     from src.services import sheet_week_service
+    from src.services.workflow_ocr_delivery_service import archived_processing_input
     value = case()
     upload_serializer, upload_ast = source_function('uploaded_pdf_service', '_serialize_uploaded_pdf', {})
     state = upload_serializer(row_for(upload_ast, 'row', current_order_id='ord', current_document_id='doc', content_sha256=value['sha256']))
@@ -187,9 +188,10 @@ def test_actual_serializer_contracts(monkeypatch):
                       and isinstance(node.value, ast.Dict))
     scope = {'workflow_job_id': 'job', 'workflow_attempt_id': 'attempt', 'expected_workflow_revision': 7,
              'evidence_id': 'new', 'result_disposition': None, 'execution_input': None,
-             'processing_start_read_input': lambda: {},
+             'processing_start_read_input': lambda: {}, 'archived_processing_input': archived_processing_input,
              'processing_start_pdf_receipt': lambda: {'order_id': 'ord', 'document_id': 'doc'}}
     execution = eval(compile(ast.Expression(assignment.value), str(path), 'eval'), scope)
+    assert execution['processing_start_input'] == {}
     evidence = {'id': 'new', 'status': 'done', 'producer_version': 'hakodate_best_method_pipeline', 'payload_json': {'_ocr_execution': execution}}
     workflow = {'order_id': 'ord', 'ocr_job': job}
     assert verification.completed_evidence(evidence, workflow, workflow, 'ord', 'doc', 'previous')

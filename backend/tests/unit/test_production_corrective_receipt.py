@@ -2,6 +2,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -110,7 +111,9 @@ def test_production_validator_delegates_without_faking_a_full_rerun(monkeypatch)
 
 
 def test_fixed_regression_suite_covers_resolver_consumer_tests():
-    consumers = {str(path.relative_to(subject.ROOT))
-                 for path in (subject.ROOT / 'backend/tests/unit').glob('test_*.py')
-                 if 'registry_image_digest' in path.read_text() or 'resolve_image_digest' in path.read_text()}
+    # This historical receipt binds a fixed suite, not future tests.
+    source = '76ef1fbfd3dc56aa958398f337b58fa8c73d6cbb'
+    consumers = {line.split(':', 1)[1] for line in subprocess.check_output(
+        ['git', 'grep', '-l', '-E', 'registry_image_digest|resolve_image_digest',
+         source, '--', 'backend/tests/unit/test_*.py'], cwd=subject.ROOT, text=True).splitlines()}
     assert consumers <= set(subject.TESTS)

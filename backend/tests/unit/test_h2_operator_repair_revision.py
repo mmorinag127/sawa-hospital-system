@@ -1945,7 +1945,7 @@ def test_real_final_confirm_fixture_producer_rejects_invalid_source(accepted_out
                     item.qty_per_serving = None
     result, error = workflow.run_bagging(order_id, expected_revision=revision)
     assert result is None
-    assert error == ("sheet_ocr_review_required" if fault == "malformed_quantity" else "menu_amount_unresolved")
+    assert error == ("sheet_quantity_review_required" if fault == "malformed_quantity" else "menu_amount_unresolved")
     with session_scope() as session:
         state = session.get(OrderWorkflowState, order_id)
         assert state.secondary_actions_json == before

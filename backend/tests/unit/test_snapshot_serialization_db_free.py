@@ -10,6 +10,7 @@ import subprocess
 import sys
 from typing import Any
 from unittest.mock import patch
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -32,13 +33,14 @@ def _original_snapshots_equal(left: Any, right: Any) -> bool:
 
 
 def test_contact_closure_matches_pinned_original_and_runtime_aliases():
+    from tests.helpers.pinned_ast import pinned_ast_hash
     from src.services import hakodate_recognizer_contact_sheet as pure
     from src.hakodate_best_method_runtime import run_text_recognizer_corner_noise_trial as runtime
 
     tree = ast.parse((ROOT / 'backend/src/services/hakodate_recognizer_contact_sheet.py').read_text())
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     assert len(functions) == 13
-    assert hashlib.sha256(ast.dump(ast.Module(body=functions, type_ignores=[])).encode()).hexdigest() == CONTACT_CLOSURE_AST_SHA256
+    assert pinned_ast_hash(ast.Module(body=functions, type_ignores=[])) == CONTACT_CLOSURE_AST_SHA256
     for node in functions:
         assert getattr(runtime, node.name) is getattr(pure, node.name)
 
@@ -52,6 +54,7 @@ def test_contact_closure_matches_pinned_original_and_runtime_aliases():
 
 def test_snapshot_functions_match_pinned_original_outputs_hashes_and_errors():
     global _json_snapshot
+    from tests.helpers.pinned_ast import pinned_ast_hash
     from src.services.snapshot_serialization import _json_snapshot
     from src.services import snapshot_serialization as pure
 
@@ -61,15 +64,15 @@ def test_snapshot_functions_match_pinned_original_outputs_hashes_and_errors():
     original = ast.parse(Path(__file__).read_text())
     baseline = next(node for node in original.body if isinstance(node, ast.FunctionDef) and node.name == '_original_canonical_snapshot_json')
     baseline.name = 'canonical_snapshot_json'
-    assert hashlib.sha256(ast.dump(baseline).encode()).hexdigest() == ORIGINAL_AST_SHA256['canonical_snapshot_json']
+    assert pinned_ast_hash(baseline) == ORIGINAL_AST_SHA256['canonical_snapshot_json']
     baseline_equal = next(node for node in original.body if isinstance(node, ast.FunctionDef) and node.name == '_original_snapshots_equal')
     baseline_equal.name = 'snapshots_equal'
     for node in ast.walk(baseline_equal):
         if isinstance(node, ast.Name) and node.id == '_original_canonical_snapshot_json':
             node.id = 'canonical_snapshot_json'
-    assert hashlib.sha256(ast.dump(baseline_equal).encode()).hexdigest() == ORIGINAL_AST_SHA256['snapshots_equal']
+    assert pinned_ast_hash(baseline_equal) == ORIGINAL_AST_SHA256['snapshots_equal']
     unchanged = next(node for node in functions if node.name == '_json_snapshot')
-    assert hashlib.sha256(ast.dump(unchanged).encode()).hexdigest() == ORIGINAL_AST_SHA256['_json_snapshot']
+    assert pinned_ast_hash(unchanged) == ORIGINAL_AST_SHA256['_json_snapshot']
     samples = [(None, 'null'), (False, 'false'), (True, 'true'), (0, '0'), (1, '1'),
                ('', '""'), ('日本語', '"日本語"'),
                ([False, 0, True, 1], '[false, 0, true, 1]'),
@@ -97,10 +100,15 @@ def test_snapshot_functions_match_pinned_original_outputs_hashes_and_errors():
             (object(), TypeError, 'execution_snapshot_non_json_value'),
             ({1, 2}, TypeError, 'execution_snapshot_non_json_value'),
             (b'bytes', TypeError, 'execution_snapshot_non_json_value'),
-            (float('nan'), ValueError, 'Out of range float values are not JSON compliant'),
-            (float('inf'), ValueError, 'Out of range float values are not JSON compliant'),
-            (float('-inf'), ValueError, 'Out of range float values are not JSON compliant'),
-            ({'nested': [float('nan')]}, ValueError, 'Out of range float values are not JSON compliant')):
+            (float('nan'), ValueError, None),
+            (float('inf'), ValueError, None),
+            (float('-inf'), ValueError, None),
+            ({'nested': [float('nan')]}, ValueError, None)):
+        if message is None:
+            with pytest.raises(ValueError) as original_error:
+                _original_canonical_snapshot_json(value)
+            message = str(original_error.value)
+            assert message.startswith('Out of range float values are not JSON compliant')
         for name in NAMES[:2]:
             try:
                 getattr(pure, name)(value)
