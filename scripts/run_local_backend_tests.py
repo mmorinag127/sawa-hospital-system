@@ -55,6 +55,12 @@ def retained_failure_modules(state):
     return sorted(modules)
 
 
+def route_online_projection_failures(retained):
+    owned = set(MODULES['online-projection'])
+    return ([item for item in retained if item.split('::', 1)[0] not in owned],
+            [item for item in retained if item.split('::', 1)[0] in owned])
+
+
 def run_scoped_backend(scope, evidence, env, source, legacy_state, excluded, arguments):
     state = legacy_state.parent / 'backend-scoped'
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -333,12 +339,14 @@ def main():
         legacy_state = common.resolve() / 'sawa-local-impact/backend'
         retained = sorted(set(retained_failure_modules(legacy_state))
                           | set(retained_failure_modules(legacy_state.parent / 'backend-scoped')))
+        retained, owned_pg = route_online_projection_failures(retained)
         if any(name.split('::', 1)[0] in excluded for name in retained):
             raise ValueError('Retained dedicated PostgreSQL failure must use its owned runner')
         from backend_test_scope import select_modules
         base = staging_scope_base()
         changed = git('diff', '--name-only', base, 'HEAD', '--', 'backend').splitlines()
         scope = select_modules(ROOT, changed, retained)
+        scope['retained_online_projection_cases'] = owned_pg
         scope['base_sha'] = base
         return run_scoped_backend(scope, evidence, env, source, legacy_state, excluded, arguments)
     # A new worktree must not discard the same repository's verified inputs.

@@ -522,6 +522,13 @@ class ReceiptContractTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'removed test coverage'):
                 select_modules(root, ['backend/tests/test_removed.py'])
 
+    def test_retained_online_projection_cases_are_routed_to_owned_pg(self):
+        pg = BACKEND_RUNNER.MODULES['online-projection'][0]
+        identity = pg + '::test_refusal_rolls_back_schema_and_data[active]'
+        other = 'backend/tests/unit/test_order_workflow_revision_contract.py::test_state'
+        self.assertEqual(BACKEND_RUNNER.route_online_projection_failures([identity, other]),
+                         ([other], [identity]))
+
     def test_source_specific_scope_keeps_auth_and_exact_failed_parameters(self):
         from backend_test_scope import select_modules
         with tempfile.TemporaryDirectory() as directory:

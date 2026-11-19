@@ -198,7 +198,8 @@ class CommandEvidence:
             reports = observation.get('reports')
             expected = ['readonly', 'c1', 'c1-guards', 'menu-identity', 'output']
             if self.environment['SAWA_LOCAL_TEST_MODE'] != 'focused':
-                expected.extend(('formal', 'online-projection'))
+                expected.append('formal')
+            expected.append('online-projection')
             if command == PG_COMMAND and (observation.get('schema') != 1 or observation.get('source_sha') != source_sha
                     or suites != expected or set(reports) != set(expected)
                     or any(report.get('schema') != 1 or type(report.get('collected')) is not int
