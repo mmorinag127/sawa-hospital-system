@@ -34,6 +34,7 @@ SOURCE_SHA = '04ef4a6ce7897bb187bb4d91f77839cfa30edde7'
     ('output', 'sawa-output', ['backend/tests/integration/pg_output_boundary_cases.py',
                               'backend/tests/unit/test_ocr_history_postgresql.py']),
     ('formal', 'sawa-formal', ['backend/tests/integration/test_formal_alembic_fresh_chain.py']),
+    ('online-projection', 'sawa-online', ['backend/tests/integration/test_online_projection_upgrade.py']),
 ])
 def test_explicit_suite_selects_whole_modules_and_distinct_owned_root(suite, prefix, modules):
     root = runner.owned_root('123', '2', suite)
@@ -61,6 +62,7 @@ def test_fixed_profiles_match_unchanged_fixture_paths_and_databases():
         },
         'output': {'MODERNIZATION_PG_TEST_URI': 'sawa_modernization_output_test'},
         'formal': {'C2_FORMAL_PG_URI': 'postgres'},
+        'online-projection': {'ONLINE_TEST_PG_URI': 'postgres'},
     }
 
 
@@ -323,9 +325,9 @@ def test_cleanup_failure_cannot_turn_successful_pytest_green(transport, failure,
     assert 'cleanup-error.log' in json.loads((evidence / 'sha256.json').read_text())
 
 
-@pytest.mark.parametrize('suite', ['output', 'formal'])
+@pytest.mark.parametrize('suite', ['output', 'formal', 'online-projection'])
 @pytest.mark.parametrize('exit_code', [0, 1])
-def test_output_and_formal_use_current_owned_socket_and_all_cases(transport, suite, exit_code):
+def test_release_pg_suites_use_current_owned_socket_and_all_cases(transport, suite, exit_code):
     transport.pytest_exit = exit_code
     assert runner.run(transport.source, '123', '1', suite) == exit_code
     calls = [(args, env) for args, env in transport.commands if args[:3] == [sys.executable, '-m', 'pytest']]
