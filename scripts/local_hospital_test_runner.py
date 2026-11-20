@@ -50,10 +50,13 @@ def focused_staging():
     if mode not in (None, 'full', 'impact', 'focused'):
         raise ValueError('Unknown local test mode')
     branch = git('branch', '--show-current')
-    return mode == 'focused' and bool(branch) and not branch.startswith('release/prod-')
+    return mode == 'focused' and bool(branch) and (
+        not branch.startswith('release/prod-') or bool(os.environ.get('SAWA_LOCAL_RELEASE_FOCUS_BASE')))
 
 
 def staging_scope_base():
+    if os.environ.get('SAWA_LOCAL_RELEASE_FOCUS_BASE') and focused_staging():
+        return os.environ['SAWA_LOCAL_RELEASE_FOCUS_BASE']
     receipt_path = os.environ.get('SAWA_LOCAL_TEST_BASELINE_RECEIPT')
     if not receipt_path or not focused_staging():
         return git('merge-base', 'HEAD', 'origin/develop')
@@ -142,7 +145,51 @@ def require_frontend_dependencies() -> None:
                          + ", ".join(missing))
 
 
+def production_focus(baseline, target, definition):
+    prior = verify_signed(baseline)
+    if not isinstance(prior, dict) or prior.get('receipt_version') != 2:
+        raise ValueError('Production focus requires a direct signed full run, not a composed receipt')
+    source = prior.get('source_sha_end', '')
+    validate_receipt(prior, source, definition, require_full=True)
+    git('merge-base', '--is-ancestor', source, target)
+    paths = git('diff', '--no-renames', '--name-only', '-z', source, target).rstrip('\0').split('\0')
+    removed = git('diff', '--no-renames', '--diff-filter=D', '--name-only', source, target)
+    mapped = json.loads((ROOT / 'infra/ci/staging_backend_scope.json').read_text())['sources']
+    assistant_ui = {
+        'frontend/src/pages/assistant.tsx',
+        'frontend/src/components/assistant/BusinessProgress.tsx',
+    }
+    from run_local_agent_tests import ASSISTANT_BUDGET_INPUTS
+
+    def reviewed(path):
+        frontend_test = Path(path)
+        return (path.startswith('backend/src/services/') and path in mapped and mapped[path] != ['*']
+                or path in assistant_ui
+                or path.startswith('experiments/agent_assistant/')
+                and path.removeprefix('experiments/agent_assistant/') in ASSISTANT_BUDGET_INPUTS
+                or path.startswith('backend/tests/') and frontend_test.name.startswith('test_') and path.endswith('.py')
+                or frontend_test.parent.as_posix() == 'frontend/tests' and path.endswith('.test.cjs')
+                or path.startswith('frontend/tests/e2e/') and path.endswith('.spec.ts')
+                or path.startswith('docs/') and path.endswith('.md'))
+
+    if removed or not all(paths) or not all(reviewed(path) for path in paths):
+        raise ValueError('Unmapped, shared or removed files require an explicit full run')
+    return {'base_sha': source, 'changed_paths': paths}
+
+
 def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash: str, *, require_full: bool = False) -> None:
+    if isinstance(receipt, dict) and receipt.get('receipt_version') == 13:
+        if set(receipt) != {'receipt_version', 'baseline', 'scope', 'focused_run'}:
+            raise ValueError('Production focus receipt fields do not match')
+        scope = production_focus(receipt['baseline'], expected_sha, expected_definition_hash)
+        inner = receipt['focused_run']
+        if (receipt['scope'] != scope or not isinstance(inner, dict) or inner.get('receipt_version') != 2
+                or not isinstance(inner.get('backend_selection'), dict)
+                or inner['backend_selection'].get('mode') != 'focused'
+                or inner['backend_selection'].get('reused') != 0):
+            raise ValueError('Production focus must attest fresh focused execution for the exact scope')
+        validate_receipt(inner, expected_sha, expected_definition_hash)
+        return
     if isinstance(receipt, dict) and receipt.get('receipt_version') == 12:
         from documented_staging_receipt import validate
         validate(receipt, expected_sha, expected_definition_hash)
@@ -251,7 +298,7 @@ def validate_receipt(receipt: dict, expected_sha: str, expected_definition_hash:
                            dependency_hash=entry['dependency_sha256'], log_hash=command['log_sha256'])
 
 
-def run(output: Path, *, full: bool = False) -> int:
+def run(output: Path, *, full: bool = False, production_baseline: Path | None = None) -> int:
     reject_hosted_runner()
     os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     if not clean_tree():
@@ -259,6 +306,16 @@ def run(output: Path, *, full: bool = False) -> int:
     require_frontend_dependencies()
     source_sha_start = git("rev-parse", "HEAD")
     definition_start = digest(MANIFEST)
+    branch = git("branch", "--show-current")
+    production_branch = branch.startswith("release/prod-")
+    baseline = scope = None
+    if production_baseline:
+        if full or not production_branch:
+            raise ValueError('--production-baseline requires a release/prod-* branch and no --full')
+        baseline = json.loads(production_baseline.read_text())
+        scope = production_focus(baseline, source_sha_start, definition_start)
+    elif production_branch and not full:
+        raise ValueError('Select --production-baseline for mapped changes or explicitly request --full')
     manifest = json.loads(MANIFEST.read_text())
     commands = manifest.get("commands")
     if manifest.get("version") != 1 or not isinstance(commands, list) or not commands:
@@ -271,8 +328,11 @@ def run(output: Path, *, full: bool = False) -> int:
     environment.setdefault('REFRESH_TEST_PG_BIN', environment.get('PG_BIN', '/usr/lib/postgresql/16/bin'))
     for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         environment.pop(key, None)
-    branch = git("branch", "--show-current")
-    environment["SAWA_LOCAL_TEST_MODE"] = "full" if full or not branch or branch.startswith("release/prod-") else "focused"
+    environment.pop('SAWA_LOCAL_RELEASE_FOCUS_BASE', None)
+    if scope is not None:
+        environment['SAWA_LOCAL_RELEASE_FOCUS_BASE'] = scope['base_sha']
+        (output / 'scope-baseline.json').write_text(json.dumps(scope, indent=2) + '\n')
+    environment["SAWA_LOCAL_TEST_MODE"] = "full" if full or not branch else "focused"
     environment["SAWA_IMPACT_FULL"] = "1" if environment["SAWA_LOCAL_TEST_MODE"] == "full" else "0"
     records = []
     executed_commands = {}
@@ -291,7 +351,7 @@ def run(output: Path, *, full: bool = False) -> int:
             shutil.copyfile(previous_log, log)
             reused_in_batch = True
         else:
-            reuse = evidence.reuse(command, log) if environment['SAWA_LOCAL_TEST_MODE'] == 'focused' else None
+            reuse = evidence.reuse(command, log) if environment['SAWA_LOCAL_TEST_MODE'] == 'focused' and scope is None else None
             if reuse is not None:
                 result = subprocess.CompletedProcess(command, 0)
             else:
@@ -352,6 +412,9 @@ def run(output: Path, *, full: bool = False) -> int:
         receipt['receipt_version'] = 3
         receipt['command_reuse'] = reused_commands
         validate_receipt(receipt, source_sha_start, receipt['definition_sha256'])
+    if scope is not None:
+        receipt = {'receipt_version': 13, 'baseline': baseline, 'scope': scope, 'focused_run': receipt}
+        validate_receipt(receipt, source_sha_start, definition_start, require_full=True)
     (output / "receipt.json").write_text(json.dumps(sign(receipt), indent=2) + "\n")
     return 0 if receipt["clean_after"] and len(records) == len(commands) and all(x["exit_code"] == 0 for x in records) else 1
 
@@ -363,6 +426,7 @@ def main() -> int:
     parser.add_argument("--expected-source-sha")
     parser.add_argument("--expected-definition-sha256")
     parser.add_argument("--full", action="store_true", help="Execute every backend case instead of dependency-tracked selection")
+    parser.add_argument("--production-baseline", type=Path, help="Use a signed direct full receipt for a reviewed production delta")
     parser.add_argument("--require-full", action="store_true")
     args = parser.parse_args()
     if args.validate:
@@ -373,7 +437,7 @@ def main() -> int:
         return 0
     if args.output is None:
         parser.error("--output is required when creating a receipt")
-    return run(args.output, full=args.full)
+    return run(args.output, full=args.full, production_baseline=args.production_baseline)
 
 
 if __name__ == "__main__":

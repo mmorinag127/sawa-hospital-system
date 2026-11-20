@@ -3,7 +3,7 @@
 ## 実行方針
 
 - push/PRによる自動試験は起動しない。ローカルbatchのbackend試験で、前回成功した個別テストの実行コード・間接依存・読取入力が同一と確認できた場合だけ再利用する。
-- `scripts/local_hospital_test_runner.py --full`、`release/prod-*`、ブランチを識別できない実行は全件対象とする。本番配信gateはimpact receiptを拒否する。
+- `--full` とブランチを識別できない実行は全件対象。本番リリースは `--production-baseline <署名済み全量receipt>` または明示的な `--full` を選ぶ。単独のfocused/impact receiptは本番配信gateで拒否する。
 - Node は個別テストが実際に読み取ったファイルと読み込んだモジュールを記録する。トップレベルで読み込むモジュールは同じテストファイルの共有依存になる。
 - パラメータ化した Python テストも node ID ごとに判定する。
 - 新規・失敗・追跡情報欠落・破損・設定変更は実行する。省略判断に使う記録を PR から公開しない。

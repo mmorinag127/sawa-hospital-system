@@ -316,7 +316,7 @@ def main():
         mode = "full" if not branch or branch.startswith("release/prod-") else "focused"
     if mode not in {"full", "impact", "focused"}:
         raise ValueError("Local backend test mode must be full, impact or focused")
-    if not branch or branch.startswith("release/prod-"):
+    if not branch or branch.startswith("release/prod-") and not os.environ.get('SAWA_LOCAL_RELEASE_FOCUS_BASE'):
         mode = "full"
     if mode != 'focused' or contracts:
         require_impact_dependencies()

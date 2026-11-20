@@ -261,6 +261,18 @@ class ReceiptContractTest(unittest.TestCase):
             self.assertEqual(AGENT_RUNNER.select_test_targets()['mode'], 'full')
             git.assert_not_called()
 
+    def test_assistant_budget_scope_keeps_native_auth_persistence_and_recovery(self):
+        paths = 'experiments/agent_assistant/business_workflow.py\0frontend/src/pages/assistant.tsx\0'
+        with patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
+             patch.object(AGENT_RUNNER, 'staging_scope_base', return_value='a'*40), \
+             patch.object(AGENT_RUNNER, 'git', return_value=paths):
+            scope = AGENT_RUNNER.select_test_targets()
+        self.assertEqual(scope['mode'], 'assistant-budget-and-shared-recovery')
+        targets = '\n'.join(scope['targets'])
+        for name in ('test_recovery.py', 'test_gemini.py', 'test_durable_postgres.py', 'test_native_workflows.py'):
+            self.assertIn(name, targets)
+        self.assertNotIn('test_route_generation_binding.py', targets)
+
     def test_native_domain_delta_includes_manifest_and_shared_recovery_not_other_domain(self):
         paths = 'agent_runtime/native/shift/backend/shift_scheduler_backend/solver.py\0agent_runtime/manifests/shift.json\0'
         with patch.object(AGENT_RUNNER, 'focused_staging', return_value=True), \
@@ -1220,7 +1232,11 @@ class ReceiptContractTest(unittest.TestCase):
                      patch.object(RUNNER, 'clean_tree', return_value=True), \
                      patch.object(RUNNER, 'git', side_effect=lambda *args: branch if args[0] == 'branch' else 'a' * 40), \
                      patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)) as execute:
-                    self.assertEqual(RUNNER.run(Path(directory) / 'evidence'), 1)
+                    if branch.startswith('release/prod-'):
+                        with self.assertRaisesRegex(ValueError, 'explicitly request --full'):
+                            RUNNER.run(Path(directory) / 'implicit')
+                        execute.assert_not_called()
+                    self.assertEqual(RUNNER.run(Path(directory) / 'evidence', full=branch.startswith('release/prod-')), 1)
                     self.assertEqual(execute.call_args.kwargs['env']['SAWA_LOCAL_TEST_MODE'], expected)
                     self.assertEqual(execute.call_args.kwargs['env']['SAWA_IMPACT_FULL'], '1' if expected == 'full' else '0')
 
@@ -1334,6 +1350,43 @@ class ReceiptContractTest(unittest.TestCase):
         RUNNER.validate_receipt(receipt, 'a' * 40, 'b' * 64)
         with self.assertRaisesRegex(ValueError, 'production requires full'):
             RUNNER.validate_receipt(receipt, 'a' * 40, 'b' * 64, require_full=True)
+
+    def test_production_focus_only_accepts_known_delta_over_direct_full_baseline(self):
+        baseline = self.receipt()
+        baseline['receipt_version'] = 2
+        baseline['backend_selection'] = {'source_sha': 'a'*40, 'mode': 'full',
+            'executed': 11000, 'reused': 0, 'report_sha256': 'e'*64}
+        source = 'c'*40
+        for filename, deleted, allowed in (
+            ('frontend/src/pages/assistant.tsx', '', True),
+            ('experiments/agent_assistant/recovery.py', '', True),
+            ('backend/migrations/0040_new.py', '', False),
+            ('scripts/backend_test_scope.py', '', False),
+            ('frontend/src/pages/assistant.tsx', 'frontend/src/pages/assistant.tsx', False),
+        ):
+            def git(*args):
+                if args[:2] == ('merge-base', '--is-ancestor'):
+                    self.assertEqual(args[2:], ('a'*40, source))
+                    return ''
+                return deleted if '--diff-filter=D' in args else filename + '\0'
+            with self.subTest(filename=filename, removed=bool(deleted)), \
+                 patch.object(RUNNER, 'git', side_effect=git), \
+                 patch.object(RUNNER, 'verify_signed', return_value=baseline):
+                if not allowed:
+                    with self.assertRaisesRegex(ValueError, 'explicit full'):
+                        RUNNER.production_focus({'signed': True}, source, 'b'*64)
+                    continue
+                focus = {**baseline, 'source_sha_start': source, 'source_sha_end': source,
+                         'backend_selection': {**baseline['backend_selection'], 'source_sha': source,
+                                               'mode': 'focused', 'executed': 300}}
+                proof = {'receipt_version': 13, 'baseline': {'signed': True}, 'focused_run': focus,
+                         'scope': {'base_sha': 'a'*40, 'changed_paths': [filename]}}
+                RUNNER.validate_receipt(proof, source, 'b'*64, require_full=True)
+                with self.assertRaisesRegex(ValueError, 'exact scope'):
+                    RUNNER.validate_receipt({**proof, 'scope': {}}, source, 'b'*64, require_full=True)
+                with self.assertRaisesRegex(ValueError, 'exact scope'):
+                    RUNNER.validate_receipt({**proof, 'focused_run': {**focus, 'receipt_version': 13}},
+                                            source, 'b'*64, require_full=True)
 
     def test_signed_selection_rejects_wrong_source_invalid_count_and_full_reuse(self):
         receipt = self.receipt()

@@ -91,7 +91,7 @@ failed or interrupted modules. Changed backend inputs without a reviewed mapping
 stop the run rather than silently omitting coverage. Dedicated PostgreSQL modules
 are excluded only because the same receipt maps them to their owned PostgreSQL
 command. Tests outside the selected staging groups are not executed or claimed
-as passed. `--full` and `release/prod-*` execute every general case; the explicit
+as passed. `--full` executes every general case; the explicit
 impact mode retains the testmon/input tracker. Inherited pytest selectors are
 removed.
 
@@ -118,7 +118,27 @@ the full native suite. A delta limited to the packaged school or shift code and
 its matching source manifest selects that domain plus shared authentication,
 receipt, recovery and restart contracts. Unknown or shared inputs cannot enter
 that narrower branch. The existing read/startup selection is unchanged.
-Full/production mode does not use this baseline.
+Full mode does not use this baseline.
+
+### Reviewed production deltas
+
+On a `release/prod-*` branch, pass `--production-baseline /absolute/full/receipt.json`
+for a reviewed delta or explicitly pass `--full`. There is no implicit full rerun
+or automatic fallback. The focused production receipt (version 13) requires a
+direct signed version 2 full receipt for an exact Git ancestor with the same
+command manifest. It runs the existing focused selection and every mandatory
+manifest command without outer result reuse. It signs the rerun separately from
+the baseline and does not claim that unselected tests passed on the new SHA.
+The production gate rechecks the baseline signature, source ancestry, manifest,
+scope and current receipt. Use `payload.focused_run.source_sha_start` when submitting
+version 13. Owner dispatch, staging acceptance, approval and normal release
+checks are unchanged.
+
+Currently, reviewed deltas cover mapped non-shared backend services, the mapped
+assistant budget/recovery inputs and screen, selected test locations and Markdown
+documentation. Removals, migrations, test-selector changes, dependency changes and
+unmapped files require a new full baseline. A new policy rollout itself therefore
+needs one full baseline before this shortcut can apply to later small releases.
 
 For frontend contracts, `--use-openssl-ca` and `--max-old-space-size=2048`
 remain in the tracked environment hash without forcing all tests to execute.
