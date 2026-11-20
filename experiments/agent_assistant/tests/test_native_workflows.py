@@ -288,11 +288,19 @@ def test_real_lunch_questions_save_approval_restart_and_three_official_outputs(t
                 else:raise AssertionError(store.events(ident)[-8:])
                 assert len(answered)==4
                 # Crash during the read-only approval wait; preserve all answers.
-                for _ in range(100):
+                deadline = asyncio.get_running_loop().time() + 30
+                while asyncio.get_running_loop().time() < deadline:
                     with store.read() as db:
-                        waiting=db.execute("SELECT 1 FROM commands WHERE run_id=? AND status='executing'",(ident,)).fetchone()
-                    if waiting:break
+                        active = db.execute(
+                            "SELECT request,status FROM commands WHERE run_id=? AND status!='done'", (ident,)
+                        ).fetchall()
+                    if [(json.loads(row['request'])['name'], row['status']) for row in active] == [
+                        ('wait_for_task_decision', 'executing')
+                    ]:
+                        break
                     await asyncio.sleep(.02)
+                else:
+                    pytest.fail('Did not reach the exclusive read-only approval wait before cancellation')
                 agent.tasks[ident].cancel()
                 with suppress(asyncio.CancelledError):await agent.tasks[ident]
                 await sandbox.stop(ident);store.recover()
