@@ -71,7 +71,7 @@ def select_test_targets():
     prefix = 'experiments/agent_assistant/'
     assistant = {path.removeprefix(prefix) for path in paths if path.startswith(prefix)}
     if (assistant and assistant <= ASSISTANT_BUDGET_INPUTS
-            and all(path.startswith((prefix, 'docs/', 'frontend/src/components/assistant/'))
+            and all(path.startswith((prefix, 'docs/', 'frontend/src/components/assistant/', 'frontend/tests/e2e/'))
                     or path in {'frontend/src/pages/assistant.tsx', 'frontend/tests/assistant-workflow-ui.test.cjs',
                                 'scripts/run_local_agent_tests.py'}
                     for path in paths)):

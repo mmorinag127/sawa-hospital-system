@@ -486,6 +486,8 @@ test("unknown dirty history stops without guessed delta and recovers after becom
   await page.getByRole("link", { name: "メニューマスター", exact: true }).click();
   await expect(page.getByRole("heading", { name: "メニューマスター", exact: true })).toBeVisible();
   await select(page); await field(editForm(page), "分類").fill("新しい所有履歴で保護");
+  await expect.poll(() => page.evaluate(() =>
+    !window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(true);
   const owned = await position(page);
   expect(owned.position).toEqual({ token: recovered.position.token, index: 2 });
   await info.attach("recovered-owned-history", { body: JSON.stringify({ recovered, neighbor, owned }), contentType: "application/json" });
