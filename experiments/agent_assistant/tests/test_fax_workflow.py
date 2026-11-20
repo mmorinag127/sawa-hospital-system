@@ -357,7 +357,7 @@ def test_budget_pause_allows_operator_to_correct_rejected_fax_preserving_other_a
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('change', [None, 'legacy_content', 'evidence', 'saved', 'revision', 'late_content'])
+@pytest.mark.parametrize('change', [None, 'legacy_content', 'evidence', 'saved', 'revision', 'late_content', 'late_revision'])
 def test_quantity_projection_change_requires_exact_legacy_and_current_basis(setup, change):
     async def scenario():
         store, native, tools, run = setup
@@ -391,13 +391,17 @@ def test_quantity_projection_change_requires_exact_legacy_and_current_basis(setu
             native.wfs['OA']['saved_sheet_id'] = 'SA'
         elif change == 'revision':
             native.wfs['OA']['revision'] += 1
-        elif change == 'late_content':
-            request = native.request
-            async def change_at_pdf(run, domain, method, path, **kwargs):
-                if path == '/orders/OA/document':
+        calls = []
+        request = native.request
+        async def record_restore(run, domain, method, path, **kwargs):
+            calls.append((path, kwargs.get('params')))
+            if path == '/orders/OA/document':
+                if change == 'late_content':
                     native.sheets['OA']['rows'][0][3] = '40'
-                return await request(run, domain, method, path, **kwargs)
-            native.request = change_at_pdf
+                elif change == 'late_revision':
+                    native.wfs['OA']['revision'] += 1
+            return await request(run, domain, method, path, **kwargs)
+        native.request = record_restore
         store.update(ident, status='budget_reached')
         paused = store.get(ident)
         async def restore():
@@ -409,10 +413,20 @@ def test_quantity_projection_change_requires_exact_legacy_and_current_basis(setu
             assert not store.events(ident, kinds=('fax_operator_correction',))
             return
         restored = (await restore())['review']
+        source_path = '/orders/OA/workflow-v2/sheet-source'
+        assert [call for call in calls if call[0] in (source_path, '/orders/OA/document')] == [
+            (source_path, {'include_legacy_quantity_basis': 'true'}),
+            ('/orders/OA/document', None),
+            (source_path, None),
+        ]
         assert restored['sheet'] == native.sheets['OA']
         assert restored['native_signature'] != old['native_signature']
         assert tools.faxes.item(ident, 'B') == before[1]
         assert store.events(ident, kinds=('fax_operator_correction',))[0]['payload']['previous_decision']['message'] == '原本に戻す'
+        repeated = await tools.faxes.submit(paused, 'A', '原本復元',
+                                          operator_review_id=restored['id'], restore_source=True)
+        assert repeated['review'] == restored
+        assert len(store.events(ident, kinds=('fax_operator_correction',))) == 1
         with pytest.raises(Conflict):
             await tools.faxes.decide(paused, 'A', old['id'], True, '')
         assert not native.writes
