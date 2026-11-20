@@ -34,12 +34,12 @@ SHARED_NATIVE_TESTS = (
     'test_native_workflows.py::test_packaged_api_auth_and_extensions_with_latest_contracts',
 )
 ASSISTANT_BUDGET_INPUTS = {
-    'app.py', 'business_workflow.py', 'fax_workflow.py', 'gemini.py', 'recovery.py', 'task_flow.py',
-    'tests/test_business_workflow.py', 'tests/test_recovery.py',
+    'app.py', 'business_workflow.py', 'execution_binding.py', 'fax_workflow.py', 'gemini.py', 'recovery.py', 'task_flow.py',
+    'tests/test_business_workflow.py', 'tests/test_fax_workflow.py', 'tests/test_recovery.py',
 }
 ASSISTANT_BUDGET_TESTS = (
     'test_business_workflow.py', 'test_recovery.py', 'test_gemini.py', 'test_fax_workflow.py',
-    'test_conversation.py', 'test_trial.py', 'test_hospital_output_completion.py',
+    'test_conversation.py', 'test_execution_binding.py', 'test_trial.py', 'test_hospital_output_completion.py',
     'test_native_workflows.py::test_packaged_api_auth_and_extensions_with_latest_contracts',
 )
 
@@ -72,7 +72,8 @@ def select_test_targets():
     assistant = {path.removeprefix(prefix) for path in paths if path.startswith(prefix)}
     if (assistant and assistant <= ASSISTANT_BUDGET_INPUTS
             and all(path.startswith((prefix, 'docs/', 'frontend/src/components/assistant/'))
-                    or path in {'frontend/src/pages/assistant.tsx', 'frontend/tests/assistant-workflow-ui.test.cjs'}
+                    or path in {'frontend/src/pages/assistant.tsx', 'frontend/tests/assistant-workflow-ui.test.cjs',
+                                'scripts/run_local_agent_tests.py'}
                     for path in paths)):
         targets = ['experiments/agent_assistant/tests/' + name
                    for name in sorted(set(SHARED_NATIVE_TESTS + ASSISTANT_BUDGET_TESTS))]

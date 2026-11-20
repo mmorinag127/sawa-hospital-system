@@ -591,6 +591,10 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         run = await asyncio.to_thread(store.get, ident, owner)
         await authorize(request.headers.get('authorization', ''), run['domains'])
         async with control_lock(ident):
+            if owned(run) and business.budget_paused(run):
+                await run_blocking(business.begin_reconciliation, run)
+                await business.kick_many([ident], request.headers.get('authorization', ''))
+                return await run_blocking(store.get, ident, owner)
             tools.authorizations[ident] = request.headers.get('authorization', '')
             return await managed.resume(ident)
 
@@ -600,8 +604,6 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         run = await run_blocking(store.get, ident, owner)
         await authorize(request.headers.get('authorization', ''), run['domains'])
         async with control_lock(ident):
-            if business.budget_paused(run):
-                raise Conflict('AI利用上限で停止中のため、保存済みの作業を確認してください')
             if managed.tasks.get(ident) and not managed.tasks[ident].done():
                 raise Conflict('処理中の依頼の業務API版は変更できません')
             from .execution_binding import approve_native_upgrade
@@ -609,6 +611,9 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             await run_blocking(approve_native_upgrade, store, tools, run, SYSTEM, **payload.model_dump())
             tools.authorizations[ident] = request.headers.get('authorization', '')
             await run_blocking(business.begin_reconciliation, run)
+            if owned(run) and business.budget_paused(run):
+                await business.kick_many([ident], request.headers.get('authorization', ''))
+                return await run_blocking(store.get, ident, owner)
             return await managed.resume(ident)
 
     @app.post('/runs/{ident}/reconcile-business')

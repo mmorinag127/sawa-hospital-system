@@ -318,6 +318,38 @@ def test_operator_correction_updates_review_only_and_cannot_be_overwritten(setup
     asyncio.run(scenario())
 
 
+def test_budget_pause_allows_operator_to_correct_rejected_fax_preserving_other_approval(setup):
+    async def scenario():
+        store, native, tools, run = setup
+        ident = run['id']
+        store.update(ident, task_inputs={'business_workflow': {'version': 1, 'phase': 'approval'}})
+        run = store.get(ident)
+        for fax_id in ('A', 'B'):
+            native.sources[fax_id]['status'] = 'completed'
+            native.sheets['O'+fax_id] = {'fields': ['date_mmdd', 'daypart', 'menu', 'qty.regular_x'],
+                                          'rows': [['01/08', '昼', '白菜', '20']]}
+        await tools.faxes.refresh(run)
+        first = (await tools.faxes.submit(run, 'A', '確認案'))['review']
+        second = (await tools.faxes.submit(run, 'B', '確認案'))['review']
+        await tools.faxes.decide(run, 'A', first['id'], False, '原本の数量を訂正')
+        await tools.faxes.decide(run, 'B', second['id'], True, '')
+        before = tools.faxes.item(ident, 'B')
+        store.update(ident, status='budget_reached')
+        paused = store.get(ident)
+        edit = {'date_mmdd': '01/08', 'daypart': '昼', 'menu': '白菜', 'field': 'qty.regular_x', 'value': '18'}
+        updated = (await tools.faxes.submit(paused, 'A', '利用者訂正', cell_edits=[edit],
+                                           operator_review_id=first['id']))['review']
+        assert tools.faxes.item(ident, 'A')['state'] == 'awaiting_approval'
+        assert updated['sheet']['rows'][0][3] == '18'
+        assert tools.faxes.item(ident, 'B') == before
+        assert store.events(ident, kinds=('fax_operator_correction',))[0]['payload']['previous_decision']['message'] == '原本の数量を訂正'
+        assert store.get(ident)['status'] == 'budget_reached'
+        await tools.faxes.decide(paused, 'A', updated['id'], True, '')
+        assert tools.faxes.item(ident, 'A')['state'] == 'approved'
+        assert not native.writes
+    asyncio.run(scenario())
+
+
 def test_mcp_sparse_correction_schema_and_wire_preserve_the_requested_cell(setup):
     from experiments.agent_assistant.mcp_server import build_mcp, call_local
     async def scenario():

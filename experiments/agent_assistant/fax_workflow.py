@@ -4,7 +4,7 @@ import json
 from copy import deepcopy
 from uuid import uuid4
 
-from .store import Conflict
+from .store import Conflict, now
 from .sandbox import run_blocking
 
 
@@ -258,8 +258,11 @@ class FaxWorkflow:
         if sheet is not None and cell_edits is not None:
             raise ValueError("シート全体とセル訂正は同時に指定できません")
         old = item["review"]
+        from .business_contracts import owned
+        operator_statuses = ("running", "budget_reached") if owned(run) else ("running",)
         if operator_review_id is not None and (
-            run["status"] != "running" or not self.active(run) or item["state"] != "awaiting_approval"
+            run["status"] not in operator_statuses or not self.active(run)
+            or item["state"] not in ("awaiting_approval", "needs_correction")
             or not old or old["id"] != operator_review_id or cell_edits is None
         ):
             raise Conflict("確認画面が古くなっています。最新の内容を開いてください")
@@ -312,14 +315,23 @@ class FaxWorkflow:
         if operator_review_id is not None:
             review["operator_edited"] = True
             def save_correction():
+                decision = item["decision"]
+                decision_clause = "decision IS NULL" if decision is None else "decision=?"
+                decision_values = () if decision is None else (json.dumps(decision, ensure_ascii=False),)
                 with self.store.tx() as db:
-                    result = db.execute("UPDATE fax_items SET review=? WHERE run_id=? AND fax_id=? "
-                        "AND state='awaiting_approval' AND review=? AND EXISTS "
-                        "(SELECT 1 FROM runs WHERE id=? AND generation=? AND status='running')",
+                    result = db.execute("UPDATE fax_items SET review=?,state='awaiting_approval',decision=NULL "
+                        "WHERE run_id=? AND fax_id=? AND state=? AND review=? "
+                        f"AND {decision_clause} AND EXISTS "
+                        "(SELECT 1 FROM runs WHERE id=? AND generation=? AND status=?)",
                         (json.dumps(review, ensure_ascii=False), run["id"], fax_id,
-                         json.dumps(old, ensure_ascii=False), run["id"], run["generation"]))
+                         item["state"], json.dumps(old, ensure_ascii=False), *decision_values,
+                         run["id"], run["generation"], run["status"]))
                     if result.rowcount != 1:
                         raise Conflict("依頼または確認案が変更されました。訂正は保存していません")
+                    db.execute("INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)",
+                        (run["id"], "fax_operator_correction", json.dumps({"fax_id": fax_id,
+                         "previous_review_id": old["id"], "previous_decision": item["decision"],
+                         "review_id": review["id"]}, ensure_ascii=False), now()))
             await run_blocking(save_correction)
         else:
             await run_blocking(self.set, run["id"], fax_id, state="awaiting_approval", review=review, decision=None)

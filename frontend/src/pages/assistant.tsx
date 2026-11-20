@@ -586,7 +586,9 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
         {[...selected.fax_items].sort((a,b)=>Number(b.state==="awaiting_approval")-Number(a.state==="awaiting_approval")).map(fax=>{
           const correctionKey=faxCorrectionKey(selected.id,fax);
           const correction=corrections[correctionKey] || "";
-          const editing=!budgetPaused && editingFax===correctionKey && fax.state==="awaiting_approval" && selected.status==="running";
+          const editable=(fax.state==="awaiting_approval" || fax.state==="needs_correction") &&
+            (selected.status==="running" && !budgetPaused || selected.status==="budget_reached" && budgetPaused);
+          const editing=editable && editingFax===correctionKey;
           const issues=new Set(fax.review?.quantity_review?.cell_issues.map(issue=>`${issue.row_index}-${issue.column_index}`));
           return <article key={correctionKey} className="fax-item">
             <h4>{fax.snapshot.name}</h4>
@@ -605,8 +607,8 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
                 })}</tr>)}</tbody></table></div>
                 {editing && <><button type="submit" disabled={busy}>確認案に訂正を反映</button><button type="button" disabled={busy} onClick={()=>setEditingFax("")}>取り消す</button></>}
               </form>
-              {fax.state==="awaiting_approval" && (selected.status==="running" || budgetPaused) && <>
-                {!budgetPaused && editingFax!==correctionKey && <button disabled={busy || decisionPending} onClick={()=>setEditingFax(correctionKey)}>原本と照合して直接訂正</button>}
+              {editable && !editing && <button disabled={busy || decisionPending} onClick={()=>setEditingFax(correctionKey)}>原本と照合して直接訂正</button>}
+              {fax.state==="awaiting_approval" && editable && <>
                 <button className="primary" disabled={busy || decisionPending || editing} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button>
                 {!budgetPaused && <section className="correction-panel"><h4>訂正してほしい箇所がある</h4>
                   <label>訂正内容<textarea value={correction} disabled={busy || decisionPending} onChange={e=>setCorrections(c=>({...c,[correctionKey]:e.target.value}))}/></label>
@@ -622,8 +624,8 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {!adminView && <div className="assistant-footer"><span className="muted">回答した内容は保存されています。作業一覧へ戻っても、この作業は引き続き確認できます。</span><button className="primary" onClick={newTask}>{terminal || selected.status==="rollback_stop_pending" ? "別の作業を始める" : "作業一覧に戻る"}</button></div>}
       <details className="conversation-history"><summary>これまでのやり取り{messages?.length ? `（${messages.length}件）` : ""}</summary><div role="log">{messages?.map(message=><div className={message.role==="user" ? "chat-bubble user-message" : "chat-bubble"} key={message.id}><strong>{message.role==="user" ? "あなた" : "エージェント"}</strong><p>{message.text}</p></div>)}</div></details>
       {budgetPaused && <section className="assistant-notice"><h3>{view!.title}</h3>{adminView && <p>{view!.message}</p>}<button disabled={busy || controlling} onClick={()=>control("reconcile-business")}>承認済みの作業を続ける</button></section>}
-      {adminView && (selected.status==="reconciliation_required" || budgetPaused && selected.status==="budget_reached" && selected.provider==="gemini" && selected.task_id==="hospital_pending_faxes") && <button className="primary" disabled={controlling || busy} onClick={()=>control("resume")}>保存済みの結果を確認して再開</button>}
-      {adminView && selected.native_upgrade && !terminal && !budgetPaused && <section className="assistant-notice"><h3>業務APIの修正版があります</h3>
+      {adminView && selected.status==="reconciliation_required" && !budgetPaused && <button className="primary" disabled={controlling || busy} onClick={()=>control("resume")}>保存済みの結果を確認して再開</button>}
+      {adminView && selected.native_upgrade && !terminal && <section className="assistant-notice"><h3>業務APIの修正版があります</h3>
         {Object.entries(selected.native_upgrade.current_sources).map(([domain,source])=><p key={domain}>{labels[domain] || domain}：{selected.native_upgrade?.previous_sources[domain].source_revision.slice(0,8)} → {source.source_revision.slice(0,8)}</p>)}
         <p>開始時の版・処理履歴は保持します。原本と保存済みデータを引き継ぎ、結果未確定の更新は再送しません。</p>
         <button disabled={busy || controlling} onClick={()=>control("upgrade-native")}>修正版へ引き継いで再開</button></section>}

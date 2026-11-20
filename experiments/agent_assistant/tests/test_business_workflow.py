@@ -453,6 +453,27 @@ def test_batch_wakeup_drives_approved_work_once_and_preserves_completion(tmp_pat
     asyncio.run(scenario())
 
 
+def test_http_resume_on_legacy_budget_paused_run_never_enters_provider(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from fastapi.testclient import TestClient
+    from experiments.agent_assistant.app import create_app
+    monkeypatch.setenv('SAWA_TRIAL_OPERATOR_ACCOUNT', 'operator')
+    store, _, _, run = shift(tmp_path, 'shift_export')
+    app = create_app({}, store.root, managed_client=SimpleNamespace(close=AsyncMock()))
+    business = app.state.business
+    business.providers.resume = AsyncMock(side_effect=AssertionError('provider resume must not run'))
+    business.kick_many = AsyncMock()
+    with TestClient(app) as web:
+        ident = run['id']
+        business.initialize(store.get(ident))
+        store.update(ident, status='budget_reached')
+        response = web.post(f'/runs/{ident}/resume', headers={'X-Trial-Token': app.state.token})
+        assert response.status_code == 200
+        assert response.json()['status'] == 'budget_reached'
+        business.providers.resume.assert_not_awaited()
+        business.kick_many.assert_awaited_once()
+
+
 def test_http_approval_response_loss_and_exact_retry_do_not_repeat_exports(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from fastapi.responses import JSONResponse

@@ -66,7 +66,9 @@ def record(store, tools, run, system, *, starting=False):
 def native_upgrade(store, tools, run, system, *, output_only=False):
     if output_only and (run['status'] != 'completed' or run.get('task_id') != 'hospital_pending_faxes' or run['domains'] != ['hospital']):
         return None
-    if not output_only and run['status'] != 'reconciliation_required':
+    from .business_contracts import owned
+    if not output_only and run['status'] != 'reconciliation_required' and not (
+            owned(run) and run['status'] == 'budget_reached'):
         return None
     previous = store.latest_event(run['id'], 'execution_binding')
     if not previous:

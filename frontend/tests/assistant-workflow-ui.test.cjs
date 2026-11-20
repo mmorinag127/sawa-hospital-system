@@ -791,20 +791,21 @@ test('known creation rejection is displayed and does not enter unknown-outcome p
 });
 
 
-test('operator edits a FAX cell without requesting AI or approving the order',async()=>{
+for(const paused of [false,true])test('operator edits a FAX cell without requesting AI or approving the order; paused='+paused,async()=>{
  const sheet={header:['日付','食事','献立','常食'],fields:['date_mmdd','daypart','menu','qty.regular'],rows:[['01/08','昼','白菜','20']]};
- const fax={fax_id:'fax1',state:'awaiting_approval',snapshot:{name:'FAX',facility:'施設',week:'週'},
+ const fax={fax_id:'fax1',state:paused?'needs_correction':'awaiting_approval',snapshot:{name:'FAX',facility:'施設',week:'週'},
    review:{id:'original-review',summary:'照合',sheet,original:{id:'artifact',name:'FAX.pdf'}}};
- const initial={...makeRun('running'),task_id:'hospital_pending_faxes',domains:['hospital'],task_inputs:{},pending_question:null,fax_items:[fax]};
+ const initial={...makeRun(paused?'budget_reached':'running'),task_id:'hospital_pending_faxes',domains:['hospital'],task_inputs:{},pending_question:null,fax_items:[fax],
+   ...(paused?{business:{state:'budget_paused',title:'AI利用上限',message:'保存済み',next_action:'reconcile'}}:{})};
  const h=await mount({initial,beforePost:async(url)=>{
   if(url.endsWith('/faxes/fax1/decision')){
-   h.setRun({...initial,fax_items:[{...fax,review:{...fax.review,id:'new-review',sheet:{...sheet,rows:[['01/08','昼','白菜','18']]}}}]});
+   h.setRun({...initial,fax_items:[{...fax,state:'awaiting_approval',review:{...fax.review,id:'new-review',sheet:{...sheet,rows:[['01/08','昼','白菜','18']]}}}]});
    return {data:{ok:true}};
   }
  }});
  try{
   await h.click(h.button('原本と照合して直接訂正'));
-  assert.equal(h.button('この内容で確定へ進む').disabled,true);
+  if(!paused)assert.equal(h.button('この内容で確定へ進む').disabled,true);
   await h.change(h.document.querySelector('[name="cell-0-3"]'),'18');
   await h.click(h.button('確認案に訂正を反映'));
   assert.deepEqual(h.calls.filter(call=>call.url.endsWith('/decision')).map(call=>call.body),[
