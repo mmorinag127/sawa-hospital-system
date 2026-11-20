@@ -4629,19 +4629,21 @@ def get_saved_sheet(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
         return _serialize_saved_sheet(draft), None
 
 
-def build_sheet_from_selected_ocr(order_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    return build_sheet_from_ocr_evidence(order_id)
+def build_sheet_from_selected_ocr(order_id: str, *, include_legacy_quantity_basis: bool = False) -> tuple[dict[str, Any] | None, str | None]:
+    return build_sheet_from_ocr_evidence(order_id, include_legacy_quantity_basis=include_legacy_quantity_basis)
 
 
 def build_sheet_from_ocr_evidence(
     order_id: str, *, evidence_run_override: dict[str, Any] | None = None,
     synchronous_write_input: dict[str, Any] | None = None,
+    include_legacy_quantity_basis: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Project a stored selected/candidate result without selecting or persisting it."""
     try:
         return _build_sheet_from_selected_ocr(
             order_id, evidence_run_override=evidence_run_override,
             synchronous_write_input=synchronous_write_input,
+            include_legacy_quantity_basis=include_legacy_quantity_basis,
         )
     except (ValueError, CanonicalStoreError) as exc:
         return None, str(exc)
@@ -4650,6 +4652,7 @@ def build_sheet_from_ocr_evidence(
 def _build_sheet_from_selected_ocr(
     order_id: str, *, evidence_run_override: dict[str, Any] | None = None,
     synchronous_write_input: dict[str, Any] | None = None,
+    include_legacy_quantity_basis: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     from src.services.initial_saved_import_service import get_binding
     from src.services.initial_saved_source_service import current_sheet_payload
@@ -4760,6 +4763,7 @@ def _build_sheet_from_selected_ocr(
             meta.get("expanded_cell_copy_mode"),
         ),
         week_sheet_name=None,
+        project_editable_quantities=False,
     )
     projected["source"] = "workflow_v2_selected_ocr_projection"
     projected["base_evidence_run_id"] = selected_ocr_result_id
@@ -4773,6 +4777,9 @@ def _build_sheet_from_selected_ocr(
         row_count=len(projected.get("rows") or []),
     )
     projected["target_cell_map"] = target_cell_map
+    from src.services.sheet_quantity_value_service import editable_sheet
+    legacy_quantity_basis = projected
+    projected = editable_sheet(projected)
     # A candidate is not part of the selected-input receipt: re-read it as well.
     with session_scope() as session:
         validate_current_sheet_input(session, order_id, bind_current_sheet_input(
@@ -4795,6 +4802,7 @@ def _build_sheet_from_selected_ocr(
         "blockers": list(projected.get("blockers") or []),
         "warnings": list(projected.get("warnings") or []),
         "source": "workflow_v2_selected_ocr_projection",
+        **({"legacy_quantity_basis": legacy_quantity_basis} if include_legacy_quantity_basis else {}),
     }, None
 
 

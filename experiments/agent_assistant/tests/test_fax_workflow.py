@@ -18,6 +18,7 @@ class Native:
         self.sources = {}
         self.wfs = {}
         self.sheets = {}
+        self.legacy_sheets = {}
         self.saved = set()
         self.writes = []
         for fax_id in ('A', 'B'):
@@ -65,7 +66,10 @@ class Native:
         if path.endswith('/document'):
             return httpx.Response(200, content=self.pdf, headers={'content-type': 'application/pdf'})
         if path.endswith('/sheet-source'):
-            return httpx.Response(200, json={'selected_ocr_result_id': wf['selected_ocr_result_id'], 'sheet': self.sheets[order_id]})
+            payload = {'selected_ocr_result_id': wf['selected_ocr_result_id'], 'sheet': self.sheets[order_id]}
+            if (kwargs.get('params') or {}).get('include_legacy_quantity_basis') == 'true':
+                payload['legacy_quantity_basis'] = self.legacy_sheets.get(order_id)
+            return httpx.Response(200, json=payload)
         if path.endswith('/sheet'):
             assert order_id in self.saved
             return httpx.Response(200, json={'saved_sheet_id': wf['saved_sheet_id'], 'source_ocr_result_id': wf['selected_ocr_result_id'], 'sheet': self.sheets[order_id]})
@@ -349,6 +353,68 @@ def test_budget_pause_allows_operator_to_correct_rejected_fax_preserving_other_a
         assert store.get(ident)['status'] == 'budget_reached'
         await tools.faxes.decide(paused, 'A', updated['id'], True, '')
         assert tools.faxes.item(ident, 'A')['state'] == 'approved'
+        assert not native.writes
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('change', [None, 'legacy_content', 'evidence', 'saved', 'revision', 'late_content'])
+def test_quantity_projection_change_requires_exact_legacy_and_current_basis(setup, change):
+    async def scenario():
+        store, native, tools, run = setup
+        ident = run['id']
+        store.update(ident, task_inputs={'business_workflow': {'version': 1, 'phase': 'approval'}})
+        run = store.get(ident)
+        for fax_id, value in [('A', '台'), ('B', '20')]:
+            native.sources[fax_id]['status'] = 'completed'
+            native.sheets['O'+fax_id] = {
+                'header': ['日付', '食事', '献立', '数量'],
+                'fields': ['date_mmdd', 'daypart', 'menu', 'qty.regular_x'],
+                'rows': [['01/08', '昼', '白菜', value]]}
+        await tools.faxes.refresh(run)
+        suggested = deepcopy(native.sheets['OA'])
+        suggested['rows'][0][3] = '39'
+        old = (await tools.faxes.submit(run, 'A', '旧確認案', sheet=suggested))['review']
+        other = (await tools.faxes.submit(run, 'B', '確認案'))['review']
+        await tools.faxes.decide(run, 'A', old['id'], False, '原本に戻す')
+        await tools.faxes.decide(run, 'B', other['id'], True, '承認済み')
+        before = tools.faxes.items(ident)
+        native.legacy_sheets['OA'] = deepcopy(native.sheets['OA'])
+        native.sheets['OA']['rows'][0][3] = ''
+        native.sheets['OA']['quantity_ocr_review'] = [
+            {'row_index': 0, 'col_index': 3, 'field': 'qty.regular_x', 'raw_text': '台'}]
+        if change == 'legacy_content':
+            native.legacy_sheets['OA']['rows'][0][3] = '文字'
+        elif change == 'evidence':
+            native.wfs['OA']['selected_ocr_result_id'] = 'different-evidence'
+        elif change == 'saved':
+            native.saved.add('OA')
+            native.wfs['OA']['saved_sheet_id'] = 'SA'
+        elif change == 'revision':
+            native.wfs['OA']['revision'] += 1
+        elif change == 'late_content':
+            request = native.request
+            async def change_at_pdf(run, domain, method, path, **kwargs):
+                if path == '/orders/OA/document':
+                    native.sheets['OA']['rows'][0][3] = '40'
+                return await request(run, domain, method, path, **kwargs)
+            native.request = change_at_pdf
+        store.update(ident, status='budget_reached')
+        paused = store.get(ident)
+        async def restore():
+            return await tools.faxes.submit(paused, 'A', '原本復元', operator_review_id=old['id'], restore_source=True)
+        if change:
+            with pytest.raises(Conflict, match='正本が変わりました'):
+                await restore()
+            assert tools.faxes.items(ident) == before
+            assert not store.events(ident, kinds=('fax_operator_correction',))
+            return
+        restored = (await restore())['review']
+        assert restored['sheet'] == native.sheets['OA']
+        assert restored['native_signature'] != old['native_signature']
+        assert tools.faxes.item(ident, 'B') == before[1]
+        assert store.events(ident, kinds=('fax_operator_correction',))[0]['payload']['previous_decision']['message'] == '原本に戻す'
+        with pytest.raises(Conflict):
+            await tools.faxes.decide(paused, 'A', old['id'], True, '')
         assert not native.writes
     asyncio.run(scenario())
 

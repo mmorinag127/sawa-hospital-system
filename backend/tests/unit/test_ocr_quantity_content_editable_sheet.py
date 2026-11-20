@@ -49,10 +49,17 @@ def test_historic_content_rejection_builds_editable_sheet_without_acceptance(rev
     assert error is None, error
     assert result["blockers"] == []
     sheet = result["sheet"]
+    assert "legacy_quantity_basis" not in result
+    with_basis, error = workflow.build_sheet_from_selected_ocr(identity, include_legacy_quantity_basis=True)
+    assert error is None, error
+    legacy = with_basis.pop("legacy_quantity_basis")
+    assert with_basis == result
     quantity_columns = [index for index, field in enumerate(sheet["fields"]) if field.startswith("qty.")]
     raw = review["review_cells"][0]["raw_text"]
-    from src.services.sheet_quantity_value_service import numeric_value
+    from src.services.sheet_quantity_value_service import editable_sheet, numeric_value
+    assert editable_sheet(legacy) == sheet
     if raw and numeric_value(raw) is None:
+        assert raw in [row[index] for row in legacy["rows"] for index in quantity_columns]
         assert raw in [item['raw_text'] for item in sheet['quantity_ocr_review']]
         assert all(numeric_value(row[index]) is not None or row[index]==''
                    for row in sheet['rows'] for index in quantity_columns)

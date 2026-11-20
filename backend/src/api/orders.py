@@ -1792,8 +1792,9 @@ def get_order_workflow_v2_sheet(order_id: str):
 
 
 @router.get("/{order_id}/workflow-v2/sheet-source", dependencies=[Depends(require_role("operator"))])
-def get_order_workflow_v2_sheet_source(order_id: str):
-    return _workflow_v2_or_404(order_workflow_v2_service.build_sheet_from_selected_ocr(order_id))
+def get_order_workflow_v2_sheet_source(order_id: str, include_legacy_quantity_basis: bool = False):
+    return _workflow_v2_or_404(order_workflow_v2_service.build_sheet_from_selected_ocr(
+        order_id, include_legacy_quantity_basis=include_legacy_quantity_basis))
 
 
 @router.put("/{order_id}/workflow-v2/expanded-cell-copy-mode", dependencies=[Depends(require_role("operator"))])

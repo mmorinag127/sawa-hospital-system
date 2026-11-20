@@ -23772,6 +23772,7 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
     assignment: dict[str, Any],
     facility_config: dict[str, Any] | None = None,
     week_sheet_name: str | None = None,
+    project_editable_quantities: bool = True,
 ) -> dict[str, Any]:
     projected = deepcopy(base_sheet)
     fields = [str(field or "").strip() for field in (projected.get("fields") or [])]
@@ -24025,7 +24026,7 @@ def _apply_hakodate_sheet_output_to_sheet_payload(
     )
     projected["review_state"] = "blocked" if projected["blockers"] else str(assignment.get("status") or "review_required")
     from src.services.sheet_quantity_value_service import editable_sheet
-    return editable_sheet(projected)
+    return editable_sheet(projected) if project_editable_quantities else projected
 
 
 def _build_hakodate_weekly_menu_base_sheet(order_id: str, *, synchronous_write_input: dict[str, Any] | None = None, processing_read_input: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, str | None]:

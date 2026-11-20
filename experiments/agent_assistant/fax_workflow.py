@@ -61,9 +61,9 @@ class FaxWorkflow:
     def active(run):
         return run.get("task_id") in ("hospital_pending_faxes", "hospital_review_faxes")
 
-    async def get(self, run, path):
+    async def get(self, run, path, **kwargs):
         response = await self.tools.sandbox.request(run, "hospital", "GET", path,
-            authorization=self.tools.authorizations.get(run["id"]))
+            authorization=self.tools.authorizations.get(run["id"]), **kwargs)
         if not response.is_success:
             raise Conflict(f"FAXの最新状態を取得できません（HTTP {response.status_code}）")
         return response
@@ -192,7 +192,7 @@ class FaxWorkflow:
                 return True
         return False
 
-    async def capture(self, run, item, proposed_sheet=None):
+    async def capture(self, run, item, proposed_sheet=None, *, legacy_quantity_basis=False):
         source = await self.current_source(run, item)
         order_id = source.get("current_order_id")
         if (source.get("status") != "completed" and not await run_blocking(self.accepted_recovery, run,item)) or not order_id or not source.get("current_document_id"):
@@ -207,7 +207,8 @@ class FaxWorkflow:
         else:
             # Explicit pre-save stage, using the native selected-evidence source.
             # It never replaces an existing saved operator draft.
-            sheet = (await self.get(run, f"/orders/{order_id}/workflow-v2/sheet-source")).json()
+            query = {"params": {"include_legacy_quantity_basis": "true"}} if legacy_quantity_basis else {}
+            sheet = (await self.get(run, f"/orders/{order_id}/workflow-v2/sheet-source", **query)).json()
             if sheet.get("selected_ocr_result_id") != workflow["selected_ocr_result_id"]:
                 raise Conflict("採用OCRとシート候補の系譜が一致しません")
         if not isinstance(sheet.get("sheet"), dict):
@@ -223,7 +224,11 @@ class FaxWorkflow:
         business = {"source": {k: source.get(k) for k in ("id", "content_sha256", "facility_hint", "week_hint", "current_order_id", "current_document_id")},
             "workflow": {k: workflow.get(k) for k in ("selected_ocr_result_id", "facility_id", "week_start", "week_end", "template_id", "template_version_id", "template_source", "quad_override", "row_axis_override", "recognition_override_invalidation", "expanded_cell_copy_mode")},
             "sheet": sheet["sheet"]}
-        return {"signature": digest(business), "revision": workflow["revision"], "sheet": sheet["sheet"], "workflow": workflow}
+        result = {"signature": digest(business), "revision": workflow["revision"], "sheet": sheet["sheet"], "workflow": workflow}
+        legacy = sheet.get("legacy_quantity_basis")
+        if legacy_quantity_basis and not workflow.get("saved_sheet_id") and isinstance(legacy, dict):
+            result["legacy_quantity_signature"] = digest({**business, "sheet": legacy})
+        return result
 
     async def refresh(self, run):
         if not self.active(run):
@@ -276,15 +281,25 @@ class FaxWorkflow:
         if cell_edits is not None or restore_source:
             native = await self.capture(run, item)
             if old:
-                if old["native_signature"] != native["signature"] or old["revision"] != native["revision"]:
+                if old["revision"] != native["revision"]:
                     raise Conflict("訂正準備中に正本が変わりました。再確認してください")
+                if old["native_signature"] != native["signature"]:
+                    if not restore_source or native["workflow"].get("saved_sheet_id"):
+                        raise Conflict("訂正準備中に正本が変わりました。再確認してください")
+                    # The native service produces both views from the same pinned input.
+                    # Match the full original digest; never carry an approval forward.
+                    proof = await self.capture(run, item, legacy_quantity_basis=True)
+                    if (proof["revision"] != native["revision"] or proof["signature"] != native["signature"]
+                            or proof.get("legacy_quantity_signature") != old["native_signature"]):
+                        raise Conflict("訂正準備中に正本が変わりました。再確認してください")
                 sheet = native["sheet"] if restore_source else apply_cell_edits(old["sheet"], cell_edits)
             else:
                 sheet = apply_cell_edits(native["sheet"], cell_edits)
         captured = await self.capture(run, item, proposed_sheet=sheet)
         quantity_review = await self.quantity_review(run, item, captured)
         basis = await self.capture(run, item)
-        if basis["revision"] != captured["revision"]:
+        if (basis["revision"] != captured["revision"]
+                or (operator_review_id is not None and basis["signature"] != native["signature"])):
             raise Conflict("確認資料の取得中に版が変わりました")
         # An unchanged repeated request keeps the exact human review identity.
         if old and old["signature"] == captured["signature"] and old["revision"] == captured["revision"] and item["state"] in ("awaiting_approval", "approved"):
@@ -307,6 +322,10 @@ class FaxWorkflow:
         original = await self.get(run, f"/orders/{order_id}/document")
         if hashlib.sha256(original.content).hexdigest() != item["snapshot"]["sha256"]:
             raise Conflict("取得した原本PDFが依頼対象のハッシュと一致しません")
+        if operator_review_id is not None:
+            latest = await self.capture(run, item)
+            if latest["revision"] != basis["revision"] or latest["signature"] != basis["signature"]:
+                raise Conflict("原本取得中に正本が変わりました。訂正は保存していません")
         artifact = self.tools.artifact(run["id"], original.content, f"FAX-{fax_id}.pdf")
         review = {"id": uuid4().hex, "signature": captured["signature"], "native_signature": basis["signature"], "revision": captured["revision"],
             "summary": summary, "agent_summary": agent_summary, "sheet": captured["sheet"], "original": artifact, "order_id": order_id,
