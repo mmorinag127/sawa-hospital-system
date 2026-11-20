@@ -251,32 +251,34 @@ class FaxWorkflow:
                 await run_blocking(self.set_observed, run["id"], item, state="blocked", decision={"message": str(exc)})
         return {"ok": True, "items": await run_blocking(self.items, run["id"])}
 
-    async def submit(self, run, fax_id, summary, sheet=None, cell_edits=None, *, operator_review_id=None):
+    async def submit(self, run, fax_id, summary, sheet=None, cell_edits=None, *, operator_review_id=None, restore_source=False):
         item = await run_blocking(self.item, run["id"], fax_id)
         if not item or not summary.strip() or len(summary) > 4000:
             raise ValueError("対象FAXと照合結果が必要です")
         if sheet is not None and cell_edits is not None:
             raise ValueError("シート全体とセル訂正は同時に指定できません")
+        if restore_source and (operator_review_id is None or sheet is not None or cell_edits is not None):
+            raise ValueError("正本への復元は利用者が確認案を指定してください")
         old = item["review"]
         from .business_contracts import owned
         operator_statuses = ("running", "budget_reached") if owned(run) else ("running",)
         if operator_review_id is not None and (
             run["status"] not in operator_statuses or not self.active(run)
             or item["state"] not in ("awaiting_approval", "needs_correction")
-            or not old or old["id"] != operator_review_id or cell_edits is None
+            or not old or old["id"] != operator_review_id or (cell_edits is None and not restore_source)
         ):
             raise Conflict("確認画面が古くなっています。最新の内容を開いてください")
-        if old and sheet is None and cell_edits is None and item["state"] in ("needs_correction", "awaiting_approval"):
+        if not restore_source and old and sheet is None and cell_edits is None and item["state"] in ("needs_correction", "awaiting_approval"):
             native = await self.capture(run, item)
             if old["native_signature"] != native["signature"] or old["revision"] != native["revision"]:
                 raise Conflict("確認案の準備後に正本が変わりました。再確認してください")
             sheet = old["sheet"]
-        if cell_edits is not None:
+        if cell_edits is not None or restore_source:
             native = await self.capture(run, item)
             if old:
                 if old["native_signature"] != native["signature"] or old["revision"] != native["revision"]:
                     raise Conflict("訂正準備中に正本が変わりました。再確認してください")
-                sheet = apply_cell_edits(old["sheet"], cell_edits)
+                sheet = native["sheet"] if restore_source else apply_cell_edits(old["sheet"], cell_edits)
             else:
                 sheet = apply_cell_edits(native["sheet"], cell_edits)
         captured = await self.capture(run, item, proposed_sheet=sheet)
@@ -292,7 +294,7 @@ class FaxWorkflow:
         if item["state"] in ("approved", "completed"):
             raise Conflict("回答済みの確認案は変更できません")
         agent_summary = summary
-        if item["state"] == "needs_correction":
+        if item["state"] == "needs_correction" and not restore_source:
             fields = captured["sheet"]["fields"]
             changes = []
             for before, after in zip(basis["sheet"]["rows"], captured["sheet"]["rows"]):

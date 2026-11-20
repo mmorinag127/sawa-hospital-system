@@ -318,7 +318,8 @@ def test_operator_correction_updates_review_only_and_cannot_be_overwritten(setup
     asyncio.run(scenario())
 
 
-def test_budget_pause_allows_operator_to_correct_rejected_fax_preserving_other_approval(setup):
+@pytest.mark.parametrize('restore_source', [False, True])
+def test_budget_pause_allows_operator_to_correct_rejected_fax_preserving_other_approval(setup, restore_source):
     async def scenario():
         store, native, tools, run = setup
         ident = run['id']
@@ -329,7 +330,9 @@ def test_budget_pause_allows_operator_to_correct_rejected_fax_preserving_other_a
             native.sheets['O'+fax_id] = {'fields': ['date_mmdd', 'daypart', 'menu', 'qty.regular_x'],
                                           'rows': [['01/08', '昼', '白菜', '20']]}
         await tools.faxes.refresh(run)
-        first = (await tools.faxes.submit(run, 'A', '確認案'))['review']
+        changed = deepcopy(native.sheets['OA'])
+        changed['rows'][0][3] = '21'
+        first = (await tools.faxes.submit(run, 'A', '確認案', sheet=changed))['review']
         second = (await tools.faxes.submit(run, 'B', '確認案'))['review']
         await tools.faxes.decide(run, 'A', first['id'], False, '原本の数量を訂正')
         await tools.faxes.decide(run, 'B', second['id'], True, '')
@@ -337,10 +340,10 @@ def test_budget_pause_allows_operator_to_correct_rejected_fax_preserving_other_a
         store.update(ident, status='budget_reached')
         paused = store.get(ident)
         edit = {'date_mmdd': '01/08', 'daypart': '昼', 'menu': '白菜', 'field': 'qty.regular_x', 'value': '18'}
-        updated = (await tools.faxes.submit(paused, 'A', '利用者訂正', cell_edits=[edit],
-                                           operator_review_id=first['id']))['review']
+        updated = (await tools.faxes.submit(paused, 'A', '利用者訂正', cell_edits=None if restore_source else [edit],
+                                           operator_review_id=first['id'], restore_source=restore_source))['review']
         assert tools.faxes.item(ident, 'A')['state'] == 'awaiting_approval'
-        assert updated['sheet']['rows'][0][3] == '18'
+        assert updated['sheet']['rows'][0][3] == ('20' if restore_source else '18')
         assert tools.faxes.item(ident, 'B') == before
         assert store.events(ident, kinds=('fax_operator_correction',))[0]['payload']['previous_decision']['message'] == '原本の数量を訂正'
         assert store.get(ident)['status'] == 'budget_reached'

@@ -460,6 +460,16 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       await refreshAfterCommand(id);
     });
   }
+  async function restoreFaxSource(fax:Fax) {
+    if (!selected || !fax.review) return;
+    const id = selected.id;
+    await act(async () => {
+      await assistantApi.post(`/assistant-trial/runs/${id}/faxes/${fax.fax_id}/decision`,
+        {review_id:fax.review!.id, approve:false, restore_source:true});
+      setEditingFax("");
+      await refreshAfterCommand(id);
+    });
+  }
   const view=selected ? businessProgress(selected) : null;
   const terminal=!!selected && (adminView ? ["completed","stopped","rolled_back","failed"].includes(selected.status) : ["completed","archived"].includes(view!.state));
   const awaitingSource=selected?.status==="waiting_input" && (adminView || view?.next_action==="source") && selected.task_id==="lunch_import" && !(selected.source_attached ?? selected.events?.some(event=>event.kind==="source"));
@@ -608,6 +618,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
                 {editing && <><button type="submit" disabled={busy}>確認案に訂正を反映</button><button type="button" disabled={busy} onClick={()=>setEditingFax("")}>取り消す</button></>}
               </form>
               {editable && !editing && <button disabled={busy || decisionPending} onClick={()=>setEditingFax(correctionKey)}>原本と照合して直接訂正</button>}
+              {editable && !editing && <button disabled={busy || decisionPending} onClick={()=>restoreFaxSource(fax)}>確認案を元のシートに戻す</button>}
               {fax.state==="awaiting_approval" && editable && <>
                 <button className="primary" disabled={busy || decisionPending || editing} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button>
                 {!budgetPaused && <section className="correction-panel"><h4>訂正してほしい箇所がある</h4>

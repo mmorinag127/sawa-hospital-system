@@ -15,7 +15,7 @@ import httpx
 
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 from .providers import Providers, LABELS
 from .mcp_server import build_mcp
@@ -76,6 +76,7 @@ class FaxDecision(BaseModel):
     approve: bool
     message: str = Field(default="", max_length=4000)
     cell_edits: list[dict[str, StrictStr]] | None = Field(default=None, min_length=1, max_length=200)
+    restore_source: StrictBool = False
 
 
 class Budget(BaseModel):
@@ -492,12 +493,14 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await authorize(request.headers.get("authorization", ""), run["domains"])
         tools.authorizations[ident] = request.headers.get("authorization", "")
         async with tools.lock(ident):
-            if payload.cell_edits is not None:
-                if payload.approve or payload.message:
+            if payload.cell_edits is not None or payload.restore_source:
+                if payload.approve or payload.message or (payload.restore_source and payload.cell_edits is not None):
                     raise ValueError("セル訂正と確定・訂正依頼は同時に行えません")
                 current = await asyncio.to_thread(store.get, ident, owner)
-                return await tools.faxes.submit(current, fax_id, "利用者が原本と照合してセルを訂正しました。確定前に確認してください。",
-                                                cell_edits=payload.cell_edits, operator_review_id=payload.review_id)
+                summary = ("保存済みの正本に確認案を戻しました。確定前に確認してください。" if payload.restore_source
+                           else "利用者が原本と照合してセルを訂正しました。確定前に確認してください。")
+                return await tools.faxes.submit(current, fax_id, summary, cell_edits=payload.cell_edits,
+                                                operator_review_id=payload.review_id, restore_source=payload.restore_source)
             item = await asyncio.to_thread(tools.faxes.item, ident, fax_id)
             decision = {'review_id': payload.review_id, 'approve': payload.approve, 'message': payload.message}
             if owned(run) and item and item.get('decision') and all(item['decision'].get(key) == value for key, value in decision.items()):
@@ -513,6 +516,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     @app.post("/runs/{ident}/decision")
     @_complete_request
     async def task_decision(ident: str, payload: FaxDecision, request: Request):
+        if payload.restore_source or payload.cell_edits is not None:
+            raise ValueError("セル訂正はFAXごとの確認案から実行してください")
         run = await asyncio.to_thread(store.get, ident, owner)
         await authorize(request.headers.get("authorization", ""),run["domains"])
         tools.authorizations[ident]=request.headers.get("authorization", "")
