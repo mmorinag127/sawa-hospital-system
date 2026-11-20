@@ -87,9 +87,13 @@ class BusinessWorkflow:
 
     def begin_reconciliation(self, run):
         state=self.state(run['id'])
-        attempt={'epoch':state.get('epoch',0)+1} if run.get('task_id') in (
+        attempt={'epoch':state.get('epoch',0)+1} if not self.budget_paused(run) and run.get('task_id') in (
             'hospital_pending_faxes','hospital_review_faxes') else {}
         return self.checkpoint(run['id'],attempts=0,next_attempt=0,**attempt)
+
+    @staticmethod
+    def budget_paused(run):
+        return run['status'] == 'budget_reached' or run['task_inputs'].get('business_workflow', {}).get('budget_paused', False)
 
     def set_status(self, run, status):
         self.store.update(run['id'], expected_generation=run['generation'], status=status)
@@ -270,7 +274,7 @@ class BusinessWorkflow:
 
     async def continue_model(self, run, message):
         current = await run_blocking(self.store.get, run['id'])
-        if current['spent'] >= current['cap'] or current['reserved'] <= 0:
+        if self.budget_paused(current) or current['spent'] >= current['cap'] or current['reserved'] <= 0:
             await run_blocking(self.set_status, current, 'budget_reached')
             return
         waits = [event for event in await run_blocking(self.store.events, run['id'], kinds=('business_model_wait',))]
@@ -315,19 +319,17 @@ class BusinessWorkflow:
             await self.release_completed(run)
             await run_blocking(self.checkpoint, ident, phase='completed')
             return False
-        if run['status'] == 'budget_reached':
-            from .fax_preparation import enabled
-            if enabled(run):
-                # Paid responses and approvals may still be outstanding. This
-                # enables explicit receipt recovery, never another inference.
-                await run_blocking(self.set_status, run, 'reconciliation_required')
-            return False
         if run['status'] in ('stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending', 'stopping'):
             return False  # Explicit administrator action, never an automatic cancellation.
         from .fax_preparation import enabled
-        if run['spent'] >= run['cap'] and not enabled(run):
-            await run_blocking(self.set_status, run, 'budget_reached')
-            return False
+        budget_paused = self.budget_paused(run) or (run['spent'] >= run['cap'] and not enabled(run))
+        if budget_paused:
+            task = self.providers.tasks.get(ident)
+            if task and not task.done():
+                return True
+            if run['status'] != 'budget_reached':
+                await run_blocking(self.set_status, run, 'budget_reached')
+            run = await run_blocking(self.store.get, ident)
         if state.get('phase') == 'support' and time.time() < state.get('next_attempt', 0):
             return False
         if state.get('phase') == 'support':
@@ -339,6 +341,19 @@ class BusinessWorkflow:
         current = await run_blocking(self.store.get, ident)
         if current['generation'] != run['generation'] or current['status'] in ('completed', 'stopped', 'rolled_back', 'stop_pending', 'rollback_stop_pending', 'stopping'):
             return False
+        if not budget_paused and self.budget_paused(current):
+            return True
+        manager_task = self.providers.tasks.get(ident)
+        model_busy = manager_task and not manager_task.done()
+        review = await run_blocking(self.tools.flow.review, ident)
+        faxes = await run_blocking(self.tools.faxes.items, ident) if self.tools.faxes.active(run) else []
+        approved = (review and review['state'] == 'approved' and run['task_id'] != 'hospital_review_faxes'
+                    or bool(faxes) and all(item['state'] in ('approved', 'completed')
+                                          and (item.get('decision') or {}).get('approve') for item in faxes))
+        if budget_paused and not approved:
+            return False
+        if budget_paused and not state.get('budget_paused'):
+            state = await run_blocking(self.checkpoint, ident, budget_paused=True)
         await self.require_binding(run)
         await run_blocking(self.require_copy, run)
         from .native_recovery import reconcile
@@ -349,13 +364,10 @@ class BusinessWorkflow:
         if pending_native and not (self.providers.tasks.get(ident) and not self.providers.tasks[ident].done()):
             await self.tools.sandbox.start(run)
             await reconcile(self, run)
-        if state['phase'] == 'source':
+        if not budget_paused and state['phase'] == 'source':
             await run_blocking(self.set_status, run, 'waiting_input')
             return False
-        manager_task = self.providers.tasks.get(ident)
-        model_busy = manager_task and not manager_task.done()
-        from .fax_preparation import enabled
-        if not model_busy and enabled(run) and run['provider'] == 'gemini':
+        if not approved and not model_busy and enabled(run) and run['provider'] == 'gemini':
             manager = await run_blocking(self.providers.for_run, ident) or self.providers
             saved_model = await run_blocking(manager.state, ident)
             if (saved_model and saved_model.get('pending')
@@ -364,26 +376,24 @@ class BusinessWorkflow:
                 await run_blocking(self.set_status, run, 'reconciliation_required')
                 await self.providers.resume(ident)
                 return True
-        review = (await run_blocking(self.tools.flow.review, ident))
-        faxes = (await run_blocking(self.tools.faxes.items, ident)) if self.tools.faxes.active(run) else []
-        if not model_busy and any(item['state'] in ('pending','processing') for item in faxes):
+        if not approved and not model_busy and any(item['state'] in ('pending','processing') for item in faxes):
             await self.tools.faxes.refresh(run)
             faxes = await run_blocking(self.tools.faxes.items, ident)
         corrections = [item for item in faxes if item['state'] == 'needs_correction']
-        if not model_busy and corrections:
+        if not approved and not model_busy and corrections:
             message = '\n'.join(item['fax_id'] + ': ' + item['decision']['message'] for item in corrections)
             await self.continue_model(run, '利用者の訂正依頼を反映してください。既存の承認と原本は保持してください。\n' + message)
             return True
-        if (not model_busy and state['phase']=='approval' and any(item['state']=='awaiting_approval' for item in faxes)
+        if (not approved and not model_busy and state['phase']=='approval' and any(item['state']=='awaiting_approval' for item in faxes)
                 and any(item['state'] not in ('awaiting_approval','approved','completed') for item in faxes)):
             await self.continue_model(run, '提示済みの確認案と利用者の回答は保持してください。残るFAXの処理状況を取得し、未提示の確認案だけ準備してください。利用者の承認を代行しないでください。')
             return True
-        if review and review['state']=='needs_correction' and state['phase'] not in ('correction','shift_adjustment','question'):
+        if not approved and review and review['state']=='needs_correction' and state['phase'] not in ('correction','shift_adjustment','question'):
             if await run_blocking(self.decision_ready, ident, False, schedule=False):
                 await self.kick_many([ident])
             return True
         all_faxes_approved = bool(faxes) and all(item['state'] in ('approved', 'completed') and (item.get('decision') or {}).get('approve') for item in faxes)
-        if review and review['state'] == 'approved' and run['task_id'] != 'hospital_review_faxes' or all_faxes_approved:
+        if approved or all_faxes_approved:
             if model_busy:
                 return True
             await run_blocking(self.checkpoint, ident, phase='saving')
@@ -551,8 +561,10 @@ class BusinessWorkflow:
             status, title, message, action = 'archived', '停止の確認が必要です', 'この依頼は処理を続けません。業務側の停止が確認できれば、料金が未確定でも予約枠は解放されます。', 'none'
         elif run['status'] in ('stopped', 'rolled_back'):
             status, title, message, action = 'archived', '作業を停止しました', 'この依頼は処理を続けません。実行履歴は保持されています。', 'none'
-        elif run['status'] == 'budget_reached':
-            status, title, message, action = 'checking', '依頼の利用上限に達しました', '追加のモデル処理は開始していません。保存済みの回答・承認は保持されています。', 'none'
+        elif self.budget_paused(run):
+            review_ready = (review and review['state'] == 'awaiting_approval' and run['task_id'] != 'hospital_review_faxes'
+                            or (any(item['state'] == 'awaiting_approval' for item in faxes) if awaiting_fax is None else awaiting_fax))
+            status, title, message, action = 'budget_paused', '依頼のAI利用上限に達しました', '回答・承認は保持されています。確認案の承認と、必要な承認がそろった作業の保存・出力は追加のAI呼出しなしで続けられます。AIが必要な作業は停止しています。', 'approve' if review_ready else 'reconcile'
         elif phase == 'source':
             status, title, message, action = 'source', '原本を添付してください', '選択した学校・対象月の献立・調理手配書を添付してください。', 'source'
         elif phase == 'support' or run['status'] in ('reconciliation_required', 'failed'):

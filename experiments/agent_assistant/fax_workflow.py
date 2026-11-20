@@ -356,7 +356,12 @@ class FaxWorkflow:
         return {**review, 'cell_issues': issues}
 
     async def decide(self, run, fax_id, review_id, approve, message):
-        if run["status"] != "running" or not self.active(run):
+        from .business_contracts import owned
+        from .business_workflow import BusinessWorkflow
+        available = run["status"] == "running"
+        if BusinessWorkflow.budget_paused(run):
+            available = approve and owned(run) and run["status"] == "budget_reached"
+        if not available or not self.active(run):
             raise Conflict("この依頼は回答を受け付けていません")
         item = await run_blocking(self.item, run["id"], fax_id)
         if not item or not item["review"] or item["review"]["id"] != review_id:
@@ -368,7 +373,8 @@ class FaxWorkflow:
             raise Conflict("この確認には既に回答済みです")
         current = await self.capture(run, item, proposed_sheet=item["review"]["sheet"])
         basis = await self.capture(run, item)
-        if (await run_blocking(self.store.get, run["id"]))["generation"] != run["generation"] or (await run_blocking(self.store.get, run["id"]))["status"] != "running":
+        latest = await run_blocking(self.store.get, run["id"])
+        if latest["generation"] != run["generation"] or latest["status"] != run["status"]:
             raise Conflict("依頼は停止されました")
         if current["signature"] != item["review"]["signature"] or current["revision"] != item["review"]["revision"] or basis["signature"] != item["review"]["native_signature"] or basis["revision"] != current["revision"]:
             await run_blocking(self.set, run["id"], fax_id, state="ready", review=None, decision=None)

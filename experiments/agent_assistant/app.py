@@ -553,6 +553,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
                 await run_blocking(business.source_ready, run, schedule=False)
                 await business.kick_many([ident])
                 return await asyncio.to_thread(store.get, ident, owner)
+            if business.budget_paused(await run_blocking(store.get, ident, owner)):
+                raise Conflict('AI利用上限に達しました。保存済みの回答は保持されています')
             await managed.reply(ident, payload.message, payload.question_id, payload.option)
             await run_blocking(business.checkpoint, ident, phase='analysing')
             await business.kick_many([ident])
@@ -598,6 +600,8 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         run = await run_blocking(store.get, ident, owner)
         await authorize(request.headers.get('authorization', ''), run['domains'])
         async with control_lock(ident):
+            if business.budget_paused(run):
+                raise Conflict('AI利用上限で停止中のため、保存済みの作業を確認してください')
             if managed.tasks.get(ident) and not managed.tasks[ident].done():
                 raise Conflict('処理中の依頼の業務API版は変更できません')
             from .execution_binding import approve_native_upgrade

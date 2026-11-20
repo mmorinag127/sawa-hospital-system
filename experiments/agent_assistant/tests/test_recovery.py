@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from experiments.agent_assistant.recovery import Recovery
+from experiments.agent_assistant.business_workflow import BusinessWorkflow
 from experiments.agent_assistant.store import Conflict
 from experiments.agent_assistant.tests.test_gemini import fixture, interaction
 from experiments.agent_assistant.gemini import command_identity
@@ -18,16 +19,18 @@ from experiments.agent_assistant.tools import Arguments
 
 
 @pytest.mark.parametrize('fault', [None, 'native_call', 'different_arguments'])
-def test_paid_review_recovery_at_cap_does_not_send_another_inference(tmp_path, monkeypatch, fault):
+@pytest.mark.parametrize('status', ['reconciliation_required', 'budget_reached'])
+def test_paid_review_recovery_at_cap_does_not_send_another_inference(tmp_path, monkeypatch, fault, status):
     from unittest.mock import AsyncMock
     args = {'fax_id':'A', 'summary':'原本を確認した訂正案'}
     response = interaction('turn', [('review', 'request_fax_approval', args)])
     if fault == 'native_call':
         response['steps'][0]['name'] = 'hospital_confirm_order'
-    recovery, agent, store, _, _, run, requests = setup(tmp_path, monkeypatch, response)
+    recovery, agent, store, _, tools, run, requests = setup(tmp_path, monkeypatch, response)
+    BusinessWorkflow(store, tools, agent)
     with store.tx() as db:
-        db.execute('UPDATE runs SET task_id=?,task_inputs=?,spent=cap,reserved=0 WHERE id=?',
-            ('hospital_pending_faxes',json.dumps({'business_workflow':{'version':1,'fax_harness':2}}),run['id']))
+        db.execute('UPDATE runs SET status=?,task_id=?,task_inputs=?,spent=cap,reserved=0 WHERE id=?',
+            (status,'hospital_pending_faxes',json.dumps({'business_workflow':{'version':1,'fax_harness':2,'phase':'approval'}}),run['id']))
     command = command_identity('turn','review')
     store.command(run['id'],command,{'name':'request_fax_approval','arguments':
         {**args,'summary':'changed'} if fault == 'different_arguments' else args})
@@ -37,11 +40,12 @@ def test_paid_review_recovery_at_cap_does_not_send_another_inference(tmp_path, m
         if fault:
             with pytest.raises(Conflict): await recovery.resume(run['id'])
             agent.consume_gemini.assert_not_awaited()
-            assert store.get(run['id'])['status'] == 'reconciliation_required'
+            assert store.get(run['id'])['status'] == status
         else:
             await recovery.resume(run['id'])
             await agent.tasks[run['id']]
             agent.consume_gemini.assert_awaited_once()
+            assert BusinessWorkflow.budget_paused(store.get(run['id']))
             assert store.command(run['id'],command,{'name':'request_fax_approval','arguments':args}) is None
         after = store.get(run['id'])
         assert (after['cap'],after['spent'],after['reserved']) == (before['cap'],before['spent'],0)
@@ -56,10 +60,11 @@ def test_paid_business_pause_restores_only_unconsumed_review_tail(tmp_path, monk
     args = {'fax_id':'A','summary':'保持済み確認案'}
     response = interaction('turn',[('a','request_fax_approval',args),
         ('b','request_fax_approval',{'fax_id':'B','summary':'未処理確認案'})])
-    recovery, agent, store, _, _, run, requests = setup(tmp_path,monkeypatch,response)
+    recovery, agent, store, _, tools, run, requests = setup(tmp_path,monkeypatch,response)
+    BusinessWorkflow(store, tools, agent)
     with store.tx() as db:
         db.execute('UPDATE runs SET task_id=?,task_inputs=?,spent=cap,reserved=0 WHERE id=?',
-            ('hospital_pending_faxes',json.dumps({'business_workflow':{'version':1,'fax_harness':2}}),run['id']))
+            ('hospital_pending_faxes',json.dumps({'business_workflow':{'version':1,'fax_harness':2,'phase':'approval'}}),run['id']))
     command=command_identity('turn','a')
     store.command(run['id'],command,{'name':'request_fax_approval','arguments':args})
     result={'ok':True,'queued_for_human':True,'command_id':command,'review':{'id':'retained'}}

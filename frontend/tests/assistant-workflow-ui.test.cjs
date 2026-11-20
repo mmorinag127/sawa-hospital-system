@@ -20,6 +20,19 @@ for(const [id,domain,label,target_kind,month] of [
 const config={missing:[],domains:Object.fromEntries(['hospital','shift','school-lunch'].map(k=>[k,{baseline_ready:true}])),budget:{spent_cents:0,reserved_cents:0,monthly_cents:1000,available_cents:1000,notice:'synthetic'}};
 const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',instruction:'翌月のシフト案を作る',domains:['shift'],status,spent:0,cap:100,events:[],artifacts:[],conversation:[],task_inputs:{inputs:{month:'2026-11'},targets:[{label:'11月の勤務計画',data:{}}]},pending_question:{id:'q1',role:'assistant',question_id:'question-1',text:'登録内容で作成しますか？',options:['登録内容で進める','確認したい']}});
 
+test('operator can continue approved work on the same budget-paused run', async()=>{
+ const initial={...makeRun('budget_reached'), pending_question:null,
+  business:{state:'budget_paused',title:'依頼のAI利用上限に達しました',message:'回答・承認は保持されています。',next_action:'reconcile'}};
+ const h=await mount({initial,beforePost:async(url)=>{
+  if(url.endsWith('/reconcile-business'))return {data:initial};
+ }});
+ try{
+  await h.click(h.button('承認済みの作業を続ける'));
+  assert.deepEqual(h.calls.filter(call=>call.method==='post').map(call=>call.url),['/assistant-trial/runs/r1/reconcile-business']);
+  assert.ok(h.document.body.textContent.includes('回答・承認は保持されています'));
+ }finally{await h.close();}
+});
+
 for(const completed of [false,true])test(`owner invoice correction submits reviewed columns and displayed upgrade once without changing budget; completed=${completed}`,async()=>{
  const upgrade={previous_sha256:'a'.repeat(64),current_sha256:'b'.repeat(64),previous_sources:{hospital:{source_revision:'a'.repeat(40)}},current_sources:{hospital:{source_revision:'b'.repeat(40)}}};
  const initial={...makeRun(completed?'completed':'reconciliation_required'),generation:14,task_id:'hospital_pending_faxes',domains:['hospital'],pending_question:null,native_upgrade:upgrade};

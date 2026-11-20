@@ -1,5 +1,5 @@
 export type BusinessProgress = {
-  state:"source"|"question"|"review"|"working"|"checking"|"completed"|"archived";
+  state:"source"|"question"|"review"|"working"|"checking"|"budget_paused"|"completed"|"archived";
   title:string;
   message:string;
   next_action:string;
@@ -8,7 +8,7 @@ export type BusinessProgress = {
 
 export const businessLabels:Record<BusinessProgress["state"],string> = {
   source:"原本の添付待ち",question:"回答待ち",review:"内容の確認待ち",working:"作業中",
-  checking:"システム側で確認中",completed:"完了",archived:"過去の記録",
+  checking:"システム側で確認中",budget_paused:"AI利用上限で停止中",completed:"完了",archived:"過去の記録",
 };
 
 // Older API responses may be retained while a new revision is rolling out.

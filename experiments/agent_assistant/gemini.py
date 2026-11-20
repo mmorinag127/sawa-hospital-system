@@ -211,7 +211,8 @@ class Gemini(Managed):
                             return
                     inputs = state['results']
                 run = await run_blocking(self.current, ident, generation)
-                if run['spent'] >= run['cap']:
+                from .business_workflow import BusinessWorkflow
+                if BusinessWorkflow.budget_paused(run) or run['spent'] >= run['cap']:
                     await run_blocking(self.store.update, ident, expected_generation=generation, status='budget_reached')
                     from .business_contracts import owned
                     if not owned(run):

@@ -463,7 +463,8 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const view=selected ? businessProgress(selected) : null;
   const terminal=!!selected && (adminView ? ["completed","stopped","rolled_back","failed"].includes(selected.status) : ["completed","archived"].includes(view!.state));
   const awaitingSource=selected?.status==="waiting_input" && (adminView || view?.next_action==="source") && selected.task_id==="lunch_import" && !(selected.source_attached ?? selected.events?.some(event=>event.kind==="source"));
-  const awaitingReview=selected?.status==="running" && (adminView || view?.next_action==="approve") && selected.task_review?.state==="awaiting_approval";
+  const budgetPaused=view?.state==="budget_paused";
+  const awaitingReview=(selected?.status==="running" && !budgetPaused || budgetPaused && view?.next_action==="approve" && selected?.task_id!=="hospital_review_faxes") && (adminView || view?.next_action==="approve") && selected?.task_review?.state==="awaiting_approval";
   const faxReviews=selected?.fax_items?.filter(fax=>fax.state==="awaiting_approval") || [];
   const hasFaxReview=(selected?.fax_page?.summary.states.awaiting_approval ?? faxReviews.length)>0;
   const question=selected?.status==="waiting_input" ? selected.pending_question : undefined;
@@ -574,7 +575,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {awaitingSource && <form key={selected.id} className="answer-panel" onSubmit={e=>{e.preventDefault();act(async()=>{if(!source || !sourceChecked)throw new Error("原本の学校・対象月を確認してください");const form=new FormData();form.append("file",source);form.append("domain","school-lunch");form.append("binding",JSON.stringify({facility_id:String(selected.task_inputs!.inputs!.facility_id),month:selected.task_inputs!.inputs!.month}));await assistantApi.post(`/assistant-trial/runs/${selected.id}/sources`,form);const accepted=await submitReply({message:"選択した学校・対象月と原本を照合しました。",question_id:selected.pending_question?.question_id});if(accepted && selectedId.current===selected.id){setSource(null);setSourceChecked(false);}await refreshAfterCommand(selected.id);});}}><label>献立・調理手配書の原本<input type="file" accept=".pdf,.xls,.xlsx" required disabled={busy || replyPending} onChange={e=>{setSource(e.target.files?.[0] || null);setSourceChecked(false);}}/></label><p>学校：{selected.task_inputs?.targets?.[0]?.label} ／ 対象月：{selected.task_inputs?.inputs?.month}</p><label className="check-line"><input type="checkbox" checked={sourceChecked} required disabled={busy || replyPending} onChange={e=>setSourceChecked(e.target.checked)}/>原本の学校・対象月が、表示内容と一致しています</label><button className="primary" disabled={busy || replyPending || !source || !sourceChecked}>原本を添付して続ける</button></form>}
       {selected.task_review && <div className="result-archive"><section className="review-panel" key={selected.task_review.id} aria-label="結果の確認と承認"><h3>{awaitingReview ? "作成した内容" : "確認した内容"}</h3><p>{selected.task_review.summary}</p>{selected.lunch_review && <section className="evidence"><h4>食材ごとの当日の実績</h4><ResultView value={selected.lunch_review} expanded/></section>}{selected.shift_review ? <ShiftReview value={selected.shift_review}/> : selected.task_review.evidence.filter(entry=>!selected.lunch_review || entry.operation!=="lunch_get_process").map((entry,i)=><section className="evidence" key={i}><h4>{({shift_get_run:"勤務表",shift_get_validation:"人員不足・勤務制約",shift_get_constraints:"希望休・勤務条件",shift_get_staff:"職員",shift_get_demands:"必要人数",shift_get_workdays:"勤務日",shift_get_settings:"勤務設定",shift_get_period:"勤務期間",lunch_get_menus:"献立",lunch_get_process:"調理工程",lunch_get_schedules:"工程表",lunch_get_routes:"動線図",lunch_get_procurement:"必要量・在庫・発注案",lunch_get_price_source:"実施価格の計算入力",lunch_get_price_result:"実施価格",lunch_get_price_quantities:"原本の1人量",lunch_get_source_document:"原本の抽出結果",lunch_get_source_review:"原本の照合結果",hospital_get_recognition_review:"原本セルと認識値",hospital_get_fax:"FAXの状態",hospital_get_workflow:"確定注文の状態"} as Record<string,string>)[entry.operation] || "業務情報"}</h4><ResultView value={entry.data} expanded/></section>)}
         {!selected.shift_review && !!selected.task_review.actions.length && <section className="evidence"><h4>承認後に保存する内容</h4>{selected.task_review.actions.map((action,i)=><ResultView key={i} value={action.parameters.body} expanded/>)}</section>}
-        {awaitingReview && <div className="review-decisions"><section className="approval-choice"><h4>この内容でよければ</h4><p className="muted">{selected.task_id==='shift_check'?'検査結果の確認を完了します。勤務表・条件は変更しません。':selected.task_id==='shift_export'?'確定済み勤務表を変更せずExcelを出力します。':'確認した内容で保存・出力へ進みます。'}</p><button className="primary" disabled={busy || decisionPending} onClick={()=>taskDecision(true)}>この内容で進める</button></section><form className="correction-panel" onSubmit={e=>{e.preventDefault();taskDecision(false);}}><label>訂正してほしい箇所<textarea value={reviewMessage} disabled={busy || decisionPending} onChange={e=>setReviewMessage(e.target.value)} placeholder="訂正が必要なときだけ入力してください" required/></label><button disabled={busy || decisionPending || !reviewMessage.trim()}>訂正を依頼する</button></form></div>}
+        {awaitingReview && <div className="review-decisions"><section className="approval-choice"><h4>この内容でよければ</h4><p className="muted">{selected.task_id==='shift_check'?'検査結果の確認を完了します。勤務表・条件は変更しません。':selected.task_id==='shift_export'?'確定済み勤務表を変更せずExcelを出力します。':'確認した内容で保存・出力へ進みます。'}</p><button className="primary" disabled={busy || decisionPending} onClick={()=>taskDecision(true)}>この内容で進める</button></section>{!budgetPaused && <form className="correction-panel" onSubmit={e=>{e.preventDefault();taskDecision(false);}}><label>訂正してほしい箇所<textarea value={reviewMessage} disabled={busy || decisionPending} onChange={e=>setReviewMessage(e.target.value)} placeholder="訂正が必要なときだけ入力してください" required/></label><button disabled={busy || decisionPending || !reviewMessage.trim()}>訂正を依頼する</button></form>}</div>}
         {selected.shift_review && awaitingReview && !['shift_check','shift_export'].includes(selected.task_id??'') && <p className="assistant-notice">承認すると、この勤務表を確定してExcelを出力します。</p>}
         {!awaitingReview && <p className="muted">{({awaiting_approval:"処理状態の確認が必要です",approved:"承認済み",needs_correction:"訂正を依頼しました",stale:"元データが変わったため、再確認が必要です"} as Record<string,string>)[selected.task_review.state]}</p>}
         {selected.task_review.decision?.message && <p>{selected.task_review.decision.message}</p>}
@@ -585,7 +586,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
         {[...selected.fax_items].sort((a,b)=>Number(b.state==="awaiting_approval")-Number(a.state==="awaiting_approval")).map(fax=>{
           const correctionKey=faxCorrectionKey(selected.id,fax);
           const correction=corrections[correctionKey] || "";
-          const editing=editingFax===correctionKey && fax.state==="awaiting_approval" && selected.status==="running";
+          const editing=!budgetPaused && editingFax===correctionKey && fax.state==="awaiting_approval" && selected.status==="running";
           const issues=new Set(fax.review?.quantity_review?.cell_issues.map(issue=>`${issue.row_index}-${issue.column_index}`));
           return <article key={correctionKey} className="fax-item">
             <h4>{fax.snapshot.name}</h4>
@@ -604,13 +605,13 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
                 })}</tr>)}</tbody></table></div>
                 {editing && <><button type="submit" disabled={busy}>確認案に訂正を反映</button><button type="button" disabled={busy} onClick={()=>setEditingFax("")}>取り消す</button></>}
               </form>
-              {fax.state==="awaiting_approval" && selected.status==="running" && <>
-                {editingFax!==correctionKey && <button disabled={busy || decisionPending} onClick={()=>setEditingFax(correctionKey)}>原本と照合して直接訂正</button>}
-                <button className="primary" disabled={busy || decisionPending || editingFax===correctionKey} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button>
-                <section className="correction-panel"><h4>訂正してほしい箇所がある</h4>
+              {fax.state==="awaiting_approval" && (selected.status==="running" || budgetPaused) && <>
+                {!budgetPaused && editingFax!==correctionKey && <button disabled={busy || decisionPending} onClick={()=>setEditingFax(correctionKey)}>原本と照合して直接訂正</button>}
+                <button className="primary" disabled={busy || decisionPending || editing} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button>
+                {!budgetPaused && <section className="correction-panel"><h4>訂正してほしい箇所がある</h4>
                   <label>訂正内容<textarea value={correction} disabled={busy || decisionPending} onChange={e=>setCorrections(c=>({...c,[correctionKey]:e.target.value}))}/></label>
                   <button disabled={busy || decisionPending || editingFax===correctionKey || !correction.trim()} onClick={()=>decide(fax,false)}>訂正を依頼する</button>
-                </section>
+                </section>}
               </>}
             </>}
             {fax.decision?.message && <p>{fax.decision.message}</p>}
@@ -620,13 +621,14 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {!terminal && renderArtifacts()}
       {!adminView && <div className="assistant-footer"><span className="muted">回答した内容は保存されています。作業一覧へ戻っても、この作業は引き続き確認できます。</span><button className="primary" onClick={newTask}>{terminal || selected.status==="rollback_stop_pending" ? "別の作業を始める" : "作業一覧に戻る"}</button></div>}
       <details className="conversation-history"><summary>これまでのやり取り{messages?.length ? `（${messages.length}件）` : ""}</summary><div role="log">{messages?.map(message=><div className={message.role==="user" ? "chat-bubble user-message" : "chat-bubble"} key={message.id}><strong>{message.role==="user" ? "あなた" : "エージェント"}</strong><p>{message.text}</p></div>)}</div></details>
-      {adminView && selected.status==="reconciliation_required" && <button className="primary" disabled={controlling || busy} onClick={()=>control("resume")}>保存済みの結果を確認して再開</button>}
-      {adminView && selected.native_upgrade && !terminal && <section className="assistant-notice"><h3>業務APIの修正版があります</h3>
+      {budgetPaused && <section className="assistant-notice"><h3>{view!.title}</h3>{adminView && <p>{view!.message}</p>}<button disabled={busy || controlling} onClick={()=>control("reconcile-business")}>承認済みの作業を続ける</button></section>}
+      {adminView && (selected.status==="reconciliation_required" || budgetPaused && selected.status==="budget_reached" && selected.provider==="gemini" && selected.task_id==="hospital_pending_faxes") && <button className="primary" disabled={controlling || busy} onClick={()=>control("resume")}>保存済みの結果を確認して再開</button>}
+      {adminView && selected.native_upgrade && !terminal && !budgetPaused && <section className="assistant-notice"><h3>業務APIの修正版があります</h3>
         {Object.entries(selected.native_upgrade.current_sources).map(([domain,source])=><p key={domain}>{labels[domain] || domain}：{selected.native_upgrade?.previous_sources[domain].source_revision.slice(0,8)} → {source.source_revision.slice(0,8)}</p>)}
         <p>開始時の版・処理履歴は保持します。原本と保存済みデータを引き継ぎ、結果未確定の更新は再送しません。</p>
         <button disabled={busy || controlling} onClick={()=>control("upgrade-native")}>修正版へ引き継いで再開</button></section>}
       {adminView && selected.business?.state==="checking" && <section className="assistant-notice"><h3>管理者による確認が必要な業務</h3>{selected.events?.filter(event=>event.kind==="business_support").slice(-1).map(event=><p key={event.id}>{event.payload.message}</p>)}<button disabled={busy || controlling} onClick={()=>control("reconcile-business")}>業務結果を再照合する</button><p>結果未確定の更新は再送せず、保存済みの証跡を確認します。</p></section>}
-      {adminView && controlNotice && <p className="assistant-notice" role="status" aria-live="polite">{controlNotice}</p>}
+      {(adminView || budgetPaused) && controlNotice && <p className="assistant-notice" role="status" aria-live="polite">{controlNotice}</p>}
       {selected.provisional_menu_amount && <p role="status" className="assistant-notice">検証専用の仮設定：{selected.provisional_menu_amount.name} {selected.provisional_menu_amount.quantity}{selected.provisional_menu_amount.unit}（実運用の値は未確認）</p>}
       {selected.trial_area_names && <p role="status">試用注文 {selected.trial_area_names.order_id} の表示名：{Object.entries(selected.trial_area_names.names).map(([id,name])=>`${id} → ${name}`).join("、")}</p>}
       {selected.trial_invoice_columns && <p role="status">試用注文 {selected.trial_invoice_columns.order_id} の納品書列：{selected.trial_invoice_columns.invoice_columns.filter(c=>c.source==="quantity").map(c=>c.name).join("、")}</p>}

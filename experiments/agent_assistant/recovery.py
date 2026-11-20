@@ -26,10 +26,13 @@ class Recovery:
             raise Conflict('既に処理中です')
         async with manager.tools.lock(ident):
             run = await run_blocking(self.store.get, ident)
-            if run['status'] != 'reconciliation_required':
-                raise Conflict('結果照合が必要な依頼だけ再開できます')
+            from .business_workflow import BusinessWorkflow
             from .fax_preparation import enabled
-            paid_reviews_only = enabled(run) and run['provider'] == 'gemini' and (run['spent'] >= run['cap'] or run['reserved'] <= 0)
+            paused = BusinessWorkflow.budget_paused(run)
+            if (run['status'] not in ('reconciliation_required', 'budget_reached')
+                    or paused and not (enabled(run) and run['provider'] == 'gemini')):
+                raise Conflict('結果照合が必要な依頼だけ再開できます')
+            paid_reviews_only = enabled(run) and run['provider'] == 'gemini' and (paused or run['spent'] >= run['cap'] or run['reserved'] <= 0)
             if run['month'] != billing_month() or (not paid_reviews_only and (run['spent'] >= run['cap'] or run['reserved'] <= 0)):
                 raise Conflict('実行月・利用上限・予約額を確認してください')
             if not run['session_id']:
@@ -67,9 +70,9 @@ class Recovery:
             else:
                 plan = await self.claude(manager, run)
             current = await run_blocking(self.store.get, ident)
-            if current['generation'] != run['generation'] or current['status'] != 'reconciliation_required':
+            if current['generation'] != run['generation'] or current['status'] != run['status']:
                 raise Conflict('照合中に依頼が停止または変更されました')
-            exhausted = current['spent'] >= current['cap'] or current['reserved'] <= 0
+            exhausted = paused or current['spent'] >= current['cap'] or current['reserved'] <= 0
             if exhausted and not (enabled(run) and run['provider'] == 'gemini'):
                 raise Conflict('照合した利用料金が実行上限に達しています。処理を再開しません')
             if safe_reviews or exhausted:
@@ -102,7 +105,7 @@ class Recovery:
                 return await run_blocking(self.store.get, ident)
             await manager.sandbox.start(run)
             current = await run_blocking(self.store.get, ident)
-            if current['generation'] != run['generation'] or current['status'] != 'reconciliation_required':
+            if current['generation'] != run['generation'] or current['status'] != run['status']:
                 await manager.sandbox.stop(ident, expected_generation=run['generation'])
                 raise Conflict('再開前に依頼が停止または変更されました')
             def mark_recoverable():
@@ -134,6 +137,14 @@ class Recovery:
                 await run_blocking(manager.tools.business.checkpoint, ident, phase='analysing', attempts=0)
                 await manager.start(await run_blocking(self.store.get, ident))
                 return await run_blocking(self.store.get, ident)
+            if exhausted and plan.get('reviews_complete'):
+                await run_blocking(manager.checkpoint, ident, plan['state'])
+                await run_blocking(manager.tools.business.checkpoint, ident, phase='approval', budget_paused=True)
+                if run['status'] != 'budget_reached':
+                    await run_blocking(self.store.update, ident, expected_generation=run['generation'], status='budget_reached')
+                return await run_blocking(self.store.get, ident)
+            if exhausted:
+                await run_blocking(manager.tools.business.checkpoint, ident, budget_paused=True)
             await run_blocking(self.store.update, ident, expected_generation=run['generation'], status='running')
             await run_blocking(self.store.event, ident, 'recovery', {'status': 'running', 'generation': run['generation']})
             if run['provider'] == 'gemini':

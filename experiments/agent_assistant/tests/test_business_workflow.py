@@ -105,9 +105,17 @@ def test_first_fax_review_does_not_pause_preparation_of_remaining_faxes(tmp_path
         assert await engine.pause_model(run['id'],'other-ready',{'ok':True}) is False
         await tools.faxes.submit(run,'B','次の原本を確認してください')
         assert await engine.pause_model(run['id'],'all-reviews',{'queued_for_human':True}) is True
+        store.update(run['id'],status='budget_reached',spent=run['cap'],reserved=0)
+        run=store.get(run['id'])
+        engine.providers.resume=AsyncMock()
         for fax in ('A','B'):
             review=tools.faxes.item(run['id'],fax)['review']
             await tools.faxes.decide(run,fax,review['id'],True,'合成コピーの承認')
+            if fax=='A':
+                assert await engine.advance(run['id']) is False
+                assert store.get(run['id'])['status']=='budget_reached'
+        engine.begin_reconciliation(run)
+        assert engine.state(run['id'])['epoch']==0
         assert await engine.pause_model(run['id'],'all-approved',{'ok':True}) is True
         assert tools.faxes.item(run['id'],'A')['review']['id']==first['id']
         assert not native.writes
@@ -119,6 +127,7 @@ def test_first_fax_review_does_not_pause_preparation_of_remaining_faxes(tmp_path
         assert await engine.advance(run['id']) is False
         engine.complete.assert_awaited_once()
         assert store.get(run['id'])['status']=='completed'
+        engine.providers.resume.assert_not_awaited()
         assert not engine.providers.started
     asyncio.run(scenario())
 
@@ -247,7 +256,8 @@ def test_every_visible_task_has_a_server_contract_and_models_cannot_finalize(tmp
 
 
 @pytest.mark.parametrize('task', ['hospital_outputs', 'shift_check', 'shift_export', 'lunch_month_exports'])
-def test_selected_native_task_reaches_review_and_finishes_after_approval_without_model(tmp_path, task):
+@pytest.mark.parametrize('budget_paused', [False, True])
+def test_selected_native_task_reaches_review_and_finishes_after_approval_without_model(tmp_path, task, budget_paused):
     async def scenario():
         if task.startswith('shift_'):
             store, native, tools, run = shift(tmp_path, task)
@@ -275,6 +285,12 @@ def test_selected_native_task_reaches_review_and_finishes_after_approval_without
             assert '変更しません' in review['summary']
         assert store.get(run['id'])['status'] != 'completed'
         before = len(native.writes)
+        if budget_paused:
+            store.update(run['id'],status='budget_reached')
+            paused = store.get(run['id'])
+            assert engine.projection(paused, review)['next_action']=='approve'
+            with pytest.raises(Conflict):
+                await tools.flow.decide(paused, review['id'], False, 'AIへの訂正依頼')
         await tools.flow.decide(store.get(run['id']), review['id'], True, '')
         assert await engine.advance(run['id']) is False
         assert store.get(run['id'])['status'] == 'completed'

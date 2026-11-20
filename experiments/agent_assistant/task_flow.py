@@ -681,7 +681,12 @@ class TaskFlow:
         return {'ok':True,'queued_for_human':True,'review_id':review['id']}
 
     async def decide(self, run, review_id, approve, message):
-        if run['status'] != 'running' or not self.active(run):
+        from .business_contracts import owned
+        from .business_workflow import BusinessWorkflow
+        available = run['status'] == 'running'
+        if BusinessWorkflow.budget_paused(run):
+            available = approve and owned(run) and run['status'] == 'budget_reached' and run['task_id'] != 'hospital_review_faxes'
+        if not available or not self.active(run):
             raise Conflict('この依頼は回答を受け付けていません')
         review = await run_blocking(self.review, run['id'])
         if not review or review['id'] != review_id:
