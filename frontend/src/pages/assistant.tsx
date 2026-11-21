@@ -9,6 +9,7 @@ import ShiftReview, {ShiftReviewData} from "../components/assistant/ShiftReview"
 import {mergeAssistantHistory,type AssistantEventPage} from "../services/assistantProgress";
 import useAssistantHistory, {type AssistantRunSummary} from "../features/assistant/useAssistantHistory";
 import RunEventHistory from "../components/assistant/RunEventHistory";
+import FaxSourcePreview from "../components/assistant/FaxSourcePreview";
 
 const BUSINESS_TIMEOUT = 300000;
 const terminalRun = (status: string) => ["completed", "rolled_back", "stopped", "failed"].includes(status);
@@ -20,7 +21,7 @@ const assistantApi = {
 };
 
 type Task = { requires_agent?:boolean; id: string; domain: string; label: string; description: string; steps: string[]; target_kind?: string; month?: boolean; date?:boolean; default_month?: string };
-type Fax = { fax_id: string; state: string; snapshot: { name: string; facility: string; week: string }; decision?: { message: string }; review?: { id: string; summary: string; sheet: { header?: any[]; fields?: any[]; rows?: any[][] }; original: { id: string; name: string }; quantity_review?: {cell_issues:{row_index:number;column_index:number}[]} } };
+type Fax = { fax_id: string; state: string; snapshot: { name: string; facility: string; week: string }; decision?: { message: string }; review?: { id: string; summary: string; selected_ocr_result_id?: string; sheet: { header?: any[]; fields?: any[]; rows?: any[][]; selected_ocr_result_id?: string; base_evidence_run_id?: string }; original: { id: string; name: string }; quantity_review?: {cell_issues:{row_index:number;column_index:number}[]} } };
 type Selection = { hospital_source?:HospitalSource; inputs?:Record<string,any>; month_choices?:{month:string;label:string;reason:string}[]; batches?:{label:string;keys:string[];reason:string}[]; absence_days?:{date:string;label:string}[]; selection_id: string; choices: {key:string;label:string;data:Record<string,any>}[]; schools:{id:number;name:string}[]; layouts:{id:number;name:string;version:number}[]; work_days?:{service_date:string;menu_names:string[];menu_count:number;reason:string;missing:string[]}[] };
 type TaskReview = {id:string;state:string;summary:string;evidence:{operation:string;data:any}[];actions:{operation:string;parameters:any}[];decision?:{approve:boolean;message:string}};
 type ChatMessage = {question_map?:QuestionMap;id:string;role:"assistant"|"user";text:string;question_id?:string;options?:string[];process_context?:{answered:number;total:number;kind?:string}};
@@ -76,6 +77,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [taskId, setTaskId] = useState("");
   const [corrections, setCorrections] = useState<Record<string, string>>({});
   const [editingFax, setEditingFax] = useState("");
+  const [previewFax, setPreviewFax] = useState("");
   const [targetMonth,setTargetMonth]=useState("");
   const [serviceDate,setServiceDate]=useState("");
   const [absenceDate,setAbsenceDate]=useState("");
@@ -595,6 +597,9 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
         <h3>FAXの処理状況 <small>{(selected.fax_page?.summary.states.completed??selected.fax_items.filter(fax=>fax.state==="completed").length)} / {(selected.fax_page?.summary.total??selected.fax_items.length)}件完了</small></h3>
         {[...selected.fax_items].sort((a,b)=>Number(b.state==="awaiting_approval")-Number(a.state==="awaiting_approval")).map(fax=>{
           const correctionKey=faxCorrectionKey(selected.id,fax);
+          const previewKey=JSON.stringify([selected.id,fax.fax_id]);
+          const previewOpen=previewFax===previewKey;
+          const formId=`fax-sheet-${fax.fax_id}`;
           const correction=corrections[correctionKey] || "";
           const editable=(fax.state==="awaiting_approval" || fax.state==="needs_correction") &&
             (selected.status==="running" && !budgetPaused || selected.status==="budget_reached" && budgetPaused);
@@ -605,8 +610,19 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
             <p>{fax.snapshot.facility} ／ {fax.snapshot.week} ／ {({pending:"処理待ち",processing:"読み取り中",ready:"内容を照合中",awaiting_approval:"内容を確認してください",approved:"確定処理中",needs_correction:"訂正中",completed:"注文確定済み",blocked:"要確認"} as Record<string,string>)[fax.state] || fax.state}</p>
             {fax.review && <>
               <p>{fax.review.summary}</p>
-              <button disabled={busy} onClick={()=>act(()=>download(fax.review!.original))}>原本PDFを開く</button>
-              <form onSubmit={event=>void editFax(event,fax)}>
+              <div className="fax-sheet-tools" role="group" aria-label="数量シートの操作">
+                <button type="button" aria-expanded={previewOpen} onClick={()=>setPreviewFax(previewOpen ? "" : previewKey)}>
+                  {previewOpen ? "原本プレビューを閉じる" : "原本PDFを開く"}
+                </button>
+                {editable && !editing && <button type="button" disabled={busy || decisionPending}
+                  onClick={()=>{setEditingFax(correctionKey);setPreviewFax(previewKey);}}>原本と照合して直接訂正</button>}
+                {editing && <>
+                  <button type="submit" form={formId} disabled={busy}>確認案に訂正を反映</button>
+                  <button type="button" disabled={busy} onClick={()=>setEditingFax("")}>取り消す</button>
+                </>}
+              </div>
+              <div className={previewOpen ? "fax-review-layout with-preview" : "fax-review-layout"}>
+              <form id={formId} onSubmit={event=>void editFax(event,fax)}>
                 <h4>読み取った数量</h4>
                 <div className="sheet"><table><thead><tr>{(fax.review.sheet.header || fax.review.sheet.fields || []).map((cell,i)=><th key={i}>{String(cell ?? "")}</th>)}</tr></thead>
                 <tbody>{fax.review.sheet.rows?.map((row,i)=><tr key={i}>{row.map((cell,j)=>{
@@ -615,9 +631,11 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
                     ? <input name={`cell-${i}-${j}`} aria-label={`${i+1}行目 ${fax.review!.sheet.header?.[j] ?? field}`} defaultValue={String(cell ?? "")} disabled={busy}/>
                     : String(cell ?? "")}{issues.has(`${i}-${j}`) && <small> 要確認</small>}</td>;
                 })}</tr>)}</tbody></table></div>
-                {editing && <><button type="submit" disabled={busy}>確認案に訂正を反映</button><button type="button" disabled={busy} onClick={()=>setEditingFax("")}>取り消す</button></>}
               </form>
-              {editable && !editing && <button disabled={busy || decisionPending} onClick={()=>setEditingFax(correctionKey)}>原本と照合して直接訂正</button>}
+              {previewOpen && <FaxSourcePreview
+                path={`/assistant-trial/runs/${selected.id}/faxes/${fax.fax_id}/preview/${fax.review.id}`}
+                hasEvidence={Boolean(fax.review.selected_ocr_result_id || fax.review.sheet.selected_ocr_result_id || fax.review.sheet.base_evidence_run_id)} />}
+              </div>
               {editable && !editing && <button disabled={busy || decisionPending} onClick={()=>restoreFaxSource(fax)}>確認案を元のシートに戻す</button>}
               {fax.state==="awaiting_approval" && editable && <>
                 <button className="primary" disabled={busy || decisionPending || editing} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button>

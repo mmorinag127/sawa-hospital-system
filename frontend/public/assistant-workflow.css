@@ -1,4 +1,17 @@
 /* Shared with the isolated preview; colors and dimensions follow school-lunch process-workflow.css. */
+.assistant-page .fax-review-layout{margin:12px 0}
+.assistant-page .fax-sheet-tools{display:flex;flex-wrap:wrap;gap:8px}
+.assistant-page .fax-review-layout.with-preview{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+.assistant-page .fax-review-layout>form,.assistant-page .fax-preview{min-width:0}
+.assistant-page .fax-review-layout.with-preview .sheet{max-height:clamp(360px,68vh,760px)}
+.assistant-page .fax-preview{border:1px solid #d9e2df;border-radius:8px;overflow:hidden;background:#fff}
+.assistant-page .fax-preview-modes{display:flex;gap:6px;flex-wrap:wrap;padding:8px;background:#f1f6f3}
+.assistant-page .fax-preview-modes button[aria-pressed=true]{background:#176b5e;border-color:#176b5e;color:#fff}
+.assistant-page .fax-preview-file{height:clamp(360px,68vh,760px);overflow:auto}
+.assistant-page .fax-preview-pagination{display:flex;align-items:center;gap:6px;margin-inline-start:auto;white-space:nowrap}
+.assistant-page .fax-preview-file img{display:block;width:100%;height:auto}
+.assistant-page .fax-preview-file>p,.assistant-page .fax-preview-file>div{margin:12px}
+@media(max-width:840px){.assistant-page .fax-review-layout.with-preview{grid-template-columns:minmax(0,1fr)}}
 .assistant-page{max-width:1120px;margin:0 auto;padding:32px 24px 48px;color:#17201f;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.6}
 .assistant-page *{box-sizing:border-box}.assistant-page [hidden]{display:none!important}
 .assistant-page .assistant-heading,.assistant-page .panel-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:24px}.assistant-page .assistant-heading h1{font-size:28px;line-height:1.4;margin:0}.assistant-page .assistant-heading .eyebrow,.assistant-page .panel-heading .eyebrow{font-size:12px;font-weight:700;color:#60716d;margin:0 0 6px;letter-spacing:.04em}.assistant-page .assistant-description{margin:10px 0 0;color:#60716d;font-size:14px}.assistant-page .trial-tag{vertical-align:middle;display:inline-block;font-size:12px;font-weight:700;background:#fff7e6;color:#805413;padding:3px 9px;border:1px solid #efdbb6;border-radius:6px}.assistant-page .quiet-link{color:#60716d;font-size:13px;white-space:nowrap;text-underline-offset:4px;margin-top:6px}

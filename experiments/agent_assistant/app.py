@@ -14,7 +14,7 @@ from typing import Literal
 import httpx
 
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 from .providers import Providers, LABELS
@@ -898,8 +898,48 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             raise Conflict('原本図面を確認できません')
         return FileResponse(path, media_type='image/svg+xml', headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'"})
 
-    @app.get("/runs/{ident}/artifacts/{artifact_id}")
-    def artifact(ident: str, artifact_id: str):
+    @app.get("/runs/{ident}/faxes/{fax_id}/preview/{review_id}")
+    async def fax_preview(ident: str, fax_id: str, review_id: str, request: Request,
+                          page: int | None = Query(None, ge=1)):
+        from .fax_preview import read_overlay, render_original_page, review_evidence_id
+
+        run = await run_blocking(store.get, ident, owner)
+        authorization = request.headers.get("authorization", "")
+        await authorize(authorization, run["domains"])
+        item = await run_blocking(tools.faxes.item, ident, fax_id)
+        review = item.get("review") if item else None
+        if (not tools.faxes.active(run) or run["status"] in ("rolled_back", "rollback_stop_pending")
+                or not review or review["id"] != review_id):
+            raise Conflict("最新のFAX確認案を開いてください")
+        headers = {"Cache-Control": "private, no-store"}
+        if page is not None:
+            def original_page():
+                original = review["original"]
+                row, _, pdf = verified_artifact(ident, original["id"])
+                if row["sha256"] != item["snapshot"].get("sha256") or row["sha256"] != original.get("sha256"):
+                    raise Conflict("確認案と原本PDFが一致しません")
+                return render_original_page(pdf, page)
+            data, count = await run_blocking(original_page)
+            headers["X-Fax-Page-Count"] = str(count)
+        else:
+            evidence_id = review_evidence_id(review)
+            order_id = item["snapshot"].get("order_id")
+            if any(not isinstance(value, str) or not value.isalnum() or not value.isascii()
+                   for value in (order_id, evidence_id)):
+                raise Conflict("このOCR結果の重ね表示画像はありません")
+            response = await sandbox.request(run, "hospital", "GET",
+                f"/orders/{order_id}/workflow-v2/ocr-results/{evidence_id}", authorization=authorization)
+            if not response.is_success:
+                raise Conflict("このOCR結果の重ね表示画像を取得できません")
+            data = await run_blocking(read_overlay, sandbox.path(ident) / "data" / "hospital", item, response.json())
+        current = await run_blocking(tools.faxes.item, ident, fax_id)
+        latest = await run_blocking(store.get, ident, owner)
+        if (latest["generation"] != run["generation"] or latest["status"] in ("rolled_back", "rollback_stop_pending")
+                or not current or (current.get("review") or {}).get("id") != review_id):
+            raise Conflict("最新のFAX確認案を開いてください")
+        return Response(data, media_type="image/png", headers=headers)
+
+    def verified_artifact(ident, artifact_id):
         run = store.get(ident, owner)
         if run["status"] in ("rolled_back", "rollback_stop_pending"):
             raise Conflict("復元前の出力は旧版です。履歴は保持されていますが業務出力として配布しません")
@@ -910,8 +950,14 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         path = Path(row["path"])
         if not path.is_file() and hasattr(store, 'materialize_file'):
             store.materialize_file(path, expected=row['sha256'])
-        if hashlib.sha256(path.read_bytes()).hexdigest() != row["sha256"]:
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != row["sha256"]:
             raise Conflict("出力ファイルが変更されています")
+        return row, path, data
+
+    @app.get("/runs/{ident}/artifacts/{artifact_id}")
+    def artifact(ident: str, artifact_id: str):
+        row, path, _ = verified_artifact(ident, artifact_id)
         return FileResponse(path, filename=row["name"], headers={"X-Content-SHA256": row["sha256"]})
 
     @app.get("/assistant-workflow.css")

@@ -332,6 +332,7 @@ class FaxWorkflow:
         artifact = self.tools.artifact(run["id"], original.content, f"FAX-{fax_id}.pdf")
         review = {"id": uuid4().hex, "signature": captured["signature"], "native_signature": basis["signature"], "revision": captured["revision"],
             "summary": summary, "agent_summary": agent_summary, "sheet": captured["sheet"], "original": artifact, "order_id": order_id,
+            "selected_ocr_result_id": captured["workflow"]["selected_ocr_result_id"],
             "quantity_review": quantity_review}
         if quantity_review['cell_issues']:
             review['summary'] += '\n保存は可能ですが袋詰め前に原本確認が必要です：' + json.dumps(

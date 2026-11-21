@@ -20,6 +20,37 @@ for(const [id,domain,label,target_kind,month] of [
 const config={missing:[],domains:Object.fromEntries(['hospital','shift','school-lunch'].map(k=>[k,{baseline_ready:true}])),budget:{spent_cents:0,reserved_cents:0,monthly_cents:1000,available_cents:1000,notice:'synthetic'}};
 const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',instruction:'翌月のシフト案を作る',domains:['shift'],status,spent:0,cap:100,events:[],artifacts:[],conversation:[],task_inputs:{inputs:{month:'2026-11'},targets:[{label:'11月の勤務計画',data:{}}]},pending_question:{id:'q1',role:'assistant',question_id:'question-1',text:'登録内容で作成しますか？',options:['登録内容で進める','確認したい']}});
 
+test('FAX review switches between inline PDF and the matching OCR overlay without downloading',async()=>{
+ const initial={...makeRun('running'),task_id:'hospital_pending_faxes',domains:['hospital'],pending_question:null,
+  fax_items:[{fax_id:'F1',state:'awaiting_approval',snapshot:{name:'確認FAX',facility:'施設',week:'2026-11'},
+   review:{id:'review1',summary:'数量確認',original:{id:'original1',name:'source.pdf'},
+    sheet:{selected_ocr_result_id:'OEV1',fields:['qty.regular'],rows:[['42']]}}}]};
+ const h=await mount({initial,beforeGet:async(url,options)=>{
+  if(url.endsWith('/faxes/F1/preview/review1'))return {
+   data:new Blob(['PNG'],{type:'image/png'}), headers: options?.params?.page ? {'x-fax-page-count':'2'} : {}};
+ }});
+ try{
+  const reads=()=>h.calls.filter(c=>/\/preview\/review1/.test(c.url));
+  assert.equal(reads().length,0);
+  await h.click(h.button('原本PDFを開く'));
+  const layout=h.document.querySelector('.fax-review-layout.with-preview');
+  assert.ok(layout.querySelector('form table'));
+  assert.match(layout.querySelector('img[alt="FAX原本PDF 1ページ"]').src,/^blob:/);
+  const next=h.document.querySelector('[aria-label="次のページ"]');
+  await h.click(next);
+  assert.match(layout.querySelector('img[alt="FAX原本PDF 2ページ"]').src,/^blob:/);
+  await h.click(h.button('OCR重ね表示'));
+  assert.ok(layout.querySelector('img[alt="FAX原本PDF 2ページ"]').parentElement.hidden);
+  assert.match(layout.querySelector('img[alt="FAXのOCR重ね表示"]').src,/^blob:/);
+  await h.click(h.button('原本PDF'));
+  assert.equal(layout.querySelector('img[alt="FAX原本PDF 2ページ"]').parentElement.hidden,false);
+  assert.deepEqual(reads().map(c=>c.options?.params?.page),[1,2,undefined]);
+  assert.equal(h.calls.filter(c=>c.method==='post').length,0);
+  await h.click(h.button('原本プレビューを閉じる'));
+  assert.equal(h.document.querySelector('.fax-preview'),null);
+ }finally{await h.close();}
+});
+
 test('operator can continue approved work on the same budget-paused run', async()=>{
  const initial={...makeRun('budget_reached'), pending_question:null,
   business:{state:'budget_paused',title:'依頼のAI利用上限に達しました',message:'回答・承認は保持されています。',next_action:'reconcile'}};
