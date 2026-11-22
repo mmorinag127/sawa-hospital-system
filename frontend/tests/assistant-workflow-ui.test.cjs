@@ -20,7 +20,7 @@ for(const [id,domain,label,target_kind,month] of [
 const config={missing:[],domains:Object.fromEntries(['hospital','shift','school-lunch'].map(k=>[k,{baseline_ready:true}])),budget:{spent_cents:0,reserved_cents:0,monthly_cents:1000,available_cents:1000,notice:'synthetic'}};
 const makeRun=(status='waiting_input')=>({id:'r1',task_id:'shift_next_month',instruction:'翌月のシフト案を作る',domains:['shift'],status,spent:0,cap:100,events:[],artifacts:[],conversation:[],task_inputs:{inputs:{month:'2026-11'},targets:[{label:'11月の勤務計画',data:{}}]},pending_question:{id:'q1',role:'assistant',question_id:'question-1',text:'登録内容で作成しますか？',options:['登録内容で進める','確認したい']}});
 
-test('FAX review switches between inline PDF and the matching OCR overlay without downloading',async()=>{
+test('FAX review opens PDF on the left and an editable sheet on the right by default',async()=>{
  const initial={...makeRun('running'),task_id:'hospital_pending_faxes',domains:['hospital'],pending_question:null,
   fax_items:[{fax_id:'F1',state:'awaiting_approval',snapshot:{name:'確認FAX',facility:'施設',week:'2026-11'},
    review:{id:'review1',summary:'数量確認',original:{id:'original1',name:'source.pdf'},
@@ -31,10 +31,11 @@ test('FAX review switches between inline PDF and the matching OCR overlay withou
  }});
  try{
   const reads=()=>h.calls.filter(c=>/\/preview\/review1/.test(c.url));
-  assert.equal(reads().length,0);
-  await h.click(h.button('原本PDFを開く'));
   const layout=h.document.querySelector('.fax-review-layout.with-preview');
-  assert.ok(layout.querySelector('form table'));
+  assert.deepEqual([...layout.children].map(child=>child.tagName),['SECTION','FORM']);
+  assert.equal(layout.querySelector('form input').value,'42');
+  assert.equal(h.button('原本PDF').getAttribute('aria-pressed'),'true');
+  assert.deepEqual(reads().map(c=>c.options?.params?.page),[1]);
   assert.match(layout.querySelector('img[alt="FAX原本PDF 1ページ"]').src,/^blob:/);
   const next=h.document.querySelector('[aria-label="次のページ"]');
   await h.click(next);
@@ -65,7 +66,6 @@ test('administrator reopens saved FAX reviews without using the model resume ope
   assert.ok(!h.document.body.textContent.includes('保存済みの結果を確認して再開'));
   await h.click(h.button('追加AIなしで確認案を開く'));
   assert.deepEqual(h.calls.filter(call=>call.method==='post').map(call=>call.url),['/assistant-trial/runs/r1/resume-fax-review']);
-  await h.click(h.button('原本と照合して直接訂正'));
   assert.equal(h.document.querySelector('input[name="cell-0-0"]').value,'42');
   assert.ok(!h.document.body.textContent.includes('訂正を依頼する'));
  }finally{await h.close();}
@@ -855,15 +855,40 @@ for(const paused of [false,true])test('operator edits a FAX cell without request
   }
  }});
  try{
-  await h.click(h.button('原本と照合して直接訂正'));
+  const input=h.document.querySelector('[name="cell-0-3"]');
+  assert.equal(input.value,'20');
+  assert.equal(h.button('確認案に訂正を反映').disabled,true);
+  if(!paused)assert.equal(h.button('この内容で確定へ進む').disabled,false);
+  await h.change(input,'18');
   if(!paused)assert.equal(h.button('この内容で確定へ進む').disabled,true);
-  await h.change(h.document.querySelector('[name="cell-0-3"]'),'18');
+  assert.equal(h.calls.filter(call=>call.method==='post').length,0);
   await h.click(h.button('確認案に訂正を反映'));
   assert.deepEqual(h.calls.filter(call=>call.url.endsWith('/decision')).map(call=>call.body),[
    {review_id:'original-review',approve:false,cell_edits:[{date_mmdd:'01/08',daypart:'昼',menu:'白菜',field:'qty.regular',value:'18'}]},
   ]);
-  assert.ok(h.document.querySelector('.sheet').textContent.includes('18'));
+  assert.equal(h.document.querySelector('[name="cell-0-3"]').value,'18');
   assert.equal(h.button('この内容で確定へ進む').disabled,false);
+ }finally{await h.close();}
+});
+
+test('closing one FAX preview does not discard its unsaved edits or close the next preview',async()=>{
+ const fax=(id,state)=>({fax_id:id,state,snapshot:{name:id,facility:'施設',week:'週'},
+  review:{id:'review-'+id,summary:'照合',sheet:{fields:['qty.regular'],rows:[['20']]},original:{id:'artifact'}}});
+ const h=await mount({initial:{...makeRun('running'),task_id:'hospital_pending_faxes',domains:['hospital'],
+  pending_question:null,fax_items:[fax('FAX1','awaiting_approval'),fax('FAX2','approved')]}});
+ try{
+  const [first,second]=h.document.querySelectorAll('.fax-item');
+  await h.change(first.querySelector('input'),'21');
+  const hide=[...first.querySelectorAll('button')].find(b=>b.textContent==='原本プレビューを閉じる');
+  await h.click(hide);
+  assert.equal(first.querySelector('.fax-preview'),null);
+  assert.ok(second.querySelector('.fax-preview'));
+  assert.equal(second.querySelector('form input'),null);
+  assert.equal(first.querySelector('input').value,'21');
+  await h.click(h.button('取り消す'));
+  await h.click(h.button('原本と照合して直接訂正'));
+  assert.equal(first.querySelector('input').value,'20');
+  assert.equal(h.calls.filter(call=>call.method==='post').length,0);
  }finally{await h.close();}
 });
 

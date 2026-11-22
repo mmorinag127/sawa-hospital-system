@@ -13,6 +13,12 @@ import FaxSourcePreview from "../components/assistant/FaxSourcePreview";
 
 const BUSINESS_TIMEOUT = 300000;
 const terminalRun = (status: string) => ["completed", "rolled_back", "stopped", "failed"].includes(status);
+function toggleFaxFlag(keys: Set<string>, key: string, value: boolean) {
+  if (keys.has(key) === value) return keys;
+  const next = new Set(keys);
+  if (value) next.add(key); else next.delete(key);
+  return next;
+}
 const assistantApi = {
   post<T=any>(url:string,data?:unknown,options?:AxiosRequestConfig) {
     const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage|reconcile-business|resume-fax-review|trial-menu-amount|trial-area-names|trial-invoice-columns)|faxes\/[^/]+\/decision)$/.test(url);
@@ -76,8 +82,9 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskId, setTaskId] = useState("");
   const [corrections, setCorrections] = useState<Record<string, string>>({});
-  const [editingFax, setEditingFax] = useState("");
-  const [previewFax, setPreviewFax] = useState("");
+  const [readOnlyFaxes, setReadOnlyFaxes] = useState(() => new Set<string>());
+  const [closedFaxPreviews, setClosedFaxPreviews] = useState(() => new Set<string>());
+  const [dirtyFaxes, setDirtyFaxes] = useState(() => new Set<string>());
   const [targetMonth,setTargetMonth]=useState("");
   const [serviceDate,setServiceDate]=useState("");
   const [absenceDate,setAbsenceDate]=useState("");
@@ -446,9 +453,10 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       return [{date_mmdd: row[fields.indexOf("date_mmdd")], daypart: row[fields.indexOf("daypart")],
         menu: row[fields.indexOf("menu")], field, value}];
     }));
-    if (!edits.length) { setEditingFax(""); return; }
+    if (!edits.length) return;
     const id = selected.id;
     const reviewId = fax.review.id;
+    const key = faxCorrectionKey(id,fax);
     await act(async () => {
       try {
         await assistantApi.post(`/assistant-trial/runs/${id}/faxes/${fax.fax_id}/decision`,
@@ -458,8 +466,8 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
         await refreshAfterCommand(id);
         throw new Error("訂正の受付結果を受信できませんでした。再送せず、現在の確認案を表示します。");
       }
-      setEditingFax("");
       await refreshAfterCommand(id);
+      setDirtyFaxes(keys=>toggleFaxFlag(keys,key,false));
     });
   }
   async function restoreFaxSource(fax:Fax) {
@@ -468,7 +476,6 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
     await act(async () => {
       await assistantApi.post(`/assistant-trial/runs/${id}/faxes/${fax.fax_id}/decision`,
         {review_id:fax.review!.id, approve:false, restore_source:true});
-      setEditingFax("");
       await refreshAfterCommand(id);
     });
   }
@@ -601,12 +608,13 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
         {[...selected.fax_items].sort((a,b)=>Number(b.state==="awaiting_approval")-Number(a.state==="awaiting_approval")).map(fax=>{
           const correctionKey=faxCorrectionKey(selected.id,fax);
           const previewKey=JSON.stringify([selected.id,fax.fax_id]);
-          const previewOpen=previewFax===previewKey;
+          const previewOpen=!closedFaxPreviews.has(previewKey);
           const formId=`fax-sheet-${fax.fax_id}`;
           const correction=corrections[correctionKey] || "";
           const editable=(fax.state==="awaiting_approval" || fax.state==="needs_correction") &&
             (selected.status==="running" && !budgetPaused || selected.status==="budget_reached" && budgetPaused);
-          const editing=editable && editingFax===correctionKey;
+          const editing=editable && !readOnlyFaxes.has(correctionKey);
+          const dirty=editing && dirtyFaxes.has(correctionKey);
           const issues=new Set(fax.review?.quantity_review?.cell_issues.map(issue=>`${issue.row_index}-${issue.column_index}`));
           return <article key={correctionKey} className="fax-item">
             <h4>{fax.snapshot.name}</h4>
@@ -614,18 +622,32 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
             {fax.review && <>
               <p>{fax.review.summary}</p>
               <div className="fax-sheet-tools" role="group" aria-label="数量シートの操作">
-                <button type="button" aria-expanded={previewOpen} onClick={()=>setPreviewFax(previewOpen ? "" : previewKey)}>
+                <button type="button" aria-expanded={previewOpen}
+                  onClick={()=>setClosedFaxPreviews(keys=>toggleFaxFlag(keys,previewKey,previewOpen))}>
                   {previewOpen ? "原本プレビューを閉じる" : "原本PDFを開く"}
                 </button>
                 {editable && !editing && <button type="button" disabled={busy || decisionPending}
-                  onClick={()=>{setEditingFax(correctionKey);setPreviewFax(previewKey);}}>原本と照合して直接訂正</button>}
+                  onClick={()=>{
+                    setReadOnlyFaxes(keys=>toggleFaxFlag(keys,correctionKey,false));
+                    setClosedFaxPreviews(keys=>toggleFaxFlag(keys,previewKey,false));
+                  }}>原本と照合して直接訂正</button>}
                 {editing && <>
-                  <button type="submit" form={formId} disabled={busy}>確認案に訂正を反映</button>
-                  <button type="button" disabled={busy} onClick={()=>setEditingFax("")}>取り消す</button>
+                  <button type="submit" form={formId} disabled={busy || decisionPending || !dirty}>確認案に訂正を反映</button>
+                  <button type="button" disabled={busy} onClick={()=>{
+                    setDirtyFaxes(keys=>toggleFaxFlag(keys,correctionKey,false));
+                    setReadOnlyFaxes(keys=>toggleFaxFlag(keys,correctionKey,true));
+                  }}>取り消す</button>
                 </>}
               </div>
               <div className={previewOpen ? "fax-review-layout with-preview" : "fax-review-layout"}>
-              <form id={formId} onSubmit={event=>void editFax(event,fax)}>
+              {previewOpen && <FaxSourcePreview
+                path={`/assistant-trial/runs/${selected.id}/faxes/${fax.fax_id}/preview/${fax.review.id}`}
+                hasEvidence={Boolean(fax.review.selected_ocr_result_id || fax.review.sheet.selected_ocr_result_id || fax.review.sheet.base_evidence_run_id)} />}
+              <form id={formId} onSubmit={event=>void editFax(event,fax)} onChange={event=>{
+                const changed=[...event.currentTarget.querySelectorAll<HTMLInputElement>('input[name^="cell-"]')]
+                  .some(input=>input.value!==input.defaultValue);
+                setDirtyFaxes(keys=>toggleFaxFlag(keys,correctionKey,changed));
+              }}>
                 <h4>読み取った数量</h4>
                 <div className="sheet"><table><thead><tr>{(fax.review.sheet.header || fax.review.sheet.fields || []).map((cell,i)=><th key={i}>{String(cell ?? "")}</th>)}</tr></thead>
                 <tbody>{fax.review.sheet.rows?.map((row,i)=><tr key={i}>{row.map((cell,j)=>{
@@ -635,16 +657,13 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
                     : String(cell ?? "")}{issues.has(`${i}-${j}`) && <small> 要確認</small>}</td>;
                 })}</tr>)}</tbody></table></div>
               </form>
-              {previewOpen && <FaxSourcePreview
-                path={`/assistant-trial/runs/${selected.id}/faxes/${fax.fax_id}/preview/${fax.review.id}`}
-                hasEvidence={Boolean(fax.review.selected_ocr_result_id || fax.review.sheet.selected_ocr_result_id || fax.review.sheet.base_evidence_run_id)} />}
               </div>
-              {editable && !editing && <button disabled={busy || decisionPending} onClick={()=>restoreFaxSource(fax)}>確認案を元のシートに戻す</button>}
+              {editable && <button disabled={busy || decisionPending || dirty} onClick={()=>restoreFaxSource(fax)}>確認案を元のシートに戻す</button>}
               {fax.state==="awaiting_approval" && editable && <>
-                <button className="primary" disabled={busy || decisionPending || editing} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button>
+                <button className="primary" disabled={busy || decisionPending || dirty} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button>
                 {!budgetPaused && !faxReviewOnly && <section className="correction-panel"><h4>訂正してほしい箇所がある</h4>
                   <label>訂正内容<textarea value={correction} disabled={busy || decisionPending} onChange={e=>setCorrections(c=>({...c,[correctionKey]:e.target.value}))}/></label>
-                  <button disabled={busy || decisionPending || editingFax===correctionKey || !correction.trim()} onClick={()=>decide(fax,false)}>訂正を依頼する</button>
+                  <button disabled={busy || decisionPending || dirty || !correction.trim()} onClick={()=>decide(fax,false)}>訂正を依頼する</button>
                 </section>}
               </>}
             </>}

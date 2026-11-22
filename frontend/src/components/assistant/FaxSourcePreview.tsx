@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiClient } from "../../services/apiClient";
 
 function PreviewFile({ path, kind, page, hidden, setPageCount }: {
@@ -46,7 +46,23 @@ export default function FaxSourcePreview({ path, hasEvidence }: {
   const [overlayOpened, setOverlayOpened] = useState(false);
   const [page, setPage] = useState(1);
   const [pageCount, setPageCount] = useState(1);
-  return <section className="fax-preview" aria-label="FAX原本とOCR">
+  const panel = useRef<HTMLElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!window.IntersectionObserver || !panel.current) {
+      setVisible(true);
+      return;
+    }
+    const observer = new window.IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) {
+        setVisible(true);
+        observer.disconnect();
+      }
+    }, { rootMargin: "160px" });
+    observer.observe(panel.current);
+    return () => observer.disconnect();
+  }, []);
+  return <section ref={panel} className="fax-preview" aria-label="FAX原本とOCR">
     <div className="fax-preview-modes" role="group" aria-label="FAXの表示切替">
       <button type="button" aria-pressed={mode === "pdf"} onClick={() => setMode("pdf")}>原本PDF</button>
       <button type="button" disabled={!hasEvidence} aria-pressed={mode === "overlay"}
@@ -57,7 +73,9 @@ export default function FaxSourcePreview({ path, hasEvidence }: {
         <button type="button" aria-label="次のページ" disabled={page === pageCount} onClick={() => setPage(n => n + 1)}>›</button>
       </div>}
     </div>
-    <PreviewFile key={page} path={path} kind="pdf" page={page} setPageCount={setPageCount} hidden={mode !== "pdf"} />
+    {visible
+      ? <PreviewFile key={page} path={path} kind="pdf" page={page} setPageCount={setPageCount} hidden={mode !== "pdf"} />
+      : <div className="fax-preview-file" hidden={mode !== "pdf"} />}
     {overlayOpened && hasEvidence && <PreviewFile path={path} kind="overlay" hidden={mode !== "overlay"} />}
   </section>;
 }
