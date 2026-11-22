@@ -83,7 +83,8 @@ def native_upgrade(store, tools, run, system, *, output_only=False):
             'previous_sources': before['native_sources'], 'current_sources': after['native_sources']}
 
 
-def approve_native_upgrade(store, tools, run, system, *, generation, previous_sha256, current_sha256, output_only=False):
+def approve_native_upgrade(store, tools, run, system, *, generation, previous_sha256, current_sha256,
+                           output_only=False, publish=None):
     plan = native_upgrade(store, tools, run, system, output_only=output_only)
     if (not plan or run['generation'] != generation or plan['previous_sha256'] != previous_sha256
             or plan['current_sha256'] != current_sha256):
@@ -108,4 +109,6 @@ def approve_native_upgrade(store, tools, run, system, *, generation, previous_sh
         for kind, payload in (('native_runtime_upgrade', {**plan, 'generation': generation, **({'output_only':True} if output_only else {})}), ('execution_binding', current)):
             db.execute('INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)',
                 (run['id'], kind, json.dumps(payload, ensure_ascii=False), now()))
+        if publish is not None:
+            publish(db)
     return plan

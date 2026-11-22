@@ -15,7 +15,7 @@ const BUSINESS_TIMEOUT = 300000;
 const terminalRun = (status: string) => ["completed", "rolled_back", "stopped", "failed"].includes(status);
 const assistantApi = {
   post<T=any>(url:string,data?:unknown,options?:AxiosRequestConfig) {
-    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage|reconcile-business|trial-menu-amount|trial-area-names|trial-invoice-columns)|faxes\/[^/]+\/decision)$/.test(url);
+    const business=/^\/assistant-trial\/runs\/[^/]+\/(?:(?:reply|decision|resume|stop|rollback|refresh-usage|reconcile-business|resume-fax-review|trial-menu-amount|trial-area-names|trial-invoice-columns)|faxes\/[^/]+\/decision)$/.test(url);
     return apiClient.post<T>(url,data,business ? {...options,timeout:BUSINESS_TIMEOUT} : options);
   },
 };
@@ -25,7 +25,7 @@ type Fax = { fax_id: string; state: string; snapshot: { name: string; facility: 
 type Selection = { hospital_source?:HospitalSource; inputs?:Record<string,any>; month_choices?:{month:string;label:string;reason:string}[]; batches?:{label:string;keys:string[];reason:string}[]; absence_days?:{date:string;label:string}[]; selection_id: string; choices: {key:string;label:string;data:Record<string,any>}[]; schools:{id:number;name:string}[]; layouts:{id:number;name:string;version:number}[]; work_days?:{service_date:string;menu_names:string[];menu_count:number;reason:string;missing:string[]}[] };
 type TaskReview = {id:string;state:string;summary:string;evidence:{operation:string;data:any}[];actions:{operation:string;parameters:any}[];decision?:{approve:boolean;message:string}};
 type ChatMessage = {question_map?:QuestionMap;id:string;role:"assistant"|"user";text:string;question_id?:string;options?:string[];process_context?:{answered:number;total:number;kind?:string}};
-type Run = { business?:BusinessProgress; business_messages?:ChatMessage[]; request_key?:string; provider?:string; usage?:{estimated?:boolean}; lunch_review?:Record<string,string>[]; shift_review?:ShiftReviewData; conversation?:ChatMessage[]; pending_question?:ChatMessage; task_review?:TaskReview; task_inputs?:{inputs?:Record<string,any>;targets?:{label:string;data:Record<string,any>}[]}; task_id?: string; fax_items?: Fax[]; id: string; instruction: string; domains: string[]; status: string; cap: number; spent: number;
+type Run = { business?:BusinessProgress; business_messages?:ChatMessage[]; request_key?:string; provider?:string; usage?:{estimated?:boolean}; lunch_review?:Record<string,string>[]; shift_review?:ShiftReviewData; conversation?:ChatMessage[]; pending_question?:ChatMessage; task_review?:TaskReview; task_inputs?:{inputs?:Record<string,any>;targets?:{label:string;data:Record<string,any>}[];business_workflow?:{fax_review_only?:boolean}}; task_id?: string; fax_items?: Fax[]; id: string; instruction: string; domains: string[]; status: string; cap: number; spent: number;
   events?: { id: number; kind: string; payload: Record<string, any> }[];
   source_attached?:boolean;
   provisional_menu_amount?:{name:string;quantity:number;unit:string;provisional:true}|null;
@@ -476,9 +476,12 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
   const terminal=!!selected && (adminView ? ["completed","stopped","rolled_back","failed"].includes(selected.status) : ["completed","archived"].includes(view!.state));
   const awaitingSource=selected?.status==="waiting_input" && (adminView || view?.next_action==="source") && selected.task_id==="lunch_import" && !(selected.source_attached ?? selected.events?.some(event=>event.kind==="source"));
   const budgetPaused=view?.state==="budget_paused";
+  const faxReviewOnly=selected?.task_inputs?.business_workflow?.fax_review_only===true;
   const awaitingReview=(selected?.status==="running" && !budgetPaused || budgetPaused && view?.next_action==="approve" && selected?.task_id!=="hospital_review_faxes") && (adminView || view?.next_action==="approve") && selected?.task_review?.state==="awaiting_approval";
   const faxReviews=selected?.fax_items?.filter(fax=>fax.state==="awaiting_approval") || [];
   const hasFaxReview=(selected?.fax_page?.summary.states.awaiting_approval ?? faxReviews.length)>0;
+  const canReopenFaxes=selected?.status==="reconciliation_required" && selected.task_id==="hospital_pending_faxes"
+    && (hasFaxReview || faxReviewOnly || selected.fax_items?.some(fax=>fax.state==="needs_correction"));
   const question=selected?.status==="waiting_input" ? selected.pending_question : undefined;
   const decisionPending=!!selected && pendingDecision?.runId===selected.id;
   const replyPending=!!selected && pendingReply?.runId===selected.id;
@@ -639,7 +642,7 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
               {editable && !editing && <button disabled={busy || decisionPending} onClick={()=>restoreFaxSource(fax)}>確認案を元のシートに戻す</button>}
               {fax.state==="awaiting_approval" && editable && <>
                 <button className="primary" disabled={busy || decisionPending || editing} onClick={()=>decide(fax,true)}>この内容で確定へ進む</button>
-                {!budgetPaused && <section className="correction-panel"><h4>訂正してほしい箇所がある</h4>
+                {!budgetPaused && !faxReviewOnly && <section className="correction-panel"><h4>訂正してほしい箇所がある</h4>
                   <label>訂正内容<textarea value={correction} disabled={busy || decisionPending} onChange={e=>setCorrections(c=>({...c,[correctionKey]:e.target.value}))}/></label>
                   <button disabled={busy || decisionPending || editingFax===correctionKey || !correction.trim()} onClick={()=>decide(fax,false)}>訂正を依頼する</button>
                 </section>}
@@ -653,8 +656,9 @@ export function AssistantScreen({adminView=false}:{adminView?:boolean}) {
       {!adminView && <div className="assistant-footer"><span className="muted">回答した内容は保存されています。作業一覧へ戻っても、この作業は引き続き確認できます。</span><button className="primary" onClick={newTask}>{terminal || selected.status==="rollback_stop_pending" ? "別の作業を始める" : "作業一覧に戻る"}</button></div>}
       <details className="conversation-history"><summary>これまでのやり取り{messages?.length ? `（${messages.length}件）` : ""}</summary><div role="log">{messages?.map(message=><div className={message.role==="user" ? "chat-bubble user-message" : "chat-bubble"} key={message.id}><strong>{message.role==="user" ? "あなた" : "エージェント"}</strong><p>{message.text}</p></div>)}</div></details>
       {budgetPaused && <section className="assistant-notice"><h3>{view!.title}</h3>{adminView && <p>{view!.message}</p>}<button disabled={busy || controlling} onClick={()=>control("reconcile-business")}>承認済みの作業を続ける</button></section>}
-      {adminView && selected.status==="reconciliation_required" && !budgetPaused && <button className="primary" disabled={controlling || busy} onClick={()=>control("resume")}>保存済みの結果を確認して再開</button>}
-      {adminView && selected.native_upgrade && !terminal && <section className="assistant-notice"><h3>業務APIの修正版があります</h3>
+      {adminView && selected.status==="reconciliation_required" && !budgetPaused && !faxReviewOnly && !canReopenFaxes && <button className="primary" disabled={controlling || busy} onClick={()=>control("resume")}>保存済みの結果を確認して再開</button>}
+      {adminView && canReopenFaxes && <button className="primary" disabled={controlling || busy} onClick={()=>control("resume-fax-review")}>追加AIなしで確認案を開く</button>}
+      {adminView && selected.native_upgrade && !terminal && !faxReviewOnly && !canReopenFaxes && <section className="assistant-notice"><h3>業務APIの修正版があります</h3>
         {Object.entries(selected.native_upgrade.current_sources).map(([domain,source])=><p key={domain}>{labels[domain] || domain}：{selected.native_upgrade?.previous_sources[domain].source_revision.slice(0,8)} → {source.source_revision.slice(0,8)}</p>)}
         <p>開始時の版・処理履歴は保持します。原本と保存済みデータを引き継ぎ、結果未確定の更新は再送しません。</p>
         <button disabled={busy || controlling} onClick={()=>control("upgrade-native")}>修正版へ引き継いで再開</button></section>}

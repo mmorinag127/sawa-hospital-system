@@ -632,6 +632,25 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         await business.kick_many([ident], request.headers.get('authorization', ''))
         return await asyncio.to_thread(store.get, ident, owner)
 
+    @app.post('/runs/{ident}/resume-fax-review')
+    @_complete_request
+    async def resume_fax_review(ident: str, request: Request):
+        from .fax_review_resume import reopen
+        from .managed import SYSTEM
+
+        run = await run_blocking(store.get, ident, owner)
+        authorization = request.headers.get('authorization', '')
+        await authorize(authorization, run['domains'])
+        async with control_lock(ident), tools.lock(ident):
+            current = await run_blocking(store.get, ident, owner)
+            if current['status'] == 'running' and business.fax_review_only(current):
+                return current
+            if any(task is not None and not task.done() for task in (managed.tasks.get(ident), business.jobs.get(ident))):
+                raise Conflict('依頼は処理中です。完了後に確認案を開いてください')
+            tools.authorizations[ident] = authorization
+            await reopen(business, current, SYSTEM)
+        return await run_blocking(store.get, ident, owner)
+
     @app.post('/runs/{ident}/trial-menu-amount')
     @_complete_request
     async def trial_menu_amount(ident: str, payload: TrialMenuAmount, request: Request):

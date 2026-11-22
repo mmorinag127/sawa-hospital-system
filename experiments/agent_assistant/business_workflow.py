@@ -95,6 +95,10 @@ class BusinessWorkflow:
     def budget_paused(run):
         return run['status'] == 'budget_reached' or run['task_inputs'].get('business_workflow', {}).get('budget_paused', False)
 
+    @staticmethod
+    def fax_review_only(run):
+        return run['task_inputs'].get('business_workflow', {}).get('fax_review_only') is True
+
     def set_status(self, run, status):
         self.store.update(run['id'], expected_generation=run['generation'], status=status)
 
@@ -274,6 +278,8 @@ class BusinessWorkflow:
 
     async def continue_model(self, run, message):
         current = await run_blocking(self.store.get, run['id'])
+        if self.fax_review_only(current):
+            raise Conflict('追加AIなしで開いた依頼です。シートを直接訂正してください')
         if self.budget_paused(current) or current['spent'] >= current['cap'] or current['reserved'] <= 0:
             await run_blocking(self.set_status, current, 'budget_reached')
             return
@@ -350,6 +356,8 @@ class BusinessWorkflow:
         approved = (review and review['state'] == 'approved' and run['task_id'] != 'hospital_review_faxes'
                     or bool(faxes) and all(item['state'] in ('approved', 'completed')
                                           and (item.get('decision') or {}).get('approve') for item in faxes))
+        if self.fax_review_only(run) and not approved:
+            return False
         if budget_paused and not approved:
             return False
         if budget_paused and not state.get('budget_paused'):

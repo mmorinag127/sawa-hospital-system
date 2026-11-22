@@ -433,6 +433,67 @@ def test_quantity_projection_change_requires_exact_legacy_and_current_basis(setu
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('change', [None, 'pending', 'revision', 'binding', 'native_upgrade'])
+def test_saved_fax_reviews_reopen_without_contacting_a_provider(setup, tmp_path, change):
+    from experiments.agent_assistant.business_workflow import BusinessWorkflow
+    from experiments.agent_assistant.execution_binding import record
+    from experiments.agent_assistant.fax_review_resume import reopen
+
+    class NoProvider:
+        tasks = {}
+
+        def __getattr__(self, name):
+            raise AssertionError(f"Provider must not be contacted: {name}")
+
+    async def scenario():
+        store, native, tools, run = setup
+        ident = run['id']
+        business = BusinessWorkflow(store, tools, NoProvider())
+        business.initialize(run)
+        run = store.get(ident)
+        manifest = tmp_path / 'manifest.json'
+        manifest.write_text(json.dumps({'source_revision': 'old', 'files': {}}))
+        native.configs = {'hospital': {'source_manifest': str(manifest)}}
+        record(store, tools, run, 'system', starting=True)
+        async def start(_run):
+            pass
+        native.start = start
+        business.require_copy = lambda _run: None
+        for fax in native.sources.values():
+            fax['status'] = 'completed'
+        await tools.faxes.refresh(run)
+        first = (await tools.faxes.submit(run, 'A', '保存済み案'))['review']
+        second = (await tools.faxes.submit(run, 'B', '承認済み案'))['review']
+        await tools.faxes.decide(run, 'B', second['id'], True, '元の承認')
+        previous = tools.faxes.items(ident)
+        store.update(ident, status='reconciliation_required')
+        current = store.get(ident)
+        if change == 'pending':
+            store.command(ident, 'unknown', {'name':'hospital_save_sheet','arguments':{}})
+        if change == 'revision':
+            native.wfs['OA']['revision'] += 1
+        if change == 'native_upgrade':
+            manifest.write_text(json.dumps({'source_revision': 'new', 'files': {}}))
+        if change in ('pending', 'revision', 'binding'):
+            with pytest.raises(Conflict):
+                await reopen(business, current, 'different system' if change == 'binding' else 'system')
+            assert store.get(ident)['status'] == 'reconciliation_required'
+            assert not store.events(ident, kinds=('fax_review_reopened',))
+        else:
+            await reopen(business, current, 'system')
+            opened = store.get(ident)
+            assert opened['status'] == 'running' and business.fax_review_only(opened)
+            assert opened['spent'] == current['spent'] and opened['reserved'] == current['reserved']
+            assert bool(store.events(ident, kinds=('native_runtime_upgrade',))) == (change == 'native_upgrade')
+            assert store.latest_event(ident, 'fax_review_reopened')['payload']['provider_called'] is False
+            assert not await business.advance(ident)
+            with pytest.raises(Conflict, match='追加AIなし'):
+                await tools.faxes.decide(opened, 'A', first['id'], False, 'モデルへ依頼')
+        assert tools.faxes.items(ident) == previous
+        assert not native.writes
+    asyncio.run(scenario())
+
+
 def test_mcp_sparse_correction_schema_and_wire_preserve_the_requested_cell(setup):
     from experiments.agent_assistant.mcp_server import build_mcp, call_local
     async def scenario():

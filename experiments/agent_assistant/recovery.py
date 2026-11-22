@@ -28,6 +28,8 @@ class Recovery:
             run = await run_blocking(self.store.get, ident)
             from .business_workflow import BusinessWorkflow
             from .fax_preparation import enabled
+            if BusinessWorkflow.fax_review_only(run):
+                raise Conflict('追加AIなしの確認を開き直してください')
             paused = BusinessWorkflow.budget_paused(run)
             if (run['status'] not in ('reconciliation_required', 'budget_reached')
                     or paused and not (enabled(run) and run['provider'] == 'gemini')):

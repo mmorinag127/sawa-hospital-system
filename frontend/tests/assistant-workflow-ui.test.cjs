@@ -51,6 +51,26 @@ test('FAX review switches between inline PDF and the matching OCR overlay withou
  }finally{await h.close();}
 });
 
+test('administrator reopens saved FAX reviews without using the model resume operation',async()=>{
+ const initial={...makeRun('reconciliation_required'),task_id:'hospital_pending_faxes',domains:['hospital'],pending_question:null,
+  fax_items:[{fax_id:'F1',state:'awaiting_approval',snapshot:{name:'確認FAX',facility:'施設',week:'2026-11'},
+   review:{id:'review1',summary:'数量確認',original:{id:'original1'},sheet:{fields:['qty.regular'],rows:[['42']]}}}]};
+ const h=await mount({initial,adminView:true,beforePost:async(url)=>{
+  if(url.endsWith('/resume-fax-review')){
+   h.setRun({...initial,status:'running',task_inputs:{business_workflow:{fax_review_only:true}}});
+   return {data:h.run};
+  }
+ }});
+ try{
+  assert.ok(!h.document.body.textContent.includes('保存済みの結果を確認して再開'));
+  await h.click(h.button('追加AIなしで確認案を開く'));
+  assert.deepEqual(h.calls.filter(call=>call.method==='post').map(call=>call.url),['/assistant-trial/runs/r1/resume-fax-review']);
+  await h.click(h.button('原本と照合して直接訂正'));
+  assert.equal(h.document.querySelector('input[name="cell-0-0"]').value,'42');
+  assert.ok(!h.document.body.textContent.includes('訂正を依頼する'));
+ }finally{await h.close();}
+});
+
 test('operator can continue approved work on the same budget-paused run', async()=>{
  const initial={...makeRun('budget_reached'), pending_question:null,
   business:{state:'budget_paused',title:'依頼のAI利用上限に達しました',message:'回答・承認は保持されています。',next_action:'reconcile'}};

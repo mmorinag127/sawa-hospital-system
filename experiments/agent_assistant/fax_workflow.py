@@ -395,6 +395,8 @@ class FaxWorkflow:
     async def decide(self, run, fax_id, review_id, approve, message):
         from .business_contracts import owned
         from .business_workflow import BusinessWorkflow
+        if not approve and BusinessWorkflow.fax_review_only(run):
+            raise Conflict("追加AIなしで開いた依頼です。シートを直接訂正してください")
         available = run["status"] == "running"
         if BusinessWorkflow.budget_paused(run):
             available = approve and owned(run) and run["status"] == "budget_reached"
