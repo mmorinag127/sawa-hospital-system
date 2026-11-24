@@ -212,7 +212,7 @@ function UsersContent({ session }: { session: string }) {
       {/* Keep the same RHF instance and its entered values during authority rechecks. */}
       <div hidden={!isAdmin}>
       <fieldset disabled={roleLoading || !isAdmin} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
-      <Link className="sawa-page__back" href="/">← システム選択へ戻る</Link>
+      <Link className="sawa-page__back" href="/admin">← 管理画面へ戻る</Link>
       <header className="sawa-page__header">
         <div>
           <p className="sawa-page__eyebrow">Administration</p>

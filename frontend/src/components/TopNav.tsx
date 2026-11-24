@@ -9,6 +9,7 @@ type NavItem = {
   label: string;
   isActive: (path: string) => boolean;
   minRole?: "operator" | "admin";
+  portal?: boolean;
 };
 
 type NavGroup = {
@@ -149,34 +150,11 @@ function FullTopNav() {
       description: "監視と保守",
       items: [
         {
-          href: "/system-status",
-          label: "システム管理",
-          isActive: (path) => path.startsWith("/system-status"),
+          href: "/admin",
+          label: "共通の管理画面",
+          isActive: () => false,
           minRole: "admin",
-        },
-        {
-          href: "/system-process-logs",
-          label: "処理ログ",
-          isActive: (path) => path.startsWith("/system-process-logs"),
-          minRole: "admin",
-        },
-        {
-          href: "/ocr-queue",
-          label: "OCRキュー",
-          isActive: (path) => path.startsWith("/ocr-queue"),
-          minRole: "admin",
-        },
-        {
-          href: "/ocr-results",
-          label: "OCR結果監視",
-          isActive: (path) => path.startsWith("/ocr-results"),
-          minRole: "admin",
-        },
-        {
-          href: "/ocr-training-data",
-          label: "OCR学習データ",
-          isActive: (path) => path.startsWith("/ocr-training-data"),
-          minRole: "admin",
+          portal: true,
         },
       ],
     },
@@ -218,11 +196,12 @@ function FullTopNav() {
             <nav className="top-nav">
               {group.items.map((item) => {
                 const active = item.isActive(currentPath);
+                const href = item.portal ? item.href : hospitalHref(item.href);
                 return (
                   <Link
                     key={item.href}
-                    href={hospitalHref(item.href)}
-                    onNavigate={event => { if (!navigation.allow(hospitalHref(item.href))) event.preventDefault(); }}
+                    href={href}
+                    onNavigate={event => { if (!navigation.allow(href)) event.preventDefault(); }}
                     className={`top-link${active ? " active" : ""}`}
                     aria-current={active ? "page" : undefined}
                   >

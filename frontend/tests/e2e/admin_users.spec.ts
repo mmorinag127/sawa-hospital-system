@@ -16,6 +16,50 @@ const prepareSession = async (page: import("@playwright/test").Page) => {
   });
 };
 
+for (const role of ["admin", "operator"] as const) {
+  test(`${role} sees only the appropriate portal management entry points`, async ({ page }) => {
+    await prepareSession(page);
+    await page.route("**/api/**", async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      const result = path.endsWith("/auth/me") ? { role, systems: ["hospital"] }
+        : path.endsWith("/assistant-trial/config")
+          ? { missing: [], domains: {}, budget: { monthly_cents: 1000, spent_cents: 717, reserved_cents: 283, available_cents: 0 } }
+          : path.endsWith("/run-history") ? { items: [], next: null } : [];
+      await route.fulfill({ json: result });
+    });
+    await page.goto(baseUrl);
+    await expect(page.getByRole("link", { name: /^病院注文 注文/ })).toBeVisible();
+    const portalAdmin = page.getByRole("link", { name: /^管理画面 共通ユーザー/ });
+    if (role === "operator") {
+      await expect(portalAdmin).toHaveCount(0);
+      await page.goto(`${baseUrl}/admin`);
+      await expect(page.getByRole("alert").filter({ hasText: "管理者アカウントでログインしてください。" })).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "共通管理" })).toHaveCount(0);
+      return;
+    }
+
+    await portalAdmin.click();
+    await expect(page).toHaveURL(`${baseUrl}/admin`);
+    const common = page.getByRole("navigation", { name: "共通管理", exact: true });
+    await expect(common.getByRole("link", { name: "共通ユーザー管理" })).toHaveAttribute("href", "/admin/users");
+    await expect(page.getByRole("navigation", { name: "病院注文の監視・保守" }).getByRole("link")).toHaveCount(5);
+    const assistantAdmin = common.getByRole("link", { name: /^エージェント管理/ });
+    if (process.env.NEXT_PUBLIC_SAWA_ASSISTANT_TRIAL_ENABLED === "true") {
+      await assistantAdmin.click();
+      await expect(page).toHaveURL(`${baseUrl}/admin/assistant`);
+      await expect(page.getByRole("heading", { name: "今月の利用料金" })).toBeVisible();
+      await expect(page.getByRole("link", { name: "管理画面へ戻る", exact: true })).toHaveAttribute("href", "/admin");
+    } else {
+      await expect(assistantAdmin).toHaveCount(0);
+    }
+    await page.goto(`${baseUrl}/assistant-admin`);
+    await expect(page).toHaveURL(`${baseUrl}/admin/assistant`);
+    await page.goto(`${baseUrl}/assistant`);
+    await expect(page.getByRole("heading", { name: /^AIに依頼/ })).toBeVisible();
+    await expect(page.getByRole("link", { name: "利用料金・管理", exact: true })).toHaveCount(0);
+  });
+}
+
 test("admin sees the shared template and an explicit successful save result", async ({ page }) => {
   await prepareSession(page);
   const users: PortalUser[] = [
