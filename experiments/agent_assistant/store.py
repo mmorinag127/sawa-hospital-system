@@ -176,6 +176,9 @@ class Store:
         domains = sorted(set(domains))
         if not domains or set(domains) - {"hospital", "shift", "school-lunch"}:
             raise ValueError("業務を選択してください")
+        from .tasks import TASKS
+        task = TASKS.get(task_id)
+        school_task = domains == ['school-lunch'] and task and task['domain'] == 'school-lunch' and not task.get('hidden')
         timestamp = now()
         with self.tx() as db:
             old = db.execute("SELECT * FROM runs WHERE request_key=?", (key,)).fetchone()
@@ -189,9 +192,15 @@ class Store:
             spent, reserved = db.execute("SELECT COALESCE(SUM(spent),0),COALESCE(SUM(reserved),0) FROM runs WHERE month=?", (month,)).fetchone()
             if spent + reserved + cap > limit:
                 raise MonthlyBudgetConflict(limit, spent, reserved, cap)
-            # A frozen review fork may coexist only with its quiescent source.
             source = task_inputs.get('source_copy',{})
-            for active in db.execute("SELECT id,status,owner,generation,task_inputs FROM runs WHERE status NOT IN ('rolled_back','stopped','failed','completed','waiting_input','budget_reached')"):
+            for active in db.execute("SELECT id,status,owner,generation,task_id,domains,task_inputs FROM runs WHERE status NOT IN ('rolled_back','stopped','failed','completed','waiting_input','budget_reached')"):
+                # The fenced hospital run keeps its copy, history and reservation.
+                # Only admission of an independent school workflow is affected.
+                if (school_task and active['status'] == 'reconciliation_required'
+                        and active['task_id'] in ('hospital_pending_faxes', 'hospital_review_faxes')
+                        and json.loads(active['domains']) == ['hospital']):
+                    continue
+                # A frozen review fork may coexist only with its quiescent source.
                 if (task_id=='hospital_review_faxes' and domains==['hospital']
                         and source.get('run_id')==active['id'] and source.get('owner')==owner==active['owner']
                         and source.get('generation')==active['generation'] and active['status']=='running'

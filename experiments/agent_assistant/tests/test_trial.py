@@ -15,7 +15,7 @@ from experiments.agent_assistant.catalog import OPERATIONS, build_path
 from experiments.agent_assistant.managed import Managed
 from experiments.agent_assistant.mcp_server import build_mcp, call_local
 from experiments.agent_assistant.sandbox import Sandbox
-from experiments.agent_assistant.store import Store, Conflict
+from experiments.agent_assistant.store import Store, Conflict, MonthlyBudgetConflict
 from experiments.agent_assistant.tools import Tools
 
 
@@ -600,3 +600,49 @@ def test_only_verified_restoration_releases_active_sandbox_without_refunding(tmp
     else:
         with pytest.raises(Conflict,match='他の依頼'):store.create('u','new-key','new',['shift'],100)
     assert store.get(old['id'])['spent']==17 and store.get(old['id'])['reserved']==183
+
+
+@pytest.mark.parametrize('task_id', [
+    'lunch_daily_bundle', 'lunch_import', 'lunch_procurement', 'lunch_month_exports',
+])
+def test_reconciling_fax_does_not_block_school_or_change_saved_records(tmp_path, task_id):
+    store = Store(tmp_path)
+    store.set_budget(500)
+    fax, _ = store.create('operator', 'fax', 'fax', ['hospital'], 300, task_id='hospital_pending_faxes')
+    store.update(fax['id'], status='reconciliation_required', spent=17, reserved=283)
+    store.event(fax['id'], 'operator_reply', {'message': 'saved answer'})
+    store.event(fax['id'], 'fax_decision', {'approve': True})
+    with store.tx() as db:
+        db.execute('INSERT INTO fax_items(run_id,fax_id,snapshot,state,review,decision) VALUES(?,?,?,?,?,?)',
+                   (fax['id'], 'fax-a', '{}', 'approved', '{"sheet_id":"saved"}', '{"approve":true}'))
+
+    def saved_rows():
+        with store.read() as db:
+            return [tuple(row) for row in db.execute('SELECT * FROM fax_items WHERE run_id=?', (fax['id'],))]
+
+    original = (store.get(fax['id']), store.events(fax['id']), saved_rows())
+    with pytest.raises(MonthlyBudgetConflict):
+        store.create('operator', 'over', 'school', ['school-lunch'], 201, task_id=task_id)
+    school, fresh = store.create('operator', 'school', 'school', ['school-lunch'], 100, task_id=task_id)
+    assert fresh and school['status'] == 'preparing'
+    assert (store.get(fax['id']), store.events(fax['id']), saved_rows()) == original
+    assert store.budget()['available_cents'] == 100
+    with pytest.raises(Conflict, match='他の依頼'):
+        store.create('operator', 'second', 'school', ['school-lunch'], 100, task_id=task_id)
+
+
+@pytest.mark.parametrize('existing_status,existing_task,new_domains,new_task', [
+    ('running', 'hospital_pending_faxes', ['school-lunch'], 'lunch_month_exports'),
+    ('reconciliation_required', 'hospital_outputs', ['school-lunch'], 'lunch_month_exports'),
+    ('reconciliation_required', 'hospital_pending_faxes', ['hospital'], 'hospital_outputs'),
+    ('reconciliation_required', 'hospital_pending_faxes', ['shift'], 'shift_check'),
+    ('reconciliation_required', 'hospital_pending_faxes', ['school-lunch'], None),
+    ('reconciliation_required', 'hospital_pending_faxes', ['school-lunch', 'hospital'], 'lunch_month_exports'),
+])
+def test_school_admission_exception_keeps_other_conflicts(tmp_path, existing_status, existing_task, new_domains, new_task):
+    store = Store(tmp_path)
+    store.set_budget(500)
+    fax, _ = store.create('operator', 'fax', 'fax', ['hospital'], 300, task_id=existing_task)
+    store.update(fax['id'], status=existing_status)
+    with pytest.raises(Conflict, match='他の依頼'):
+        store.create('operator', 'new', 'new', new_domains, 100, task_id=new_task)
