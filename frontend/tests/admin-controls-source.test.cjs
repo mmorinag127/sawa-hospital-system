@@ -100,7 +100,11 @@ for (const [name, counts] of Object.entries(expected)) {
     if (name === 'admin/users') execFileSync('git', ['merge-base', '--is-ancestor', 'a252363', approved], { cwd: root });
     const live = fs.readFileSync(path.join(root, file), 'utf8');
     if (name === 'admin/users') {
-      assert.equal(live, execFileSync('git', ['show', approved + ':' + file], {cwd: root, encoding: 'utf8'}));
+      const before = execFileSync('git', ['show', approved + ':' + file], {cwd: root, encoding: 'utf8'});
+      const oldBack = '<Link className="sawa-page__back" href="/">← システム選択へ戻る</Link>\n      <header className="sawa-page__header">';
+      const adminBack = '<Link className="sawa-page__back" href="/admin">← 管理画面へ戻る</Link>\n      <header className="sawa-page__header">';
+      assert.ok(before.includes(oldBack));
+      assert.equal(live, before.replace(oldBack, adminBack));
     } else {
       const declarations = require('./helpers/owned-declarations.cjs');
       const names = name === 'system-status' ? ['downloadDb', 'clearAll'] : ['downloadOriginal'];

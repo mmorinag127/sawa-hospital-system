@@ -118,7 +118,12 @@ test('source-backed links/controls and existing aggregate guard remain; manuals 
   assert.ok(runner.includes('matchesReadonlyResponse(response, origin, path, query)'));
   for (const path of ['base-menus', 'menu-rules', 'order-forms', 'shipping-history', 'system-process-logs']) {
     assert.equal(businessPath('/hospital/' + path), true);
-    assert.ok(read('../../src/components/TopNav.tsx').includes(`href: "/${path}"`));
+    if (path === 'system-process-logs') {
+      assert.ok(read('../../src/pages/admin/index.tsx').includes(`"/hospital/${path}"`));
+      assert.ok(read('../../src/components/TopNav.tsx').includes('href: "/admin"'));
+    } else {
+      assert.ok(read('../../src/components/TopNav.tsx').includes(`href: "/${path}"`));
+    }
   }
   assert.equal(businessPath('/hospital/weekly-orders'), false);
   for (const [page, literal] of [['base-menus', '全件再読込'], ['menu-rules', 'params: { rule_type: ruleType }'], ['order-forms', '注文書パターン'], ['shipping-history', '監査ログを取得しました（${nextItems.length}件）。'], ['system-process-logs', 'aria-label="処理ログ詳細"']]) assert.ok(read(`../../src/pages/${page}.tsx`).includes(literal));

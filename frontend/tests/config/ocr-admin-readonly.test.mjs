@@ -75,7 +75,7 @@ test('retired facilities/templates are excluded on explicit API410 proof; active
   for (const name of ['list_templates', 'list_facilities', 'list_unclassified', 'get_unclassified']) assert.match(api, new RegExp(`def ${name}[^\\n]*\\n    _legacy_ocr_registry_disabled\\(\\)`));
   assert.match(api, /status_code=410, detail="legacy_ocr_registry_disabled"/);
   for (const route of ['queue', 'results', 'training-data']) {
-    assert.ok(read('../../src/components/TopNav.tsx').includes(`href: "/ocr-${route}"`));
+    assert.ok(read('../../src/pages/admin/index.tsx').includes(`"/hospital/ocr-${route}"`));
     assert.equal(businessPath(`/hospital/ocr-${route}`), true);
   }
   assert.equal(businessPath('/hospital/ocr-templates'), false);
