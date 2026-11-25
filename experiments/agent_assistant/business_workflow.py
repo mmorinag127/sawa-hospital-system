@@ -569,11 +569,13 @@ class BusinessWorkflow:
             status, title, message, action = 'archived', '停止の確認が必要です', 'この依頼は処理を続けません。業務側の停止が確認できれば、料金が未確定でも予約枠は解放されます。', 'none'
         elif run['status'] in ('stopped', 'rolled_back'):
             status, title, message, action = 'archived', '作業を停止しました', 'この依頼は処理を続けません。実行履歴は保持されています。', 'none'
+        elif run['status'] == 'preparing' and run['domains'] == ['school-lunch']:
+            status, title, message, action = 'working', '学校給食の作業データを準備しています', 'この依頼専用のコピーを保存しています。準備が終わるまで原本添付やAI処理は開始しません。', 'none'
         elif self.budget_paused(run):
             review_ready = (review and review['state'] == 'awaiting_approval' and run['task_id'] != 'hospital_review_faxes'
                             or (any(item['state'] == 'awaiting_approval' for item in faxes) if awaiting_fax is None else awaiting_fax))
             status, title, message, action = 'budget_paused', '依頼のAI利用上限に達しました', '回答・承認は保持されています。確認案の承認と、必要な承認がそろった作業の保存・出力は追加のAI呼出しなしで続けられます。AIが必要な作業は停止しています。', 'approve' if review_ready else 'reconcile'
-        elif phase == 'source':
+        elif phase == 'source' and run['status'] == 'waiting_input':
             status, title, message, action = 'source', '原本を添付してください', '選択した学校・対象月の献立・調理手配書を添付してください。', 'source'
         elif phase == 'support' or run['status'] in ('reconciliation_required', 'failed'):
             status, title, message, action = 'checking', '保存した内容を確認しています', '回答・承認した内容は保存されています。システム側で確認しており、操作は必要ありません。解決できない場合は管理者が対応します。', 'none'

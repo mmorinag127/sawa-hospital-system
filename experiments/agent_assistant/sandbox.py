@@ -5,6 +5,7 @@ Child processes are terminated and reaped before swapping directories.
 """
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 import secrets
@@ -14,6 +15,7 @@ import socket
 import sqlite3
 import sys
 import subprocess
+from time import monotonic
 import psutil
 
 import httpx
@@ -145,6 +147,8 @@ class Sandbox:
         return self.root / "runs" / run_id
 
     def prepare(self, run):
+        school = run['domains'] == ['school-lunch']
+        started = monotonic()
         directory = self.path(run["id"])
         directory.mkdir(parents=True, mode=0o700)
         before = directory / "before"
@@ -214,7 +218,14 @@ class Sandbox:
             os.replace(before, directory / "baseline-before-registration")
             os.replace(directory / "registered-before", before)
         if self.durable_store is not None and run.get('purpose') != 'target_lookup':
-            self.durable_store.persist_files(run["id"])
+            if school:
+                copied = monotonic()
+                log = logging.getLogger('uvicorn.error')
+                log.info('school_trial_source_ready run=%s seconds=%.3f', run['id'], copied-started)
+                self.durable_store.persist_files(run['id'], expected_generation=run['generation'])
+                log.info('school_trial_checkpoint_ready run=%s seconds=%.3f', run['id'], monotonic()-copied)
+            else:
+                self.durable_store.persist_files(run['id'])
 
     def environment(self, run, domain, cfg, data, worktree, token, *, include_models=True):
         if set(cfg.get("env", {})) - ENV_ALLOW:

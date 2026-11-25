@@ -276,12 +276,15 @@ class PostgresStore(Store):
         if known is not None:
             known[relative] = digest
 
-    def persist_files(self, ident):
+    def persist_files(self, ident, *, expected_generation=None):
         from .working_copy import checkpoint
         root = self.root / 'runs' / ident
-        with self._write_lock, closing(self.connect()) as pg, pg:
+        # A new copy writes only its own immutable files. Do not serialize its
+        # bulk transfer with candidate lookup, stop, or other ledger writes.
+        lock = self._write_lock if expected_generation is None else nullcontext()
+        with lock, closing(self.connect()) as pg, pg:
             with pg.cursor() as c:
-                c.execute('SELECT epoch FROM sawa_agent_trial.ledger WHERE id=1 FOR UPDATE')
+                c.execute('SELECT epoch FROM sawa_agent_trial.ledger WHERE id=1 FOR SHARE')
                 if c.fetchone()[0] != self.epoch:
                     raise Conflict('実行環境が交代したため保存を停止しました')
                 paths = []
@@ -299,6 +302,12 @@ class PostgresStore(Store):
                 for path in paths:
                     self._file(c, path, known=known_files)
                 manifest = checkpoint(self.root, ident, c, encode_blob, known=known_files)
+                if expected_generation is not None:
+                    c.execute('SELECT generation,status FROM sawa_agent_trial.runs WHERE id=%s FOR UPDATE', (ident,))
+                    if c.fetchone() != (expected_generation, 'preparing'):
+                        raise Conflict('依頼の準備中に状態が変わりました。作業コピーを公開しません')
+                    if manifest is None:
+                        raise Conflict('学校給食の作業コピーを確認できません')
                 if manifest is not None:
                     c.execute('INSERT INTO sawa_agent_trial.working_copies(run_id,manifest) VALUES(%s,%s) '
                               'ON CONFLICT(run_id) DO UPDATE SET manifest=excluded.manifest', (ident, manifest))

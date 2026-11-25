@@ -1,9 +1,11 @@
 """Actual PostgreSQL persistence and fencing; opt in with own disposable DB."""
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import shutil
 import sqlite3
+from threading import Event
 
 import pytest
 
@@ -731,3 +733,54 @@ def test_restart_preserves_stop_uncertainty_and_restoration_receipt(tmp_path,dat
         assert b.create('u','next-work','new',['shift'],100)[0]['status']=='preparing'
     else:
         with pytest.raises(Conflict,match='他の依頼'):b.create('u','next-work','new',['shift'],100)
+
+
+@pytest.mark.parametrize('stop', [False, True])
+def test_school_initial_checkpoint_does_not_block_target_writes_or_publish_after_stop(tmp_path, database, monkeypatch, stop):
+    from experiments.agent_assistant.target_lookups import TargetLookups
+
+    store = PostgresStore(tmp_path, database)
+    store.set_budget(500)
+    fax, _ = store.create('u', 'separate-fax', 'fax', ['hospital'], 100, task_id='hospital_pending_faxes')
+    store.update(fax['id'], status='reconciliation_required')
+    store.event(fax['id'], 'operator_reply', {'message': 'retained answer'})
+    original = store.get(fax['id']), store.events(fax['id'])
+    run, _ = store.create('u', 'new-school', 'school', ['school-lunch'], 100, task_id='lunch_import')
+    ident = run['id']
+    before = tmp_path / 'runs' / ident / 'before' / 'school-lunch'
+    before.mkdir(parents=True)
+    (before/'proof.txt').write_text('immutable school input')
+    data = tmp_path / 'runs' / ident / 'data' / 'school-lunch'
+    data.mkdir(parents=True)
+    (data/'proof.txt').write_text('owned school copy')
+
+    entered, release = Event(), Event()
+    write_file = store._file
+
+    def delayed_file(*args, **kwargs):
+        entered.set()
+        assert release.wait(8)
+        return write_file(*args, **kwargs)
+
+    monkeypatch.setattr(store, '_file', delayed_file)
+    with ThreadPoolExecutor(2) as executor:
+        upload = executor.submit(store.persist_files, ident, expected_generation=run['generation'])
+        try:
+            assert entered.wait(5)
+            lookup = executor.submit(TargetLookups(store, None).prepare, 'school-list', 'u', 'lunch_daily_bundle', {})
+            assert lookup.result(timeout=3)['state'] == 'queued'
+            assert not store.working_copy_ready(ident)
+            if stop:
+                _, generation = executor.submit(store.fence, ident).result(timeout=3)
+                executor.submit(store.finish_stop, ident, generation, native_stopped=True, restored=False).result(timeout=3)
+        finally:
+            release.set()
+        if stop:
+            with pytest.raises(Conflict, match='作業コピーを公開しません'):
+                upload.result(timeout=5)
+        else:
+            upload.result(timeout=5)
+    assert store.working_copy_ready(ident) is not stop
+    with store.read() as db:
+        assert bool(db.execute('SELECT 1 FROM working_copies WHERE run_id=?', (ident,)).fetchone()) is not stop
+    assert (store.get(fax['id']), store.events(fax['id'])) == original

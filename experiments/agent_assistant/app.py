@@ -154,6 +154,7 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     secret = os.environ.get("SAWA_TRIAL_WEB_TOKEN") or secrets.token_urlsafe(32)
     owner = os.environ.get("SAWA_TRIAL_OPERATOR_ACCOUNT") or "local-trial-operator"
     controls = {}
+    school_preparations = {}
 
     def control_lock(ident):
         return controls.setdefault(ident, asyncio.Lock())
@@ -183,6 +184,10 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     async def lifespan(app):
         async with mcp.session_manager.run():
             yield
+        preparations = list(school_preparations.values())
+        for task in preparations:
+            task.cancel()
+        await asyncio.gather(*preparations, return_exceptions=True)
         await business.close()
         await lookups.close()
         for task in managed.tasks.values():
@@ -223,13 +228,9 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             except KeyError:
                 return JSONResponse({"detail": "Run required"}, status_code=403)
             request.state.trial_binding = (ident, run["generation"])
-        response = await call_next(request)
-        if sandbox.durable_store is not None and request.method not in ("GET", "HEAD", "OPTIONS") and '/target-lookups' not in request.url.path:
-            def persist_response_files():
-                for run in store.listing(owner):
-                    store.persist_files(run["id"])
-            await run_blocking(persist_response_files)
-        return response
+        # Initial snapshots are published by Sandbox.prepare; subsequent
+        # receipts checkpoint only their changed runs in the ledger transaction.
+        return await call_next(request)
 
     @app.exception_handler(Conflict)
     async def conflict(_request, exc):
@@ -352,6 +353,28 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
     async def run_lookup(request_key: str = Query(min_length=8, max_length=128)):
         return {'run': await asyncio.to_thread(store.find_request, owner, request_key)}
 
+    async def prepare_school(run):
+        ident, generation = run['id'], run['generation']
+        try:
+            await run_blocking(sandbox.prepare, run)
+        except Exception as exc:
+            async with control_lock(ident):
+                current = await run_blocking(store.get, ident)
+                if current['generation'] != generation or current['status'] != 'preparing':
+                    return
+                await run_blocking(store.update, ident, expected_generation=generation, status='failed', reserved=0)
+                await run_blocking(store.event, ident, 'error', {'message': str(exc) if isinstance(exc, Conflict) else '試用データの準備に失敗しました'})
+            return
+        async with control_lock(ident):
+            current = await run_blocking(store.get, ident)
+            if current['generation'] != generation or current['status'] != 'preparing':
+                return
+            if run['task_id'] == 'lunch_import':
+                await run_blocking(store.update, ident, expected_generation=generation, status='waiting_input')
+                await run_blocking(store.event, ident, 'notice', {'message':'選択した学校・対象月と一致する原本を添付してください。添付が終わるまでエージェントは開始しません。'})
+            else:
+                await business.kick_many([ident])
+
     @app.post("/runs", status_code=201)
     @_complete_request
     async def create_run(payload: NewRun, request: Request):
@@ -388,6 +411,16 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
             tools.authorizations[run["id"]] = request.headers.get("authorization", "")
             if task:
                 await run_blocking(business.initialize, run)
+            if task and domains == ['school-lunch'] and sandbox.durable_store is not None:
+                job = asyncio.create_task(prepare_school(run))
+                school_preparations[run['id']] = job
+                def settled(task):
+                    school_preparations.pop(run['id'], None)
+                    if not task.cancelled() and task.exception() is not None:
+                        asyncio.get_running_loop().call_exception_handler({
+                            'message': 'Could not finalize school trial preparation', 'exception': task.exception()})
+                job.add_done_callback(settled)
+                return await run_blocking(store.get, run['id'], owner)
             try:
                 await run_blocking(sandbox.prepare, run)
             except Exception as exc:
