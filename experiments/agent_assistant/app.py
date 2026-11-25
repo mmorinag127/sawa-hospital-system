@@ -406,12 +406,14 @@ def create_app(config, root, *, managed_client=None, gemini_client=None):
         elif payload.hospital_source_sha256 is not None:
             raise ValueError('原本セットの指定は未処理FAXの作業専用です')
         provider = await asyncio.to_thread(store.provider)
-        run, fresh = await run_blocking(store.create, owner, payload.request_key, instruction, domains, payload.cap_cents if payload.cap_cents is not None else config.get("run_cap_cents", 100), task_id=payload.task_id, task_inputs=task_inputs, provider=provider)
+        school_copy = task and domains == ['school-lunch'] and sandbox.durable_store is not None
+        initial_business = business.initial_state(payload.task_id) if school_copy else None
+        run, fresh = await run_blocking(store.create, owner, payload.request_key, instruction, domains, payload.cap_cents if payload.cap_cents is not None else config.get("run_cap_cents", 100), task_id=payload.task_id, task_inputs=task_inputs, provider=provider, initial_business=initial_business)
         if fresh:
             tools.authorizations[run["id"]] = request.headers.get("authorization", "")
-            if task:
+            if task and not school_copy:
                 await run_blocking(business.initialize, run)
-            if task and domains == ['school-lunch'] and sandbox.durable_store is not None:
+            if school_copy:
                 job = asyncio.create_task(prepare_school(run))
                 school_preparations[run['id']] = job
                 def settled(task):

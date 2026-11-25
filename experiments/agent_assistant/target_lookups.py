@@ -15,7 +15,7 @@ class TargetLookups:
         return self.result(self.prepare(ident, owner, task_id, inputs), authorization)
 
     def prepare(self, ident, owner, task_id, inputs):
-        with self.store.tx() as db:
+        with self.store.control_tx() as db:
             row = db.execute('SELECT * FROM target_lookups WHERE id=?', (ident,)).fetchone()
             if row:
                 if (row['owner'], row['task_id'], json.loads(row['inputs'])) != (owner, task_id, inputs):
@@ -44,7 +44,7 @@ class TargetLookups:
             result = {'message': str(exc) if isinstance(exc, (ValueError, Conflict)) else '登録内容の取得をシステム側で確認しています。'}
             state = 'failed'
         def save_result():
-            with self.store.tx() as db:
+            with self.store.control_tx() as db:
                 db.execute('UPDATE target_lookups SET state=?,payload=? WHERE id=?', (state, json.dumps(result, ensure_ascii=False), row['id']))
         await run_blocking(save_result)
 

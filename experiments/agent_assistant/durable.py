@@ -94,6 +94,7 @@ class PostgresStore(Store):
         self._preparing = set()
         self._hydration_lock = threading.RLock()
         self._write_lock = threading.RLock()
+        self._control_lock = threading.RLock()
         self._read_snapshot = ContextVar('agent_read_snapshot', default=None)
         self.path = self.root / 'ledger.sqlite3'
         with closing(connect()) as pg, pg:
@@ -126,9 +127,8 @@ class PostgresStore(Store):
         if fresh:
             # New sandbox data belongs to this instance; do not restore an
             # older checkpoint over changes currently being prepared locally.
-            with self._hydration_lock:
-                self._hydrated.add(run['id'])
-                self._preparing.add(run['id'])
+            self._preparing.add(run['id'])
+            self._hydrated.add(run['id'])
         return run, fresh
 
     def budget(self):
@@ -157,6 +157,13 @@ class PostgresStore(Store):
             yield db
 
     @contextmanager
+    def control_tx(self):
+        if self._read_snapshot.get() is not None:
+            raise Conflict("読取スナップショット内では変更できません")
+        with self._transaction(readonly=False, control=True) as db:
+            yield db
+
+    @contextmanager
     def read(self):
         snapshot = self._read_snapshot.get()
         if snapshot is not None:
@@ -172,11 +179,11 @@ class PostgresStore(Store):
             yield db
 
     @contextmanager
-    def _transaction(self, *, readonly):
+    def _transaction(self, *, readonly, control=False):
         from psycopg2.errors import SerializationFailure, DeadlockDetected
-        # Start each writer's snapshot after its predecessor commits. Epoch
-        # fencing permits only this instance to write; readers remain concurrent.
-        transaction_lock = nullcontext() if readonly else self._write_lock
+        # Admission and target lookup do not change any existing run or its
+        # checkpoint. Keep them serializable without queuing behind file I/O.
+        transaction_lock = nullcontext() if readonly else self._control_lock if control else self._write_lock
         with transaction_lock, closing(self.connect()) as pg, pg:
             pg.set_session(readonly=readonly, isolation_level='REPEATABLE READ' if readonly else 'SERIALIZABLE')
             with pg.cursor() as c:
@@ -199,6 +206,11 @@ class PostgresStore(Store):
                     changed = [row[0] for row in c.fetchall()]
                     from .working_copy import checkpoint
                     for ident in changed:
+                        if control and (ident in self._hydrated or db.execute(
+                                'SELECT 1 FROM working_copies WHERE run_id=?', (ident,)).fetchone()):
+                            raise Conflict('受付処理から既存の作業コピーは更新できません')
+                        if control:
+                            continue
                         # Only this run's immutable originals/checkpoints are
                         # relevant to the receipt being committed.
                         known_files = {}

@@ -40,10 +40,14 @@ class BusinessWorkflow:
         self.store.event(ident, 'business_progress', {'phase': state['phase']})
         return state
 
-    def initialize(self, run):
-        if run.get('task_id') not in CONTRACTS:
+    @staticmethod
+    def initial_state(task_id):
+        if task_id not in CONTRACTS:
             raise ValueError('登録された業務を選択してください')
-        self.checkpoint(run['id'], version=1, phase='source' if run['task_id'] == 'lunch_import' else 'preparing', epoch=0, attempts=0)
+        return dict(version=1, phase='source' if task_id == 'lunch_import' else 'preparing', epoch=0, attempts=0)
+
+    def initialize(self, run):
+        self.checkpoint(run['id'], **self.initial_state(run['task_id']))
         if run['task_id'] == 'hospital_pending_faxes':
             self.checkpoint(run['id'], fax_harness=2)
 

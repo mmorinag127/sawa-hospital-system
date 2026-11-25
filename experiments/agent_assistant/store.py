@@ -114,6 +114,9 @@ class Store:
             db.execute('PRAGMA query_only=ON')
             yield db
 
+    def control_tx(self):
+        return self.tx()
+
     @contextmanager
     def snapshot(self, *, view=None, owner=None, identities=None):
         """Keep every part of one response on the same committed ledger."""
@@ -168,7 +171,8 @@ class Store:
                 db.execute('UPDATE settings SET provider=? WHERE id=1', (value,))
             return db.execute('SELECT provider FROM settings WHERE id=1').fetchone()[0]
 
-    def create(self, owner, key, instruction, domains, cap, *, task_id=None, task_inputs=None, provider='claude'):
+    def create(self, owner, key, instruction, domains, cap, *, task_id=None, task_inputs=None, provider='claude',
+               initial_business=None):
         if provider not in ('claude', 'gemini'): raise ValueError('未対応の接続先です')
         if type(cap) is not int or cap <= 0:
             raise ValueError("依頼上限は1セント以上が必要です")
@@ -179,8 +183,10 @@ class Store:
         from .tasks import TASKS
         task = TASKS.get(task_id)
         school_task = domains == ['school-lunch'] and task and task['domain'] == 'school-lunch' and not task.get('hidden')
+        if initial_business is not None:
+            task_inputs = {**task_inputs, 'business_workflow': initial_business}
         timestamp = now()
-        with self.tx() as db:
+        with (self.control_tx() if school_task else self.tx()) as db:
             old = db.execute("SELECT * FROM runs WHERE request_key=?", (key,)).fetchone()
             if old:
                 if old['provider'] != provider: raise Conflict('同一依頼キーの接続先が異なります')
@@ -224,6 +230,9 @@ class Store:
             ident = uuid4().hex
             db.execute("INSERT INTO runs(id,request_key,owner,instruction,domains,status,month,cap,reserved,created,updated) VALUES(?,?,?,?,?,'preparing',?,?,?,?,?)",
                        (ident, key, owner, instruction, json.dumps(domains), month, cap, cap, timestamp, timestamp))
+            if initial_business is not None:
+                db.execute('INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)',
+                           (ident, 'business_progress', json.dumps({'phase': initial_business['phase']}), timestamp))
             db.execute("UPDATE runs SET task_id=?,task_inputs=? WHERE id=?", (task_id, json.dumps(task_inputs, ensure_ascii=False), ident))
             db.execute('UPDATE runs SET provider=? WHERE id=?', (provider, ident))
             row = db.execute("SELECT * FROM runs WHERE id=?", (ident,)).fetchone()

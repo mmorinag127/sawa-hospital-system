@@ -784,3 +784,52 @@ def test_school_initial_checkpoint_does_not_block_target_writes_or_publish_after
     with store.read() as db:
         assert bool(db.execute('SELECT 1 FROM working_copies WHERE run_id=?', (ident,)).fetchone()) is not stop
     assert (store.get(fax['id']), store.events(fax['id'])) == original
+
+
+def test_school_admission_and_daily_lookup_do_not_wait_for_existing_run_receipt(tmp_path, database, monkeypatch):
+    from experiments.agent_assistant import working_copy
+    from experiments.agent_assistant.business_workflow import BusinessWorkflow
+    from experiments.agent_assistant.target_lookups import TargetLookups
+
+    store = PostgresStore(tmp_path, database)
+    store.set_budget(500)
+    fax, _ = store.create('u', 'fenced-hospital', 'fax', ['hospital'], 100, task_id='hospital_pending_faxes')
+    store.update(fax['id'], status='reconciliation_required')
+    store.event(fax['id'], 'operator_reply', {'message': 'keep the reply'})
+    original = store.get(fax['id']), store.events(fax['id'])
+    prior, _ = store.create('u', 'completed-school', 'first', ['school-lunch'], 100, task_id='lunch_import')
+    path = tmp_path / 'runs' / prior['id'] / 'data' / 'school-lunch'
+    path.mkdir(parents=True)
+    (path / 'proof.txt').write_text('retained result')
+    store.persist_files(prior['id'], expected_generation=prior['generation'])
+    store.update(prior['id'], status='completed', reserved=0)
+
+    entered, release = Event(), Event()
+    snapshot = working_copy.checkpoint
+
+    def slow_receipt(root, ident, *args, **kwargs):
+        if ident == prior['id']:
+            entered.set()
+            assert release.wait(8)
+        return snapshot(root, ident, *args, **kwargs)
+
+    monkeypatch.setattr(working_copy, 'checkpoint', slow_receipt)
+    initial = BusinessWorkflow.initial_state('lunch_procurement')
+    create = lambda: store.create('u', 'next-school-trial', 'second', ['school-lunch'], 100,
+                                  task_id='lunch_procurement', initial_business=initial)
+    with ThreadPoolExecutor(3) as executor:
+        finishing = executor.submit(store.event, prior['id'], 'finished', {'result': 'verified'})
+        try:
+            assert entered.wait(5)
+            lookup = executor.submit(TargetLookups(store, None).prepare, 'next-school-list', 'u', 'lunch_daily_bundle', {})
+            admission = executor.submit(create)
+            assert lookup.result(timeout=3)['state'] == 'queued'
+            run, fresh = admission.result(timeout=3)
+            assert fresh and run['status'] == 'preparing' and run['task_inputs']['business_workflow'] == initial
+            assert store.events(run['id'])[-1]['kind'] == 'business_progress'
+            assert create() == (run, False)
+        finally:
+            release.set()
+        finishing.result(timeout=5)
+    assert (store.get(fax['id']), store.events(fax['id'])) == original
+    assert store.working_copy_ready(prior['id'])
