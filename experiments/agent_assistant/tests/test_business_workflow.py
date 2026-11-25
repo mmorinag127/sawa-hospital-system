@@ -626,6 +626,86 @@ def test_recovery_never_replays_a_write_without_its_matching_response(tmp_path, 
     asyncio.run(scenario())
 
 
+def test_layout_reply_during_question_publication_keeps_selected_revision(tmp_path):
+    from experiments.agent_assistant.conversation import pending_question
+
+    async def scenario():
+        store, native, tools, run = lunch(tmp_path, 'lunch_daily_bundle')
+        context = run['task_inputs']
+        context['inputs'].pop('layout_id')
+        context['inputs'].pop('layout_version')
+        context['inputs']['layout_choices'] = [{'id': 2, 'version': 3, 'name': '旧図面'},
+                                               {'id': 17, 'version': 2, 'name': '合成図面'}]
+        store.update(run['id'], task_inputs=context)
+        engine, run = attach(store, native, tools, store.get(run['id']))
+        with pytest.raises(Conflict, match='まだ照合'):
+            engine.answer_layout(run, '合成図面', 'business:layout:0:0', '合成図面', schedule=False)
+        call = engine.call
+
+        async def answer_immediately(*args):
+            result = await call(*args)
+            question = pending_question(store.events(run['id']))
+            assert engine.answer_layout(store.get(run['id']), '合成図面', question['question_id'], '合成図面', schedule=False)
+            return result
+
+        engine.call = answer_immediately
+        await engine.choose_layout(run)
+        result = store.get(run['id'])
+        assert result['status'] == 'preparing'
+        assert result['task_inputs']['business_workflow']['phase'] == 'preparing'
+        assert result['task_inputs']['inputs']['layout_id'] == 17
+        assert result['task_inputs']['inputs']['layout_version'] == 2
+        assert tools.flow.choose_layout(result, 17)['layout']['version'] == 2
+        with pytest.raises(Conflict, match='図面候補'):
+            tools.flow.choose_layout(result, 2)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('binding', ['matching', 'unrelated', 'changed'])
+def test_restore_answer_from_original_layout_question_only(tmp_path, binding):
+    store, native, tools, run = lunch(tmp_path, 'lunch_daily_bundle')
+    context = run['task_inputs']
+    context['inputs'].pop('layout_id')
+    context['inputs'].pop('layout_version')
+    context['inputs']['layout_choices'] = [{'id': 17, 'version': 3 if binding == 'changed' else 2, 'name': '合成図面'}]
+    store.update(run['id'], task_inputs=context, status='reconciliation_required')
+    engine, run = attach(store, native, tools, store.get(run['id']))
+    store.event(run['id'], 'business_layout_question', {'command_id': 'business:layout:0:0',
+        'choices': [{'layout_id': 17, 'layout_version': 2, 'label': '合成図面'}]})
+    response = {'question_id': 'other' if binding == 'unrelated' else 'business:layout:0:0', 'message': '合成図面', 'option': '合成図面'}
+    store.event(run['id'], 'operator_reply', response)
+    if binding == 'changed':
+        with pytest.raises(Conflict, match='選択肢の版'):
+            engine.recover_layout_answer(run)
+    else:
+        engine.recover_layout_answer(run)
+        engine.recover_layout_answer(run)
+    saved = store.get(run['id'])
+    assert saved['status'] == 'reconciliation_required'
+    assert saved['task_inputs']['inputs'].get('layout_id') == (17 if binding == 'matching' else None)
+    assert [x['payload'] for x in store.events(run['id'], kinds=('operator_reply',))] == [response]
+    assert len(store.events(run['id'], kinds=('business_layout_recovered',))) == (1 if binding == 'matching' else 0)
+    assert not native.writes
+
+
+def test_missing_daily_review_does_not_leave_an_executing_mcp_wait(tmp_path):
+    from experiments.agent_assistant.mcp_server import build_mcp, call_local
+
+    async def scenario():
+        store, native, tools, run = lunch(tmp_path, 'lunch_daily_bundle')
+        engine, run = attach(store, native, tools, run)
+        server = build_mcp(tools)
+        result = await call_local(server, tools, run['id'], run['generation'], 'wait_for_task_decision', {}, 'premature-wait')
+        assert result['ok'] is False and 'prepare_lunch_daily_review' in result['next_step']
+        assert await call_local(server, tools, run['id'], run['generation'], 'wait_for_task_decision', {}, 'premature-wait') == result
+        assert tools.flow.commands(run['id'])[-1]['result'] == result
+        assert tools.flow.review(run['id']) is None
+        assert not native.writes
+
+    asyncio.run(scenario())
+
+
 def test_more_than_eight_layouts_remain_selectable_without_internal_ids(tmp_path):
     from experiments.agent_assistant.conversation import pending_question
     async def scenario():

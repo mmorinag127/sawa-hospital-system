@@ -67,6 +67,11 @@ class Recovery:
             for domain in run['domains']:
                 if not (directory / 'data' / domain / 'database.sqlite3').is_file():
                     raise Conflict('保存済みの業務データがありません。初期データへの置換は行いません')
+            if run.get('task_id') == 'lunch_daily_bundle' and run['status'] == 'reconciliation_required':
+                business = getattr(manager.tools, 'business', None)
+                if business is not None:
+                    await run_blocking(business.recover_layout_answer, run)
+                    run = await run_blocking(self.store.get, ident)
             if run['provider'] == 'gemini':
                 plan = await self.gemini(manager, run)
             else:

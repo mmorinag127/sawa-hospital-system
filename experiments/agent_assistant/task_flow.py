@@ -401,6 +401,8 @@ class TaskFlow:
         if run.get('task_id')!='lunch_daily_bundle': raise Conflict('日次の図面選択ではありません')
         inputs=run['task_inputs']['inputs']
         layout=next((x for x in inputs['layout_choices'] if x['id']==layout_id),None)
+        if layout and (inputs.get('layout_id'), inputs.get('layout_version')) == (layout_id, layout['version']):
+            return {'ok': True, 'layout': layout}
         reply = self.store.latest_event(run['id'], 'operator_reply')
         replies = [reply] if reply else []
         if not layout or not replies or replies[-1]['payload']['message']!=f"{layout['name']}（ID:{layout['id']}）":

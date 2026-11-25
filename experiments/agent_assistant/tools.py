@@ -349,9 +349,14 @@ class Tools:
                         return result
                 if name == "wait_for_task_decision":
                     review=(await run_blocking(self.flow.review, run_id))
-                    if not review: raise ValueError("確認結果を先に提出してください")
-                    ready=review["state"] != "awaiting_approval"
-                    result={"ok":True,"review_id":review["id"],"state":review["state"],"decision":review["decision"]}
+                    if review is None:
+                        ready = True
+                        operation = 'prepare_lunch_daily_review' if run['task_id'] == 'lunch_daily_bundle' else 'request_task_approval'
+                        result = {'ok': False, 'error': '確認結果を先に提出してください',
+                                  'next_step': operation + ' で利用者の確認結果を提出してください'}
+                    else:
+                        ready=review["state"] != "awaiting_approval"
+                        result={"ok":True,"review_id":review["id"],"state":review["state"],"decision":review["decision"]}
                 else:
                     args=Arguments.model_validate(raw["parameters"])
                     await self.flow.scoped(run,raw["operation"],args,inventory=True)

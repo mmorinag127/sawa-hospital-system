@@ -218,9 +218,10 @@ class BusinessWorkflow:
             next_page = page + 1 if (page + 1) * 7 < len(layouts) else 0
             choices.append({'label': 'ほかの図面を見る' if next_page else '最初の図面へ戻る', 'next_page': next_page})
         command = 'business:layout:' + str(state['epoch']) + ':' + str(page)
-        result = await self.call(run, 'ask_operator', {'question': 'この日の作業に使う図面を選んでください。', 'options': [choice['label'] for choice in choices]}, command)
-        await run_blocking(self.store.event, run['id'], 'business_layout_question', {'command_id': result['command_id'], 'choices': choices})
-        await run_blocking(self.checkpoint, run['id'], phase='question')
+        # Publish the binding before the question becomes answerable.
+        await run_blocking(self.store.event, run['id'], 'business_layout_question',
+                           {'command_id': command, 'choices': choices}, 'layout-question:' + command)
+        await self.call(run, 'ask_operator', {'question': 'この日の作業に使う図面を選んでください。', 'options': [choice['label'] for choice in choices]}, command)
         return True
 
     def answer_layout(self, run, message, question_id, option, *, schedule=True):
@@ -231,6 +232,8 @@ class BusinessWorkflow:
             questions = [event['payload'] for event in events if event['kind'] == 'business_layout_question'
                          and event['payload']['command_id'] == question_id]
             if not questions:
+                if run.get('task_id') == 'lunch_daily_bundle' and (question_id or '').startswith('business:layout:'):
+                    raise Conflict('図面候補をまだ照合できません。質問を読み直して回答してください')
                 return False
             current = db.execute('SELECT generation,status,task_inputs FROM runs WHERE id=?', (run['id'],)).fetchone()
             if current['generation'] != run['generation'] or current['status'] != 'waiting_input':
@@ -255,6 +258,45 @@ class BusinessWorkflow:
         if schedule:
             self.kick(run['id'])
         return True
+
+    def recover_layout_answer(self, run):
+        if run.get('task_id') != 'lunch_daily_bundle' or not owned(run) or run['task_inputs']['inputs'].get('layout_id'):
+            return
+        with self.store.tx() as db:
+            current = db.execute('SELECT generation,status,task_inputs FROM runs WHERE id=?', (run['id'],)).fetchone()
+            if current['generation'] != run['generation'] or current['status'] != 'reconciliation_required':
+                raise Conflict('図面回答の照合中に依頼が変更されました')
+            context = json.loads(current['task_inputs'])
+            inputs = context['inputs']
+            if inputs.get('layout_id'):
+                return
+            choices = {(item['id'], item['version']) for item in inputs.get('layout_choices', [])}
+            questions, replies = {}, []
+            for event in db.execute("SELECT id,kind,payload FROM events WHERE run_id=? AND "
+                                    "kind IN ('business_layout_question','operator_reply') ORDER BY id", (run['id'],)):
+                payload = json.loads(event['payload'])
+                if event['kind'] == 'business_layout_question':
+                    questions[payload['command_id']] = payload['choices']
+                else:
+                    replies.append((event['id'], payload))
+            recorded = []
+            for answer_id, payload in replies:
+                matching = [(item.get('layout_id'), item.get('layout_version')) for item in
+                            questions.get(payload.get('question_id'), []) if item['label'] == payload.get('message')
+                            and payload.get('option') in (None, item['label']) and 'next_page' not in item]
+                if len(matching) == 1:
+                    recorded.append((matching[0], answer_id))
+            if not recorded:
+                return
+            if len({pair for pair, _ in recorded}) != 1 or recorded[-1][0] not in choices:
+                raise Conflict('保存済み図面回答と選択肢の版が一致しません')
+            (layout_id, layout_version), answer_id = recorded[-1]
+            inputs.update(layout_id=layout_id, layout_version=layout_version)
+            db.execute('UPDATE runs SET task_inputs=?,updated=? WHERE id=?',
+                       (json.dumps(context, ensure_ascii=False), now(), run['id']))
+            db.execute('INSERT INTO events(run_id,kind,payload,created) VALUES(?,?,?,?)',
+                       (run['id'], 'business_layout_recovered', json.dumps(
+                           {'answer_id': answer_id, 'layout_id': layout_id, 'layout_version': layout_version}), now()))
 
     async def pause_model(self, ident, command, result):
         run = await run_blocking(self.store.get, ident)
