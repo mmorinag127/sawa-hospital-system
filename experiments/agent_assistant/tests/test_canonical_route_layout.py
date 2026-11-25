@@ -18,9 +18,19 @@ def test_map_bridge_preserves_registered_original_and_is_idempotent(tmp_path):
         assert native.data['/api/school-lunch/route-diagrams/layouts'][:len(originals)]==originals
         assert receipt['binding']['locations']['下処理台1']==[150/900,140/600]
         assert len(receipt['binding']['svg_sha256'])==64
+        summary=await tools.flow.read(result,'lunch_get_layouts',{'query':{'facility_id':1}})
+        assert all(row['image'] is None for row in summary)
         count=len(native.writes)
+        request=native.request; detail=[]
+        async def track(run,domain,method,path,**kwargs):
+            if method=='GET' and path.startswith('/api/school-lunch/route-diagrams/layouts/'):
+                detail.append((path,kwargs['params']))
+            return await request(run,domain,method,path,**kwargs)
+        native.request=track
         again=await prepare(tools,result)
         assert again['task_inputs']['canonical_route_layout']==receipt and len(native.writes)==count
+        assert detail==[('/api/school-lunch/route-diagrams/layouts/'+str(receipt['id']),
+                        {'facility_id':1,'version':receipt['version']})]
         await tools.flow.questions.gate(again,'review')
     asyncio.run(scenario())
 

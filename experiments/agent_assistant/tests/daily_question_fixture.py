@@ -26,6 +26,15 @@ def install(native):
     native.data['/api/school-lunch/menu-executions/101/process/question-drawing'] = {'template_id':'kitchen-rice','template_version':1,'title':'合成試験図面','view_box':[0,0,900,600],'sha256':hashlib.sha256(svg).hexdigest(),'svg_base64':base64.b64encode(svg).decode(),'equipment':[{'id':e['id'],'name':e['name'],'bounds':[100+i*150,100,100,80]} for i,e in enumerate(equipment)]}
     request = native.request
     async def write(run, domain, method, path, **kwargs):
+        if method == 'GET' and path == '/api/school-lunch/route-diagrams/layouts':
+            return httpx.Response(200,json=[{**row,'image':None} for row in native.data[path]])
+        if method == 'GET' and path.startswith('/api/school-lunch/route-diagrams/layouts/'):
+            ident=int(path.rsplit('/',1)[1]);query=kwargs['params']
+            row=next((x for x in native.data['/api/school-lunch/route-diagrams/layouts']
+                      if x['id']==ident and x['facility_id']==query['facility_id']),None)
+            if row is None:return httpx.Response(404,json={})
+            if row['version']!=query['version']:return httpx.Response(409,json={})
+            return httpx.Response(200,json=deepcopy(row))
         if method == 'POST' and path == '/api/school-lunch/route-diagrams/layouts':
             native.writes.append((path,deepcopy(kwargs)))
             layouts=native.data[path]; ident=max(x['id'] for x in layouts)+1

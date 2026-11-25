@@ -77,16 +77,25 @@ async def prepare(tools, run):
         if receipt:
             if receipt['binding'] != {**binding,'pixels':list(binding['pixels'])}:
                 raise Conflict('回答した正規図面と出力用図面の出典が一致しません')
-            layouts=await tools.flow.read(current,'lunch_get_layouts',{'query':{'facility_id':facility}})
-            saved=next((value for value in layouts if value['id']==receipt['id']),None)
+            response=await tools.sandbox.request(current,'school-lunch','GET',
+                '/api/school-lunch/route-diagrams/layouts/'+str(receipt['id']),
+                params={'facility_id':facility,'version':receipt['version']})
+            if response.status_code!=200:
+                raise Conflict('保存した出力用図面の学校・版を照合できません')
+            saved=response.json()
+            if (saved.get('id'),saved.get('version'))!=(receipt['id'],receipt['version']):
+                raise Conflict('保存した出力用図面のID・版が一致しません')
         else:
             created=await mutate('create','POST','/api/school-lunch/route-diagrams/layouts',
                 {'facility_id':str(facility),'name':name},
                 {'file':('canonical.png',image,'image/png')})
             saved=await mutate('locations','PUT','/api/school-lunch/route-diagrams/layouts/'+str(created['id']),
                 {'version':created['version'],'locations':locations})
+        image_url=saved.get('image') if saved else None
+        prefix='data:image/png;base64,'
         if (not saved or saved['facility_id']!=facility or saved['name']!=name or saved['locations']!=locations
-                or await run_blocking(pixels, base64.b64decode(saved['image'].split(',',1)[1]))!=image_pixels):
+                or not isinstance(image_url,str) or not image_url.startswith(prefix)
+                or await run_blocking(pixels, base64.b64decode(image_url[len(prefix):],validate=True))!=image_pixels):
             raise Conflict('保存した図面の学校・設備座標・画像が正規原本と一致しません')
         latest=await run_blocking(tools.store.get, run['id'])
         if latest['generation']!=run['generation'] or latest['status']!='running':raise Conflict('依頼は停止されました')
